@@ -1,0 +1,60 @@
+spring:
+  application:
+    name: springaitest
+
+  # ---- 資料層：H2 記憶體資料庫 ----
+  datasource:
+    url: jdbc:h2:mem:springaitest;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update      # 啟動時自動建表（示範用；正式環境建議改用 Flyway/Liquibase）
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+  h2:
+    console:
+      enabled: true         # 瀏覽器開 http://localhost:8080/h2-console 可查看資料
+      path: /h2-console
+
+  # ---- Spring AI：透過 LiteLLM 閘道（OpenAI 相容協定）----
+  ai:
+    openai:
+      base-url: ${LLM_BASE_URL:http://localhost:4000}   # 指向 LiteLLM，而非直連 OpenAI
+      api-key: ${LITELLM_KEY:sk-1234}                   # LiteLLM 虛擬金鑰（非真正的 OpenAI 金鑰）
+      chat:
+        options:
+          model: gpt-4o-mini    # 必須是 litellm-config.yaml 裡的 model_name
+          temperature: 0.7
+    # ---- 觀測：把 prompt / completion 納入觀測（會輸出敏感內容，僅開發用）----
+    chat:
+      client:
+        observations:
+          log-prompt: true
+      observations:
+        log-prompt: true
+        log-completion: true
+        include-error-logging: true
+
+server:
+  port: 8080
+
+# ---- 可觀測性：Micrometer Tracing → OTLP → Langfuse ----
+management:
+  tracing:
+    sampling:
+      probability: 1.0        # 開發期全量取樣；正式環境請調低
+  otlp:
+    tracing:
+      # Langfuse 的 OTLP/HTTP traces 端點
+      endpoint: ${LANGFUSE_OTEL_ENDPOINT:http://localhost:3000/api/public/otel/v1/traces}
+      headers:
+        # Basic base64(public_key:secret_key)；對應 .env 的預設金鑰
+        Authorization: ${LANGFUSE_OTEL_AUTH:Basic cGstbGYtMTIzNDU2Nzg5MDpzay1sZi0xMjM0NTY3ODkw}
+
+logging:
+  level:
+    org.springframework.ai: INFO

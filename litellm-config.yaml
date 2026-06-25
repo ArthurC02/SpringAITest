@@ -1,0 +1,14 @@
+# LiteLLM 閘道設定。Spring 端的 options.model 要對應這裡的 model_name。
+model_list:
+  - model_name: gpt-4o-mini            # ← Spring application.yml 的 spring.ai.openai.chat.options.model
+    litellm_params:
+      model: openai/gpt-4o-mini        # 真正路由目標（之後要加 Claude 就在這裡多一筆）
+      api_key: os.environ/OPENAI_API_KEY
+
+litellm_settings:
+  success_callback: ["langfuse"]       # 成功呼叫 → Langfuse
+  failure_callback: ["langfuse"]       # 失敗呼叫 → Langfuse
+  drop_params: true                    # 自動丟掉供應商不支援的參數，避免相容性錯誤
+
+general_settings:
+  master_key: sk-1234                  # ← Spring application.yml 的 spring.ai.openai.api-key（虛擬金鑰）
