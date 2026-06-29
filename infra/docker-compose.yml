@@ -1,0 +1,187 @@
+# 前端（React/nginx）+ LiteLLM 閘道 + Langfuse（自架 v3，含 postgres / clickhouse / redis / minio）
+# 啟動（在 infra/ 目錄）：docker compose up -d   ← .env 也放這個目錄
+#   - 前端聊天 UI : http://localhost:5173   （容器內 nginx 反向代理 /api → 主機 :8080）
+#   - Langfuse UI : http://localhost:3000   （登入見 .env 的 LANGFUSE_INIT_USER_*）
+#   - LiteLLM     : http://localhost:4000
+# Spring 後端在「主機」上跑（於 backend/ 執行 ./mvnw -pl springaitest-web spring-boot:run）；
+# 前端容器透過 host.docker.internal 連回主機後端，其餘服務間走 compose 服務名。
+
+# 固定 compose 專案名：不論在哪個目錄執行 docker compose，都對應同一套容器
+# （搬到 infra/ 後若不釘名，專案名會變成 "infra" 而另起一套，與現有 springaitest-* 衝突）。
+name: springaitest
+
+services:
+  # ---------------- LiteLLM 閘道 ----------------
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: always
+    depends_on:
+      langfuse-web:
+        condition: service_started
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # LiteLLM 內建 callback：把每次呼叫送進 Langfuse（容器內走服務名）
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-1234567890}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-1234567890}
+      LANGFUSE_HOST: http://langfuse-web:3000
+
+  # ---------------- 前端（React + Vite，build 後由 nginx 提供）----------------
+  # 後端是跑在「主機」上（非容器），nginx 透過 host.docker.internal 反向代理 /api 過去。
+  frontend:
+    build:
+      context: ../frontend            # build context 在 compose 檔的上一層 frontend/
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "5173:80"                     # 瀏覽器開 http://localhost:5173
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 讓容器內 nginx 連得到主機上的 Spring 後端 :8080
+
+  # ---------------- Langfuse ----------------
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: always
+    depends_on: &langfuse-depends-on
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    ports:
+      - "127.0.0.1:3030:3030"
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      SALT: ${SALT:-mysalt}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: myredissecret
+      REDIS_TLS_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    restart: always
+    depends_on: *langfuse-depends-on
+    ports:
+      - "3000:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-mysecret}
+      # 無頭初始化：自動建立 org / project / 使用者，並固定一組 API 金鑰
+      LANGFUSE_INIT_ORG_ID: demo-org
+      LANGFUSE_INIT_ORG_NAME: Demo Org
+      LANGFUSE_INIT_PROJECT_ID: demo-project
+      LANGFUSE_INIT_PROJECT_NAME: springaitest
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-1234567890}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-1234567890}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: Admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-password123}
+
+  # ---------------- 依賴的基礎服務 ----------------
+  postgres:
+    image: postgres:17
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  clickhouse:
+    # 釘版本：原為不帶 tag（= latest 浮動，曾解析到 26.x）。此為 2026-06-28 當下 latest 對應的精確版本。
+    # 升級時手動改此處；對應 digest sha256:1d1f6508eba2…
+    image: clickhouse/clickhouse-server:26.6.1.1193
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7
+    restart: always
+    command: --requirepass myredissecret
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "myredissecret", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  minio:
+    # 釘版本：原為不帶 tag（= latest 浮動）。此為 2026-06-28 當下 latest 對應的精確 RELEASE。
+    # 對應 digest sha256:14cea493d9a3…
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: always
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports:
+      - "127.0.0.1:9090:9000"   # S3 API
+      - "127.0.0.1:9091:9001"   # 主控台
+    volumes:
+      - minio_data:/data
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
+  redis_data:
+  minio_data:
