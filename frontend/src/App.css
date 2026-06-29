@@ -1,0 +1,273 @@
+.app {
+  width: min(820px, 100%);
+  height: 100svh;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  border-inline: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.app__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.app__header h1 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.app__badge {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--code-bg);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.app__clear {
+  margin-left: auto;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.app__clear:hover:not(:disabled) {
+  background: var(--code-bg);
+}
+
+.app__clear:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.chat__empty {
+  margin: auto;
+  text-align: center;
+  color: var(--text);
+}
+
+.chat__hint {
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 85%;
+}
+
+.bubble--user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.bubble--assistant {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.bubble__role {
+  font-size: 12px;
+  color: var(--text);
+  padding: 0 4px;
+}
+
+.bubble__content {
+  padding: 10px 14px;
+  border-radius: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble--user .bubble__content {
+  background: var(--accent);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.bubble--assistant .bubble__content {
+  background: var(--code-bg);
+  color: var(--text-h);
+  border-bottom-left-radius: 4px;
+}
+
+.bubble--error .bubble__content {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
+/* AI 回覆的 Markdown 內容：泡泡本身用 pre-wrap，但 Markdown 區塊改回 normal，
+   交給各區塊元素自行排版。 */
+.markdown {
+  white-space: normal;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p {
+  margin: 8px 0;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+
+.markdown li {
+  margin: 2px 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin: 14px 0 8px;
+  line-height: 1.3;
+}
+
+.markdown a {
+  color: var(--accent);
+}
+
+.markdown blockquote {
+  margin: 8px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text);
+}
+
+.markdown table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 14px;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+}
+
+/* 行內 code 沿用全域 code 樣式；程式碼區塊（pre code.hljs）改由
+   highlight.js 主題上色，這裡只處理排版（內距、圓角、可橫向捲動）。 */
+.markdown pre {
+  margin: 10px 0;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+
+.markdown pre code {
+  display: block;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.bubble__typing {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.bubble__typing span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text);
+  opacity: 0.5;
+  animation: blink 1.2s infinite both;
+}
+
+.bubble__typing span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.bubble__typing span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes blink {
+  0%,
+  80%,
+  100% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 0.9;
+  }
+}
+
+.composer {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.composer__input {
+  flex: 1 1 auto;
+  resize: none;
+  min-height: 24px;
+  max-height: 160px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.4;
+  background: var(--bg);
+  color: var(--text-h);
+  overflow-y: auto;
+}
+
+.composer__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.composer__send {
+  align-self: flex-end;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.composer__send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
