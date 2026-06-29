@@ -10,6 +10,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import reactor.core.publisher.Flux;
 
 import java.time.Instant;
 import java.util.List;
@@ -66,6 +67,23 @@ public class ChatServiceImpl implements ChatService {
 
             return toResponse(saved);
         });
+    }
+
+    @Override
+    public Flux<String> streamChat(String message) {
+        // 串流版本：用 ChatClient.stream() 取得逐塊回覆。
+        // 注意：這裡「不」加 @Transactional —— 方法回傳的是 Flux，真正的資料流在「被訂閱時」
+        //   才發生，而 @Transactional 只會包住「組裝 Flux」這一瞬間，無法涵蓋整段串流。
+        //   因此改為在串流結束（doOnComplete）時，呼叫 repository.save() 落檔；
+        //   Spring Data 的每個 repository 方法本身即為一個獨立交易，足以保證該筆寫入的原子性。
+        StringBuilder full = new StringBuilder();
+        return chatClient.prompt()
+                .user(message)
+                .stream()
+                .content()
+                .doOnNext(full::append)
+                .doOnComplete(() -> conversationRepository.save(
+                        new Conversation(message, full.toString(), Instant.now())));
     }
 
     @Override

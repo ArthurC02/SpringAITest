@@ -1,5 +1,5 @@
 target/
-.mvn/wrapper/maven-wrapper.jar
+**/.mvn/wrapper/maven-wrapper.jar
 
 ### Secrets ###
 .env
@@ -33,3 +33,13 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Frontend（React + Vite）###
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

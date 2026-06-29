@@ -5,6 +5,11 @@ model_list:
       model: openai/gpt-4o-mini        # 真正路由目標（之後要加 Claude 就在這裡多一筆）
       api_key: os.environ/OPENAI_API_KEY
 
+  - model_name: mock-gpt               # 開發用：沒有 OpenAI 額度時，用固定回覆驗證 SSE 串流鏈路
+    litellm_params:
+      model: openai/gpt-4o-mini        # 有 mock_response 時不會真的打 OpenAI
+      mock_response: "這是一段由 LiteLLM 模擬的回覆，用來在沒有 OpenAI 額度時驗證 SSE 逐字串流是否正常。Streaming works! 0123456789，繁體中文也沒問題。"
+
 litellm_settings:
   success_callback: ["langfuse"]       # 成功呼叫 → Langfuse
   failure_callback: ["langfuse"]       # 失敗呼叫 → Langfuse
