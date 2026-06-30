@@ -1,41 +1,6 @@
-// 與 Spring 後端 /api/chat 對接的薄封裝。
+// 與 Spring 後端 /api/chat/stream 對接的薄封裝（含 SSE 解析）。
 // 開發時經由 Vite proxy 轉發到 http://localhost:8080（見 vite.config.ts），
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
-
-/** 對應後端 service.dto.ChatResponse。 */
-export interface ChatResponse {
-  id: number
-  reply: string
-  createdAt: string // ISO-8601（後端為 java.time.Instant）
-}
-
-const JSON_HEADERS = { 'Content-Type': 'application/json' }
-
-/** 送出一則訊息並取得 AI 回覆。對應 POST /api/chat。 */
-export async function sendChat(message: string, signal?: AbortSignal): Promise<ChatResponse> {
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ message }),
-    signal,
-  })
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`請求失敗（HTTP ${res.status}）${detail ? `：${detail}` : ''}`)
-  }
-  return (await res.json()) as ChatResponse
-}
-
-/**
- * 取得歷史回覆（由新到舊）。對應 GET /api/chat/history。
- * 注意：目前後端 ChatResponse 只含 reply，不含使用者原句，
- *       因此歷史無法重建完整對話——這是待補的後端缺口之一。
- */
-export async function fetchHistory(signal?: AbortSignal): Promise<ChatResponse[]> {
-  const res = await fetch('/api/chat/history', { signal })
-  if (!res.ok) throw new Error(`載入歷史失敗（HTTP ${res.status}）`)
-  return (await res.json()) as ChatResponse[]
-}
 
 /**
  * 以串流方式送出訊息。對應 POST /api/chat/stream（後端回 text/event-stream）。

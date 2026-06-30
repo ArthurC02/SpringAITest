@@ -1,10 +1,21 @@
-# 前端（React/nginx）+ LiteLLM 閘道 + Langfuse（自架 v3，含 postgres / clickhouse / redis / minio）
-# 啟動（在 infra/ 目錄）：docker compose up -d   ← .env 也放這個目錄
-#   - 前端聊天 UI : http://localhost:5173   （容器內 nginx 反向代理 /api → 主機 :8080）
-#   - Langfuse UI : http://localhost:3000   （登入見 .env 的 LANGFUSE_INIT_USER_*）
-#   - LiteLLM     : http://localhost:4000
-# Spring 後端在「主機」上跑（於 backend/ 執行 ./mvnw -pl springaitest-web spring-boot:run）；
-# 前端容器透過 host.docker.internal 連回主機後端，其餘服務間走 compose 服務名。
+# 基礎設施：LiteLLM 閘道 + Langfuse（自架 v3，含 postgres / clickhouse / redis / minio）。
+# 前端與後端對稱：兩者都「預設跑主機、--profile full 才容器化」（.env 放在 infra/ 目錄）。
+#
+#   A) 預設（開發）：只起基礎設施，前後端都在「主機」上跑，利於熱重載 / debug。
+#        docker compose up -d
+#      然後另開兩個終端：前端 `npm run dev`（:5173）、後端 `./mvnw -pl springaitest-web spring-boot:run`（:8080）。
+#      此模式下 :5173 / :8080 都空著，不必先 stop 任何容器。
+#
+#   B) 全容器（展示 / 部署）：前端 + 後端也一起容器化，一鍵起整套。
+#        docker compose --profile full up -d
+#      full profile 下 backend 容器把 :8080 發佈到主機，因此前端 nginx 既有的
+#      host.docker.internal:8080 反代不必改也能連到（單一 nginx 設定通吃兩種模式）。
+#
+#   各服務位置（兩種模式相同）：
+#     - 前端聊天 UI : http://localhost:5173   （full：容器內 nginx 反代 /api → 主機 :8080）
+#     - Langfuse UI : http://localhost:3000   （登入見 .env 的 LANGFUSE_INIT_USER_*）
+#     - LiteLLM     : http://localhost:4000
+#   ※ 前端佔 :5173、後端佔 :8080，每個埠請擇一模式；用 B 時不要再在主機另跑前/後端。
 
 # 固定 compose 專案名：不論在哪個目錄執行 docker compose，都對應同一套容器
 # （搬到 infra/ 後若不釘名，專案名會變成 "infra" 而另起一套，與現有 springaitest-* 衝突）。
@@ -30,17 +41,45 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-1234567890}
       LANGFUSE_HOST: http://langfuse-web:3000
 
-  # ---------------- 前端（React + Vite，build 後由 nginx 提供）----------------
-  # 後端是跑在「主機」上（非容器），nginx 透過 host.docker.internal 反向代理 /api 過去。
+  # ---------------- 前端（React + Vite，build 後由 nginx 提供）：選用，只有 --profile full 才啟用 ----------------
+  # 預設不啟用：前端平常用 Vite dev server 跑在「主機」上（npm run dev，有 HMR）。需要一鍵全容器時用 --profile full。
+  # nginx 透過 host.docker.internal 反向代理 /api → 主機 :8080（full 模式下即後端容器發佈到主機的埠）。
   frontend:
+    profiles: ["full"]
     build:
       context: ../frontend            # build context 在 compose 檔的上一層 frontend/
       dockerfile: Dockerfile
     restart: always
+    depends_on:
+      backend:
+        condition: service_started
     ports:
       - "5173:80"                     # 瀏覽器開 http://localhost:5173
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # 讓容器內 nginx 連得到主機上的 Spring 後端 :8080
+      - "host.docker.internal:host-gateway"   # 讓容器內 nginx 連得到後端 :8080（full 模式的容器版後端發佈到主機的埠）
+
+  # ---------------- 後端（Spring Boot）：選用，只有 --profile full 才啟用 ----------------
+  # 預設不啟用：後端平常跑在「主機」上（見檔頭說明 A）。需要一鍵全容器時用 --profile full。
+  # 容器化後改用 compose 服務名連 LiteLLM / Langfuse（application.yml 早已把這些位址做成環境變數可覆寫）；
+  # 並把 :8080 發佈到主機，讓前端 nginx 既有的 host.docker.internal:8080 反代不必改也能連到。
+  backend:
+    profiles: ["full"]
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      litellm:
+        condition: service_started
+      langfuse-web:
+        condition: service_started
+    ports:
+      - "8080:8080"                   # 發佈到主機，供前端 nginx 經 host.docker.internal 反代；curl 也可直連
+    environment:
+      LLM_BASE_URL: http://litellm:4000                       # 走 compose 服務名（取代主機版的 localhost:4000）
+      LITELLM_KEY: ${LITELLM_KEY:-sk-1234}                    # LiteLLM 虛擬金鑰
+      LANGFUSE_OTEL_ENDPOINT: http://langfuse-web:3000/api/public/otel/v1/traces
+      LANGFUSE_OTEL_AUTH: ${LANGFUSE_OTEL_AUTH:-Basic cGstbGYtMTIzNDU2Nzg5MDpzay1sZi0xMjM0NTY3ODkw}
 
   # ---------------- Langfuse ----------------
   langfuse-worker:

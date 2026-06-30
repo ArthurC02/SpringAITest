@@ -1,0 +1,4 @@
+# 不送進 build context：編譯產物與 IDE 檔案（依賴改由 BuildKit cache mount 處理）。
+**/target/
+.idea/
+*.iml
