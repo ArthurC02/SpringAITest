@@ -12,6 +12,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.client.ChatClient;
+import reactor.core.publisher.Flux;
 
 import java.time.Instant;
 import java.util.List;
@@ -41,6 +42,9 @@ class ChatServiceImplTest {
     private ChatClient.CallResponseSpec responseSpec;
 
     @Mock
+    private ChatClient.StreamResponseSpec streamResponseSpec;
+
+    @Mock
     private ConversationRepository conversationRepository;
 
     private ChatServiceImpl chatService;
@@ -68,6 +72,29 @@ class ChatServiceImplTest {
         assertThat(result.reply()).isEqualTo("你好，我是 AI");
 
         // 驗證存進資料庫的內容正確
+        ArgumentCaptor<Conversation> captor = ArgumentCaptor.forClass(Conversation.class);
+        verify(conversationRepository).save(captor.capture());
+        Conversation saved = captor.getValue();
+        assertThat(saved.getPrompt()).isEqualTo("你好");
+        assertThat(saved.getReply()).isEqualTo("你好，我是 AI");
+        assertThat(saved.getCreatedAt()).isNotNull();
+    }
+
+    @Test
+    void streamChat_shouldStreamChunksAndPersistFullReplyOnComplete() {
+        // 模擬串流 API：prompt().user(...).stream().content() 回 Flux<String>
+        when(chatClient.prompt()).thenReturn(requestSpec);
+        when(requestSpec.user("你好")).thenReturn(requestSpec);
+        when(requestSpec.stream()).thenReturn(streamResponseSpec);
+        when(streamResponseSpec.content()).thenReturn(Flux.just("你好", "，我是", " AI"));
+        when(conversationRepository.save(any(Conversation.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        // 逐塊內容應原樣傳遞給呼叫端
+        List<String> chunks = chatService.streamChat("你好").collectList().block();
+        assertThat(chunks).containsExactly("你好", "，我是", " AI");
+
+        // 串流結束後，累積的完整回覆應落檔為一筆紀錄
         ArgumentCaptor<Conversation> captor = ArgumentCaptor.forClass(Conversation.class);
         verify(conversationRepository).save(captor.capture());
         Conversation saved = captor.getValue();

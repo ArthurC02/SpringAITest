@@ -1,5 +1,6 @@
 # 多階段建置：先用 Node 把 SPA 打包成靜態檔，再交給 nginx 提供並反向代理 /api。
-# 注意：Spring 後端是跑在「主機」上（非容器內），nginx 透過 host.docker.internal 連回去。
+# 只有 docker compose --profile full 會用到此映像（平常前端用 Vite dev server 跑主機）。
+# nginx 透過 host.docker.internal 反代 /api → 主機 :8080（full 模式下即後端容器發佈到主機的埠）。
 
 # ---- build 階段：產出 dist/ ----
 FROM node:22-alpine AS build

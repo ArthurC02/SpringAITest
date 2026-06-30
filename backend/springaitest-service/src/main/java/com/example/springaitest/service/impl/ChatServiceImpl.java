@@ -46,12 +46,7 @@ public class ChatServiceImpl implements ChatService {
         // 自訂業務 span：包住「呼叫 LLM + 存檔」。span 開始後仍可補標籤，
         // 所以回覆字數在取得回覆後才加上。observe(...) 期間，Spring AI 的
         // ChatClient span 會成為這個 span 的子節點，於 Langfuse 形成巢狀結構。
-        Observation observation = Observation.createNotStarted("chat.service", observationRegistry)
-                .contextualName("chat-service")
-                .lowCardinalityKeyValue("gen_ai.operation.name", "chat")
-                .lowCardinalityKeyValue("gen_ai.system", "openai")
-                .lowCardinalityKeyValue("gen_ai.request.model", model)
-                .highCardinalityKeyValue("prompt.length", String.valueOf(message.length()));
+        Observation observation = newChatObservation(message);
 
         return observation.observe(() -> {
             String reply = chatClient.prompt()
@@ -76,14 +71,37 @@ public class ChatServiceImpl implements ChatService {
         //   才發生，而 @Transactional 只會包住「組裝 Flux」這一瞬間，無法涵蓋整段串流。
         //   因此改為在串流結束（doOnComplete）時，呼叫 repository.save() 落檔；
         //   Spring Data 的每個 repository 方法本身即為一個獨立交易，足以保證該筆寫入的原子性。
+        //
+        // 觀測同理：chat() 用的 observe(...) 會「進入 lambda 前開 scope、離開即關」，只適用於阻塞流程，
+        //   無法涵蓋非同步的串流生命週期。因此改為手動 start()，並在串流真正結束的 doFinally 才 stop()；
+        //   串流期間於 doOnComplete / doOnError 補上回覆字數與錯誤標籤。
+        Observation observation = newChatObservation(message);
+        observation.start();
+
         StringBuilder full = new StringBuilder();
         return chatClient.prompt()
                 .user(message)
                 .stream()
                 .content()
                 .doOnNext(full::append)
-                .doOnComplete(() -> conversationRepository.save(
-                        new Conversation(message, full.toString(), Instant.now())));
+                .doOnComplete(() -> {
+                    observation.highCardinalityKeyValue("completion.length",
+                            String.valueOf(full.length()));
+                    conversationRepository.save(
+                            new Conversation(message, full.toString(), Instant.now()));
+                })
+                .doOnError(observation::error)
+                .doFinally(signalType -> observation.stop());
+    }
+
+    /** 建立統一規格的業務 span（chat 與 streamChat 共用，避免標籤重複定義）。 */
+    private Observation newChatObservation(String message) {
+        return Observation.createNotStarted("chat.service", observationRegistry)
+                .contextualName("chat-service")
+                .lowCardinalityKeyValue("gen_ai.operation.name", "chat")
+                .lowCardinalityKeyValue("gen_ai.system", "openai")
+                .lowCardinalityKeyValue("gen_ai.request.model", model)
+                .highCardinalityKeyValue("prompt.length", String.valueOf(message.length()));
     }
 
     @Override

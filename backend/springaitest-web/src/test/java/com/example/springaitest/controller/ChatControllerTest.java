@@ -8,13 +8,20 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import reactor.core.publisher.Flux;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -41,6 +48,31 @@ class ChatControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(1))
                 .andExpect(jsonPath("$.reply").value("你好，我是 AI"));
+    }
+
+    @Test
+    void stream_shouldReturnSseStreamOfReplyChunks() throws Exception {
+        when(chatService.streamChat(eq("你好")))
+                .thenReturn(Flux.just("你好", "，我是 AI"));
+
+        // Flux 回傳型別走 Spring MVC 非同步流程：先確認 async 已啟動，再 dispatch 取完整結果。
+        MvcResult result = mockMvc.perform(post("/api/chat/stream")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"你好\"}"))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        MvcResult dispatched = mockMvc.perform(asyncDispatch(result))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+                .andReturn();
+
+        // SSE 回應的 content-type 不帶 charset，MockMvc 預設以 ISO-8859-1 解碼會讓中文變亂碼，
+        // 因此直接取原始 bytes 以 UTF-8 還原，再驗證每個 chunk 都被包成 data: 事件送出。
+        String body = dispatched.getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertThat(body)
+                .contains("data:你好")
+                .contains("data:，我是 AI");
     }
 
     @Test
