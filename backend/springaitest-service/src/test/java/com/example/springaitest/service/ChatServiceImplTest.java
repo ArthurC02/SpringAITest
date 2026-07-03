@@ -12,10 +12,13 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.api.Advisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import reactor.core.publisher.Flux;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -47,26 +50,35 @@ class ChatServiceImplTest {
     @Mock
     private ConversationRepository conversationRepository;
 
+    @Mock
+    private com.example.springaitest.service.impl.Mem0Client mem0;
+
+    @Mock
+    private ChatMemory chatMemory;
+
     private ChatServiceImpl chatService;
 
     @BeforeEach
     void setUp() {
-        // 建構子內部會呼叫 builder.build()
+        // 建構子內部會 defaultAdvisors(短期記憶 advisor) 後 build()
+        when(builder.defaultAdvisors(any(Advisor.class))).thenReturn(builder);
         when(builder.build()).thenReturn(chatClient);
-        chatService = new ChatServiceImpl(builder, conversationRepository, ObservationRegistry.NOOP, "gpt-4o-mini");
+        // mem0 為 mock：recall 預設回 null → 不加 system 記憶，行為與整合前一致；remember 為無動作。
+        chatService = new ChatServiceImpl(builder, conversationRepository, ObservationRegistry.NOOP, mem0, chatMemory, "gpt-4o-mini");
     }
 
     @Test
     void chat_shouldCallLlmAndPersistConversation() {
-        // 模擬 ChatClient 流式 API：prompt().user(...).call().content()
+        // 模擬 ChatClient 流式 API：prompt().advisors(...).user(...).call().content()
         when(chatClient.prompt()).thenReturn(requestSpec);
+        when(requestSpec.advisors(any(Consumer.class))).thenReturn(requestSpec);
         when(requestSpec.user("你好")).thenReturn(requestSpec);
         when(requestSpec.call()).thenReturn(responseSpec);
         when(responseSpec.content()).thenReturn("你好，我是 AI");
         when(conversationRepository.save(any(Conversation.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
-        ChatResponse result = chatService.chat("你好");
+        ChatResponse result = chatService.chat("你好", "user-1", "conv-1");
 
         // 回傳的 reply 應為 LLM 的輸出
         assertThat(result.reply()).isEqualTo("你好，我是 AI");
@@ -82,8 +94,9 @@ class ChatServiceImplTest {
 
     @Test
     void streamChat_shouldStreamChunksAndPersistFullReplyOnComplete() {
-        // 模擬串流 API：prompt().user(...).stream().content() 回 Flux<String>
+        // 模擬串流 API：prompt().advisors(...).user(...).stream().content() 回 Flux<String>
         when(chatClient.prompt()).thenReturn(requestSpec);
+        when(requestSpec.advisors(any(Consumer.class))).thenReturn(requestSpec);
         when(requestSpec.user("你好")).thenReturn(requestSpec);
         when(requestSpec.stream()).thenReturn(streamResponseSpec);
         when(streamResponseSpec.content()).thenReturn(Flux.just("你好", "，我是", " AI"));
@@ -91,7 +104,7 @@ class ChatServiceImplTest {
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
         // 逐塊內容應原樣傳遞給呼叫端
-        List<String> chunks = chatService.streamChat("你好").collectList().block();
+        List<String> chunks = chatService.streamChat("你好", "user-1", "conv-1").collectList().block();
         assertThat(chunks).containsExactly("你好", "，我是", " AI");
 
         // 串流結束後，累積的完整回覆應落檔為一筆紀錄

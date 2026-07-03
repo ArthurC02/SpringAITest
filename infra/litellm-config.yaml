@@ -5,6 +5,11 @@ model_list:
       model: openai/gpt-4o-mini        # 真正路由目標（之後要加 Claude 就在這裡多一筆）
       api_key: os.environ/OPENAI_API_KEY
 
+  - model_name: text-embedding-3-small # mem0 的 embedder 走這裡（名稱須對應 mem0 的 MEM0_DEFAULT_EMBEDDER_MODEL）
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY
+
   - model_name: mock-gpt               # 開發用：沒有 OpenAI 額度時，用固定回覆驗證 SSE 串流鏈路
     litellm_params:
       model: openai/gpt-4o-mini        # 有 mock_response 時不會真的打 OpenAI

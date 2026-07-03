@@ -12,6 +12,8 @@ if (-not (Test-Path .env)) {
 }
 
 Write-Host "▶ 啟動基礎設施（不含前後端）…"
+docker compose up -d postgres                 # 先起 postgres，好在 mem0 之前備妥它需要的庫
+& (Join-Path $PSScriptRoot 'ensure-mem0-db.ps1')
 docker compose up -d
 Write-Host ""
 docker compose ps

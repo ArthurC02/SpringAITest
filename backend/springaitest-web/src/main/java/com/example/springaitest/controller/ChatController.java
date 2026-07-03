@@ -31,7 +31,7 @@ public class ChatController {
     /** 送出一則訊息並取得 AI 回覆（一次性，非串流）。 */
     @PostMapping
     public ChatResponse chat(@Valid @RequestBody ChatRequest request) {
-        return chatService.chat(request.message());
+        return chatService.chat(request.message(), request.userId(), request.conversationId());
     }
 
     /**
@@ -41,7 +41,7 @@ public class ChatController {
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> stream(@Valid @RequestBody ChatRequest request) {
-        return chatService.streamChat(request.message());
+        return chatService.streamChat(request.message(), request.userId(), request.conversationId());
     }
 
     /** 取得歷史對話紀錄。 */

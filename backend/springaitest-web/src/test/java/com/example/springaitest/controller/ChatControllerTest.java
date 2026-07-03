@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
@@ -39,7 +40,7 @@ class ChatControllerTest {
 
     @Test
     void chat_shouldReturnReply() throws Exception {
-        when(chatService.chat(eq("你好")))
+        when(chatService.chat(eq("你好"), any(), any()))
                 .thenReturn(new ChatResponse(1L, "你好，我是 AI", Instant.parse("2026-01-01T00:00:00Z")));
 
         mockMvc.perform(post("/api/chat")
@@ -52,7 +53,7 @@ class ChatControllerTest {
 
     @Test
     void stream_shouldReturnSseStreamOfReplyChunks() throws Exception {
-        when(chatService.streamChat(eq("你好")))
+        when(chatService.streamChat(eq("你好"), any(), any()))
                 .thenReturn(Flux.just("你好", "，我是 AI"));
 
         // Flux 回傳型別走 Spring MVC 非同步流程：先確認 async 已啟動，再 dispatch 取完整結果。

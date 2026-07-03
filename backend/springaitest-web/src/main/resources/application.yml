@@ -39,6 +39,11 @@ spring:
         log-completion: true
         include-error-logging: true
 
+# ---- mem0：長期記憶 REST server（mem0/mem0-api-server）----
+mem0:
+  # 主機開發時走 localhost:8000；full profile 容器化時由 compose 覆寫成 http://mem0:8000
+  base-url: ${MEM0_BASE_URL:http://localhost:8000}
+
 server:
   port: 8080
 

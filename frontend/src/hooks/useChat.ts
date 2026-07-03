@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { streamChat } from '../api/chat'
+import { streamChat, newConversation } from '../api/chat'
 import type { Message } from '../types'
 
 const STORAGE_KEY = 'springai-chat:messages'
@@ -66,7 +66,11 @@ export function useChat() {
     }
   }, [])
 
-  const clear = useCallback(() => setMessages([]), [])
+  // 清除對話：同時換新 conversationId，讓後端短期記憶也一起重置。
+  const clear = useCallback(() => {
+    newConversation()
+    setMessages([])
+  }, [])
 
   return { messages, loading, send, clear }
 }

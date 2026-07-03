@@ -41,6 +41,38 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-1234567890}
       LANGFUSE_HOST: http://langfuse-web:3000
 
+  # ---------------- mem0 長期記憶 REST server ----------------
+  # 官方 mem0/mem0-api-server（:8000）。LLM 與 embedder 都改走現有 LiteLLM 閘道（OpenAI 相容協定），
+  # 向量儲存用它預設的 pgvector —— 即上面那台 postgres（已換成 pgvector 映像）。
+  mem0:
+    # 用薄封裝映像（見 mem0.Dockerfile）：官方 image 缺 libpq 會 crash，這層補上帶 libpq 的 psycopg。
+    build:
+      context: .
+      dockerfile: mem0.Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    ports:
+      - "8000:8000"                    # 主機開發時後端用 localhost:8000 連；瀏覽 /docs 可看 API
+    environment:
+      AUTH_DISABLED: "true"                                   # 本機開發：開放端點免認證
+      # openai provider 指向 LiteLLM（同時設 BASE_URL 與 API_BASE，涵蓋 SDK / mem0 兩種讀取路徑）
+      OPENAI_API_KEY: ${LITELLM_KEY:-sk-1234}
+      OPENAI_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_BASE: http://litellm:4000/v1
+      MEM0_DEFAULT_LLM_MODEL: gpt-4o-mini                     # 須存在於 litellm-config.yaml 的 model_name
+      MEM0_DEFAULT_EMBEDDER_MODEL: text-embedding-3-small     # 同上（已在 litellm-config.yaml 註冊）
+      # 向量庫 = 現有 postgres 的 pgvector（預設值即 postgres/postgres，這裡顯式標明）
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - mem0_history:/app/history   # image 沒建這個資料夾，mem0 的 sqlite 變更紀錄開不了；掛上即建立且持久化
+
   # ---------------- 前端（React + Vite，build 後由 nginx 提供）：選用，只有 --profile full 才啟用 ----------------
   # 預設不啟用：前端平常用 Vite dev server 跑在「主機」上（npm run dev，有 HMR）。需要一鍵全容器時用 --profile full。
   # nginx 透過 host.docker.internal 反向代理 /api → 主機 :8080（full 模式下即後端容器發佈到主機的埠）。
@@ -80,6 +112,7 @@ services:
       LITELLM_KEY: ${LITELLM_KEY:-sk-1234}                    # LiteLLM 虛擬金鑰
       LANGFUSE_OTEL_ENDPOINT: http://langfuse-web:3000/api/public/otel/v1/traces
       LANGFUSE_OTEL_AUTH: ${LANGFUSE_OTEL_AUTH:-Basic cGstbGYtMTIzNDU2Nzg5MDpzay1sZi0xMjM0NTY3ODkw}
+      MEM0_BASE_URL: http://mem0:8000                         # 容器化後端走 compose 服務名連 mem0
 
   # ---------------- Langfuse ----------------
   langfuse-worker:
@@ -149,7 +182,9 @@ services:
 
   # ---------------- 依賴的基礎服務 ----------------
   postgres:
-    image: postgres:17
+    # pgvector/pgvector:pg17 = 官方 postgres 17 + pgvector 擴充。Langfuse 照舊使用，
+    # 另外供 mem0 當向量庫（mem0 預設 vector_store 就是連這台 postgres 的 pgvector）。
+    image: pgvector/pgvector:pg17
     restart: always
     environment:
       POSTGRES_USER: postgres
@@ -219,6 +254,7 @@ services:
       - minio_data:/data
 
 volumes:
+  mem0_history:
   postgres_data:
   clickhouse_data:
   clickhouse_logs:

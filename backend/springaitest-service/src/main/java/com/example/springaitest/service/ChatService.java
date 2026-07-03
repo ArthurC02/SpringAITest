@@ -14,19 +14,23 @@ public interface ChatService {
     /**
      * 將使用者訊息送至 LLM，取得回覆並保存對話紀錄。
      *
-     * @param message 使用者輸入
+     * @param message        使用者輸入
+     * @param userId         長期記憶（mem0）分群用的使用者識別（空值時視為 default 使用者）
+     * @param conversationId 短期記憶（同一對話多輪脈絡）分群用的對話識別（空值時退回以 userId 分群）
      * @return 含回覆內容與紀錄編號的結果
      */
-    ChatResponse chat(String message);
+    ChatResponse chat(String message, String userId, String conversationId);
 
     /**
      * 以串流方式將使用者訊息送至 LLM，逐塊回傳回覆內容（token chunk）。
      * 串流結束時，會把累積的完整回覆保存為一筆對話紀錄。
      *
-     * @param message 使用者輸入
+     * @param message        使用者輸入
+     * @param userId         長期記憶（mem0）分群用的使用者識別（空值時視為 default 使用者）
+     * @param conversationId 短期記憶（同一對話多輪脈絡）分群用的對話識別（空值時退回以 userId 分群）
      * @return 回覆內容片段的 Flux（由 Controller 包成 SSE 推給前端）
      */
-    Flux<String> streamChat(String message);
+    Flux<String> streamChat(String message, String userId, String conversationId);
 
     /**
      * 取得所有歷史對話（由新到舊）。

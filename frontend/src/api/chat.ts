@@ -3,6 +3,40 @@
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
 
 /**
+ * 每個瀏覽器一組穩定的 userId，供後端 mem0 分群長期記憶用。
+ * 首次產生後存進 localStorage，之後每次請求都帶同一個 id。
+ */
+function getUserId(): string {
+  const KEY = 'springai-chat:userId'
+  let id = localStorage.getItem(KEY)
+  if (!id) {
+    id = crypto.randomUUID()
+    localStorage.setItem(KEY, id)
+  }
+  return id
+}
+
+const CONVERSATION_KEY = 'springai-chat:conversationId'
+
+/**
+ * 一次對話的識別，供後端短期記憶（同對話多輪脈絡）分群用。
+ * 與 userId 不同：userId 是「這個人」（跨對話長期記憶），conversationId 是「這一串對話」。
+ */
+function getConversationId(): string {
+  let id = localStorage.getItem(CONVERSATION_KEY)
+  if (!id) {
+    id = crypto.randomUUID()
+    localStorage.setItem(CONVERSATION_KEY, id)
+  }
+  return id
+}
+
+/** 開一段新對話：換掉 conversationId，讓後端的短期記憶重新開始（清除對話時呼叫）。 */
+export function newConversation(): void {
+  localStorage.setItem(CONVERSATION_KEY, crypto.randomUUID())
+}
+
+/**
  * 以串流方式送出訊息。對應 POST /api/chat/stream（後端回 text/event-stream）。
  * 每收到一個 token chunk 就呼叫一次 onToken，呼叫端可逐字累加顯示。
  *
@@ -20,7 +54,7 @@ export async function streamChat(
       'Content-Type': 'application/json',
       Accept: 'text/event-stream, application/json',
     },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, userId: getUserId(), conversationId: getConversationId() }),
     signal,
   })
   if (!res.ok || !res.body) {

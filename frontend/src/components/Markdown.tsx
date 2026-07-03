@@ -16,7 +16,7 @@ export default function Markdown({ children }: { children: string }) {
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
         components={{
-          a({ node, ...props }) {
+          a({ node: _node, ...props }) {
             return <a {...props} target="_blank" rel="noreferrer noopener" />
           },
         }}
