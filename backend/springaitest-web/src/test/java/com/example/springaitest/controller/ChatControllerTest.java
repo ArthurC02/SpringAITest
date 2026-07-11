@@ -1,9 +1,11 @@
 package com.example.springaitest.controller;
 
+import com.example.springaitest.security.JwtService;
 import com.example.springaitest.service.ChatService;
 import com.example.springaitest.service.dto.ChatResponse;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -28,8 +30,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * 展示層單元測試：只載入 Web 切片並 mock 掉 Service，
  * 驗證路由、請求驗證與回應序列化。
+ * {@code addFilters = false}：/api/chat/** 在 SecurityConfig 中維持公開，但 @WebMvcTest
+ * 不會載入 SecurityConfig，只會套用 Spring Boot 對 Security 的預設自動配置（要求逐一認證），
+ * 因此關閉 filter 鏈以還原「公開路由」的行為。
  */
 @WebMvcTest(ChatController.class)
+@AutoConfigureMockMvc(addFilters = false)
 class ChatControllerTest {
 
     @Autowired
@@ -37,6 +43,10 @@ class ChatControllerTest {
 
     @MockitoBean
     private ChatService chatService;
+
+    // JwtAuthFilter 是 Filter，@WebMvcTest 的切片會自動載入它，因而需要它依賴的 JwtService 也在容器中。
+    @MockitoBean
+    private JwtService jwtService;
 
     @Test
     void chat_shouldReturnReply() throws Exception {

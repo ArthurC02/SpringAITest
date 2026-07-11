@@ -21,10 +21,17 @@ SpringAITest/
 │   ├── vite.config.ts          dev 時把 /api proxy 到 :8080（免 CORS）
 │   ├── Dockerfile / nginx.conf 正式：多階段 build → nginx 靜態檔 + /api 反代（SSE 關緩衝）
 │   └── src/                    api/chat.ts、hooks/useChat.ts、components/、App.tsx
+├── workflow/                   工作流：Python + LangGraph + FastAPI（多個具名工作流、向量檢索、分析工作流、權限邊界）
+│   ├── app/
+│   │   ├── workflows/          每個工作流一個模組 + registry（新增工作流只要新增一個模組檔）
+│   │   ├── nodes/              可重用節點（retrieve：租戶過濾向量檢索）
+│   │   └── main.py             FastAPI 進入點（內部密鑰驗證 + 多租戶 context）
+│   ├── pyproject.toml          uv 管理依賴（langgraph、langchain-openai、fastapi、pgvector…）
+│   └── Dockerfile              正式：容器內經服務名連 LiteLLM，pgvector 做向量檢索
 └── infra/
-    ├── docker-compose.yml      LiteLLM + Langfuse（自架 v3）+ mem0；frontend / backend 為 profile「full」
+    ├── docker-compose.yml      LiteLLM + Langfuse（自架 v3）+ mem0 + workflow + appdb（pgvector）；frontend / backend 為 profile「full」
     ├── mem0.Dockerfile         mem0 官方映像的薄封裝（補上缺的 libpq，見下方長期記憶章節）
-    ├── litellm-config.yaml     LiteLLM 路由（chat 模型、mem0 用的 embedding、免額度測試用的 mock-gpt）
+    ├── litellm-config.yaml     LiteLLM 路由（chat 模型、embedding、免額度測試用的 mock-gpt）
     ├── .env.example            金鑰範本
     └── .env                    真正的金鑰（自建，已 gitignore）
 ```
@@ -35,6 +42,8 @@ SpringAITest/
 - **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。
 
 > 後端 `<java.version>` 為 25,需 JDK 25 以上才能建置（`java -version` 應顯示 `25.x`）。
+
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、langchain-openai（經 LiteLLM 閘道連 LLM）、pgvector（向量檢索）、Langfuse callback（env 開關）。
 
 ## 前置需求
 
@@ -107,6 +116,8 @@ npm install && npm run dev                    # :5173（Vite proxy /api → :808
 | Langfuse UI | http://localhost:3000 （帳號見 `.env` 的 `LANGFUSE_INIT_USER_*`）|
 | LiteLLM | http://localhost:4000 |
 | mem0（長期記憶）| http://localhost:8000 （API 文件 `/docs`）|
+| 工作流服務（LangGraph）| http://localhost:8001 （主機埠 8001 → 容器 8000,避開 mem0）|
+| 應用資料庫（pgvector）| localhost:5433 （使用者 `postgres`,密碼 `postgres`,資料庫 `springaitest`）|
 
 打幾次 `/api/chat` 後,到 Langfuse UI 即可看到 trace、token 與成本。
 
@@ -170,6 +181,7 @@ OpenAI / ...（未來可加 Claude 等）
 
 - **LiteLLM → Langfuse**:閘道層自動記錄 token、成本、輸入輸出（零改碼）。
 - **Spring AI → Langfuse**:App 層的 trace 與延遲,經 Micrometer Tracing + OTLP 匯出（串流與非串流路徑皆有業務 span）。
+- **workflow → Langfuse**:workflow 服務同樣經 LiteLLM 閘道呼叫 LLM,並額外掛 Langfuse LangChain callback,一併被 Langfuse 記錄。
 
 ## 長期記憶（mem0）
 
@@ -200,6 +212,114 @@ mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量�
 - **兩種記憶各司其職**:mem0 存「跨 session 的長期事實」(走 system prompt 注入);`ChatMemory` 存「這一串對話的近期訊息」(直接把前幾輪對話補回 prompt),讓 LLM 認得「上一句」。
 - **零額外依賴 / 零 bean 設定**:`ChatMemory` bean 由 Spring AI auto-config 提供(預設 `MessageWindowChatMemory`,in-memory、保留最近 20 則);`ChatServiceImpl` 只把 advisor 掛成 default advisor,並依 `conversationId` 分群(見 [API](#api))。
 - **記憶體儲存、重啟即清**:與 H2 一致(見上,重啟後對話脈絡歸零屬預期)。要跨重啟保留,換成 `JdbcChatMemoryRepository` 即可,不改業務碼。
+
+## 認證與多租戶
+
+專案支持 Spring JWT 認證與租戶隔離。文件與檢索都以租戶代碼隔離。
+
+### 種子帳號與租戶
+
+| 帳號 | 密碼 | 角色 | 租戶代碼 |
+|---|---|---|---|
+| admin-a | password123 | ADMIN | demo-a |
+| user-a | password123 | USER | demo-a |
+| user-b | password123 | USER | demo-b |
+
+種子租戶的邀請碼：`demo-a` → `demo-a-invite`、`demo-b` → `demo-b-invite`。
+
+自助註冊需要提供該租戶的邀請碼（防止任意加入他人租戶讀取其文件）：
+
+```bash
+curl -X POST http://localhost:8080/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"newuser","password":"password123","tenantCode":"demo-a","inviteCode":"demo-a-invite"}'
+```
+
+邀請碼錯誤回 `403 邀請碼無效`；租戶代碼不存在回 404；帳號重複回 409。
+
+### 認證流程
+
+1. **登入 —— 取得 JWT token**
+
+```bash
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user-a","password":"password123"}'
+# 回應：{"token":"eyJhbGc...","username":"user-a","role":"USER","tenantCode":"demo-a"}
+```
+
+2. **使用 token 呼叫受保護的端點** —— 在 `Authorization` header 帶上 `Bearer <token>`:
+
+```bash
+curl -H "Authorization: Bearer eyJhbGc..." http://localhost:8080/api/documents
+```
+
+### 受保護的 API
+
+| 端點 | 方法 | 權限 | 說明 |
+|---|---|---|---|
+| `/api/documents` | POST | USER | 新增文件（切塊 + 嵌入,存入租戶向量庫） |
+| `/api/documents` | GET | USER | 列出文件（租戶隔離） |
+| `/api/workflows` | GET | USER | 列出工作流（含 `required_role`） |
+| `/api/workflows/rag_qa` | POST | USER | RAG 問答（使用租戶向量庫,附引用） |
+| `/api/workflows/analyze_report` | POST | ADMIN | 生成分析報告（權限受限） |
+
+```bash
+# 新增文件
+curl -X POST http://localhost:8080/api/documents \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"我的文件","text":"這是文件內容"}'
+
+# RAG 問答
+curl -X POST http://localhost:8080/api/workflows/rag_qa \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"question":"文件裡提到什麼？"}}'
+
+# 分析報告（ADMIN only，USER 會得 403）
+curl -X POST http://localhost:8080/api/workflows/analyze_report \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"topic":"市場分析"}}'
+```
+
+## 工作流（LangGraph）
+
+| 工作流 | 說明 | 權限 |
+|---|---|---|
+| `summarize` | 文本摘要 | USER |
+| `triage` | 問題分流分類 | USER |
+| `rag_qa` | RAG 問答（向量檢索 + 生成） | USER |
+| `analyze_report` | 生成分析報告 | ADMIN |
+
+> 上述端點都在 `/api/workflows/**` 之下，Spring 端一律要求 JWT 認證（見「認證與多租戶」），
+> 需帶 `Authorization: Bearer <token>`；`summarize`、`triage`、`rag_qa` 任一登入使用者（USER）
+> 皆可呼叫，`analyze_report` 則限 ADMIN。
+
+```bash
+# 觸發 summarize（摘要）
+curl -X POST http://localhost:8080/api/workflows/summarize \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"text":"..."}}'
+
+# 觸發 triage（分流）
+curl -X POST http://localhost:8080/api/workflows/triage \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"question":"退款要多久？"}}'
+```
+
+> Spring 收到請求後會轉呼叫 workflow 服務;若要略過 Spring 直接測工作流本身,也可以打 `http://localhost:8001/workflows/...`
+> （但工作流服務本身走的是服務間認證 `X-Internal-Token`／租戶標頭，不是 JWT，見 `workflow/README.md`）。
+
+### 注意事項
+
+- **`/api/chat` 端點目前仍為公開**（不需認證）。前端聊天 UI 尚無登入頁。
+- **向量嵌入**:開發預設 `WORKFLOW_EMBEDDINGS_PROVIDER=fake`，無需 OpenAI 額度，可驗證整條 RAG 鏈。正式環境改為 `openai` 並確保 `OPENAI_API_KEY` 有效。
+- **多租戶隔離**:文件與向量檢索結果都按租戶代碼隔離，使用者只能看到同租戶的資料。
+- **appdb 資料庫**:應用層向量儲存（`localhost:5433`）；Spring 後端預設仍用 H2 記憶體資料庫。
 
 ## 後續工作
 

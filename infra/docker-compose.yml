@@ -1,4 +1,5 @@
-# 基礎設施：LiteLLM 閘道 + Langfuse（自架 v3，含 postgres / clickhouse / redis / minio）。
+# 基礎設施：LiteLLM 閘道 + Langfuse（自架 v3，含 postgres / clickhouse / redis / minio）
+#           + mem0 長期記憶 + LangGraph 工作流服務（Python/FastAPI）+ appdb（pgvector）。
 # 前端與後端對稱：兩者都「預設跑主機、--profile full 才容器化」（.env 放在 infra/ 目錄）。
 #
 #   A) 預設（開發）：只起基礎設施，前後端都在「主機」上跑，利於熱重載 / debug。
@@ -13,6 +14,8 @@
 #
 #   各服務位置（兩種模式相同）：
 #     - 前端聊天 UI : http://localhost:5173   （full：容器內 nginx 反代 /api → 主機 :8080）
+#     - 工作流服務 : http://localhost:8001   （LangGraph；主機埠 8001 → 容器 8000，避開 mem0 佔用的 :8000）
+#     - mem0        : http://localhost:8000   （長期記憶 REST server）
 #     - Langfuse UI : http://localhost:3000   （登入見 .env 的 LANGFUSE_INIT_USER_*）
 #     - LiteLLM     : http://localhost:4000
 #   ※ 前端佔 :5173、後端佔 :8080，每個埠請擇一模式；用 B 時不要再在主機另跑前/後端。
@@ -113,6 +116,52 @@ services:
       LANGFUSE_OTEL_ENDPOINT: http://langfuse-web:3000/api/public/otel/v1/traces
       LANGFUSE_OTEL_AUTH: ${LANGFUSE_OTEL_AUTH:-Basic cGstbGYtMTIzNDU2Nzg5MDpzay1sZi0xMjM0NTY3ODkw}
       MEM0_BASE_URL: http://mem0:8000                         # 容器化後端走 compose 服務名連 mem0
+      WORKFLOW_BASE_URL: http://workflow:8000                 # 容器化後端走 compose 服務名連工作流服務（容器內仍是 :8000）
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
+
+  # ---------------- LangGraph 工作流服務（Python/FastAPI）----------------
+  workflow:
+    build:
+      context: ../workflow
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      litellm:
+        condition: service_started
+      appdb:
+        condition: service_healthy
+    ports:
+      - "8001:8000"                   # 主機上的 Spring 後端經 localhost:8001 觸發工作流（:8000 已被 mem0 佔用）
+    environment:
+      LLM_BASE_URL: http://litellm:4000              # 容器內走 compose 服務名連 LiteLLM
+      LLM_API_KEY: ${LITELLM_KEY:-sk-1234}
+      LLM_MODEL: ${WORKFLOW_LLM_MODEL:-mock-gpt}     # 預設走無金鑰 mock 模型，正式改 gpt-4o-mini
+      LANGFUSE_ENABLED: ${WORKFLOW_LANGFUSE_ENABLED:-true}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-1234567890}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-1234567890}
+      LANGFUSE_HOST: http://langfuse-web:3000
+      DATABASE_URL: postgresql://postgres:postgres@appdb:5432/springaitest
+      EMBEDDINGS_PROVIDER: ${WORKFLOW_EMBEDDINGS_PROVIDER:-fake}   # fake=免金鑰確定性嵌入；openai=經 LiteLLM 的 text-embedding-3-small
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
+
+  # 應用資料庫（含 pgvector 擴充）：workflow 服務的向量檢索儲存；Spring 後端預設仍用 H2，可透過環境變數切換至此
+  appdb:
+    image: pgvector/pgvector:pg17
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: springaitest
+    ports:
+      - "127.0.0.1:5433:5432"   # 避開 langfuse postgres 佔用的 5432
+    volumes:
+      - appdb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
   # ---------------- Langfuse ----------------
   langfuse-worker:
@@ -260,3 +309,4 @@ volumes:
   clickhouse_logs:
   redis_data:
   minio_data:
+  appdb_data:

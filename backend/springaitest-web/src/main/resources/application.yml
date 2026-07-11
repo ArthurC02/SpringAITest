@@ -63,3 +63,15 @@ management:
 logging:
   level:
     org.springframework.ai: INFO
+
+# ---- 工作流服務（Python/LangGraph，經 HTTP 觸發）----
+workflow:
+  # 主機開發時走 localhost:8001（compose 把工作流容器的 :8000 發佈到主機 :8001，因 :8000 已被 mem0 佔用）
+  base-url: ${WORKFLOW_BASE_URL:http://localhost:8001}
+  # 內部服務間權杖：Spring 呼叫下游 /workflows*、/documents* 時一併帶上，供下游驗證呼叫來源
+  internal-token: ${INTERNAL_API_TOKEN:internal-dev-token}
+
+# ---- JWT 簽發設定（登入後由 web 層簽發，其餘 API 皆需帶 Bearer token）----
+jwt:
+  secret: ${JWT_SECRET:dev-jwt-secret-change-me-0123456789abcdef}
+  expiration-hours: 24

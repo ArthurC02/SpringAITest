@@ -34,10 +34,22 @@
 			<artifactId>spring-boot-starter-validation</artifactId>
 		</dependency>
 
+		<!-- RestClient 呼叫工作流服務；目前僅由 spring-ai starter 傳遞帶入，顯式宣告以明確依賴 -->
+		<dependency>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-web</artifactId>
+		</dependency>
+
 		<!-- 觀測 API：在業務層建立自訂 span（實際匯出由 web 模組的 tracing 負責）-->
 		<dependency>
 			<groupId>io.micrometer</groupId>
 			<artifactId>micrometer-observation</artifactId>
+		</dependency>
+
+		<!-- 密碼編碼（BCrypt）：AuthServiceImpl 用；只需加密演算法，不需整個 Security starter -->
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-crypto</artifactId>
 		</dependency>
 
 		<!-- 測試：Mockito（純單元測試，不需 DB） -->
