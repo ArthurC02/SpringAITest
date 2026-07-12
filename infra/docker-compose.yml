@@ -189,7 +189,7 @@ services:
       backend:
         condition: service_started    # 檢索/資料存取全部經 backend，不再直連 appdb
     ports:
-      - "8001:8000"                   # 主機上的 platform 經 localhost:8001 觸發工作流（:8000 已被 mem0 佔用）
+      - "127.0.0.1:8001:8000"         # 只綁 localhost：主機上的 platform 經 localhost:8001 觸發工作流（:8000 已被 mem0 佔用）；workflow 信任 X-* 身分 header，絕不可暴露到 LAN
     environment:
       LLM_BASE_URL: http://litellm:4000              # 容器內走 compose 服務名連 LiteLLM
       LLM_API_KEY: ${LITELLM_KEY:-sk-1234}

@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# 模式 A：只啟動基礎設施（7 個服務：LiteLLM + Langfuse 全套）。
+# 模式 A：啟動基礎設施 + 常駐應用層（backend/workflow/appdb/rabbitmq 等），不含 frontend/platform（profile full）。
 # 前端 (npm run dev) 與後端 (dotnet run --project src/Platform.Web) 請另在主機上跑——見 README 模式 A。
 set -e
 

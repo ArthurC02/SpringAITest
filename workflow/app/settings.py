@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -15,7 +16,7 @@ class Settings(BaseSettings):
 
     # 資料檢索：核心商業邏輯（含向量庫）已搬到 backend/，本服務只負責呼叫。
     backend_base_url: str = "http://localhost:8002"
-    retrieval_top_k: int = 4                       # 檢索節點預設取回的片段數
+    retrieval_top_k: int = Field(default=4, ge=1, le=50)   # 檢索節點預設取回的片段數；上限對齊 backend 的 [Range(1,50)]，超出會讓 backend 回 400
 
     # 工作流執行的逾時保護（秒），可由個別工作流的 timeout_seconds 覆蓋。
     workflow_timeout_seconds: int = 120

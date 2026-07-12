@@ -59,7 +59,7 @@ export default function MessageList({ messages, loading }: Props) {
           <div className="chat__empty">
             <p>開始對話吧 👋</p>
             <p className="chat__hint">
-              送出後會呼叫後端 <code>POST /api/chat</code>（經 Vite proxy 轉到 :8080）。
+              送出後會呼叫後端 <code>POST /api/chat/stream</code>（經 Vite proxy 轉到 :8080）。
             </p>
           </div>
         )}

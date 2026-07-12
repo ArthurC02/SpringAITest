@@ -4,7 +4,7 @@ Area-specific guidance. Cross-service contracts (X-Internal-Token + identity hea
 
 ## Layout
 
-Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM. Tests in `tests/Backend.Api.Tests` (xUnit, 54 tests, hand-written fakes, in-memory Dapper fixtures).
+Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM. Tests in `tests/Backend.Api.Tests` (xUnit, 57 tests, hand-written fakes, in-memory Dapper fixtures).
 
 ## Commands (run from `backend/`)
 

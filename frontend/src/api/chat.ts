@@ -62,8 +62,14 @@ export async function streamChat(
     signal,
   })
   if (!res.ok || !res.body) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`串流請求失敗（HTTP ${res.status}）${detail ? `：${detail}` : ''}`)
+    // 錯誤時 body 是 ApiError JSON（非 SSE），比照 apiFetch 取 message，
+    // 免得整包原始 JSON 被當成訊息塞進聊天泡泡。
+    const data = await res.json().catch(() => null)
+    const message =
+      data && typeof data.message === 'string'
+        ? data.message
+        : `串流請求失敗（HTTP ${res.status}）`
+    throw new Error(message)
   }
 
   const reader = res.body.getReader()

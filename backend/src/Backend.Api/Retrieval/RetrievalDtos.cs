@@ -15,7 +15,7 @@ public sealed record SearchRequest(
     int? TopK);
 
 /// <summary>檢索命中的單一片段。JSON:{ document_id, title, content, score }。
-/// score = 1 - cosine distance,與 workflow 現行 pgvector 查詢一致。</summary>
+/// score = 1 - cosine distance,與 pgvector cosine 查詢一致(此查詢現由 backend 持有,workflow 經 HTTP 取用)。</summary>
 public sealed record RetrievedChunk(
     [property: JsonPropertyName("document_id")] string DocumentId,
     [property: JsonPropertyName("title")] string Title,
