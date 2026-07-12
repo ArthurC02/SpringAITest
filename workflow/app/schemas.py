@@ -1,7 +1,6 @@
-from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class InvokeRequest(BaseModel):
@@ -23,27 +22,3 @@ class WorkflowInfo(BaseModel):
     name: str
     description: str
     required_role: str
-
-
-class DocumentCreate(BaseModel):
-    """新增文件的請求本體：title 與 text 皆須為非空字串。"""
-
-    title: str = Field(min_length=1)
-    text: str = Field(min_length=1)
-
-
-class DocumentCreated(BaseModel):
-    """新增文件成功後的回應本體。"""
-
-    id: str
-    title: str
-    chunk_count: int
-
-
-class DocumentInfo(BaseModel):
-    """文件清單項目：供 GET /documents 回傳，僅含中繼資料、不含片段內容。"""
-
-    id: str
-    title: str
-    chunk_count: int
-    created_at: datetime

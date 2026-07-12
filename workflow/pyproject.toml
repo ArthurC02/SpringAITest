@@ -12,19 +12,13 @@ dependencies = [
     "langfuse>=3.0,<4.0",
     # langfuse.langchain.CallbackHandler 內部 import langchain，需完整套件（僅 langchain-core 不夠）
     "langchain>=1.0,<2.0",
-    # RAG 向量檢索：PgVectorStore 走 psycopg3 async 連線池 + pgvector 型別/運算子
-    "psycopg[binary]>=3.2,<4",
-    "psycopg_pool>=3.2,<4",
-    "pgvector>=0.3,<1",
-    # langchain_core.embeddings.DeterministicFakeEmbedding 內部以 numpy 產生向量，
-    # 本身未把 numpy 列為必要相依套件，因此在這裡明確加上，"fake" 嵌入模式才能正常運作
-    "numpy>=1.26,<3",
+    # 資料檢索改呼叫 backend 的 /api/retrieval/search（核心商業邏輯與向量庫都搬到 backend/）
+    "httpx>=0.27,<1.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "httpx>=0.27",
 ]
 
 [tool.uv]

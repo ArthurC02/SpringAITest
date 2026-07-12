@@ -10,6 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ag-ui/client": "0.0.57",
+    "@copilotkit/react-core": "1.62.3",
+    "@copilotkit/react-ui": "1.62.3",
     "highlight.js": "^11.11.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

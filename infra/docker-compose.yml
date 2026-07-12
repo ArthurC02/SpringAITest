@@ -1,24 +1,26 @@
 # 基礎設施：LiteLLM 閘道 + Langfuse（自架 v3，含 postgres / clickhouse / redis / minio）
-#           + mem0 長期記憶 + LangGraph 工作流服務（Python/FastAPI）+ appdb（pgvector）。
-# 前端與後端對稱：兩者都「預設跑主機、--profile full 才容器化」（.env 放在 infra/ 目錄）。
+#           + mem0 長期記憶 + backend 核心服務（ASP.NET Core + Dapper）+ LangGraph 工作流服務 + appdb（pgvector）。
+# 分層：frontend → platform（Gateway + LLM 編排）→ backend（核心商業邏輯）；workflow（狀態管理）→ backend。
+# 前端與 platform 對稱：兩者都「預設跑主機、--profile full 才容器化」；backend/workflow 屬基礎設施層，一律容器。
 #
-#   A) 預設（開發）：只起基礎設施，前後端都在「主機」上跑，利於熱重載 / debug。
+#   A) 預設（開發）：起基礎設施（含 backend/workflow），前端與 platform 在「主機」上跑，利於熱重載 / debug。
 #        docker compose up -d
-#      然後另開兩個終端：前端 `npm run dev`（:5173）、後端 `./mvnw -pl springaitest-web spring-boot:run`（:8080）。
+#      然後另開兩個終端：前端 `npm run dev`（:5173）、platform `dotnet run --project src/Platform.Web`（:8080，於 platform/ 執行）。
 #      此模式下 :5173 / :8080 都空著，不必先 stop 任何容器。
 #
-#   B) 全容器（展示 / 部署）：前端 + 後端也一起容器化，一鍵起整套。
+#   B) 全容器（展示 / 部署）：前端 + platform 也一起容器化，一鍵起整套。
 #        docker compose --profile full up -d
-#      full profile 下 backend 容器把 :8080 發佈到主機，因此前端 nginx 既有的
+#      full profile 下 platform 容器把 :8080 發佈到主機，因此前端 nginx 既有的
 #      host.docker.internal:8080 反代不必改也能連到（單一 nginx 設定通吃兩種模式）。
 #
 #   各服務位置（兩種模式相同）：
 #     - 前端聊天 UI : http://localhost:5173   （full：容器內 nginx 反代 /api → 主機 :8080）
+#     - 核心服務    : http://localhost:8002   （backend；驗證/檔案/檢索/分析/組態，僅供內部呼叫與除錯）
 #     - 工作流服務 : http://localhost:8001   （LangGraph；主機埠 8001 → 容器 8000，避開 mem0 佔用的 :8000）
 #     - mem0        : http://localhost:8000   （長期記憶 REST server）
 #     - Langfuse UI : http://localhost:3000   （登入見 .env 的 LANGFUSE_INIT_USER_*）
 #     - LiteLLM     : http://localhost:4000
-#   ※ 前端佔 :5173、後端佔 :8080，每個埠請擇一模式；用 B 時不要再在主機另跑前/後端。
+#   ※ 前端佔 :5173、platform 佔 :8080，每個埠請擇一模式；用 B 時不要再在主機另跑前端/platform。
 
 # 固定 compose 專案名：不論在哪個目錄執行 docker compose，都對應同一套容器
 # （搬到 infra/ 後若不釘名，專案名會變成 "infra" 而另起一套，與現有 springaitest-* 衝突）。
@@ -49,6 +51,8 @@ services:
   # 向量儲存用它預設的 pgvector —— 即上面那台 postgres（已換成 pgvector 映像）。
   mem0:
     # 用薄封裝映像（見 mem0.Dockerfile）：官方 image 缺 libpq 會 crash，這層補上帶 libpq 的 psycopg。
+    # 官方 image 目前只發布 linux/arm64（amd64 已從 manifest 消失），amd64 主機釘 platform 走 QEMU 模擬。
+    platform: linux/arm64
     build:
       context: .
       dockerfile: mem0.Dockerfile
@@ -86,21 +90,21 @@ services:
       dockerfile: Dockerfile
     restart: always
     depends_on:
-      backend:
+      platform:
         condition: service_started
     ports:
       - "5173:80"                     # 瀏覽器開 http://localhost:5173
     extra_hosts:
       - "host.docker.internal:host-gateway"   # 讓容器內 nginx 連得到後端 :8080（full 模式的容器版後端發佈到主機的埠）
 
-  # ---------------- 後端（Spring Boot）：選用，只有 --profile full 才啟用 ----------------
-  # 預設不啟用：後端平常跑在「主機」上（見檔頭說明 A）。需要一鍵全容器時用 --profile full。
-  # 容器化後改用 compose 服務名連 LiteLLM / Langfuse（application.yml 早已把這些位址做成環境變數可覆寫）；
-  # 並把 :8080 發佈到主機，讓前端 nginx 既有的 host.docker.internal:8080 反代不必改也能連到。
-  backend:
+  # ---------------- platform（API Gateway + LLM 編排，ASP.NET Core + Agent Framework）：選用，只有 --profile full 才啟用 ----------------
+  # 預設不啟用：platform 平常跑在「主機」上（見檔頭說明 A）。需要一鍵全容器時用 --profile full。
+  # 職責：對外 API、JWT 驗證、聊天編排（Agent Framework + mem0 + 短期記憶）；核心商業邏輯轉呼叫 backend。
+  # 把 :8080 發佈到主機，讓前端 nginx 既有的 host.docker.internal:8080 反代不必改也能連到。
+  platform:
     profiles: ["full"]
     build:
-      context: ../backend
+      context: ../platform
       dockerfile: Dockerfile
     restart: always
     depends_on:
@@ -108,19 +112,72 @@ services:
         condition: service_started
       langfuse-web:
         condition: service_started
+      backend:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy    # 檔案處理走佇列發佈
     ports:
       - "8080:8080"                   # 發佈到主機，供前端 nginx 經 host.docker.internal 反代；curl 也可直連
     environment:
       LLM_BASE_URL: http://litellm:4000                       # 走 compose 服務名（取代主機版的 localhost:4000）
       LITELLM_KEY: ${LITELLM_KEY:-sk-1234}                    # LiteLLM 虛擬金鑰
+      CHAT_MODEL: ${CHAT_MODEL:-gpt-4o-mini}                  # 須存在於 litellm-config.yaml 的 model_name；無 OpenAI 額度時可設 mock-gpt 驗證鏈路
       LANGFUSE_OTEL_ENDPOINT: http://langfuse-web:3000/api/public/otel/v1/traces
       LANGFUSE_OTEL_AUTH: ${LANGFUSE_OTEL_AUTH:-Basic cGstbGYtMTIzNDU2Nzg5MDpzay1sZi0xMjM0NTY3ODkw}
-      MEM0_BASE_URL: http://mem0:8000                         # 容器化後端走 compose 服務名連 mem0
-      WORKFLOW_BASE_URL: http://workflow:8000                 # 容器化後端走 compose 服務名連工作流服務（容器內仍是 :8000）
+      MEM0_BASE_URL: http://mem0:8000                         # 容器化後走 compose 服務名連 mem0
+      WORKFLOW_BASE_URL: http://workflow:8000                 # 容器化後走 compose 服務名連工作流服務（容器內仍是 :8000）
+      BACKEND_BASE_URL: http://backend:8080                   # 核心商業邏輯服務（主機開發時是 localhost:8002）
+      RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672   # 檔案處理佇列（發佈端）
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
 
-  # ---------------- LangGraph 工作流服務（Python/FastAPI）----------------
+  # ---------------- RabbitMQ（platform → backend 檔案處理的非同步佇列）----------------
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    restart: always
+    hostname: rabbitmq              # rabbitmq 以 hostname 命名資料目錄，固定住讓 durable 佇列跨重啟存活
+    environment:
+      # guest 帳號只允許 loopback 連線，容器間互連必須用自訂帳號
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-app-dev-password}
+    ports:
+      - "127.0.0.1:5672:5672"       # AMQP：主機開發的 platform 連這裡
+      - "127.0.0.1:15672:15672"     # 管理 UI http://localhost:15672（帳密同上）
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  # ---------------- backend（核心商業邏輯：驗證/授權、檔案處理、資料檢索、分析、系統組態；Dapper + appdb）----------------
+  # 屬基礎設施層（不設 profile）：workflow 與主機上開發的 platform 都需要它。
+  # 只信任帶 X-Internal-Token 的內部呼叫（platform / workflow），不對外公開；發佈 :8002 供主機開發與除錯。
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      appdb:
+        condition: service_healthy    # 啟動時要跑 DDL/種子，DB 必須先就緒
+      rabbitmq:
+        condition: service_healthy    # 檔案處理消費者要連佇列（程式內另有退避重試，此處只是加速就緒）
+      litellm:
+        condition: service_started    # EMBEDDINGS_PROVIDER=openai 時經 LiteLLM 算嵌入
+    ports:
+      - "127.0.0.1:8002:8080"         # 只綁 localhost：主機開發的 platform 經 localhost:8002 呼叫；backend 信任 X-* 身分 header，絕不可暴露到 LAN
+    environment:
+      DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=postgres;Database=springaitest
+      RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672   # 檔案處理佇列（消費端）
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}   # backend 簽發 JWT，platform 用同一把驗證
+      EMBEDDINGS_PROVIDER: ${WORKFLOW_EMBEDDINGS_PROVIDER:-fake}   # fake=免金鑰確定性嵌入；openai=經 LiteLLM 的 text-embedding-3-small
+      LLM_BASE_URL: http://litellm:4000
+      LITELLM_KEY: ${LITELLM_KEY:-sk-1234}
+
+  # ---------------- LangGraph 工作流服務（Python/FastAPI，只管狀態管理，資料存取走 backend）----------------
   workflow:
     build:
       context: ../workflow
@@ -129,10 +186,10 @@ services:
     depends_on:
       litellm:
         condition: service_started
-      appdb:
-        condition: service_healthy
+      backend:
+        condition: service_started    # 檢索/資料存取全部經 backend，不再直連 appdb
     ports:
-      - "8001:8000"                   # 主機上的 Spring 後端經 localhost:8001 觸發工作流（:8000 已被 mem0 佔用）
+      - "8001:8000"                   # 主機上的 platform 經 localhost:8001 觸發工作流（:8000 已被 mem0 佔用）
     environment:
       LLM_BASE_URL: http://litellm:4000              # 容器內走 compose 服務名連 LiteLLM
       LLM_API_KEY: ${LITELLM_KEY:-sk-1234}
@@ -141,11 +198,10 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-1234567890}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-1234567890}
       LANGFUSE_HOST: http://langfuse-web:3000
-      DATABASE_URL: postgresql://postgres:postgres@appdb:5432/springaitest
-      EMBEDDINGS_PROVIDER: ${WORKFLOW_EMBEDDINGS_PROVIDER:-fake}   # fake=免金鑰確定性嵌入；openai=經 LiteLLM 的 text-embedding-3-small
+      BACKEND_BASE_URL: http://backend:8080          # 向量檢索改呼叫 backend 的資料檢索服務
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
 
-  # 應用資料庫（含 pgvector 擴充）：workflow 服務的向量檢索儲存；Spring 後端預設仍用 H2，可透過環境變數切換至此
+  # 應用資料庫（含 pgvector 擴充）：backend 核心服務的資料庫（Dapper：使用者/租戶/歷史/文件向量/組態，重啟持久）
   appdb:
     image: pgvector/pgvector:pg17
     restart: always
@@ -303,6 +359,7 @@ services:
       - minio_data:/data
 
 volumes:
+  rabbitmq_data:
   mem0_history:
   postgres_data:
   clickhouse_data:

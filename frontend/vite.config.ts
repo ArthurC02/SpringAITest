@@ -7,7 +7,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // 開發時把 /api 轉發到 Spring 後端（backend/，預設 :8080）。
+      // 開發時把 /api 轉發到 Spring 後端（platform/，預設 :8080）。
+      // 副駕的 AG-UI(/api/copilot/agui,SSE)同樣走這條。
       // 瀏覽器只跟 Vite 同源溝通，因此完全不需要在後端開 CORS。
       '/api': {
         target: 'http://localhost:8080',

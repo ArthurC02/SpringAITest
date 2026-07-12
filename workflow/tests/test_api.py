@@ -1,20 +1,18 @@
 """測試 FastAPI 端點：以 stub LLM 取代真正的 LiteLLM 呼叫，全程不打真的網路。
 
-所有 /workflows*、/documents* 端點都需要服務間認證與租戶 context 標頭，
-因此一律透過 _headers() 輔助函式組出符合契約的標頭；向量庫固定使用
-InMemoryVectorStore（DATABASE_URL 預設為空）＋ fake 嵌入，且每個測試前後都會
-重置，避免測試之間的文件資料互相汙染。
+所有 /workflows* 端點都需要服務間認證與租戶 context 標頭，因此一律透過
+_headers() 輔助函式組出符合契約的標頭。rag_qa／analyze_report 會透過
+app.nodes.retrieve 呼叫 backend 的檢索 API，測試裡一律用 _mock_backend_chunks()
+把 httpx.AsyncClient.post 換成假的實作，避免打真的網路（backend 檢索邏輯本身的
+測試屬於 backend/ 的範圍，不在這裡重複）。
 """
 
-import asyncio
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.settings import settings
-from app.vectorstore import InMemoryVectorStore, get_vector_store
 
 client = TestClient(app)
 
@@ -41,14 +39,26 @@ def _headers(tenant_id="demo-a", user_id="alice", role="USER", token=INTERNAL_TO
 ADMIN_HEADERS = _headers(role="ADMIN")
 
 
-@pytest.fixture(autouse=True)
-def _reset_vector_store():
-    """每個測試前後都清空記憶體向量庫，避免不同測試之間的文件互相汙染。"""
-    store = get_vector_store()
-    assert isinstance(store, InMemoryVectorStore), "測試預期一律使用記憶體向量庫"
-    store.reset()
-    yield
-    store.reset()
+class _FakeBackendResponse:
+    """假的 httpx.Response：只提供 retrieve 節點用得到的兩個方法。"""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {"chunks": self._chunks}
+
+
+def _mock_backend_chunks(monkeypatch, chunks: list[dict]):
+    """讓 retrieve 節點呼叫 backend 檢索 API 時，直接拿到指定的 chunks，不打真的網路。"""
+
+    async def fake_post(self, url, json=None, headers=None, **kwargs):
+        return _FakeBackendResponse(chunks)
+
+    monkeypatch.setattr("httpx.AsyncClient.post", fake_post)
 
 
 class StubLLM:
@@ -210,8 +220,9 @@ def test_invoke_admin_workflow_forbidden_for_user_role():
 
 
 def test_invoke_admin_workflow_allowed_for_admin_role(monkeypatch):
-    # 這個租戶沒有任何文件，retrieve 節點會回傳空 docs，
+    # backend 回傳空 chunks，retrieve 節點對應得到空 docs，
     # 因此 analyze 節點會走固定文案分支、不呼叫 LLM，只有 synthesize 會呼叫一次。
+    _mock_backend_chunks(monkeypatch, [])
     stub = StubLLM(["結構化報告內容"])
     monkeypatch.setattr("app.workflows.analyze_report.get_llm", lambda: stub)
 
@@ -243,7 +254,9 @@ def test_rag_qa_missing_question_returns_422_workflow_input_invalid():
     assert resp.json()["detail"]["error"] == "workflow_input_invalid"
 
 
-def test_rag_qa_without_documents_returns_fixed_not_found_answer():
+def test_rag_qa_without_documents_returns_fixed_not_found_answer(monkeypatch):
+    _mock_backend_chunks(monkeypatch, [])
+
     resp = client.post(
         "/workflows/rag_qa/invoke",
         json={"input": {"question": "退款政策是什麼？"}},
@@ -256,106 +269,34 @@ def test_rag_qa_without_documents_returns_fixed_not_found_answer():
     assert body["citations"] == []
 
 
-# ---------------------------------------------------------------------------
-# /documents CRUD
-# ---------------------------------------------------------------------------
+def test_rag_qa_with_backend_chunks_returns_answer_and_citations(monkeypatch):
+    """backend 回傳非空 chunks 時，rag_qa 應呼叫 LLM 作答，並依 docs 組出引用清單。
 
-
-def test_documents_crud_happy_path():
-    create_resp = client.post(
-        "/documents",
-        json={"title": "退款政策", "text": "退款需在七天內申請。\n\n超過七天恕不受理。"},
-        headers=_headers(),
+    文件的切塊／嵌入／向量檢索本身已搬到 backend/，這裡只驗證 workflow 這端
+    「收到 backend 回傳的 chunks 後，rag_qa 圖的行為是否正確」。
+    """
+    _mock_backend_chunks(
+        monkeypatch,
+        [
+            {
+                "document_id": "doc-1",
+                "title": "示例文件",
+                "content": "公司地址在台北市信義區。",
+                "score": 0.9,
+            }
+        ],
     )
-    assert create_resp.status_code == 201
-    created = create_resp.json()
-    assert created["title"] == "退款政策"
-    assert created["chunk_count"] >= 1
-
-    list_resp = client.get("/documents", headers=_headers())
-    assert list_resp.status_code == 200
-    docs = list_resp.json()
-    assert any(d["id"] == created["id"] for d in docs)
-    assert all("created_at" in d for d in docs)
-
-    delete_resp = client.delete(f"/documents/{created['id']}", headers=_headers())
-    assert delete_resp.status_code == 204
-
-    list_resp_after = client.get("/documents", headers=_headers())
-    assert all(d["id"] != created["id"] for d in list_resp_after.json())
-
-
-def test_delete_nonexistent_document_returns_404():
-    resp = client.delete("/documents/does-not-exist", headers=_headers())
-    assert resp.status_code == 404
-    assert resp.json()["detail"]["error"] == "document_not_found"
-
-
-# ---------------------------------------------------------------------------
-# /documents 逾時保護：嵌入呼叫卡住時應回 504，而不是無限阻塞
-# ---------------------------------------------------------------------------
-
-
-def test_create_document_timeout_returns_504(monkeypatch):
-    """把逾時秒數 monkeypatch 成極小值，並讓嵌入呼叫睡得比它久，驗證 504 逾時保護生效。"""
-    monkeypatch.setattr(settings, "document_timeout_seconds", 0.05)
-
-    class SlowEmbeddings:
-        async def aembed_documents(self, chunks):
-            await asyncio.sleep(1)
-            return [[0.0] * 4 for _ in chunks]
-
-    monkeypatch.setattr("app.main.get_embeddings", lambda: SlowEmbeddings())
-
-    resp = client.post(
-        "/documents",
-        json={"title": "逾時測試文件", "text": "隨便一段文字"},
-        headers=_headers(),
-    )
-
-    assert resp.status_code == 504
-    assert resp.json()["detail"]["error"] == "document_timeout"
-
-
-# ---------------------------------------------------------------------------
-# 多租戶隔離：demo-a 上傳的文件，demo-b 完全看不到
-# ---------------------------------------------------------------------------
-
-
-def test_tenant_isolation_for_documents_and_rag_qa(monkeypatch):
     stub = StubLLM(["這是根據租戶文件的回答"])
     monkeypatch.setattr("app.workflows.rag_qa.get_llm", lambda: stub)
 
-    create_resp = client.post(
-        "/documents",
-        json={"title": "示例文件", "text": "公司地址在台北市信義區。"},
-        headers=_headers(tenant_id="demo-a"),
-    )
-    assert create_resp.status_code == 201
-
-    # demo-b 看不到 demo-a 上傳的任何文件。
-    other_list = client.get("/documents", headers=_headers(tenant_id="demo-b"))
-    assert other_list.json() == []
-
-    # demo-b 呼叫 rag_qa 找不到相關內容，走固定文案分支。
-    other_rag = client.post(
-        "/workflows/rag_qa/invoke",
-        json={"input": {"question": "公司地址在哪？"}},
-        headers=_headers(tenant_id="demo-b"),
-    )
-    assert other_rag.status_code == 200
-    assert (
-        other_rag.json()["output"]["answer"]
-        == "在你的租戶資料中找不到相關內容，請先上傳文件。"
-    )
-
-    # demo-a 應該檢索得到剛上傳的文件並附上引用。
-    own_rag = client.post(
+    resp = client.post(
         "/workflows/rag_qa/invoke",
         json={"input": {"question": "公司地址在哪？"}},
         headers=_headers(tenant_id="demo-a"),
     )
-    assert own_rag.status_code == 200
-    own_body = own_rag.json()["output"]
-    assert own_body["answer"] == "這是根據租戶文件的回答"
-    assert len(own_body["citations"]) >= 1
+
+    assert resp.status_code == 200
+    body = resp.json()["output"]
+    assert body["answer"] == "這是根據租戶文件的回答"
+    assert len(body["citations"]) == 1
+    assert body["citations"][0]["document_id"] == "doc-1"

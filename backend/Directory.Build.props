@@ -1,0 +1,15 @@
+<Project>
+
+  <!--
+    backend 方案共用建置設定。net10.0、可空參考型別、隱含 using 全專案一致,
+    避免每個 csproj 重複宣告。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>

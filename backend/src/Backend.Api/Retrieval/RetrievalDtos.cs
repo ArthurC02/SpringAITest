@@ -1,0 +1,23 @@
+using System.Text.Json.Serialization;
+using Backend.Api.Common;
+
+namespace Backend.Api.Retrieval;
+
+/// <summary>向量相似度檢索請求:{ query, top_k(預設 4) }。</summary>
+public sealed record SearchRequest(
+    [NotBlank(ErrorMessage = "query 不可為空")]
+    string? Query,
+
+    [property: JsonPropertyName("top_k")] int? TopK);
+
+/// <summary>檢索命中的單一片段。JSON:{ document_id, title, content, score }。
+/// score = 1 - cosine distance,與 workflow 現行 pgvector 查詢一致。</summary>
+public sealed record RetrievedChunk(
+    [property: JsonPropertyName("document_id")] string DocumentId,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("content")] string Content,
+    [property: JsonPropertyName("score")] double Score);
+
+/// <summary>檢索回應。JSON:{ chunks: [...] }。</summary>
+public sealed record SearchResponse(
+    [property: JsonPropertyName("chunks")] IReadOnlyList<RetrievedChunk> Chunks);

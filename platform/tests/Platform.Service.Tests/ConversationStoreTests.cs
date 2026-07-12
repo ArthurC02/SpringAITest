@@ -1,0 +1,68 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Platform.Service;
+using Platform.Service.Exceptions;
+
+namespace Platform.Service.Tests;
+
+public sealed class ConversationStoreTests
+{
+    private static ConversationStore Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
+
+    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
+        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+
+    [Fact]
+    public async Task Add_PostsPromptAndReply_SendsInternalTokenOnly_MapsResult()
+    {
+        var stub = new StubHttpMessageHandler(_ =>
+            Json(HttpStatusCode.Created, "{\"id\":5,\"createdAt\":\"2026-07-12T10:00:00Z\"}"));
+        var store = Build(stub);
+
+        var saved = await store.AddAsync("問句", "答句");
+
+        Assert.Equal(5, saved.Id);
+        Assert.Equal("答句", saved.Reply);
+        Assert.Equal(DateTimeKind.Utc, saved.CreatedAt.Kind);
+
+        Assert.Equal("http://backend/api/conversations", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
+        Assert.Equal("tok", stub.Header("X-Internal-Token"));
+        // 聊天歷史是全域的,不帶身分 header。
+        Assert.False(stub.HasHeader("X-Tenant-Id"));
+        Assert.False(stub.HasHeader("X-User-Id"));
+
+        using var doc = JsonDocument.Parse(stub.LastBody!);
+        Assert.Equal("問句", doc.RootElement.GetProperty("prompt").GetString());
+        Assert.Equal("答句", doc.RootElement.GetProperty("reply").GetString());
+    }
+
+    [Fact]
+    public async Task ListDesc_MapsItems_PreservesBackendOrder()
+    {
+        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+            "[{\"id\":2,\"reply\":\"r2\",\"createdAt\":\"2026-07-12T10:01:00Z\"}," +
+            "{\"id\":1,\"reply\":\"r1\",\"createdAt\":\"2026-07-12T10:00:00Z\"}]"));
+        var store = Build(stub);
+
+        var list = await store.ListDescAsync();
+
+        Assert.Equal(2, list.Count);
+        Assert.Equal(2, list[0].Id);
+        Assert.Equal("r2", list[0].Reply);
+        Assert.Equal("r1", list[1].Reply);
+        Assert.Equal(DateTimeKind.Utc, list[0].CreatedAt.Kind);
+        Assert.Equal("http://backend/api/conversations", stub.LastRequest!.RequestUri!.ToString());
+    }
+
+    [Fact]
+    public async Task Add_500_ThrowsBackendCall_NotWorkflowInvocation()
+    {
+        var store = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+
+        var ex = await Assert.ThrowsAsync<BackendCallException>(() => store.AddAsync("問", "答"));
+        // 刻意不是 WorkflowInvocationException(那會變 502);維持 chat 端點失敗即 500。
+        Assert.IsNotType<WorkflowInvocationException>(ex);
+    }
+}

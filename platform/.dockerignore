@@ -1,0 +1,6 @@
+# 建置產物與 IDE 暫存不需要進 build context(也避免污染容器內的 restore/publish)。
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/*.user

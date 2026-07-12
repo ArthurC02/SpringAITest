@@ -1,12 +1,16 @@
 // 與 Spring 後端 /api/chat/stream 對接的薄封裝（含 SSE 解析）。
 // 開發時經由 Vite proxy 轉發到 http://localhost:8080（見 vite.config.ts），
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
+import { getSession } from './auth'
 
 /**
- * 每個瀏覽器一組穩定的 userId，供後端 mem0 分群長期記憶用。
- * 首次產生後存進 localStorage，之後每次請求都帶同一個 id。
+ * mem0 長期記憶的分群鍵。登入後跟著使用者走（用 username），
+ * 未登入時 fallback 到既有的「每瀏覽器一組穩定 UUID」邏輯。
  */
 function getUserId(): string {
+  const session = getSession()
+  if (session?.username) return session.username
+
   const KEY = 'springai-chat:userId'
   let id = localStorage.getItem(KEY)
   if (!id) {

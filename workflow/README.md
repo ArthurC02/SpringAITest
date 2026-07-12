@@ -107,20 +107,13 @@ $headers = @{
 curl -Headers $headers http://localhost:8001/workflows
 
 curl -Method Post -Headers ($headers + @{"Content-Type"="application/json"}) `
-  -Body '{"title":"退款政策","text":"退款需在七天內申請。"}' `
-  http://localhost:8001/documents
-
-curl -Method Post -Headers ($headers + @{"Content-Type"="application/json"}) `
   -Body '{"input":{"question":"退款政策是什麼？"}}' `
   http://localhost:8001/workflows/rag_qa/invoke
 ```
 
-> `PgVectorStore`（`DATABASE_URL` 非空時使用）走 psycopg3 的非同步連線池，
-> 在 Windows 本機直接以 `asyncio.run` 啟動時，預設的 `ProactorEventLoop` 不相容於
-> psycopg 的 async 模式；容器化部署（`Dockerfile` 用的是 Linux 基底映像）不受影響。
-> 若要在 Windows 本機直接對真正的 Postgres 開發，需改用相容的事件迴圈
-> （例如 `asyncio.WindowsSelectorEventLoopPolicy`）。本機測試預設一律使用
-> `InMemoryVectorStore`（`DATABASE_URL` 留空），不受此限制。
+> 文件的新增/列表/刪除已移到 backend 核心服務（經 platform 的 `/api/documents`）；
+> 本服務不再直連資料庫，檢索節點是以 HTTP 呼叫 backend 的 `/api/retrieval/search`。
+> 要先有文件可檢索，請走 platform（:8080）的 documents API 建立。
 
 ## 環境變數
 
@@ -133,11 +126,8 @@ curl -Method Post -Headers ($headers + @{"Content-Type"="application/json"}) `
 | `LANGFUSE_PUBLIC_KEY` | 無 | 開啟追蹤時，由 langfuse SDK 直接讀取的公開金鑰 |
 | `LANGFUSE_SECRET_KEY` | 無 | 開啟追蹤時，由 langfuse SDK 直接讀取的私密金鑰 |
 | `LANGFUSE_HOST` | 無 | 開啟追蹤時，由 langfuse SDK 直接讀取的 Langfuse 伺服器位址 |
-| `INTERNAL_API_TOKEN` | `internal-dev-token` | 服務間共享密鑰；Spring 端呼叫時必須帶上相同值的 `X-Internal-Token` |
-| `DATABASE_URL` | 空字串 | Postgres 連線字串；留空＝使用行程記憶體向量庫（開發／測試），非空＝使用 pgvector |
-| `EMBEDDINGS_PROVIDER` | `fake` | `fake`（無需金鑰、確定性假嵌入，適合測試）或 `openai`（經 LiteLLM 呼叫真正的嵌入模型） |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | `EMBEDDINGS_PROVIDER=openai` 時實際使用的嵌入模型名稱 |
-| `EMBEDDING_DIM` | `1536` | 嵌入向量維度；同時決定 fake 嵌入的向量大小與 pgvector 資料表的 `vector(N)` 欄位維度 |
+| `INTERNAL_API_TOKEN` | `internal-dev-token` | 服務間共享密鑰；入站呼叫必須帶相同值的 `X-Internal-Token`，出站呼叫 backend 時也用它 |
+| `BACKEND_BASE_URL` | `http://localhost:8002` | backend 核心服務位址；檢索節點經它做向量搜尋（嵌入計算也在 backend） |
 | `RETRIEVAL_TOP_K` | `4` | 檢索節點預設取回的片段數（工作流可自行覆蓋） |
 | `WORKFLOW_TIMEOUT_SECONDS` | `120` | 工作流執行逾時秒數（可由個別工作流的 `timeout_seconds` 覆蓋） |
 

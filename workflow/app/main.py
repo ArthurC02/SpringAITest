@@ -1,23 +1,12 @@
 import asyncio
-from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import ValidationError
 
 from app import tracing
-from app.chunking import split_text
-from app.embeddings import get_embeddings
-from app.schemas import (
-    DocumentCreate,
-    DocumentCreated,
-    DocumentInfo,
-    InvokeRequest,
-    InvokeResponse,
-    WorkflowInfo,
-)
+from app.schemas import InvokeRequest, InvokeResponse, WorkflowInfo
 from app.security import RequestContext, get_context
 from app.settings import settings
-from app.vectorstore import PgVectorStore, VectorStore, get_vector_store
 
 # 這行 import 除了取得 registry 模組本身，也會連帶執行
 # app/workflows/__init__.py 內各工作流模組的 @register 裝飾器，
@@ -29,21 +18,7 @@ from app.workflows import registry
 _RESERVED_INPUT_KEYS = {"tenant_id", "user_id", "role"}
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """應用程式生命週期：若目前的向量庫是 PgVectorStore，啟動時建表、關閉時釋放連線池。
-
-    InMemoryVectorStore 不需要任何生命週期管理，因此這裡用 isinstance 判斷即可。
-    """
-    store = get_vector_store()
-    if isinstance(store, PgVectorStore):
-        await store.init()
-    yield
-    if isinstance(store, PgVectorStore):
-        await store.close()
-
-
-app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
+app = FastAPI(title="springaitest-workflow")
 
 
 @app.get("/health")
@@ -133,99 +108,3 @@ async def invoke_workflow(
         )
 
     return InvokeResponse(workflow=name, output=output)
-
-
-@app.post("/documents", response_model=DocumentCreated, status_code=201)
-async def create_document(
-    body: DocumentCreate,
-    ctx: RequestContext = Depends(get_context),
-    store: VectorStore = Depends(get_vector_store),
-) -> DocumentCreated:
-    """切塊、嵌入並儲存一份文件；文件只會屬於呼叫者所在的租戶。
-
-    嵌入呼叫（外部模型）或向量庫寫入（DB pool）都可能卡住，因此整段套上逾時保護，
-    避免 handler 無限阻塞。
-    """
-    try:
-        async with asyncio.timeout(settings.document_timeout_seconds):
-            chunks = split_text(body.text) or [body.text.strip()]
-            embeddings = await get_embeddings().aembed_documents(chunks)
-            doc_id, chunk_count = await store.add_document(
-                ctx.tenant_id, body.title, chunks, embeddings
-            )
-    except TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail={
-                "error": "document_timeout",
-                "message": f"新增文件執行超過 {settings.document_timeout_seconds} 秒",
-            },
-        )
-
-    return DocumentCreated(id=doc_id, title=body.title, chunk_count=chunk_count)
-
-
-@app.get("/documents", response_model=list[DocumentInfo])
-async def list_documents(
-    ctx: RequestContext = Depends(get_context),
-    store: VectorStore = Depends(get_vector_store),
-) -> list[DocumentInfo]:
-    """列出呼叫者所在租戶底下的所有文件；這是多租戶隔離的其中一環，僅回傳本租戶資料。
-
-    向量庫查詢（DB pool）可能卡住，因此套上逾時保護，避免 handler 無限阻塞。
-    """
-    try:
-        async with asyncio.timeout(settings.document_timeout_seconds):
-            records = await store.list_documents(ctx.tenant_id)
-    except TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail={
-                "error": "document_timeout",
-                "message": f"列出文件執行超過 {settings.document_timeout_seconds} 秒",
-            },
-        )
-
-    return [
-        DocumentInfo(
-            id=record.id,
-            title=record.title,
-            chunk_count=record.chunk_count,
-            created_at=record.created_at,
-        )
-        for record in records
-    ]
-
-
-@app.delete("/documents/{doc_id}", status_code=204)
-async def delete_document(
-    doc_id: str,
-    ctx: RequestContext = Depends(get_context),
-    store: VectorStore = Depends(get_vector_store),
-) -> None:
-    """刪除指定文件；非本租戶或根本不存在一律回報 404，避免洩漏其他租戶是否持有該文件。
-
-    向量庫刪除操作（DB pool）可能卡住，因此套上逾時保護；注意 404 判斷放在
-    timeout 區塊之外，避免這裡主動拋出的 HTTPException 被 except TimeoutError 誤吞
-    （TimeoutError 與 HTTPException 本來就不是同一個型別，但刻意分開讓意圖更清楚）。
-    """
-    try:
-        async with asyncio.timeout(settings.document_timeout_seconds):
-            deleted = await store.delete_document(ctx.tenant_id, doc_id)
-    except TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail={
-                "error": "document_timeout",
-                "message": f"刪除文件執行超過 {settings.document_timeout_seconds} 秒",
-            },
-        )
-
-    if not deleted:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "document_not_found",
-                "message": f"document not found: {doc_id}",
-            },
-        )
