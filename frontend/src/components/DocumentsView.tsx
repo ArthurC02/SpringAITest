@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import type { useDocuments } from '../hooks/useDocuments'
+import { useToast } from './Toast'
+import Skeleton from './Skeleton'
 
 function fmtDate(s: string): string {
   const d = new Date(s)
@@ -20,20 +22,29 @@ interface Props {
 /** 文件視圖：新增表單 + 清單，含 202→processing→輪詢至就緒的完整流程（見 useDocuments）。 */
 export default function DocumentsView({ documents }: Props) {
   const { docs, loading, error, timedOut, create, remove } = documents
+  const toast = useToast()
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
+  const [titleErr, setTitleErr] = useState('')
+  const [textErr, setTextErr] = useState('')
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
-    if (!title.trim() || !text.trim()) return
+    // 空 title/text 不再靜默 return，改顯示緊貼欄位的 inline 錯誤。
+    const te = title.trim() ? '' : '請填寫標題'
+    const xe = text.trim() ? '' : '請填寫內容'
+    setTitleErr(te)
+    setTextErr(xe)
+    if (te || xe) return
     setBusy(true)
     setSubmitError(null)
     try {
       await create(title.trim(), text.trim())
       setTitle('')
       setText('')
+      toast('已送出,處理中', 'success')
     } catch (err) {
       setSubmitError((err as Error).message)
     } finally {
@@ -45,6 +56,7 @@ export default function DocumentsView({ documents }: Props) {
     if (!window.confirm(`刪除文件「${t}」?`)) return
     try {
       await remove(id)
+      toast('已刪除', 'success')
     } catch (err) {
       setSubmitError((err as Error).message)
     }
@@ -63,9 +75,19 @@ export default function DocumentsView({ documents }: Props) {
             id="doc-title"
             className="input"
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => {
+              setTitle(e.target.value)
+              if (titleErr && e.target.value.trim()) setTitleErr('')
+            }}
             placeholder="文件標題"
+            aria-invalid={!!titleErr}
+            aria-describedby={titleErr ? 'doc-title-err' : undefined}
           />
+          {titleErr && (
+            <span className="field-error" id="doc-title-err" role="alert">
+              {titleErr}
+            </span>
+          )}
         </div>
         <div className="field">
           <label htmlFor="doc-text">內容</label>
@@ -73,26 +95,47 @@ export default function DocumentsView({ documents }: Props) {
             id="doc-text"
             className="textarea"
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value)
+              if (textErr && e.target.value.trim()) setTextErr('')
+            }}
             placeholder="貼上要讓 AI 檢索的文字…"
+            aria-invalid={!!textErr}
+            aria-describedby={textErr ? 'doc-text-err' : undefined}
           />
+          {textErr && (
+            <span className="field-error" id="doc-text-err" role="alert">
+              {textErr}
+            </span>
+          )}
         </div>
         <button className="btn btn--primary" type="submit" disabled={busy}>
           {busy ? '送出中…' : '新增文件'}
         </button>
-        {submitError && <p className="error-text">{submitError}</p>}
+        {submitError && (
+          <p className="error-text" role="alert">
+            {submitError}
+          </p>
+        )}
       </form>
 
-      {error && <p className="error-text">{error}</p>}
+      {error && (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      )}
       {timedOut && (
         <p className="muted">仍在處理中，稍後重新整理頁面即可看到最新狀態。</p>
       )}
 
       {loading && docs.length === 0 ? (
-        <p className="muted">載入中…</p>
+        <div className="table-wrap">
+          <Skeleton rows={4} />
+        </div>
       ) : docs.length === 0 ? (
         <p className="muted">尚無文件,新增一份讓 AI 檢索。</p>
       ) : (
+        <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
@@ -123,6 +166,7 @@ export default function DocumentsView({ documents }: Props) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   )

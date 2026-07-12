@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useCopilotReadable, useCopilotAction } from '@copilotkit/react-core'
 import { CopilotSidebar } from '@copilotkit/react-ui'
 import type { Session } from '../types'
 import { useDocuments } from '../hooks/useDocuments'
 import { invokeWorkflow } from '../api/workflows'
+import { ToastProvider } from './Toast'
+import ErrorBoundary from './ErrorBoundary'
 import ChatView from './ChatView'
 import DocumentsView from './DocumentsView'
 import WorkflowsView from './WorkflowsView'
@@ -36,6 +38,12 @@ export default function AppShell({ session, onLogout }: Props) {
   // useDocuments 提升到此層：AppShell 的 copilot action(建立/刪除)與 DocumentsView 共用
   // 同一份狀態,避免兩處各自實例化造成雙重輪詢(見契約)。DocumentsView 改吃 props。
   const documents = useDocuments()
+
+  // 分頁標題隨視圖更新（沿用 NAV 的中文 label，不另建映射）。
+  useEffect(() => {
+    const label = NAV.find((n) => n.id === view)?.label ?? ''
+    document.title = `${label} — SpringAITest`
+  }, [view])
 
   // ---- 餵給副駕的畫面上下文(readable) ----
   useCopilotReadable({
@@ -155,53 +163,61 @@ export default function AppShell({ session, onLogout }: Props) {
   )
 
   return (
-    <div className="shell">
-      <aside className="shell__sidebar">
-        <div className="shell__brand">Spring AI</div>
-        <nav>
-          {items.map((n) => (
-            <button
-              key={n.id}
-              className={`shell__nav${view === n.id ? ' shell__nav--active' : ''}`}
-              onClick={() => setView(n.id)}
-            >
-              <span className="shell__nav-icon">{n.icon}</span>
-              {n.label}
+    <ToastProvider>
+      <div className="shell">
+        <aside className="shell__sidebar">
+          <h1 className="shell__brand">Spring AI</h1>
+          <nav aria-label="主選單">
+            {items.map((n) => (
+              <button
+                key={n.id}
+                className={`shell__nav${view === n.id ? ' shell__nav--active' : ''}`}
+                aria-current={view === n.id ? 'page' : undefined}
+                onClick={() => setView(n.id)}
+              >
+                <span className="shell__nav-icon" aria-hidden="true">
+                  {n.icon}
+                </span>
+                {n.label}
+              </button>
+            ))}
+          </nav>
+        </aside>
+
+        <div className="shell__main">
+          <header className="shell__topbar">
+            <span className="shell__identity">
+              {session.username} @ {session.tenantCode}
+            </span>
+            <span className={`badge badge--${isAdmin ? 'admin' : 'user'}`}>{session.role}</span>
+            <button className="btn shell__logout" onClick={onLogout}>
+              登出
             </button>
-          ))}
-        </nav>
-      </aside>
+          </header>
 
-      <div className="shell__main">
-        <header className="shell__topbar">
-          <span className="shell__identity">
-            {session.username} @ {session.tenantCode}
-          </span>
-          <span className={`badge badge--${isAdmin ? 'admin' : 'user'}`}>{session.role}</span>
-          <button className="btn shell__logout" onClick={onLogout}>
-            登出
-          </button>
-        </header>
-
-        <div className="shell__content">
-          {view === 'chat' && <ChatView />}
-          {view === 'documents' && <DocumentsView documents={documents} />}
-          {view === 'workflows' && <WorkflowsView />}
-          {view === 'analysis' && <AnalysisView />}
-          {view === 'config' && <ConfigView isAdmin={isAdmin} />}
+          {/* key={view}：某視圖崩潰後切換到別的視圖即自動復原（重掛邊界）。 */}
+          <main className="shell__content">
+            <ErrorBoundary key={view}>
+              {view === 'chat' && <ChatView />}
+              {view === 'documents' && <DocumentsView documents={documents} />}
+              {view === 'workflows' && <WorkflowsView />}
+              {view === 'analysis' && <AnalysisView />}
+              {view === 'config' && <ConfigView isAdmin={isAdmin} />}
+            </ErrorBoundary>
+          </main>
         </div>
-      </div>
 
-      {/* 全站 AI 副駕:浮動側欄(自帶開合鈕),不動既有五視圖版面。defaultOpen=false。 */}
-      <CopilotSidebar
-        defaultOpen={false}
-        instructions="你是這個 AI 資料平台的操作助理。可讀取畫面上下文,並用提供的動作代使用者建立/刪除文件、查詢知識庫、切換視圖。刪除文件務必先讓使用者確認。"
-        labels={{
-          title: 'AI 副駕',
-          initial: '嗨,我是 AI 副駕。可以幫你建立/刪除文件、查詢知識庫或切換視圖。',
-          placeholder: '輸入訊息…',
-        }}
-      />
-    </div>
+        {/* 全站 AI 副駕:浮動側欄(自帶開合鈕),不動既有五視圖版面。defaultOpen=false。 */}
+        <CopilotSidebar
+          defaultOpen={false}
+          instructions="你是這個 AI 資料平台的操作助理。可讀取畫面上下文,並用提供的動作代使用者建立/刪除文件、查詢知識庫、切換視圖。刪除文件務必先讓使用者確認。"
+          labels={{
+            title: 'AI 副駕',
+            initial: '嗨,我是 AI 副駕。可以幫你建立/刪除文件、查詢知識庫或切換視圖。',
+            placeholder: '輸入訊息…',
+          }}
+        />
+      </div>
+    </ToastProvider>
   )
 }

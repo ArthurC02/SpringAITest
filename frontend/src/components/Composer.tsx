@@ -1,11 +1,12 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
 
 interface Props {
-  disabled: boolean
+  streaming: boolean
   onSend: (text: string) => void
+  onStop: () => void
 }
 
-export default function Composer({ disabled, onSend }: Props) {
+export default function Composer({ streaming, onSend, onStop }: Props) {
   const [input, setInput] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
 
@@ -19,7 +20,7 @@ export default function Composer({ disabled, onSend }: Props) {
 
   function submit() {
     const text = input.trim()
-    if (!text || disabled) return
+    if (!text || streaming) return // 串流中不送出（一次一條）；改用「停止」鈕中止。
     onSend(text)
     setInput('')
   }
@@ -42,13 +43,24 @@ export default function Composer({ disabled, onSend }: Props) {
         onKeyDown={handleKeyDown}
         rows={1}
       />
-      <button
-        className="composer__send"
-        onClick={submit}
-        disabled={disabled || !input.trim()}
-      >
-        送出
-      </button>
+      {streaming ? (
+        <button
+          type="button"
+          className="composer__send composer__stop"
+          onClick={onStop}
+        >
+          停止
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="composer__send"
+          onClick={submit}
+          disabled={!input.trim()}
+        >
+          送出
+        </button>
+      )}
     </div>
   )
 }

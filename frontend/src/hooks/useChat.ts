@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { streamChat, newConversation } from '../api/chat'
 import type { Message } from '../types'
 
@@ -20,6 +20,8 @@ function loadMessages(): Message[] {
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>(loadMessages)
   const [loading, setLoading] = useState(false)
+  // 串流中的 AbortController，供「停止產生」中止 fetch 用。
+  const abortRef = useRef<AbortController | null>(null)
 
   // 每次 messages 變動就寫回 localStorage（容量滿等情況靜默忽略）。
   useEffect(() => {
@@ -42,28 +44,48 @@ export function useChat() {
       { id: assistantId, role: 'assistant', content: '' },
     ])
     setLoading(true)
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
-      await streamChat(trimmed, (chunk) => {
+      await streamChat(
+        trimmed,
+        (chunk) => {
+          setMessages((m) =>
+            m.map((msg) =>
+              msg.id === assistantId
+                ? { ...msg, content: msg.content + chunk }
+                : msg,
+            ),
+          )
+        },
+        controller.signal,
+      )
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        // 使用者中止：保留已收到的 token；若一個字都還沒收到就移除空佔位泡泡。
+        setMessages((m) => {
+          const msg = m.find((x) => x.id === assistantId)
+          return msg && msg.content === '' ? m.filter((x) => x.id !== assistantId) : m
+        })
+      } else {
+        // 串流失敗：把該佔位泡泡改成錯誤訊息。
         setMessages((m) =>
           m.map((msg) =>
             msg.id === assistantId
-              ? { ...msg, content: msg.content + chunk }
+              ? { ...msg, content: (e as Error).message, error: true }
               : msg,
           ),
         )
-      })
-    } catch (e) {
-      // 串流失敗：把該佔位泡泡改成錯誤訊息。
-      setMessages((m) =>
-        m.map((msg) =>
-          msg.id === assistantId
-            ? { ...msg, content: (e as Error).message, error: true }
-            : msg,
-        ),
-      )
+      }
     } finally {
       setLoading(false)
+      abortRef.current = null
     }
+  }, [])
+
+  // 停止產生：中止進行中的串流（AbortError 由 send 的 catch 當作正常中止處理）。
+  const stop = useCallback(() => {
+    abortRef.current?.abort()
   }, [])
 
   // 清除對話：同時換新 conversationId，讓後端短期記憶也一起重置。
@@ -72,5 +94,5 @@ export function useChat() {
     setMessages([])
   }, [])
 
-  return { messages, loading, send, clear }
+  return { messages, loading, send, stop, clear }
 }

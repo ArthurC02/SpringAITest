@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { listWorkflows, invokeWorkflow } from '../api/workflows'
 import type { WorkflowInfo, WorkflowResult } from '../types'
 import Markdown from './Markdown'
+import Skeleton from './Skeleton'
 
 // 已知工作流 → 友善單欄輸入（前端硬編碼映射）。未知名稱 fallback 成 JSON textarea。
 // ponytail: 硬編碼映射，天花板是每加一個工作流要改這裡；
@@ -24,6 +25,7 @@ function answerOf(output: Record<string, unknown>): string | null {
 export default function WorkflowsView() {
   const [flows, setFlows] = useState<WorkflowInfo[]>([])
   const [listError, setListError] = useState<string | null>(null)
+  const [listLoading, setListLoading] = useState(true)
   const [selected, setSelected] = useState<WorkflowInfo | null>(null)
   const [value, setValue] = useState('') // 友善欄位值，或未知工作流的 JSON 文字
   const [result, setResult] = useState<WorkflowResult | null>(null)
@@ -34,6 +36,7 @@ export default function WorkflowsView() {
     listWorkflows()
       .then(setFlows)
       .catch((e) => setListError((e as Error).message))
+      .finally(() => setListLoading(false))
   }, [])
 
   function pick(f: WorkflowInfo) {
@@ -80,11 +83,19 @@ export default function WorkflowsView() {
         <h2 className="view__title">工作流</h2>
       </div>
 
-      {listError && <p className="error-text">{listError}</p>}
+      {listError && (
+        <p className="error-text" role="alert">
+          {listError}
+        </p>
+      )}
 
       <div className="wf">
         <div className="wf__list">
-          {flows.length === 0 && !listError && <p className="muted">尚無工作流。</p>}
+          {listLoading ? (
+            <Skeleton rows={3} />
+          ) : (
+            flows.length === 0 && !listError && <p className="muted">尚無工作流。</p>
+          )}
           {flows.map((f) => (
             <button
               key={f.name}
@@ -131,7 +142,11 @@ export default function WorkflowsView() {
               <button className="btn btn--primary" type="submit" disabled={busy}>
                 {busy ? '執行中…' : '執行'}
               </button>
-              {runError && <p className="error-text">{runError}</p>}
+              {runError && (
+                <p className="error-text" role="alert">
+                  {runError}
+                </p>
+              )}
             </form>
           )}
 

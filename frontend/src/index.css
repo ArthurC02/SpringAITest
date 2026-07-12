@@ -6,6 +6,16 @@
   --code-bg: #f4f3ec;
   --accent: #7c3aed;
 
+  /* 語意色 token。文字色與底色（tint）都算過 WCAG 對比 ≥4.5:1（light + dark）。
+     底色 tint 是單一 rgba，會疊在各模式的 --bg 上自動合成，故只定義一次。 */
+  --danger: #b91c1c;
+  --danger-bg: rgba(220, 38, 38, 0.12);
+  --success: #166534;
+  --success-bg: rgba(16, 163, 74, 0.16);
+  --warning: #854d0e;
+  --warning-bg: rgba(217, 164, 6, 0.16);
+  --on-accent: #fff;
+
   --sans: system-ui, 'Segoe UI', Roboto, 'Noto Sans TC', sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
@@ -25,6 +35,31 @@
     --border: #2e303a;
     --code-bg: #1f2028;
     --accent: #a78bfa;
+
+    /* 深色模式文字色改亮；tint 底色沿用同一 rgba（疊在深色 --bg 上自動變深）。
+       --on-accent 由白改深色以修掉白字對 #a78bfa 僅 2.7:1 的問題。 */
+    --danger: #fca5a5;
+    --success: #4ade80;
+    --warning: #fbbf24;
+    --on-accent: #221833;
+  }
+}
+
+/* 全域可見焦點環：button / a / input / textarea / summary 等皆蓋（WCAG 2.2 focus 可見）。 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 尊重使用者的減少動態偏好：關閉 blink/pulse 動畫與所有 transition，改為靜態顯示。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

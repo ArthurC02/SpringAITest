@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 import { useCopilotReadable } from '@copilotkit/react-core'
 import { getSummary } from '../api/analysis'
 import type { AnalysisSummary } from '../types'
+import Skeleton from './Skeleton'
 
 /** 分析視圖:兩張數字卡 + 最近文件條列 + 重新整理。 */
 export default function AnalysisView() {
   const [summary, setSummary] = useState<AnalysisSummary | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  // 初值 true:首次 render 直接進 skeleton,避免閃現無錯誤的「重試」鈕(與 Config/Workflows 一致)
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -40,10 +42,26 @@ export default function AnalysisView() {
         </button>
       </div>
 
-      {error && <p className="error-text">{error}</p>}
-
-      {summary && (
+      {loading && !summary ? (
+        <Skeleton rows={3} />
+      ) : !summary ? (
+        <div>
+          {error && (
+            <p className="error-text" role="alert">
+              {error}
+            </p>
+          )}
+          <button className="btn" onClick={load}>
+            重試
+          </button>
+        </div>
+      ) : (
         <>
+          {error && (
+            <p className="error-text" role="alert">
+              {error}
+            </p>
+          )}
           <div className="cards">
             <div className="card">
               <div className="card__num">{summary.document_count}</div>

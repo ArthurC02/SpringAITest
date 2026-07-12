@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listConfig, updateConfig } from '../api/config'
 import type { ConfigEntry } from '../types'
+import { useToast } from './Toast'
+import Skeleton from './Skeleton'
 
 function fmtDate(s: string): string {
   const d = new Date(s)
@@ -9,12 +11,15 @@ function fmtDate(s: string): string {
 
 /** 系統設定:GET 表格；ADMIN 可就地編輯 value + 儲存(PUT)。非 ADMIN 只讀。 */
 export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
+  const toast = useToast()
   const [entries, setEntries] = useState<ConfigEntry[]>([])
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
   const [savingKey, setSavingKey] = useState<string | null>(null)
 
   const load = useCallback(async () => {
+    setLoading(true)
     setError(null)
     try {
       const list = await listConfig()
@@ -22,6 +27,8 @@ export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
       setDrafts(Object.fromEntries(list.map((e) => [e.key, e.value])))
     } catch (e) {
       setError((e as Error).message)
+    } finally {
+      setLoading(false)
     }
   }, [])
 
@@ -35,6 +42,7 @@ export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
     try {
       const updated = await updateConfig(key, drafts[key])
       setEntries((prev) => prev.map((e) => (e.key === key ? updated : e)))
+      toast('已儲存', 'success')
     } catch (e) {
       // PUT 403(非 ADMIN)或其他錯誤在此顯示;真正授權以後端把關為準。
       setError((e as Error).message)
@@ -49,11 +57,18 @@ export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
         <h2 className="view__title">系統設定</h2>
       </div>
 
-      {error && <p className="error-text">{error}</p>}
+      {error && (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      )}
 
-      {entries.length === 0 ? (
+      {loading && entries.length === 0 ? (
+        <Skeleton rows={4} />
+      ) : entries.length === 0 ? (
         <p className="muted">尚無設定。</p>
       ) : (
+        <div className="table-wrap">
         <table className="table">
           <thead>
             <tr>
@@ -96,6 +111,7 @@ export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   )

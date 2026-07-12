@@ -105,7 +105,7 @@
 
 .bubble--user .bubble__content {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border-bottom-right-radius: 4px;
 }
 
@@ -116,8 +116,8 @@
 }
 
 .bubble--error .bubble__content {
-  background: rgba(220, 38, 38, 0.12);
-  color: #dc2626;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 /* AI 回覆的 Markdown 內容：泡泡本身用 pre-wrap，但 Markdown 區塊改回 normal，
@@ -249,18 +249,13 @@
   overflow-y: auto;
 }
 
-.composer__input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 .composer__send {
   align-self: flex-end;
   padding: 10px 20px;
   border: none;
   border-radius: 12px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font: inherit;
   font-weight: 600;
   cursor: pointer;
@@ -294,7 +289,7 @@
 }
 .btn--primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border-color: transparent;
   font-weight: 600;
 }
@@ -303,7 +298,7 @@
   opacity: 0.9;
 }
 .btn--danger {
-  color: #dc2626;
+  color: var(--danger);
 }
 
 .field {
@@ -332,24 +327,18 @@
   min-height: 90px;
   line-height: 1.5;
 }
-.input:focus-visible,
-.textarea:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 .error-text {
-  color: #dc2626;
+  color: var(--danger);
   font-size: 13px;
   margin: 8px 0;
 }
 .notice-text {
-  color: #16a34a;
+  color: var(--success);
   font-size: 13px;
   margin: 8px 0;
 }
 .field-error {
-  color: #dc2626;
+  color: var(--danger);
   font-size: 12px;
 }
 .muted {
@@ -364,8 +353,8 @@
   letter-spacing: 0.3px;
 }
 .badge--admin {
-  background: rgba(220, 38, 38, 0.14);
-  color: #dc2626;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 .badge--user {
   background: var(--code-bg);
@@ -384,8 +373,8 @@
   gap: 6px;
 }
 .chip--processing {
-  background: rgba(217, 164, 6, 0.16);
-  color: #b58105;
+  background: var(--warning-bg);
+  color: var(--warning);
 }
 .chip--processing::before {
   content: '';
@@ -396,12 +385,12 @@
   animation: blink 1.2s infinite both;
 }
 .chip--ready {
-  background: rgba(16, 163, 74, 0.16);
-  color: #16a34a;
+  background: var(--success-bg);
+  color: var(--success);
 }
 .chip--failed {
-  background: rgba(220, 38, 38, 0.14);
-  color: #dc2626;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 .table {
@@ -662,4 +651,154 @@ details > summary {
   flex-direction: column;
   gap: 8px;
   align-items: flex-start;
+}
+
+/* ── loading 骨架（各視圖共用一套；微光受 prefers-reduced-motion 保護） ── */
+.skeleton-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.skeleton {
+  border-radius: 8px;
+  background: var(--code-bg);
+  position: relative;
+  overflow: hidden;
+}
+.skeleton-row {
+  height: 40px;
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(127, 127, 127, 0.18), transparent);
+  transform: translateX(-100%);
+  animation: skeleton-shimmer 1.4s infinite;
+}
+@keyframes skeleton-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* ── toast（右下角固定位，整站共用） ───────────────────────── */
+.toast-container {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(360px, calc(100vw - 32px));
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-size: 14px;
+  animation: toast-in 0.2s ease;
+}
+.toast--success {
+  color: var(--success);
+  border-color: var(--success);
+}
+.toast--error {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.toast__close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 表格橫向捲動容器（桌面無感，窄螢幕可橫捲）。 */
+.table-wrap {
+  overflow-x: auto;
+}
+
+/* ── 聊天：跳至最新膠囊 + 停止產生鈕 ───────────────────────── */
+.chat-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+}
+.composer__stop {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* ── 響應式：單一斷點，側欄變頂部橫向 nav ───────────────────── */
+@media (max-width: 768px) {
+  .shell {
+    flex-direction: column;
+  }
+  .shell__sidebar {
+    width: 100%;
+    flex: none;
+    flex-direction: row;
+    align-items: center;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    gap: 8px;
+    overflow-x: auto;
+  }
+  .shell__brand {
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+  .shell__sidebar nav {
+    flex-direction: row;
+    gap: 6px;
+  }
+  .shell__nav {
+    width: auto;
+    white-space: nowrap;
+  }
+  .shell__main {
+    min-height: 0;
+  }
+  .bubble {
+    max-width: 92%;
+  }
 }
