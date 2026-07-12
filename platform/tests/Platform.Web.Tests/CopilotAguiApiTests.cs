@@ -25,17 +25,6 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     };
 
     [Fact]
-    public async Task Agui_Endpoint_Exists()
-    {
-        var client = _factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/api/copilot/agui", RunInput());
-
-        // 端點存在(有掛 MapAGUI):POST 不該是 404。
-        Assert.NotEqual(HttpStatusCode.NotFound, resp.StatusCode);
-    }
-
-    [Fact]
     public async Task Agui_Streams_Sse_Events()
     {
         var client = _factory.CreateClient();

@@ -54,6 +54,43 @@ public sealed class DocumentProcessorTests
         Assert.Equal(2, doc.ChunkCount);
         Assert.Equal(1, embeddings.DocumentCalls); // 只嵌入一次,重投未重跑。
     }
+
+    [Fact]
+    public async Task Process_FailedThenRedelivered_RecoversToReady()
+    {
+        var repo = new FakeRagRepository();
+        var id = Guid.NewGuid().ToString();
+
+        // 首投:嵌入失敗 → 標 failed(保留文件列)。
+        var failing = new DocumentProcessor(repo, new ThrowingEmbeddingProvider(), NullLogger<DocumentProcessor>.Instance);
+        await failing.ProcessAsync(Message(id), CancellationToken.None);
+        Assert.Equal("failed", (Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None))).Status);
+
+        // 重投(同一訊息)以正常 provider:failed 非 ready → 重跑至 ready;insert ON CONFLICT 不覆寫既有列。
+        var recovering = new DocumentProcessor(repo, new FakeEmbeddingProvider(8), NullLogger<DocumentProcessor>.Instance);
+        await recovering.ProcessAsync(Message(id), CancellationToken.None);
+
+        var doc = Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None));
+        Assert.Equal(id, doc.Id);
+        Assert.Equal("ready", doc.Status);
+        Assert.Equal(2, doc.ChunkCount);
+    }
+
+    [Fact]
+    public async Task Process_BlankText_FallsBackToSingleEmptyChunk_Ready()
+    {
+        // ponytail: 空白內文的現行 POC 行為 — 切塊為空時退回單一(trim 後的空)切塊並標 ready。
+        // 非理想(理應標 failed 或拒收),但這是刻意接受的 POC 取捨;以測試釘住避免無意間改變。
+        var repo = new FakeRagRepository();
+        var processor = new DocumentProcessor(repo, new FakeEmbeddingProvider(8), NullLogger<DocumentProcessor>.Instance);
+        var id = Guid.NewGuid().ToString();
+
+        await processor.ProcessAsync(Message(id, "   "), CancellationToken.None);
+
+        var doc = Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None));
+        Assert.Equal("ready", doc.Status);
+        Assert.Equal(1, doc.ChunkCount);
+    }
 }
 
 /// <summary>嵌入時拋例外,用來驗 DocumentProcessor 的 failed 路徑。</summary>

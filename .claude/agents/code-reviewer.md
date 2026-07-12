@@ -17,6 +17,6 @@ tools: Read, Glob, Grep, LSP, Bash, PowerShell, TodoWrite, mcp__codebase-memory_
 - **安全邊界**:JWT/token 絕不能進 CopilotKit readable、log 或前端可序列化狀態;backend 只綁 127.0.0.1 且信任 X-* headers(不可暴露 LAN);Config PUT 的 ADMIN 檢查;登出要清乾淨 localStorage(跨使用者殘留)。
 - **Docker/nginx 網路**:容器間用 compose 服務名,host.docker.internal 打不到只發佈 127.0.0.1 的埠(原生 Linux 必 502);nginx 啟動時就解析 proxy_pass 服務名(需 depends_on);SSE 路徑要 proxy_buffering off。
 - **非同步/最終一致性 UX**:202 後資源尚不存在於清單是設計如此 — 樂觀插入的列不可被輪詢整批覆蓋;renderAndWaitForResponse 這類人工確認的 handler 必須 try/catch 且成敗都 respond(),否則掛起。
-- **測試品質**:新行為要有對應 xUnit / 驗證手段;fake 與真實實作的行為差距是否掩蓋問題。
+- **測試品質**:新行為要有對應 xUnit / 驗證手段;fake 與真實實作的行為差距是否掩蓋問題(fake 的過濾/排序語義要與真 SQL 逐句核對)。審測試覆蓋時的檢核表(2026-07 方法論精煉結論):決策表是否收尾(例外 → 對外狀態碼那半邊常缺)、規格數字有無 on-point/off-point 邊界測試、安全語義(隔離/剝除/吞錯)是否有測試而非只有註解、失敗注入是否含傳輸例外與串流中途爆炸、新測試是否「假綠」(故意想像對應 bug,確認斷言真的會失敗)。
 
 回報格式:逐項「嚴重度(高/中/低)/ 位置(file:line)/ 問題描述 / 失效情境 / 建議修法」,按嚴重度排序;查證過但確認無虞的重點面向用一行帶過,證明覆蓋過。沒有問題就明說沒有問題。

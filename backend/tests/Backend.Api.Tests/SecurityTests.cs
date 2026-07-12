@@ -10,10 +10,17 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
 
     public SecurityTests(TestWebAppFactory factory) => _factory = factory;
 
-    [Fact]
-    public async Task NoInternalToken_Returns401_ApiError()
+    // 缺 header(null)與錯 token("nope")同屬「內部憑證無效」等價類:守門一律回 401 ApiError。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("nope")]
+    public async Task InvalidInternalToken_Returns401_ApiError(string? token)
     {
         var client = _factory.CreateClient();
+        if (token is not null)
+        {
+            client.DefaultRequestHeaders.Add(InternalTokenMiddleware.HeaderName, token);
+        }
 
         var resp = await client.GetAsync("/api/config");
 
@@ -21,17 +28,6 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         var body = await resp.ReadJsonAsync();
         Assert.Equal("內部憑證無效", body["message"]!.GetValue<string>());
         Assert.NotNull(body["fieldErrors"]);
-    }
-
-    [Fact]
-    public async Task WrongInternalToken_Returns401()
-    {
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add(InternalTokenMiddleware.HeaderName, "nope");
-
-        var resp = await client.GetAsync("/api/config");
-
-        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
     [Fact]
@@ -43,16 +39,6 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("UP", (await resp.ReadJsonAsync())["status"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public async Task ValidInternalToken_ReachesEndpoint()
-    {
-        var client = _factory.CreateInternalClient();
-
-        var resp = await client.GetAsync("/api/config");
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
 
     [Fact]
@@ -109,5 +95,47 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         Assert.NotEmpty(chunks);
         Assert.NotNull(chunks[0]!["document_id"]);
         Assert.NotNull(chunks[0]!["score"]);
+    }
+
+    // ---- C2:跨租戶隔離(兩個不同 X-Tenant-Id 的 client 打同一 factory;fake repo 忠實模擬租戶過濾) ----
+
+    [Fact]
+    public async Task CrossTenant_DocumentsList_ExcludesOtherTenant()
+    {
+        var idA = await _factory.SeedDocumentAsync("demo-a", "甲租戶專屬手冊", "內容一。\n\n內容二。");
+        var clientB = _factory.CreateInternalClient().WithTenant("demo-b");
+
+        var arr = (await (await clientB.GetAsync("/api/documents")).ReadJsonAsync()).AsArray();
+
+        Assert.DoesNotContain(arr, n => n!["id"]!.GetValue<string>() == idA);
+    }
+
+    [Fact]
+    public async Task CrossTenant_Delete_Returns404_AndKeepsDocument()
+    {
+        var idA = await _factory.SeedDocumentAsync("demo-a", "甲租戶不可刪", "內容。");
+        var clientB = _factory.CreateInternalClient().WithTenant("demo-b");
+
+        var del = await clientB.DeleteAsync($"/api/documents/{idA}");
+        Assert.Equal(HttpStatusCode.NotFound, del.StatusCode);
+
+        // 跨租戶刪除視為找不到,文件仍在(demo-a 可見)。
+        var clientA = _factory.CreateInternalClient().WithTenant("demo-a");
+        var arr = (await (await clientA.GetAsync("/api/documents")).ReadJsonAsync()).AsArray();
+        Assert.Contains(arr, n => n!["id"]!.GetValue<string>() == idA);
+    }
+
+    [Fact]
+    public async Task CrossTenant_Search_ExcludesOtherTenantChunks()
+    {
+        var idA = await _factory.SeedDocumentAsync("demo-a", "甲租戶機密報告", "祕密一。\n\n祕密二。");
+        var clientB = _factory.CreateInternalClient().WithTenant("demo-b");
+
+        var resp = await clientB.PostAsJsonAsync("/api/retrieval/search", new { query = "祕密", top_k = 10 });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var chunks = (await resp.ReadJsonAsync())["chunks"]!.AsArray();
+        // demo-b 的檢索絕不含 demo-a 的片段。
+        Assert.DoesNotContain(chunks, c => c!["document_id"]!.GetValue<string>() == idA);
     }
 }

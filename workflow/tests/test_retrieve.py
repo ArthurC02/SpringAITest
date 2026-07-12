@@ -15,17 +15,7 @@ import pytest
 
 from app.nodes.retrieve import make_retrieve_node
 from app.settings import settings
-
-
-class _FakeResponse:
-    def __init__(self, chunks):
-        self._chunks = chunks
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return {"chunks": self._chunks}
+from tests.conftest import FakeBackendResponse
 
 
 def test_retrieve_sends_expected_request_and_maps_chunks_to_docs(monkeypatch):
@@ -35,7 +25,7 @@ def test_retrieve_sends_expected_request_and_maps_chunks_to_docs(monkeypatch):
         captured["url"] = url
         captured["json"] = json
         captured["headers"] = headers
-        return _FakeResponse(
+        return FakeBackendResponse(
             [
                 {
                     "document_id": "doc-1",
@@ -71,7 +61,7 @@ def test_retrieve_sends_expected_request_and_maps_chunks_to_docs(monkeypatch):
 
 def test_retrieve_empty_chunks_returns_empty_docs(monkeypatch):
     async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return _FakeResponse([])
+        return FakeBackendResponse([])
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
 
@@ -86,7 +76,7 @@ def test_retrieve_uses_explicit_top_k_override(monkeypatch):
 
     async def fake_post(self, url, json=None, headers=None, **kwargs):
         captured["json"] = json
-        return _FakeResponse([])
+        return FakeBackendResponse([])
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
 

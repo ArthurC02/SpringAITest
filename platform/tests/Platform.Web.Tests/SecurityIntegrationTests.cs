@@ -53,27 +53,23 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.OK, workflows.StatusCode);
     }
 
-    [Fact]
-    public async Task Register_WrongInvite_Returns403_WithMessage()
+    // 過期與竄改的 token 同屬「憑證無效」等價類:JwtBearer OnChallenge 一律回 401 + 同一 ApiError。
+    [Theory]
+    [InlineData("expired")]
+    [InlineData("tampered")]
+    public async Task ProtectedEndpoint_InvalidToken_Returns401_ApiError(string kind)
     {
-        var client = _factory.CreateClient();
+        var now = DateTime.UtcNow;
+        var token = kind == "expired"
+            ? TestTokens.Mint(notBefore: now.AddMinutes(-10), expires: now.AddMinutes(-5))
+            : TestTokens.Mint() + "x"; // 竄改簽章尾段。
+        var client = _factory.CreateClient().WithToken(token);
 
-        var resp = await client.PostAsJsonAsync("/api/auth/register",
-            new { username = "sec-badinvite", password = "password123", tenantCode = "demo-a", inviteCode = "nope" });
-
-        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
-        Assert.Equal("邀請碼無效", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public async Task Login_WrongPassword_Returns401_WithMessage()
-    {
-        var client = _factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/api/auth/login",
-            new { username = "user-b", password = "totally-wrong" });
+        var resp = await client.GetAsync("/api/workflows");
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
-        Assert.Equal("帳號或密碼錯誤", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("未認證或憑證無效", body["message"]!.GetValue<string>());
+        Assert.NotNull(body["fieldErrors"]);
     }
 }

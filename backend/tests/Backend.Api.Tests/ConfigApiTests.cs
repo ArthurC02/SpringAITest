@@ -20,25 +20,22 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull((await resp.ReadJsonAsync()).AsArray());
     }
 
-    [Fact]
-    public async Task Put_NonAdmin_Returns403()
+    // 非 ADMIN(USER)與缺角色 header(null)同屬「權限不足」等價類:PUT 一律 403 + 同一訊息。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("USER")]
+    public async Task Put_NonAdmin_Returns403(string? role)
     {
-        var client = _factory.CreateInternalClient().WithRole("USER");
+        var client = _factory.CreateInternalClient();
+        if (role is not null)
+        {
+            client.WithRole(role);
+        }
 
         var resp = await client.PutAsJsonAsync("/api/config/theme", new { value = "dark" });
 
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
         Assert.Equal("權限不足，無法修改系統組態", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public async Task Put_NoRoleHeader_Returns403()
-    {
-        var client = _factory.CreateInternalClient();
-
-        var resp = await client.PutAsJsonAsync("/api/config/theme", new { value = "dark" });
-
-        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
     [Fact]

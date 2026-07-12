@@ -45,6 +45,17 @@ public sealed class ChunkingTests
         Assert.Equal(8, chunks[2].Length);  // 12..20
     }
 
+    // 段落長度剛好等於 maxChars → 不切(1 塊);多 1 字 → 進滑動視窗(2 塊)。off-by-one 邊界。
+    [Theory]
+    [InlineData(10, 1)]
+    [InlineData(11, 2)]
+    public void SplitText_LengthAtMaxCharsBoundary(int len, int expectedChunks)
+    {
+        var chunks = Chunking.SplitText(new string('a', len), maxChars: 10, overlap: 4);
+
+        Assert.Equal(expectedChunks, chunks.Count);
+    }
+
     [Fact]
     public void SplitText_OverlapGreaterThanMax_StillTerminates()
     {

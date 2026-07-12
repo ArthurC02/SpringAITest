@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 using Backend.Api.Common;
 
@@ -8,7 +9,10 @@ public sealed record SearchRequest(
     [NotBlank(ErrorMessage = "query 不可為空")]
     string? Query,
 
-    [property: JsonPropertyName("top_k")] int? TopK);
+    // 缺省(null)時 controller 退回 4;有給則須介於 1~50(負值進真 SQL LIMIT 會 500、0 回空結果 — 一律當非法輸入擋成 400)。
+    [property: JsonPropertyName("top_k")]
+    [Range(1, 50, ErrorMessage = "top_k 必須介於 1 到 50 之間")]
+    int? TopK);
 
 /// <summary>檢索命中的單一片段。JSON:{ document_id, title, content, score }。
 /// score = 1 - cosine distance,與 workflow 現行 pgvector 查詢一致。</summary>

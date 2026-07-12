@@ -149,4 +149,81 @@ public sealed class ChatServiceTests
         Assert.Equal("r2", history[0].Reply);
         Assert.Equal("r1", history[1].Reply);
     }
+
+    // ---- H1:uid / cid fallback 決策表(NormalizeUser:空白→"default";NormalizeConversation:空白→uid) ----
+
+    [Fact]
+    public async Task Fallback_BothBlank_UseDefault_ForMem0AndSharedWindow()
+    {
+        var agent = new FakeLlmAgent();
+        var mem0 = new FakeMem0Client();
+        var svc = Build(agent, mem0, new FakeConversationStore());
+
+        await svc.ChatAsync("第一問", "", "");
+        await svc.ChatAsync("第二問", "", "");
+
+        // userId 空白 → mem0 收到 uid="default"。
+        Assert.Equal("default", mem0.Remembered[0].UserId);
+        // conversationId 空白 → 退回 uid("default"),兩輪共用同一短期記憶視窗。
+        Assert.Contains(agent.LastMessages!, m => m is { Role: "user", Content: "第一問" });
+        Assert.Equal("第二問", agent.LastMessages!.Last().Content);
+    }
+
+    [Fact]
+    public async Task Fallback_UserOnly_ConversationBlank_UsesUserIdAsWindowKey_ThenIsolatesByCid()
+    {
+        var agent = new FakeLlmAgent();
+        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
+
+        await svc.ChatAsync("甲", "u1", "");
+        await svc.ChatAsync("乙", "u1", "");
+        // cid 空白 → 短期記憶 key = "u1",兩輪共窗。
+        Assert.Contains(agent.LastMessages!, m => m is { Role: "user", Content: "甲" });
+
+        // 改以明確 cid="c9" 呼叫:不同視窗,不含前兩輪。
+        await svc.ChatAsync("丙", "u1", "c9");
+        Assert.DoesNotContain(agent.LastMessages!, m => m.Content == "甲");
+        Assert.DoesNotContain(agent.LastMessages!, m => m.Content == "乙");
+    }
+
+    [Fact]
+    public async Task Fallback_ConversationOnly_UserBlank_Mem0UsesDefault_WindowUsesCid()
+    {
+        var agent = new FakeLlmAgent();
+        var mem0 = new FakeMem0Client();
+        var svc = Build(agent, mem0, new FakeConversationStore());
+
+        await svc.ChatAsync("問一", "", "c1");
+        // userId 空白 → mem0 用 "default"。
+        Assert.Equal("default", mem0.Remembered[0].UserId);
+
+        // 短期記憶用 "c1":同一 cid 第二輪含第一輪。
+        await svc.ChatAsync("問二", "", "c1");
+        Assert.Contains(agent.LastMessages!, m => m is { Role: "user", Content: "問一" });
+    }
+
+    // ---- H5:串流中途失敗 → 例外傳播、半截回覆不持久化 ----
+
+    [Fact]
+    public async Task StreamChat_MidStreamFailure_Propagates_DoesNotPersistPartial()
+    {
+        var agent = new FakeLlmAgent { Chunks = new[] { "甲", "乙" }, ThrowAfterChunks = 1 };
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore();
+        var svc = Build(agent, mem0, convos);
+
+        var collected = new List<string>();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var chunk in svc.StreamChatAsync("嗨", "u1", "c1"))
+            {
+                collected.Add(chunk);
+            }
+        });
+
+        // 只吐了「甲」就炸;半截回覆不寫 backend、不寫 mem0。
+        Assert.Equal(new[] { "甲" }, collected);
+        Assert.Empty(convos.Saved);
+        Assert.Empty(mem0.Remembered);
+    }
 }

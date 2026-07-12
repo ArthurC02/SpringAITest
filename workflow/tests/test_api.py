@@ -7,12 +7,19 @@ app.nodes.retrieve 呼叫 backend 的檢索 API，測試裡一律用 _mock_backe
 測試屬於 backend/ 的範圍，不在這裡重複）。
 """
 
+import asyncio
 from types import SimpleNamespace
+from typing import TypedDict
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from langgraph.graph import END, START, StateGraph
 
 from app.main import app
+from app.settings import settings
+from app.workflows import registry
+from tests.conftest import FakeBackendResponse
 
 client = TestClient(app)
 
@@ -39,26 +46,22 @@ def _headers(tenant_id="demo-a", user_id="alice", role="USER", token=INTERNAL_TO
 ADMIN_HEADERS = _headers(role="ADMIN")
 
 
-class _FakeBackendResponse:
-    """假的 httpx.Response：只提供 retrieve 節點用得到的兩個方法。"""
+def _mock_backend_chunks(monkeypatch, chunks: list[dict]) -> dict:
+    """讓 retrieve 節點呼叫 backend 檢索 API 時，直接拿到指定的 chunks，不打真的網路。
 
-    def __init__(self, chunks):
-        self._chunks = chunks
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return {"chunks": self._chunks}
-
-
-def _mock_backend_chunks(monkeypatch, chunks: list[dict]):
-    """讓 retrieve 節點呼叫 backend 檢索 API 時，直接拿到指定的 chunks，不打真的網路。"""
+    回傳 captured dict，記錄最後一次送往 backend 的 url / json / headers，
+    供需要檢查出站請求內容的測試（如租戶隔離）斷言使用；不需要的測試可忽略。
+    """
+    captured = {}
 
     async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return _FakeBackendResponse(chunks)
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        return FakeBackendResponse(chunks)
 
     monkeypatch.setattr("httpx.AsyncClient.post", fake_post)
+    return captured
 
 
 class StubLLM:
@@ -87,14 +90,10 @@ def test_health_without_any_header():
 # ---------------------------------------------------------------------------
 
 
-def test_list_workflows_missing_token_returns_401():
-    resp = client.get("/workflows", headers=_headers(token=None))
-    assert resp.status_code == 401
-    assert resp.json()["detail"]["error"] == "unauthorized"
-
-
-def test_list_workflows_wrong_token_returns_401():
-    resp = client.get("/workflows", headers=_headers(token="wrong-token"))
+@pytest.mark.parametrize("token", [None, "wrong-token"], ids=["missing", "wrong"])
+def test_list_workflows_bad_token_returns_401(token):
+    """缺標頭與錯 token 是同一個 401 等價類（安全上刻意不區分原因）。"""
+    resp = client.get("/workflows", headers=_headers(token=token))
     assert resp.status_code == 401
     assert resp.json()["detail"]["error"] == "unauthorized"
 
@@ -123,9 +122,6 @@ def test_list_workflows():
     assert {"summarize", "triage", "rag_qa", "analyze_report"}.issubset(body.keys())
     assert body["summarize"]["required_role"] == "USER"
     assert body["analyze_report"]["required_role"] == "ADMIN"
-
-    names = [item["name"] for item in resp.json()]
-    assert names == sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -238,15 +234,49 @@ def test_invoke_admin_workflow_allowed_for_admin_role(monkeypatch):
     assert body["report"] == "結構化報告內容"
 
 
+def test_analyze_report_with_chunks_runs_analyze_then_synthesize(monkeypatch):
+    """有資料分支：analyze 與 synthesize 各呼叫一次 LLM（消耗式 StubLLM 依序吐兩則）。"""
+    _mock_backend_chunks(
+        monkeypatch,
+        [
+            {
+                "document_id": "doc-1",
+                "title": "示例文件",
+                "content": "本季銷售成長一成。",
+                "score": 0.9,
+            }
+        ],
+    )
+    stub = StubLLM(["要點", "報告"])
+    monkeypatch.setattr("app.workflows.analyze_report.get_llm", lambda: stub)
+
+    resp = client.post(
+        "/workflows/analyze_report/invoke",
+        json={"input": {"topic": "本季銷售"}},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["output"]
+    assert body["insights"] == "要點"
+    assert body["report"] == "報告"
+
+
 # ---------------------------------------------------------------------------
 # rag_qa 輸入驗證
 # ---------------------------------------------------------------------------
 
 
-def test_rag_qa_missing_question_returns_422_workflow_input_invalid():
+@pytest.mark.parametrize(
+    "input_body",
+    [{}, {"question": ""}],
+    ids=["missing-question", "blank-question"],
+)
+def test_rag_qa_invalid_question_returns_422_workflow_input_invalid(input_body):
+    """缺 question 與空字串 question 都應被 input_model 擋下（min_length=1 的存在理由）。"""
     resp = client.post(
         "/workflows/rag_qa/invoke",
-        json={"input": {}},
+        json={"input": input_body},
         headers=_headers(),
     )
 
@@ -300,3 +330,86 @@ def test_rag_qa_with_backend_chunks_returns_answer_and_citations(monkeypatch):
     assert body["answer"] == "這是根據租戶文件的回答"
     assert len(body["citations"]) == 1
     assert body["citations"][0]["document_id"] == "doc-1"
+
+
+# ---------------------------------------------------------------------------
+# 多租戶隔離邊界：保留鍵剝除
+# ---------------------------------------------------------------------------
+
+
+def test_reserved_tenant_id_in_input_cannot_override_caller_tenant(monkeypatch):
+    """body input 夾帶 tenant_id 不得覆蓋呼叫者標頭的租戶（_RESERVED_INPUT_KEYS 剝除）。
+
+    關鍵斷言：retrieve 節點實際送往 backend 的 X-Tenant-Id 必須是合法呼叫者的
+    demo-a，而不是 body 夾帶的 evil-tenant。
+    """
+    captured = _mock_backend_chunks(monkeypatch, [])
+
+    resp = client.post(
+        "/workflows/rag_qa/invoke",
+        json={"input": {"question": "公司地址在哪？", "tenant_id": "evil-tenant"}},
+        headers=_headers(tenant_id="demo-a"),
+    )
+
+    assert resp.status_code == 200
+    assert captured["headers"]["X-Tenant-Id"] == "demo-a"
+
+
+# ---------------------------------------------------------------------------
+# 執行期錯誤契約：500 / 504
+# ---------------------------------------------------------------------------
+
+
+def test_backend_connect_error_returns_500_workflow_execution_failed(monkeypatch):
+    """backend 連不上（httpx.ConnectError）時，對外契約是 500 workflow_execution_failed。"""
+
+    async def fake_post(self, url, json=None, headers=None, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr("httpx.AsyncClient.post", fake_post)
+
+    resp = client.post(
+        "/workflows/rag_qa/invoke",
+        json={"input": {"question": "公司地址在哪？"}},
+        headers=_headers(),
+    )
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["error"] == "workflow_execution_failed"
+
+
+def test_slow_workflow_returns_504_workflow_timeout(monkeypatch):
+    """執行超過逾時上限時，對外契約是 504 workflow_timeout。
+
+    用 throwaway 工作流（sleep 節點）搭配 monkeypatch 極小的全域逾時，
+    不動生產程式的 `spec.timeout_seconds or settings...` 語義，也不讓測試久等。
+    """
+    name = "__throwaway_slow_for_timeout_test__"
+
+    class _SlowState(TypedDict, total=False):
+        tenant_id: str
+
+    async def slow(state: _SlowState) -> dict:
+        await asyncio.sleep(0.5)
+        return {}
+
+    def build():
+        g = StateGraph(_SlowState)
+        g.add_node("slow", slow)
+        g.add_edge(START, "slow")
+        g.add_edge("slow", END)
+        return g.compile()
+
+    monkeypatch.setattr(settings, "workflow_timeout_seconds", 0.05)
+    try:
+        registry.register(name, "逾時測試用")(build)
+
+        resp = client.post(
+            f"/workflows/{name}/invoke", json={"input": {}}, headers=_headers()
+        )
+
+        assert resp.status_code == 504
+        assert resp.json()["detail"]["error"] == "workflow_timeout"
+    finally:
+        # 清理，避免污染其他測試（仿 test_registry.py 的 throwaway 模式）。
+        registry._REGISTRY.pop(name, None)

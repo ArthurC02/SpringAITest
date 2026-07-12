@@ -6,8 +6,8 @@ Solution-wide guidance only. Each area has its own `AGENTS.md` (+ `CLAUDE.md` im
 
 | Area | What it is | Details |
 |---|---|---|
-| `platform/` | ASP.NET Core 10 gateway (`:8080`): JWT verify, SSE chat, Microsoft Agent Framework + AG-UI endpoint, mem0, BackendClient proxy. xUnit 73 tests. | [platform/AGENTS.md](platform/AGENTS.md) |
-| `backend/` | ASP.NET Core 10 core service (`:8002`): feature folders, Dapper + appdb (PostgreSQL/pgvector), RabbitMQ document consumer, issues JWTs. xUnit 38+ tests. | [backend/AGENTS.md](backend/AGENTS.md) |
+| `platform/` | ASP.NET Core 10 gateway (`:8080`): JWT verify, SSE chat, Microsoft Agent Framework + AG-UI endpoint, mem0, BackendClient proxy. xUnit 93 tests. | [platform/AGENTS.md](platform/AGENTS.md) |
+| `backend/` | ASP.NET Core 10 core service (`:8002`): feature folders, Dapper + appdb (PostgreSQL/pgvector), RabbitMQ document consumer, issues JWTs. xUnit 54 tests. | [backend/AGENTS.md](backend/AGENTS.md) |
 | `frontend/` | React 19 + Vite + TypeScript SPA (`:5173`): login + five views (Chat, Documents, Workflows, Analysis, Config), CopilotKit sidebar. | [frontend/AGENTS.md](frontend/AGENTS.md) |
 | `workflow/` | Python 3.12+ LangGraph + FastAPI (host `:8001`): named workflows, retrieval via backend HTTP. | [workflow/AGENTS.md](workflow/AGENTS.md) |
 | `infra/` | Docker Compose (LiteLLM, Langfuse, postgres, RabbitMQ, mem0, appdb…), `litellm-config.yaml`. `scripts/` holds startup helpers. | [infra/AGENTS.md](infra/AGENTS.md) |

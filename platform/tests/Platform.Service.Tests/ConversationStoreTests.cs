@@ -65,4 +65,14 @@ public sealed class ConversationStoreTests
         // 刻意不是 WorkflowInvocationException(那會變 502);維持 chat 端點失敗即 500。
         Assert.IsNotType<WorkflowInvocationException>(ex);
     }
+
+    [Fact]
+    public async Task Add_TransportError_ThrowsBackendCall_NotWorkflowInvocation()
+    {
+        // 傳輸層錯誤包成 BackendCallException(對外 500),與 WorkflowService 的 502 語意刻意不同。
+        var store = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒")));
+
+        var ex = await Assert.ThrowsAsync<BackendCallException>(() => store.AddAsync("問", "答"));
+        Assert.IsNotType<WorkflowInvocationException>(ex);
+    }
 }

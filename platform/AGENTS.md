@@ -8,7 +8,7 @@ Solution `Platform.sln`, dependencies one-way `Web -> Service` (no data layer):
 
 - `src/Platform.Service` — business logic: `ChatService` (LLM via Microsoft Agent Framework), `Mem0Client`, short-term memory (in-memory sliding window, last 20 messages per `conversationId`), `BackendClient` proxy to backend `:8002`, DTOs.
 - `src/Platform.Web` — controllers, JWT validation (tokens are *issued* by backend, same `JWT_SECRET`), SSE streaming, AG-UI endpoint wiring, `GlobalExceptionHandler`, executable app.
-- `tests/Platform.Service.Tests` + `tests/Platform.Web.Tests` — xUnit, 73 tests total, hand-written fakes (no mocking library).
+- `tests/Platform.Service.Tests` + `tests/Platform.Web.Tests` — xUnit, 93 tests total, hand-written fakes (no mocking library).
 
 ## Commands (run from `platform/`)
 

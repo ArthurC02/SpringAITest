@@ -67,6 +67,9 @@ public sealed class FakeLlmAgent : ILlmAgent
     public IReadOnlyList<string> Chunks { get; set; } = new[] { "你好", "世界" };
     public IReadOnlyList<LlmMessage>? LastMessages { get; private set; }
 
+    /// <summary>非 null 時:吐出第 N 塊後擲例外(模擬串流中途失敗),用來驗半截回覆不持久化。</summary>
+    public int? ThrowAfterChunks { get; set; }
+
     public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, CancellationToken ct)
     {
         LastMessages = messages;
@@ -77,10 +80,16 @@ public sealed class FakeLlmAgent : ILlmAgent
         IReadOnlyList<LlmMessage> messages, [EnumeratorCancellation] CancellationToken ct)
     {
         LastMessages = messages;
+        var emitted = 0;
         foreach (var chunk in Chunks)
         {
             await Task.Yield();
             yield return chunk;
+            emitted++;
+            if (ThrowAfterChunks is int n && emitted >= n)
+            {
+                throw new InvalidOperationException("串流中途失敗");
+            }
         }
     }
 }

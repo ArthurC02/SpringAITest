@@ -44,15 +44,13 @@ def test_all_specs_contains_summarize_and_triage_sorted():
     assert names == sorted(names)
 
 
-def test_default_required_role_is_user():
-    """既有工作流（summarize / triage）沒有指定 required_role，應維持預設值 USER。"""
-    assert registry.get("summarize").required_role == "USER"
+def test_unspecified_fields_keep_defaults():
+    """既有工作流（summarize / triage）未指定的欄位應維持預設：
+    required_role=USER、input_model/timeout_seconds=None（寬鬆）。"""
     assert registry.get("triage").required_role == "USER"
 
-
-def test_default_input_model_and_timeout_are_none():
-    """既有工作流沒有指定 input_model / timeout_seconds，應維持寬鬆、None。"""
     spec = registry.get("summarize")
+    assert spec.required_role == "USER"
     assert spec.input_model is None
     assert spec.timeout_seconds is None
 

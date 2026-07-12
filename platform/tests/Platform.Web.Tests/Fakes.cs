@@ -16,6 +16,13 @@ public sealed class FakeLlmAgent : ILlmAgent
         IReadOnlyList<LlmMessage> messages, [EnumeratorCancellation] CancellationToken ct)
     {
         await Task.Yield();
+        // 訊息為「多行」時,吐一塊含換行的 chunk,驗 SSE 把單一 chunk 拆成多個 data: 行。
+        if (messages.Count > 0 && messages[^1].Content == "多行")
+        {
+            yield return "甲\n乙";
+            yield break;
+        }
+
         yield return "你好";
         yield return "世界";
     }
@@ -95,9 +102,17 @@ public sealed class FakeWorkflowService : IWorkflowService
     public Task<WorkflowInvokeResponse> InvokeAsync(
         string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default)
     {
-        if (name == "ghost")
+        // 特殊名稱觸發各類下游/服務例外,驗全域例外→狀態碼映射(對外 404/400/502/500)。
+        switch (name)
         {
-            throw new WorkflowNotFoundException("找不到工作流：" + name);
+            case "ghost":
+                throw new WorkflowNotFoundException("找不到工作流：" + name);
+            case "boom":
+                throw new WorkflowInvocationException("工作流服務呼叫失敗：HTTP 500");
+            case "badinput":
+                throw new WorkflowBadInputException("工作流輸入不符合規範：欄位錯誤");
+            case "explode":
+                throw new InvalidOperationException("非預期錯誤");
         }
 
         var output = new Dictionary<string, JsonElement> { ["ok"] = JsonSerializer.SerializeToElement(true) };

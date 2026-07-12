@@ -78,6 +78,15 @@ public sealed class WorkflowServiceTests
     }
 
     [Fact]
+    public async Task Invoke_TransportError_ThrowsWorkflowInvocation()
+    {
+        // 傳輸層錯誤(連線失敗/逾時)也包成 WorkflowInvocationException(對外 502)。
+        var svc = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒")));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.InvokeAsync("rag_qa", Input(), Ctx));
+    }
+
+    [Fact]
     public async Task List_MapsResponse_AndSendsHeaders()
     {
         var stub = new StubHttpMessageHandler(_ =>
