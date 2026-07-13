@@ -300,6 +300,58 @@
 .btn--danger {
   color: var(--danger);
 }
+.btn--info {
+  background: var(--info);
+  color: var(--on-accent);
+  border-color: transparent;
+  font-weight: 600;
+}
+.btn--info:hover:not(:disabled) {
+  background: var(--info);
+  opacity: 0.9;
+}
+
+/* 內容來源切換：兩顆 .btn 併成 segmented control，aria-pressed 即選中態。 */
+.seg {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg .btn {
+  border: 0;
+  border-radius: 0;
+}
+.seg .btn[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* 檔案匯入：原生 input 隱藏（保留焦點/鍵盤可達），以 .btn 樣式的 label 觸發。 */
+.file-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.file-pick__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.file-pick__input:focus-visible + .btn {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.file-pick .muted {
+  font-size: 13px;
+}
 
 .field {
   display: flex;
@@ -307,7 +359,8 @@
   gap: 4px;
   margin-bottom: 12px;
 }
-.field label {
+.field label,
+#doc-source-label {
   font-size: 13px;
   color: var(--text);
 }
@@ -583,6 +636,13 @@ details > summary {
 .doc-form {
   max-width: 640px;
   margin-bottom: 20px;
+}
+
+/* 新增/送出類按鈕統一靠表單右緣。 */
+.doc-form > button[type='submit'],
+.wf-form > button[type='submit'] {
+  display: block;
+  margin-left: auto;
 }
 
 .chatview {

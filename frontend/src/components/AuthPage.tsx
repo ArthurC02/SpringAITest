@@ -122,7 +122,7 @@ export default function AuthPage({ login, register }: Props) {
     <div className="auth">
       <form className="auth__card" onSubmit={onSubmit} noValidate>
         <h1 className="auth__title">{isRegister ? '註冊' : '登入'}</h1>
-        <p className="muted" style={{ marginTop: 0 }}>Spring AI 資料檢索平台</p>
+        <p className="muted" style={{ marginTop: 0 }}>資料分析平台</p>
 
         <div className="field">
           <label htmlFor="username">帳號</label>

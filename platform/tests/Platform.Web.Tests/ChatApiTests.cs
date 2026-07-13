@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Platform.Web.Tests;
 
@@ -67,6 +68,47 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
         Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
+    }
+
+    // ---- 工作流工具:帶有效 JWT 的聊天掛工具,匿名不掛(工作流需要租戶身分) ----
+
+    [Fact]
+    public async Task Chat_WithBearer_EnablesWorkflowTools_UserRoleGetsFour()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "文件裡有什麼?" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+        Assert.Equal(4, agent.LastTools!.Count);
+        Assert.Contains(agent.LastTools!, t => t.Name == "search_knowledge_base");
+        Assert.DoesNotContain(agent.LastTools!, t => t.Name == "generate_analysis_report");
+    }
+
+    [Fact]
+    public async Task Chat_WithAdminBearer_AlsoGetsAnalysisReportTool()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken(username: "admin-a", role: "ADMIN"));
+
+        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "给我一份報告" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+        Assert.Equal(5, agent.LastTools!.Count);
+        Assert.Contains(agent.LastTools!, t => t.Name == "generate_analysis_report");
+    }
+
+    [Fact]
+    public async Task Chat_Anonymous_HasNoTools()
+    {
+        var client = _factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+        Assert.Null(agent.LastTools);
     }
 
     [Fact]

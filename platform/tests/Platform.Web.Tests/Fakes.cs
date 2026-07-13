@@ -6,15 +6,21 @@ using Platform.Service.Exceptions;
 
 namespace Platform.Web.Tests;
 
-/// <summary>Web 整合測試用的 LLM 代理 fake:阻塞回固定字串、串流吐「你好」「世界」。</summary>
+/// <summary>Web 整合測試用的 LLM 代理 fake:阻塞回固定字串、串流吐「你好」「世界」。記下最後一次工具列供斷言。</summary>
 public sealed class FakeLlmAgent : ILlmAgent
 {
-    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, CancellationToken ct)
-        => Task.FromResult("測試回覆");
+    public IReadOnlyList<LlmTool>? LastTools { get; private set; }
+
+    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, CancellationToken ct)
+    {
+        LastTools = tools;
+        return Task.FromResult("測試回覆");
+    }
 
     public async IAsyncEnumerable<string> StreamAsync(
-        IReadOnlyList<LlmMessage> messages, [EnumeratorCancellation] CancellationToken ct)
+        IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, [EnumeratorCancellation] CancellationToken ct)
     {
+        LastTools = tools;
         await Task.Yield();
         // 訊息為「多行」時,吐一塊含換行的 chunk,驗 SSE 把單一 chunk 拆成多個 data: 行。
         if (messages.Count > 0 && messages[^1].Content == "多行")

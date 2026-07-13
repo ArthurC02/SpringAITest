@@ -14,6 +14,8 @@
   --success-bg: rgba(16, 163, 74, 0.16);
   --warning: #854d0e;
   --warning-bg: rgba(217, 164, 6, 0.16);
+  /* 藍色動作色：白字對 #2563eb 對比 ≈5.2:1（AA）。 */
+  --info: #2563eb;
   --on-accent: #fff;
 
   --sans: system-ui, 'Segoe UI', Roboto, 'Noto Sans TC', sans-serif;
@@ -41,6 +43,8 @@
     --danger: #fca5a5;
     --success: #4ade80;
     --warning: #fbbf24;
+    /* 深色改亮藍，配深色 --on-accent 文字對比 ≈6.6:1（AA）。 */
+    --info: #60a5fa;
     --on-accent: #221833;
   }
 }

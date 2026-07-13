@@ -3,6 +3,7 @@ name: e2e-verifier
 description: 端到端驗證代理:以 docker compose --profile full 啟動全套服務,用 curl 驗證整條鏈路(auth、SSE 聊天、文件 202→ready、rag_qa、AG-UI、角色權限、錯誤格式),完成後收攤且保留 volume。
 model: sonnet
 tools: Read, Glob, Grep, Bash, PowerShell, LSP
+# mcp: none — verifies running services via curl, not code structure
 hooks:
   PreToolUse:
     - matcher: Bash|PowerShell

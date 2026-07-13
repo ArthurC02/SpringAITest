@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useState, type ChangeEvent, type FormEvent } from 'react'
 import type { useDocuments } from '../hooks/useDocuments'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
@@ -29,12 +29,23 @@ export default function DocumentsView({ documents }: Props) {
   const [textErr, setTextErr] = useState('')
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [fileName, setFileName] = useState('')
+  const [mode, setMode] = useState<'file' | 'text'>('file')
+
+  // 切換內容來源時清掉另一模式的內容,避免「送出的到底是哪份」的混淆。
+  function switchMode(m: 'file' | 'text') {
+    if (m === mode) return
+    setMode(m)
+    setText('')
+    setTextErr('')
+    setFileName('')
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     // 空 title/text 不再靜默 return，改顯示緊貼欄位的 inline 錯誤。
     const te = title.trim() ? '' : '請填寫標題'
-    const xe = text.trim() ? '' : '請填寫內容'
+    const xe = text.trim() ? '' : mode === 'file' ? '請選擇檔案' : '請填寫內容'
     setTitleErr(te)
     setTextErr(xe)
     if (te || xe) return
@@ -44,11 +55,26 @@ export default function DocumentsView({ documents }: Props) {
       await create(title.trim(), text.trim())
       setTitle('')
       setText('')
+      setFileName('')
       toast('已送出,處理中', 'success')
     } catch (err) {
       setSubmitError((err as Error).message)
     } finally {
       setBusy(false)
+    }
+  }
+
+  // ponytail: 檔案匯入只做前端讀文字填表單,API 不變;PDF/Word 解析需要後端支援時再加。
+  async function onFile(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    e.target.value = '' // 允許重選同一檔案
+    if (!f) return
+    setText(await f.text())
+    setFileName(f.name)
+    setTextErr('')
+    if (!title.trim()) {
+      setTitle(f.name.replace(/\.(txt|md)$/i, ''))
+      setTitleErr('')
     }
   }
 
@@ -90,26 +116,73 @@ export default function DocumentsView({ documents }: Props) {
           )}
         </div>
         <div className="field">
-          <label htmlFor="doc-text">內容</label>
-          <textarea
-            id="doc-text"
-            className="textarea"
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value)
-              if (textErr && e.target.value.trim()) setTextErr('')
-            }}
-            placeholder="貼上要讓 AI 檢索的文字…"
-            aria-invalid={!!textErr}
-            aria-describedby={textErr ? 'doc-text-err' : undefined}
-          />
-          {textErr && (
-            <span className="field-error" id="doc-text-err" role="alert">
-              {textErr}
-            </span>
-          )}
+          <span id="doc-source-label">內容來源</span>
+          <div className="seg" role="group" aria-labelledby="doc-source-label">
+            <button
+              type="button"
+              className="btn"
+              aria-pressed={mode === 'file'}
+              onClick={() => switchMode('file')}
+            >
+              上傳檔案
+            </button>
+            <button
+              type="button"
+              className="btn"
+              aria-pressed={mode === 'text'}
+              onClick={() => switchMode('text')}
+            >
+              貼上文字
+            </button>
+          </div>
         </div>
-        <button className="btn btn--primary" type="submit" disabled={busy}>
+        {mode === 'file' ? (
+          <div className="field">
+            <label htmlFor="doc-file">檔案（.txt／.md）</label>
+            <div className="file-pick">
+              <input
+                id="doc-file"
+                className="file-pick__input"
+                type="file"
+                accept=".txt,.md"
+                onChange={onFile}
+                aria-invalid={!!textErr}
+                aria-describedby={textErr ? 'doc-text-err' : undefined}
+              />
+              <label htmlFor="doc-file" className="btn">選擇檔案…</label>
+              <span className="muted">
+                {fileName ? `${fileName}（已讀入 ${text.length} 字）` : '尚未選擇檔案'}
+              </span>
+            </div>
+            {textErr && (
+              <span className="field-error" id="doc-text-err" role="alert">
+                {textErr}
+              </span>
+            )}
+          </div>
+        ) : (
+          <div className="field">
+            <label htmlFor="doc-text">內容</label>
+            <textarea
+              id="doc-text"
+              className="textarea"
+              value={text}
+              onChange={(e) => {
+                setText(e.target.value)
+                if (textErr && e.target.value.trim()) setTextErr('')
+              }}
+              placeholder="貼上要讓 AI 檢索的文字…"
+              aria-invalid={!!textErr}
+              aria-describedby={textErr ? 'doc-text-err' : undefined}
+            />
+            {textErr && (
+              <span className="field-error" id="doc-text-err" role="alert">
+                {textErr}
+              </span>
+            )}
+          </div>
+        )}
+        <button className="btn btn--info" type="submit" disabled={busy}>
           {busy ? '送出中…' : '新增文件'}
         </button>
         {submitError && (

@@ -21,5 +21,9 @@ class Settings(BaseSettings):
     # 工作流執行的逾時保護（秒），可由個別工作流的 timeout_seconds 覆蓋。
     workflow_timeout_seconds: int = 120
 
+    # kb_query 工作流的檢索參數。
+    kb_query_top_k: int = 8                     # 檢索計畫預設取回筆數；requires_multi_doc 時節點內會加倍
+    kb_query_max_retrieval_attempts: int = 2    # 檢索嘗試上限（含首次），防止驗證 RETRY 無限重試
+
 
 settings = Settings()

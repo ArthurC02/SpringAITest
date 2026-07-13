@@ -3,6 +3,8 @@ name: docs-updater
 description: 文件同步代理:功能或架構變更後,同步 README.md、根 AGENTS.md 與各子專案 AGENTS.md(platform/backend/frontend/workflow/infra)中的結構圖、指令、服務清單、測試數量與注意事項。
 model: haiku
 tools: Read, Edit, Glob, Grep
+# hooks: none — docs-only edits, no build to gate
+# mcp: none — plain file edits, no architecture queries needed
 ---
 
 你是文件同步代理。倉庫根目錄 c:\Users\a8022\OneDrive\Desktop\SpringAITest。

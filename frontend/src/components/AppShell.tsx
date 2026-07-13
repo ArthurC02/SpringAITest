@@ -42,7 +42,7 @@ export default function AppShell({ session, onLogout }: Props) {
   // 分頁標題隨視圖更新（沿用 NAV 的中文 label，不另建映射）。
   useEffect(() => {
     const label = NAV.find((n) => n.id === view)?.label ?? ''
-    document.title = `${label} — SpringAITest`
+    document.title = `${label} — 資料分析平台`
   }, [view])
 
   // ---- 餵給副駕的畫面上下文(readable) ----
@@ -166,7 +166,7 @@ export default function AppShell({ session, onLogout }: Props) {
     <ToastProvider>
       <div className="shell">
         <aside className="shell__sidebar">
-          <h1 className="shell__brand">Spring AI</h1>
+          <h1 className="shell__brand">資料分析平台</h1>
           <nav aria-label="主選單">
             {items.map((n) => (
               <button
@@ -210,10 +210,24 @@ export default function AppShell({ session, onLogout }: Props) {
         {/* 全站 AI 副駕:浮動側欄(自帶開合鈕),不動既有五視圖版面。defaultOpen=false。 */}
         <CopilotSidebar
           defaultOpen={false}
-          instructions="你是這個 AI 資料平台的操作助理。可讀取畫面上下文,並用提供的動作代使用者建立/刪除文件、查詢知識庫、切換視圖。刪除文件務必先讓使用者確認。"
+          instructions={[
+            '你是「資料分析平台」的操作助理,一律以繁體中文簡潔回答。',
+            '',
+            '平台操作手冊(使用者問「怎麼做」時照此說明步驟):',
+            '- 文件:AI 檢索用的知識庫。新增:文件視圖 → 填標題 → 內容來源選「上傳檔案」(.txt/.md)或「貼上文字」→ 按「新增文件」。送出後狀態「處理中」,背景切塊與向量化完成後轉「就緒」,失敗則顯示「失敗」;清單可刪除文件。',
+            '- 聊天:與 AI 對話(串流回覆),「新對話」會重開上下文。',
+            '- 工作流:選擇具名工作流(如 rag_qa 檢索問答),填輸入後按「執行」。',
+            '- 分析:查看統計摘要。',
+            '- 系統設定:僅管理員(ADMIN)可見可改。',
+            '文件依租戶隔離,使用者只看得到自己租戶的資料。',
+            '',
+            '你可代為執行的動作:createDocument(建文件)、deleteDocument(刪文件,務必先經使用者確認)、askKnowledgeBase(用知識庫回答問題)、switchView(切換視圖)。',
+            '回答「怎麼做 X」時先給步驟,若該事能用動作代勞,主動提議由你執行。沒把握的功能明說不確定,不要編造。',
+          ].join('\n')}
           labels={{
             title: 'AI 副駕',
-            initial: '嗨,我是 AI 副駕。可以幫你建立/刪除文件、查詢知識庫或切換視圖。',
+            initial:
+              '嗨,我是 AI 副駕,懂這個平台的操作,也能直接代勞。試試:\n・「文件功能怎麼用?」\n・「幫我把這段文字存成文件:…」\n・「用知識庫回答:…」\n・「切到分析頁」',
             placeholder: '輸入訊息…',
           }}
         />

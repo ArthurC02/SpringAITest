@@ -1,12 +1,17 @@
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
+using Platform.Web.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Platform.Web.Controllers;
 
-/// <summary>聊天端點,全部公開(免 token)。</summary>
+/// <summary>
+/// 聊天端點,全部公開(免 token)。
+/// 但請求帶有效 JWT 時仍取出使用者情境傳給 service:登入者的聊天自動獲得租戶知識庫檢索工具(RAG),
+/// 匿名請求維持裸聊(檢索需要租戶身分)。
+/// </summary>
 [ApiController]
 [Route("api/chat")]
 [AllowAnonymous]
@@ -20,7 +25,7 @@ public sealed class ChatController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<ChatResponse>> Chat([FromBody] ChatRequest request, CancellationToken ct)
     {
-        var result = await _chat.ChatAsync(request.Message!, request.UserId, request.ConversationId, ct);
+        var result = await _chat.ChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct);
         return Ok(result);
     }
 
@@ -39,7 +44,7 @@ public sealed class ChatController : ControllerBase
         var bodyFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
         bodyFeature?.DisableBuffering();
 
-        await foreach (var chunk in _chat.StreamChatAsync(request.Message!, request.UserId, request.ConversationId, ct))
+        await foreach (var chunk in _chat.StreamChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct))
         {
             foreach (var line in chunk.Split('\n'))
             {
@@ -50,6 +55,10 @@ public sealed class ChatController : ControllerBase
             await Response.Body.FlushAsync(ct);
         }
     }
+
+    /// <summary>AllowAnonymous 下認證中介軟體仍會驗有帶的 Bearer:驗過就有身分,沒帶或無效即匿名。</summary>
+    private UserContext? MaybeUserContext()
+        => User.Identity?.IsAuthenticated == true ? User.ToUserContext() : null;
 
     /// <summary>聊天歷史 — 回 List&lt;ChatResponse&gt;,createdAt DESC(全域,不分租戶/使用者)。</summary>
     [HttpGet("history")]

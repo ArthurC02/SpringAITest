@@ -3,6 +3,7 @@ name: frontend-implementer
 description: 前端實作代理:負責 frontend/(React 19 + Vite + TypeScript SPA)的視圖、hooks 與 API 串接實作,依規格實作並讓 lint 與 build 全綠。
 model: opus
 tools: Read, Write, Edit, Glob, Grep, Bash, PowerShell, LSP, TodoWrite
+# mcp: none — npm lint/build output is the source of truth
 hooks:
   Stop:
     - hooks:

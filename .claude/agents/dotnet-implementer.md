@@ -3,6 +3,7 @@ name: dotnet-implementer
 description: .NET 實作代理:負責 platform/(:8080 閘道,Microsoft Agent Framework + AG-UI)與 backend/(:8002 核心服務,Dapper + appdb)的功能實作與 xUnit 測試,依規格實作並跑到全綠。
 model: opus
 tools: Read, Write, Edit, Glob, Grep, Bash, PowerShell, LSP, TodoWrite
+# mcp: none — dotnet build/test output is the source of truth
 hooks:
   Stop:
     - hooks:

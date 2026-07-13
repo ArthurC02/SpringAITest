@@ -60,26 +60,29 @@ public sealed class FakeConversationStore : IConversationStore
             Items.OrderByDescending(c => c.CreatedAt).ThenByDescending(c => c.Id).ToList());
 }
 
-/// <summary>可控回覆的 LLM 代理 fake;會記下最後一次收到的訊息列以供斷言。</summary>
+/// <summary>可控回覆的 LLM 代理 fake;會記下最後一次收到的訊息列與工具列以供斷言。</summary>
 public sealed class FakeLlmAgent : ILlmAgent
 {
     public string Response { get; set; } = "測試回覆";
     public IReadOnlyList<string> Chunks { get; set; } = new[] { "你好", "世界" };
     public IReadOnlyList<LlmMessage>? LastMessages { get; private set; }
+    public IReadOnlyList<LlmTool>? LastTools { get; private set; }
 
     /// <summary>非 null 時:吐出第 N 塊後擲例外(模擬串流中途失敗),用來驗半截回覆不持久化。</summary>
     public int? ThrowAfterChunks { get; set; }
 
-    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, CancellationToken ct)
+    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, CancellationToken ct)
     {
         LastMessages = messages;
+        LastTools = tools;
         return Task.FromResult(Response);
     }
 
     public async IAsyncEnumerable<string> StreamAsync(
-        IReadOnlyList<LlmMessage> messages, [EnumeratorCancellation] CancellationToken ct)
+        IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, [EnumeratorCancellation] CancellationToken ct)
     {
         LastMessages = messages;
+        LastTools = tools;
         var emitted = 0;
         foreach (var chunk in Chunks)
         {
@@ -91,6 +94,44 @@ public sealed class FakeLlmAgent : ILlmAgent
                 throw new InvalidOperationException("串流中途失敗");
             }
         }
+    }
+}
+
+/// <summary>工作流 fake:可控 answer、可模擬失敗、可覆寫 kb_query 輸出;記下呼叫序供斷言。</summary>
+public sealed class FakeWorkflowService : IWorkflowService
+{
+    public string Answer { get; set; } = "知識庫答案";
+    public Exception? ThrowOnInvoke { get; set; }
+
+    /// <summary>非 null 時:kb_query 回這包輸出(其餘工作流照舊回 answer),用來測棄答兜底。</summary>
+    public Dictionary<string, System.Text.Json.JsonElement>? KbQueryOutput { get; set; }
+
+    public List<(string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)> Invokes { get; } = new();
+    public (string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)? LastInvoke
+        => Invokes.Count > 0 ? Invokes[^1] : null;
+
+    public Task<IReadOnlyList<WorkflowInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<WorkflowInfo>>(Array.Empty<WorkflowInfo>());
+
+    public Task<WorkflowInvokeResponse> InvokeAsync(
+        string name, Dictionary<string, System.Text.Json.JsonElement> input, UserContext ctx, CancellationToken ct = default)
+    {
+        if (ThrowOnInvoke is not null)
+        {
+            throw ThrowOnInvoke;
+        }
+
+        Invokes.Add((name, input, ctx));
+        if (name == "kb_query" && KbQueryOutput is not null)
+        {
+            return Task.FromResult(new WorkflowInvokeResponse(name, KbQueryOutput));
+        }
+
+        var output = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["answer"] = System.Text.Json.JsonSerializer.SerializeToElement(Answer),
+        };
+        return Task.FromResult(new WorkflowInvokeResponse(name, output));
     }
 }
 

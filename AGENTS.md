@@ -14,6 +14,22 @@ Solution-wide guidance only. Each area has its own `AGENTS.md` (+ `CLAUDE.md` im
 
 Start services with `.\scripts\start-infra.ps1` / `./scripts/start-infra.sh` (infra-only, default) or `start-full.*` (everything containerized). Run modes, port conflicts, and container known-issues: [infra/AGENTS.md](infra/AGENTS.md); run-mode matrix: [README.md](README.md).
 
+## Subagent Delegation
+
+**Delegate by default — do not wait to be asked.** Route substantive work to the project subagents in `.claude/agents/` and run independent ones in parallel; the main agent orchestrates (write the spec, delegate, integrate results):
+
+| Agent | Use for |
+|---|---|
+| `dotnet-implementer` | Any implementation in `platform/` or `backend/` (+ xUnit tests) |
+| `frontend-implementer` | Any implementation in `frontend/` |
+| `code-reviewer` | Review after every non-trivial change, before declaring done |
+| `e2e-verifier` | Full-chain verification via docker compose when cross-service behavior changed |
+| `docs-updater` | Sync README/AGENTS files after feature or architecture changes |
+
+Only work with no matching agent (small edits in `workflow/`/`infra/`, quick Q&A) stays in the main loop.
+
+**Every subagent definition must pin all four knobs in its frontmatter:** `model`, `tools`, `hooks`, and MCP access (MCP tools are granted as `mcp__<server>__<tool>` entries inside `tools`). Where one is deliberately absent (e.g. no hooks for a docs-only agent), record that as a YAML comment in the frontmatter — omission must be a decision, never an oversight. New agents follow the same rule.
+
 ## Cross-Service Contracts
 
 These facts span two or more areas — changing one side silently breaks the other, so they live here, not in the area files:

@@ -117,7 +117,7 @@ export default function WorkflowsView() {
           {!selected ? (
             <p className="muted">從左側選一個工作流。</p>
           ) : (
-            <form onSubmit={onRun}>
+            <form className="wf-form" onSubmit={onRun}>
               <div className="field">
                 <label htmlFor="wf-input">
                   {spec ? spec.label : 'input（JSON 物件）'}
