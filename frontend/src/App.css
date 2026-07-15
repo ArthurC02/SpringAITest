@@ -705,6 +705,290 @@ details > summary {
   margin-top: 16px;
 }
 
+/* 系統設定分頁列（沿用 .seg segmented control）。 */
+.config-tabs {
+  margin-bottom: 20px;
+}
+
+/* ── 執行結果：output 摘要 chips + 節點軌跡（trace） ───────────── */
+.wf-result__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.chip--skip {
+  background: var(--code-bg);
+  color: var(--text);
+}
+.chip--warn {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.trace {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.trace__title {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.trace__row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  padding: 0 10px;
+}
+.trace__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  margin: 0;
+}
+.trace__node {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-h);
+}
+.trace__ms {
+  font-size: 12px;
+  color: var(--text);
+  margin-left: auto;
+}
+.trace__code {
+  font-size: 12px;
+  color: var(--danger);
+}
+.trace__detail {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 0 0 10px;
+  font-size: 13px;
+}
+.trace__detail dt {
+  color: var(--text);
+}
+.trace__detail dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* ── Skill 管理（清單 + 三欄編輯器） ───────────────────────── */
+.skills__bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+.skills__ops {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+.skill-editor {
+  margin-top: 20px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.skill-editor__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.skill-editor__title {
+  margin: 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-editor__actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.skill-history {
+  margin-top: 20px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.rev {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.rev__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+.rev__meta {
+  font-size: 12px;
+  color: var(--text);
+}
+.rev__sha {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text);
+}
+.skill-editor__cols {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) 280px;
+  gap: 16px;
+  align-items: start;
+}
+.skill-editor__col {
+  min-width: 0;
+}
+.skill-editor__col-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* 節點目錄（Tab 3 唯讀 + 編輯器左欄共用） */
+.nodecat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 520px;
+  overflow-y: auto;
+}
+.nodecat__item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.nodecat__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.nodecat__name {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-h);
+}
+.nodecat__desc {
+  margin: 6px 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.nodecat__io {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+.nodecat__io dt {
+  color: var(--text);
+  font-family: var(--mono);
+}
+.nodecat__io dd {
+  margin: 0;
+  word-break: break-all;
+}
+.nodes-tab .nodecat {
+  max-height: none;
+}
+
+/* YAML 編輯器：透明 textarea 疊在 highlight.js 上色層之上。
+   兩層的字體度量與內距必須完全一致，否則游標會跟文字錯位。 */
+.yaml {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.yaml__hl,
+.yaml__input {
+  margin: 0;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+  box-sizing: border-box;
+  height: 480px;
+  border: 0;
+}
+.yaml__hl {
+  border-radius: 0;
+}
+.yaml__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: #fff;
+}
+.yaml__input::selection {
+  background: rgba(120, 160, 255, 0.35);
+}
+
+/* 驗證結果清單 */
+.vlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vlist li {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.vlist__err {
+  border-left-color: var(--danger);
+}
+.vlist__warn {
+  border-left-color: var(--warning);
+}
+.vlist__label {
+  margin-top: 4px;
+  color: var(--text-h);
+}
+
+/* 執行清單的來源徽章（code / 內建 / 自訂） */
+.badge--src-code {
+  background: var(--code-bg);
+  color: var(--text);
+}
+.badge--src-builtin {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.badge--src-custom {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+@media (max-width: 1100px) {
+  .skill-editor__cols {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* AI 副駕的刪除確認(renderAndWaitForResponse)氣泡:清楚間距,避免誤按。 */
 .copilot-confirm {
   display: flex;

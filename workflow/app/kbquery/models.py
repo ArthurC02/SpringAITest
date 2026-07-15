@@ -9,7 +9,7 @@
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializeAsAny
 
 
 class IntentType(StrEnum):
@@ -198,6 +198,9 @@ class AuditTrail(BaseModel):
     source_citations: list[Citation] = Field(default_factory=list)
     calculation_trace: CalculationTrace | None = None
     retry_count: int = 0
-    node_trace: list[TraceEntry] = Field(default_factory=list)
+    # SerializeAsAny：script／tool 步驟的 entry 是 TraceEntry 的子類（多帶 script_sha256、
+    # tool、args_keys）。不加這個標記，pydantic 會照宣告型別序列化，稽核紀錄落地成 JSON 時
+    # 就會把 script 的 SHA-256 丟掉（AT3-14 要求 hash 進 audit trail）。
+    node_trace: list[SerializeAsAny[TraceEntry]] = Field(default_factory=list)
     errors: list[dict[str, Any]] = Field(default_factory=list)
     user_feedback: str = ""

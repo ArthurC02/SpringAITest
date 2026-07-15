@@ -12,9 +12,26 @@ from typing import Any
 
 import httpx
 
+from app.engine.node_registry import node
 from app.settings import settings
 
 
+@node(
+    name="retrieve",
+    version="1.0",
+    description="向 backend 的資料檢索 API 查詢與 state[query_key] 最相關的租戶片段",
+    # query_key 是建構期參數（各工作流用不同的鍵），因此 reads 只能列出固定讀取的鍵
+    reads=["tenant_id"],
+    # 真正讀的是 state[query_key]；dynamic_reads 列的是「參數名」，由 compiler 用該步驟
+    # 的 params: 解析成實際 state 鍵再做資料流檢查。少了這條，Skill 跑 retrieve 卻沒有
+    # 前置步驟供給那個 query 鍵時，靜態檢查不會報 dataflow_error，要到執行期才 KeyError。
+    dynamic_reads=["query_key"],
+    writes=["docs"],
+    # query_key / top_k 不在任何 deps 物件上，是呼叫端決定的靜態參數 →
+    # deps 留空，改由 spec.build(deps, query_key=..., top_k=...) 以 kwargs 傳入
+    deps=[],
+    requires_tools=[],
+)
 def make_retrieve_node(query_key: str, top_k: int | None = None):
     """建立一個 LangGraph 節點函式。
 

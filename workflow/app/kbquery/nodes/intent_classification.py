@@ -1,5 +1,6 @@
 """Intent Classification：確定性關鍵詞規則優先，UNKNOWN 才問 LLM 且信心不足不硬猜。"""
 
+from app.engine.node_registry import node
 from app.kbquery.models import IntentOutput, IntentType
 from app.kbquery.ports import StructuredLLMPort
 
@@ -61,6 +62,21 @@ def classify_by_rules(text: str) -> tuple[IntentType, str]:
     return IntentType.UNKNOWN, "unknown"
 
 
+@node(
+    name="intent_classification",
+    version="1.0",
+    description="問題意圖分類：確定性關鍵詞規則優先，UNKNOWN 才問 LLM",
+    reads=["normalized_query"],
+    writes=[
+        "intent_type",
+        "question_type",
+        "requires_table",
+        "requires_calculation",
+        "requires_multi_doc",
+    ],
+    deps=["llm"],
+    requires_tools=[],
+)
 def make_intent_classification_node(llm: StructuredLLMPort | None):
     """建立 intent_classification 節點：規則先行，LLM 僅補位且 confidence >= 0.6 才採用。"""
 

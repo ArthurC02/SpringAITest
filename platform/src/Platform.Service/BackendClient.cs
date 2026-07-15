@@ -77,17 +77,23 @@ public sealed class BackendClient
 
     /// <summary>讀取 backend ApiError body 的 message 欄位(讀不到/解析失敗回空字串)。</summary>
     public async Task<string> ReadErrorMessageAsync(HttpResponseMessage resp, CancellationToken ct)
+        => (await ReadErrorAsync(resp, ct)).Message ?? string.Empty;
+
+    /// <summary>讀取 backend ApiError body(message + fieldErrors);讀不到/解析失敗回全 null 的空殼。</summary>
+    public async Task<BackendErrorBody> ReadErrorAsync(HttpResponseMessage resp, CancellationToken ct)
     {
         try
         {
-            var body = await resp.Content.ReadFromJsonAsync<BackendErrorBody>(JsonOpts, ct);
-            return body?.Message ?? string.Empty;
+            return await resp.Content.ReadFromJsonAsync<BackendErrorBody>(JsonOpts, ct) ?? EmptyError;
         }
         catch
         {
-            return string.Empty;
+            return EmptyError;
         }
     }
 
-    private sealed record BackendErrorBody(string? Message);
+    private static readonly BackendErrorBody EmptyError = new(null, null);
 }
+
+/// <summary>backend 的 ApiError body(只取 platform 會用到的兩個欄位)。</summary>
+public sealed record BackendErrorBody(string? Message, Dictionary<string, string>? FieldErrors);

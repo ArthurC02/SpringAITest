@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
 using Backend.Api.Analysis;
 using Backend.Api.Auth;
+using Backend.Api.Common;
 using Backend.Api.Config;
 using Backend.Api.Conversations;
 using Backend.Api.Files;
 using Backend.Api.Retrieval;
+using Backend.Api.Skills;
 
 namespace Backend.Api.Tests;
 
@@ -155,4 +157,187 @@ public sealed class FakeConfigRepository : IConfigRepository
         _store[key] = item;
         return Task.FromResult(item);
     }
+}
+
+/// <summary>
+/// Skill 儲存庫 fake:行程記憶體,key = (租戶, 名稱) — 忠實模擬 DB 的 UNIQUE (tenant_id, name) 與租戶過濾。
+/// 時間戳用單調遞增的假時鐘(DateTime.UtcNow 在 Windows 只有 ~15ms 解析度,同一測試內兩次寫入可能撞到同值)。
+/// 忠實模擬三件事實:軟刪(enabled=false,列仍在;清單/單筆看不到)、revision 遞增、
+/// skill_revision 永不刪且軟刪後仍查得到。
+/// </summary>
+public sealed class FakeSkillRepository : ISkillRepository
+{
+    private static readonly DateTime Epoch = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    private readonly ConcurrentDictionary<(string Tenant, string Name), Skill> _store = new();
+
+    /// <summary>稽核表:只增不減(軟刪不動它)。</summary>
+    private readonly List<(string Tenant, string Name, SkillRevisionInfo Row)> _revisions = new();
+
+    private long _tick;
+
+    private DateTime Now() => Epoch.AddSeconds(Interlocked.Increment(ref _tick));
+
+    public Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<SkillInfo>>(
+            _store.Where(e => e.Key.Tenant == tenantId).Select(e => e.Value).Where(s => s.Enabled)
+                .OrderBy(s => s.Name, StringComparer.Ordinal)
+                .Select(s => new SkillInfo(
+                    s.Name, s.Description, s.RequiredRole, s.Enabled, s.CurrentRevision, s.CreatedAt, s.UpdatedAt))
+                .ToList());
+
+    public Task<Skill?> GetAsync(string tenantId, string name, CancellationToken ct)
+    {
+        var skill = _store.GetValueOrDefault((tenantId, name));
+        // 軟刪後不可見(WHERE ... AND enabled)。
+        return Task.FromResult(skill is { Enabled: true } ? skill : null);
+    }
+
+    /// <summary>
+    /// 忠實模擬 ON CONFLICT (tenant_id, name) DO UPDATE ... WHERE NOT skill.enabled:
+    /// 同名仍啟用 → 0 列 → null(不寫 revision);同名已軟刪 → 復活並把 revision 接著加。
+    /// </summary>
+    public Task<Skill?> CreateAsync(string tenantId, Skill skill, string createdBy, CancellationToken ct)
+    {
+        var now = Now();
+
+        if (_store.TryGetValue((tenantId, skill.Name), out var existing))
+        {
+            if (existing.Enabled)
+            {
+                return Task.FromResult<Skill?>(null);
+            }
+
+            // 軟刪的名字可以重用:同一列復活,稽核鏈不斷號。
+            var revived = skill with
+            {
+                CurrentRevision = existing.CurrentRevision + 1,
+                Enabled = true,
+                CreatedAt = existing.CreatedAt,
+                UpdatedAt = now,
+            };
+            _store[(tenantId, skill.Name)] = revived;
+            AddRevision(tenantId, revived, createdBy);
+            return Task.FromResult<Skill?>(revived);
+        }
+
+        var stored = skill with { CurrentRevision = 1, Enabled = true, CreatedAt = now, UpdatedAt = now };
+        _store[(tenantId, skill.Name)] = stored;
+        AddRevision(tenantId, stored, createdBy);
+        return Task.FromResult<Skill?>(stored);
+    }
+
+    public Task<Skill?> UpdateAsync(string tenantId, string name, Skill skill, string updatedBy, CancellationToken ct)
+    {
+        // 已軟刪的 skill 不可經 PUT 復活(WHERE ... AND enabled)。
+        if (!_store.TryGetValue((tenantId, name), out var existing) || !existing.Enabled)
+        {
+            return Task.FromResult<Skill?>(null);
+        }
+
+        // name 不可經 PUT 改變(以路由的 name 為準);updated_at 必變動;current_revision +1。
+        var stored = skill with
+        {
+            Name = name,
+            Enabled = true,
+            CurrentRevision = existing.CurrentRevision + 1,
+            CreatedAt = existing.CreatedAt,
+            UpdatedAt = Now(),
+        };
+        _store[(tenantId, name)] = stored;
+        AddRevision(tenantId, stored, updatedBy);
+        return Task.FromResult<Skill?>(stored);
+    }
+
+    /// <summary>軟刪:enabled=false;列與 revision 都留著。已停用/不存在 → false。</summary>
+    public Task<bool> DeleteAsync(string tenantId, string name, CancellationToken ct)
+    {
+        if (!_store.TryGetValue((tenantId, name), out var existing) || !existing.Enabled)
+        {
+            return Task.FromResult(false);
+        }
+
+        _store[(tenantId, name)] = existing with { Enabled = false, UpdatedAt = Now() };
+        return Task.FromResult(true);
+    }
+
+    /// <summary>不過濾 enabled — 軟刪後歷史仍查得到;依 revision 遞減。</summary>
+    public Task<IReadOnlyList<SkillRevisionInfo>> ListRevisionsAsync(
+        string tenantId, string name, CancellationToken ct)
+    {
+        lock (_revisions)
+        {
+            return Task.FromResult<IReadOnlyList<SkillRevisionInfo>>(
+                _revisions.Where(r => r.Tenant == tenantId && r.Name == name)
+                    .Select(r => r.Row).OrderByDescending(r => r.Revision).ToList());
+        }
+    }
+
+    private void AddRevision(string tenantId, Skill stored, string createdBy)
+    {
+        lock (_revisions)
+        {
+            _revisions.Add((tenantId, stored.Name, new SkillRevisionInfo(
+                stored.CurrentRevision, stored.Definition, SkillHash.Sha256(stored.Definition),
+                createdBy, Now())));
+        }
+    }
+}
+
+/// <summary>
+/// Skill 驗證器 fake(取代真的打 workflow :8001 的 POST /skills/validate)。
+/// 記錄每一次呼叫供斷言;definition 含 <see cref="InvalidMarker"/> → valid=false 與兩個引擎錯誤碼,
+/// 其餘一律通過並比照引擎回報 skill 中繼資料(以最陽春的逐行掃描取代真 YAML parser — 這是 fake 的工作)。
+/// 以「內容觸發」而非可變旗標:fake 為 class fixture 共用,旗標會造成測試互相汙染。
+/// </summary>
+public sealed class FakeSkillValidator : ISkillValidator
+{
+    public const string InvalidMarker = "__invalid__";
+
+    /// <summary>引擎不可達(WorkflowSkillValidator 對傳輸失敗/非 200 一律拋 502)。</summary>
+    public const string EngineDownMarker = "__engine_down__";
+
+    public sealed record Call(string Definition, string TenantId, string? UserId, string? Role);
+
+    public List<Call> Calls { get; } = new();
+
+    public Task<SkillValidationResult> ValidateAsync(
+        string definition, string tenantId, string? userId, string? role, CancellationToken ct)
+    {
+        lock (Calls)
+        {
+            Calls.Add(new Call(definition, tenantId, userId, role));
+        }
+
+        if (definition.Contains(EngineDownMarker, StringComparison.Ordinal))
+        {
+            throw new ApiException(502, "Skill 驗證服務呼叫失敗：連線被拒");
+        }
+
+        if (definition.Contains(InvalidMarker, StringComparison.Ordinal))
+        {
+            return Task.FromResult(new SkillValidationResult(
+                false,
+                new[]
+                {
+                    new SkillValidationError("unbounded_loop", "loop 缺少 max_iterations", 7),
+                    new SkillValidationError("unknown_node", "節點不存在：no_such_node", null),
+                },
+                null));
+        }
+
+        var meta = new SkillMetadata(
+            Field(definition, "name") ?? "unnamed",
+            Field(definition, "description") ?? string.Empty,
+            Field(definition, "required_role") ?? "USER");
+        return Task.FromResult(new SkillValidationResult(true, Array.Empty<SkillValidationError>(), meta));
+    }
+
+    /// <summary>取 YAML 頂層 `key: value` 的值(fake 專用的粗略掃描,不處理引號/巢狀)。</summary>
+    private static string? Field(string definition, string key)
+        => definition.Split('\n')
+            .Select(line => line.TrimEnd('\r'))
+            .Where(line => line.StartsWith(key + ":", StringComparison.Ordinal))
+            .Select(line => line[(key.Length + 1)..].Trim())
+            .FirstOrDefault(v => v.Length > 0);
 }

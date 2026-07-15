@@ -42,6 +42,37 @@ public static class DbBootstrap
         CREATE TABLE IF NOT EXISTS app_config (
           key text PRIMARY KEY, value text NOT NULL,
           updated_at timestamptz NOT NULL DEFAULT now());
+        -- 使用者撰寫的 Skill。definition = YAML 原文(權威格式,引擎執行的事實來源);
+        -- name/description/required_role 都寫在 YAML 裡,存檔時由引擎 validate 回報的中繼資料落欄位
+        -- (backend 不解析 YAML — 兩個 parser 就是兩份事實)。
+        -- tenant_id 用 text(= 租戶 code,與 rag_documents 一致;identity header X-Tenant-Id 傳的就是 code)。
+        -- 設計稿第 3 節寫 tenant_id uuid、definition_json jsonb:前者與既有 schema 不符(見 D-N),
+        -- 後者無任何讀取端(正規化 JSON 由引擎持有)→ 兩者皆不採用。
+        CREATE TABLE IF NOT EXISTS skill (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          tenant_id text NOT NULL,
+          name text NOT NULL,
+          description text NOT NULL,
+          definition text NOT NULL DEFAULT '',
+          required_role text NOT NULL DEFAULT 'USER',
+          enabled boolean NOT NULL DEFAULT true,
+          current_revision int NOT NULL DEFAULT 1,
+          created_by text NOT NULL DEFAULT '',
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_skill_tenant_name UNIQUE (tenant_id, name));
+        CREATE INDEX IF NOT EXISTS ix_skill_tenant_enabled ON skill (tenant_id, enabled);
+        -- 稽核與回溯:每次建立/更新產生一筆。軟刪不動此表 — revision 永不刪。
+        CREATE TABLE IF NOT EXISTS skill_revision (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          skill_id uuid NOT NULL REFERENCES skill(id),
+          revision int NOT NULL,
+          definition text NOT NULL,
+          definition_sha256 text NOT NULL,
+          created_by text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_skill_revision UNIQUE (skill_id, revision));
+        CREATE INDEX IF NOT EXISTS ix_skill_revision_skill ON skill_revision (skill_id);
         """;
 
     public static async Task RunAsync(NpgsqlDataSource dataSource, ILogger logger, CancellationToken ct = default)

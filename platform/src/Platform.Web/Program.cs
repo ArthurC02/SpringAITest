@@ -75,6 +75,7 @@ builder.Services.AddScoped<IDocumentService, DocumentService>();
 builder.Services.AddSingleton<IDocumentQueue, RabbitDocumentQueue>();
 builder.Services.AddScoped<IAnalysisService, AnalysisService>();
 builder.Services.AddScoped<IConfigService, ConfigService>();
+builder.Services.AddScoped<ISkillService, SkillService>();
 builder.Services.AddSingleton<IChatMemoryStore, InMemoryChatMemoryStore>();
 builder.Services.AddSingleton<IJwtService, JwtService>();
 

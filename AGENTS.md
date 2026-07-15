@@ -4,13 +4,13 @@ Solution-wide guidance only. Each area has its own `AGENTS.md` (+ `CLAUDE.md` im
 
 ## Monorepo Map
 
-| Area | What it is | Details |
-|---|---|---|
-| `platform/` | ASP.NET Core 10 gateway (`:8080`): JWT verify, SSE chat, Microsoft Agent Framework + AG-UI endpoint, mem0, BackendClient proxy. xUnit 93 tests. | [platform/AGENTS.md](platform/AGENTS.md) |
-| `backend/` | ASP.NET Core 10 core service (`:8002`): feature folders, Dapper + appdb (PostgreSQL/pgvector), RabbitMQ document consumer, issues JWTs. xUnit 54 tests. | [backend/AGENTS.md](backend/AGENTS.md) |
-| `frontend/` | React 19 + Vite + TypeScript SPA (`:5173`): login + five views (Chat, Documents, Workflows, Analysis, Config), CopilotKit sidebar. | [frontend/AGENTS.md](frontend/AGENTS.md) |
-| `workflow/` | Python 3.12+ LangGraph + FastAPI (host `:8001`): named workflows, retrieval via backend HTTP. | [workflow/AGENTS.md](workflow/AGENTS.md) |
-| `infra/` | Docker Compose (LiteLLM, Langfuse, postgres, RabbitMQ, mem0, appdb…), `litellm-config.yaml`. `scripts/` holds startup helpers. | [infra/AGENTS.md](infra/AGENTS.md) |
+| Area        | What it is                                                                                                                                                                | Details                                  |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `platform/` | ASP.NET Core 10 gateway (`:8080`): JWT verify, SSE chat, Microsoft Agent Framework + AG-UI endpoint, mem0, BackendClient proxy, Skill CRUD/invoke proxy. xUnit 175 tests. | [platform/AGENTS.md](platform/AGENTS.md) |
+| `backend/`  | ASP.NET Core 10 core service (`:8002`): feature folders, Dapper + appdb (PostgreSQL/pgvector), RabbitMQ document consumer, issues JWTs, Skills CRUD. xUnit 100 tests.     | [backend/AGENTS.md](backend/AGENTS.md)   |
+| `frontend/` | React 19 + Vite + TypeScript SPA (`:5173`): login + five views (Chat, Documents, Workflows & Skills, Analysis, Config), CopilotKit sidebar.                               | [frontend/AGENTS.md](frontend/AGENTS.md) |
+| `workflow/` | Python 3.12+ LangGraph + FastAPI (host `:8001`): Skill engine layer, named workflows, node registry, retrieval via backend HTTP. pytest 343 tests.                        | [workflow/AGENTS.md](workflow/AGENTS.md) |
+| `infra/`    | Docker Compose (LiteLLM, Langfuse, postgres, RabbitMQ, mem0, appdb…), `litellm-config.yaml`. `scripts/` holds startup helpers.                                            | [infra/AGENTS.md](infra/AGENTS.md)       |
 
 Start services with `.\scripts\start-infra.ps1` / `./scripts/start-infra.sh` (infra-only, default) or `start-full.*` (everything containerized). Run modes, port conflicts, and container known-issues: [infra/AGENTS.md](infra/AGENTS.md); run-mode matrix: [README.md](README.md).
 
@@ -18,13 +18,14 @@ Start services with `.\scripts\start-infra.ps1` / `./scripts/start-infra.sh` (in
 
 **Delegate by default — do not wait to be asked.** Route substantive work to the project subagents in `.claude/agents/` and run independent ones in parallel; the main agent orchestrates (write the spec, delegate, integrate results):
 
-| Agent | Use for |
-|---|---|
-| `dotnet-implementer` | Any implementation in `platform/` or `backend/` (+ xUnit tests) |
-| `frontend-implementer` | Any implementation in `frontend/` |
-| `code-reviewer` | Review after every non-trivial change, before declaring done |
-| `e2e-verifier` | Full-chain verification via docker compose when cross-service behavior changed |
-| `docs-updater` | Sync README/AGENTS files after feature or architecture changes |
+| Agent                  | Use for                                                                             |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| `dotnet-implementer`   | Any implementation in `platform/` or `backend/` (+ xUnit tests)                     |
+| `frontend-implementer` | Any implementation in `frontend/`                                                   |
+| `python-implementer`   | Any implementation in `workflow/` (nodes, engine, skill compiler, sandbox + pytest) |
+| `code-reviewer`        | Review after every non-trivial change, before declaring done                        |
+| `e2e-verifier`         | Full-chain verification via docker compose when cross-service behavior changed      |
+| `docs-updater`         | Sync README/AGENTS files after feature or architecture changes                      |
 
 Only work with no matching agent (small edits in `workflow/`/`infra/`, quick Q&A) stays in the main loop.
 
@@ -42,6 +43,7 @@ These facts span two or more areas — changing one side silently breaks the oth
 - **Async document processing:** platform publishes to RabbitMQ queue `documents.process` and returns `202 {id, title, status:"processing"}`; backend's consumer chunks/embeds/stores and flips status to `ready`/`failed`. The document is absent from `GET /api/documents` until consumed — eventual consistency by design (frontend bridges the gap with optimistic insert + polling). Broker unreachable at publish time → `502`.
 - **Auth:** backend issues JWTs (HS256, shared `JWT_SECRET`), platform validates them. Frontend stores `{token, username, role, tenantCode}` in localStorage and sends `Authorization: Bearer` on all API calls via the unified `apiFetch`; any `401` while logged in clears the session (and chat localStorage keys) and returns to login.
 - **Two memory layers, don't confuse them:** *short-term* = in-memory sliding window in platform (last 20 messages per `conversationId`, resets on restart); *long-term* = mem0 (cross-session facts, best-effort — errors swallowed so chat never breaks). Everything else persists in appdb across restarts.
+- **Skill Engine (P1–P4 nodes, backend/workflow split):** Skills are declarative YAML-defined workflows compiled by workflow's engine (`app/engine/`). Backend stores skill metadata in `skill`/`skill_revision` tables and issues JWTs; platform proxies CRUD (`/api/skills*` → backend) and invocation/validation (`/api/skills/{name}/invoke`, `/api/skills/validate`, `/api/skills/catalog`, `/api/nodes` → workflow). Workflow's engine is the sole source of truth for compilation/execution; it validates syntax at write time (backend calls `POST /api/skills/validate` as a request-time dependency — 502 if workflow is unreachable). Node contracts (`@node` decorators) declare `reads`/`writes`/`deps`/`appends`/`dynamic_reads`/`requires_tools`; tool registry (`@tool` decorators) wires HTTP and local callables. Custom skills merge with built-ins at load time.
 
 ## Coding Style & Naming Conventions
 

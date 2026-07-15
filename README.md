@@ -17,18 +17,21 @@ SpringAITest/
 │   │   ├── Platform.Service     業務層：Agent Framework 聊天、mem0 長期記憶、滑動視窗短期記憶、BackendClient 代理
 │   │   └── Platform.Web         展示層 + 啟動模組：controller、JWT 驗證、SSE 串流、例外處理、設定檔
 │   └── tests/                  xUnit 測試專案（Service.Tests、Web.Tests）
-├── backend/                     核心服務層：ASP.NET Core 10 WebAPI（驗證、檔案、檢索、分析、組態）
+├── backend/                     核心服務層：ASP.NET Core 10 WebAPI（驗證、檔案、檢索、分析、技能、組態）
 │   ├── Backend.sln              .NET 方案檔
 │   ├── Dockerfile              選用：容器模式用到
 │   ├── src/
-│   │   └── Backend.Api/         單一專案（feature folders：Auth、Conversations、Files、Retrieval、Analysis、Config）
-│   └── tests/                  xUnit 測試專案 36 個（Backend.Api.Tests）
-├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、工作流、分析、系統設定五視圖）
+│   │   └── Backend.Api/         單一專案（feature folders：Auth、Conversations、Files、Retrieval、Analysis、Skills、Config）
+│   └── tests/                  xUnit 測試專案 ~100 個（Backend.Api.Tests）
+├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、Workflows & Skills、分析、系統設定五視圖）
 │   ├── vite.config.ts          dev 時把 /api proxy 到 :8080（免 CORS）
 │   ├── Dockerfile / nginx.conf 正式：多階段 build → nginx 靜態檔 + /api 反代（SSE 關緩衝）
 │   └── src/                    api/{http,auth,chat,documents,workflows,analysis,config}.ts、hooks/{useAuth,useChat,useDocuments}.ts、components/{AuthPage,AppShell,ChatView,...}.tsx
-├── workflow/                   工作流：Python + LangGraph + FastAPI（多個具名工作流、向量檢索、分析工作流、權限邊界）
+├── workflow/                   工作流：Python + LangGraph + FastAPI（Skill 引擎、多個具名工作流、向量檢索、分析工作流、權限邊界）
 │   ├── app/
+│   │   ├── engine/             Skill 引擎層（@node、@tool 裝飾器、YAML 編譯器、表達式求值器、沙箱執行器）
+│   │   ├── skills/             Skill 定義（kb_query.yaml 內建範例、custom.py 自訂載入）
+│   │   ├── tools.py            四個初始 tool（retrieve、embed、chunk、rerank）
 │   │   ├── workflows/          每個工作流一個模組 + registry（新增工作流只要新增一個模組檔）
 │   │   ├── nodes/              可重用節點（retrieve：租戶過濾向量檢索）
 │   │   └── main.py             FastAPI 進入點（內部密鑰驗證 + 多租戶 context）
@@ -44,10 +47,10 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 73 個 + 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）;測試用 xUnit 38+ 個、手寫 fake repository（未引入 mocking 套件）。
-- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）。
-- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit ~175 個 + 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit ~100 個、手寫 fake repository（未引入 mocking 套件）。
+- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。Workflows 視圖擴充為三分頁（執行工作流、Skill 管理 [ADMIN]、節點目錄）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）。
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 343 個。
 
 > .NET 後端需 .NET SDK 10 以上才能建置（`dotnet --version` 應顯示 `10.x`）。
 
@@ -71,10 +74,10 @@ OPENAI_API_KEY=sk-你的金鑰
 
 前後端**對稱**——可各自跑主機（開發)或進容器,基礎設施與核心服務一律用 compose 起。前端 `:5173` / 平台閘道 `:8080`,**請擇一,別同時跑**。
 
-| 模式 | 啟動腳本 | infra | 核心服務（:8002）| 平台閘道（:8080）| 前端（:5173）| 適用 |
-|---|---|---|---|---|---|---|
-| **A 開發**（預設) | `start-infra` | 容器 | 容器 | 主機 `dotnet run`（可 debug）| 主機 `npm run dev`（HMR）| 日常開發 |
-| **B 全容器** | `start-full` | 容器 | 容器 | 容器 | 容器（nginx）| 展示 / 部署 |
+| 模式              | 啟動腳本      | infra | 核心服務（:8002） | 平台閘道（:8080）             | 前端（:5173）             | 適用        |
+| ----------------- | ------------- | ----- | ----------------- | ----------------------------- | ------------------------- | ----------- |
+| **A 開發**（預設) | `start-infra` | 容器  | 容器              | 主機 `dotnet run`（可 debug） | 主機 `npm run dev`（HMR） | 日常開發    |
+| **B 全容器**      | `start-full`  | 容器  | 容器              | 容器                          | 容器（nginx）             | 展示 / 部署 |
 
 ### 快速啟動腳本（跨平台）
 
@@ -116,17 +119,17 @@ npm install && npm run dev                # :5173（Vite proxy /api → :8080）
 
 ### 各服務位置
 
-| 服務 | 位置 |
-|---|---|
-| 前端聊天 UI | http://localhost:5173 |
-| 平台閘道 API | http://localhost:8080 |
-| 核心服務 API | http://localhost:8002 |
-| Langfuse UI | http://localhost:3000 （帳號見 `.env` 的 `LANGFUSE_INIT_USER_*`）|
-| LiteLLM | http://localhost:4000 |
-| RabbitMQ 管理 UI | http://localhost:15672 （帳號 `app`,密碼 env `RABBITMQ_PASSWORD` 預設 `app-dev-password`）|
-| mem0（長期記憶）| http://localhost:8000 （API 文件 `/docs`）|
-| 工作流服務（LangGraph）| http://localhost:8001 （主機埠 8001 → 容器 8000,避開 mem0）|
-| 應用資料庫（pgvector）| localhost:5433 （使用者 `postgres`,密碼 `postgres`,資料庫 `springaitest`）|
+| 服務                    | 位置                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------------------ |
+| 前端聊天 UI             | http://localhost:5173                                                                      |
+| 平台閘道 API            | http://localhost:8080                                                                      |
+| 核心服務 API            | http://localhost:8002                                                                      |
+| Langfuse UI             | http://localhost:3000 （帳號見 `.env` 的 `LANGFUSE_INIT_USER_*`）                          |
+| LiteLLM                 | http://localhost:4000                                                                      |
+| RabbitMQ 管理 UI        | http://localhost:15672 （帳號 `app`,密碼 env `RABBITMQ_PASSWORD` 預設 `app-dev-password`） |
+| mem0（長期記憶）        | http://localhost:8000 （API 文件 `/docs`）                                                 |
+| 工作流服務（LangGraph） | http://localhost:8001 （主機埠 8001 → 容器 8000,避開 mem0）                                |
+| 應用資料庫（pgvector）  | localhost:5433 （使用者 `postgres`,密碼 `postgres`,資料庫 `springaitest`）                 |
 
 打幾次 `/api/chat` 後,到 Langfuse UI 即可看到 trace、token 與成本。
 
@@ -156,12 +159,15 @@ curl http://localhost:8080/api/chat/history
 
 ```
 platform/Platform.sln                     前置閘道層
-├── Platform.Service                      業務層：Agent Framework、mem0 長期記憶、滑動視窗短期記憶、BackendClient 代理
-└── Platform.Web                          展示層 + 啟動：controller、JWT 驗證、SSE 串流、例外處理
+├── Platform.Service                      業務層：Agent Framework、mem0 長期記憶、滑動視窗短期記憶、SkillService、BackendClient 代理
+└── Platform.Web                          展示層 + 啟動：ChatController、SkillController、NodeController、JWT 驗證、SSE 串流、例外處理
 
 backend/Backend.sln                       核心服務層
-└── Backend.Api/                          單一項目：Auth、Conversations、Files、Retrieval、Analysis、Config（feature folders）
-                                         Dapper 2.x + Npgsql 直連 appdb postgresql
+└── Backend.Api/                          單一項目：Auth、Conversations、Files、Retrieval、Analysis、Skills、Config（feature folders）
+                                         Dapper 2.x + Npgsql 直連 appdb postgresql（含 skill / skill_revision 表）
+
+workflow                                  Skill 引擎層
+└── app/engine/                           @node、@tool 裝飾器、YAML 編譯器、沙箱執行器
 ```
 
 依賴方向：`platform` 無本地資料層，聊天歷史、文件、組態全經 BackendClient 代理呼叫 `backend` 的 API；`backend` 獨立執行核心業務邏輯與資料持久化。**文件處理非同步化**：`platform` 收到文件上傳後發佈訊息到 RabbitMQ 佇列 `documents.process` 並立即回 `202 Accepted`，由 `backend` 的消費者負責切塊、嵌入與向量存儲。
@@ -170,11 +176,11 @@ backend/Backend.sln                       核心服務層
 
 ### 各模組測試
 
-| 層級 | 模組 | 測試套 | 方式 |
-|---|---|---|---|
-| 平台 | Service | `ChatServiceTests` | xUnit + 手寫 fake HttpMessageHandler（BackendClient 代理行為）|
-| 平台 | Web | `ChatControllerTests` | xUnit + WebApplicationFactory（整合測試）|
-| 核心 | Backend.Api | 36+ 個 | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking 等單元測試 |
+| 層級 | 模組        | 測試套                | 方式                                                                                          |
+| ---- | ----------- | --------------------- | --------------------------------------------------------------------------------------------- |
+| 平台 | Service     | `ChatServiceTests`    | xUnit + 手寫 fake HttpMessageHandler（BackendClient 代理行為）                                |
+| 平台 | Web         | `ChatControllerTests` | xUnit + WebApplicationFactory（整合測試）                                                     |
+| 核心 | Backend.Api | 36+ 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking 等單元測試 |
 
 ## 可觀測性架構（LiteLLM 閘道 + Langfuse）
 
@@ -231,11 +237,11 @@ mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量�
 
 ### 種子帳號與租戶
 
-| 帳號 | 密碼 | 角色 | 租戶代碼 |
-|---|---|---|---|
-| admin-a | password123 | ADMIN | demo-a |
-| user-a | password123 | USER | demo-a |
-| user-b | password123 | USER | demo-b |
+| 帳號    | 密碼        | 角色  | 租戶代碼 |
+| ------- | ----------- | ----- | -------- |
+| admin-a | password123 | ADMIN | demo-a   |
+| user-a  | password123 | USER  | demo-a   |
+| user-b  | password123 | USER  | demo-b   |
 
 種子租戶的邀請碼：`demo-a` → `demo-a-invite`、`demo-b` → `demo-b-invite`。
 
@@ -268,13 +274,13 @@ curl -H "Authorization: Bearer eyJhbGc..." http://localhost:8080/api/documents
 
 ### 受保護的 API
 
-| 端點 | 方法 | 權限 | 說明 |
-|---|---|---|---|
-| `/api/documents` | POST | USER | 新增文件（切塊 + 嵌入,存入租戶向量庫） |
-| `/api/documents` | GET | USER | 列出文件（租戶隔離） |
-| `/api/workflows` | GET | USER | 列出工作流（含 `required_role`） |
-| `/api/workflows/rag_qa` | POST | USER | RAG 問答（使用租戶向量庫,附引用） |
-| `/api/workflows/analyze_report` | POST | ADMIN | 生成分析報告（權限受限） |
+| 端點                            | 方法 | 權限  | 說明                                   |
+| ------------------------------- | ---- | ----- | -------------------------------------- |
+| `/api/documents`                | POST | USER  | 新增文件（切塊 + 嵌入,存入租戶向量庫） |
+| `/api/documents`                | GET  | USER  | 列出文件（租戶隔離）                   |
+| `/api/workflows`                | GET  | USER  | 列出工作流（含 `required_role`）       |
+| `/api/workflows/rag_qa`         | POST | USER  | RAG 問答（使用租戶向量庫,附引用）      |
+| `/api/workflows/analyze_report` | POST | ADMIN | 生成分析報告（權限受限）               |
 
 ```bash
 # 新增文件（非同步）—— 立即回 202，含文件 id、status 為 "processing"
@@ -302,18 +308,38 @@ curl -X POST http://localhost:8080/api/workflows/analyze_report \
   -d '{"input":{"topic":"市場分析"}}'
 ```
 
-## 工作流（LangGraph）
+## 工作流與技能（LangGraph + Skill 引擎）
 
-| 工作流 | 說明 | 權限 |
-|---|---|---|
-| `summarize` | 文本摘要 | USER |
-| `triage` | 問題分流分類 | USER |
-| `rag_qa` | RAG 問答（向量檢索 + 生成） | USER |
-| `analyze_report` | 生成分析報告 | ADMIN |
+### 內建工作流
+
+| 工作流           | 說明                        | 權限  |
+| ---------------- | --------------------------- | ----- |
+| `summarize`      | 文本摘要                    | USER  |
+| `triage`         | 問題分流分類                | USER  |
+| `rag_qa`         | RAG 問答（向量檢索 + 生成） | USER  |
+| `analyze_report` | 生成分析報告                | ADMIN |
 
 > 上述端點都在 `/api/workflows/**` 之下，平台端一律要求 JWT 認證（見「認證與多租戶」），
 > 需帶 `Authorization: Bearer <token>`；`summarize`、`triage`、`rag_qa` 任一登入使用者（USER）
 > 皆可呼叫，`analyze_report` 則限 ADMIN。
+
+### 技能（Skill）管理與執行
+
+前端「Workflows & Skills」視圖新增三個分頁：
+
+1. **執行工作流** — 執行上述內建工作流或自訂技能（需登入）。
+2. **技能管理** [ADMIN] — CRUD 自訂技能；上傳 YAML 定義；自動語法驗證（後端呼叫工作流引擎）。
+3. **節點目錄** — 瀏覽所有註冊節點的輸入/輸出契約與工具庫。
+
+新增 API 端點（皆需 JWT 認證 + `X-Internal-Token`）：
+
+- `GET /api/skills` — 列出所有技能（內建 + 自訂）。
+- `POST /api/skills` — 新增技能（含上傳 YAML）。
+- `PUT /api/skills/{name}` — 更新技能（驗證後存新 revision）。
+- `DELETE /api/skills/{name}` — 軟刪除技能（disabled=false）。
+- `POST /api/skills/{name}/invoke` — 執行技能，回傳 `{status, output, trace}`。
+- `POST /api/skills/validate` — 驗證 YAML 語法（寫入前檢查）。
+- `GET /api/nodes` — 節點目錄（契約清單）。
 
 ```bash
 # 觸發 summarize（摘要）

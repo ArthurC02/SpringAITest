@@ -27,9 +27,18 @@ public sealed class GlobalExceptionHandler : IExceptionHandler
             _logger.LogError(exception, "未預期的伺服器錯誤：{訊息}", exception.Message);
         }
 
-        await ApiErrorWriter.WriteAsync(httpContext.Response, status, message, cancellationToken);
+        await ApiErrorWriter.WriteAsync(
+            httpContext.Response, status, message, cancellationToken, FieldErrorsOf(exception));
         return true;
     }
+
+    /// <summary>帶得動欄位級錯誤的兩種例外:代理 backend 400(欄位驗證)與 422(引擎的 skill 錯誤碼);其餘一律空 map。</summary>
+    private static IReadOnlyDictionary<string, string>? FieldErrorsOf(Exception ex) => ex switch
+    {
+        WorkflowBadInputException bad => bad.FieldErrors,
+        SkillValidationFailedException invalid => invalid.FieldErrors,
+        _ => null,
+    };
 
     private static (int Status, string Message) Map(Exception ex) => ex switch
     {
@@ -40,7 +49,9 @@ public sealed class GlobalExceptionHandler : IExceptionHandler
         WorkflowNotFoundException => (StatusCodes.Status404NotFound, ex.Message),
         WorkflowForbiddenException => (StatusCodes.Status403Forbidden, ex.Message),
         WorkflowBadInputException => (StatusCodes.Status400BadRequest, ex.Message),
+        SkillValidationFailedException => (StatusCodes.Status422UnprocessableEntity, ex.Message),
         DocumentNotFoundException => (StatusCodes.Status404NotFound, ex.Message),
+        DownstreamConflictException => (StatusCodes.Status409Conflict, ex.Message),
         WorkflowInvocationException => (StatusCodes.Status502BadGateway, ex.Message),
         _ => (StatusCodes.Status500InternalServerError, ex.Message),
     };

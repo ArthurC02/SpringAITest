@@ -4,9 +4,9 @@ Area-specific guidance. Cross-service contracts (SSE formats, ApiError shape, sn
 
 ## Layout
 
-- `src/api/` — `http.ts` (`apiFetch`: Bearer injection, ApiError parsing, global 401 logout), `auth.ts`, `chat.ts` (SSE streaming), `documents.ts`, `workflows.ts`, `analysis.ts`, `config.ts`.
-- `src/hooks/` — `useAuth`, `useChat`, `useDocuments`.
-- `src/components/` — `AuthPage`, `AppShell` (sidebar + view switching + CopilotKit readables/actions), `ChatView`, `DocumentsView`, `WorkflowsView`, `AnalysisView`, `ConfigView`.
+- `src/api/` — `http.ts` (`apiFetch`: Bearer injection, ApiError parsing, global 401 logout), `auth.ts`, `chat.ts` (SSE streaming), `documents.ts`, `workflows.ts` (execute + skill invoke), `skills.ts` (CRUD + validate), `nodes.ts` (catalog), `analysis.ts`, `config.ts`.
+- `src/hooks/` — `useAuth`, `useChat`, `useDocuments`, `useSkills`.
+- `src/components/` — `AuthPage`, `AppShell` (sidebar + view switching + CopilotKit readables/actions), `ChatView`, `DocumentsView`, `WorkflowsAndSkillsView` (three tabs: Execute Workflow, Skill Manager [ADMIN], Node Catalog), `AnalysisView`, `ConfigView`; skill-specific: `SkillsTab` (list/create/edit YAML), `YamlEditor` (syntax highlighting), `TraceView` (invoke results), `NodeCatalog` (browse node contracts).
 - Shared types in `src/types.ts`. Dev proxy in `vite.config.ts`; container proxy in `nginx.conf` (SSE paths need `proxy_buffering off`).
 
 ## Commands (run from `frontend/`)

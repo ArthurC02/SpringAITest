@@ -2,12 +2,32 @@
 
 import logging
 
+from app.engine.node_registry import node
 from app.kbquery.models import RetrievalPlan, SourceResult
 from app.kbquery.ports import RerankerPort, SearchPort
 
 logger = logging.getLogger(__name__)
 
 
+@node(
+    name="source_retrieval_rerank",
+    version="1.0",
+    description="依計畫對各檢索來源發查、去重後 rerank 取前 top_k",
+    reads=[
+        "retrieval_plan",
+        "normalized_query",
+        "original_query",
+        "query_variants",
+        "filters",
+        "tenant_id",
+        "target_period",
+        "metric_terms",
+        "excluded_terms",
+    ],
+    writes=["ranked_sources", "candidate_documents", "candidate_pages"],
+    deps=["searchers", "reranker"],
+    requires_tools=[],
+)
 def make_source_retrieval_rerank_node(
     searchers: dict[str, SearchPort], reranker: RerankerPort
 ):

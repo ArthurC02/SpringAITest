@@ -4,7 +4,7 @@ Area-specific guidance. Cross-service contracts (X-Internal-Token + identity hea
 
 ## Layout
 
-Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM. Tests in `tests/Backend.Api.Tests` (xUnit, 57 tests, hand-written fakes, in-memory Dapper fixtures).
+Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config, Skills — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM. Tests in `tests/Backend.Api.Tests` (xUnit, ~108 tests, hand-written fakes, in-memory Dapper fixtures).
 
 ## Commands (run from `backend/`)
 
@@ -18,13 +18,16 @@ Requires appdb running (default `DB_CONNECTION_STRING`: `Host=localhost;Port=543
 
 ## Gotchas
 
-- **appdb owns ALL persistent data** (users, tenants, conversations, documents, vectors, config) — restarts do **not** clear history. Only platform's in-memory short-term window resets.
+- **appdb owns ALL persistent data** (users, tenants, conversations, documents, vectors, config, skills) — restarts do **not** clear history. Only platform's in-memory short-term window resets.
+- **Skills storage:** `skill` table (tenant_id, name, definition YAML, current_revision, `enabled`=soft-delete flag) + `skill_revision` audit table (one row per write, `definition_sha256`, never deleted) with atomic data-modifying CTEs on write. `DELETE` sets `enabled=false` (revisions retained for audit); re-`POST`ing a soft-deleted name revives it with a bumped revision (not a 409). Custom skills are user-managed; built-ins live in workflow.
+- **Skill validation at write time:** `PUT /api/skills/{name}` calls `POST /api/skills/validate` on workflow (`:8001`) as a request-time dependency — if workflow is unreachable, return `502`. This is deliberate: the engine is the only source of truth for syntax.
+- **Skill export:** `GET /api/skills/{name}/export` returns a zip (`application/zip`, `filename="<name>.zip"`) in Claude Skill format — `SKILL.md` (frontmatter `name`+`description`; body points at the definition) + `skill.yaml` (the `definition` column byte-for-byte, no re-serialization). `SkillExporter` is pure string assembly + `System.IO.Compression`, no code execution; role is USER (same data as `GET /api/skills/{name}`, just zipped), tenant-filtered so cross-tenant is 404.
 - **Document consumer** (`DocumentProcessor` BackgroundService): consumes RabbitMQ queue `documents.process` with prefetch 1 + manual ack; redelivery is idempotent (ON CONFLICT insert + skip-if-ready); chunk → embed → pgvector, then flips document status to `ready`/`failed`. Startup logs a retrying `BrokerUnreachableException` until the broker is up — expected noise, backed-off retry by design.
 - **Embeddings:** `EMBEDDINGS_PROVIDER` is `fake` (deterministic, default — tests and E2E rely on it) or `openai` (routed through LiteLLM, needs `text-embedding-3-small` in `litellm-config.yaml`).
 - **Seed data** (from `DbBootstrap`): tenants `demo-a`/`demo-b` (invite codes `demo-a-invite`/`demo-b-invite`); users `admin-a` (ADMIN, demo-a), `user-a` (USER, demo-a), `user-b` (USER, demo-b); password `password123`.
 - **Auth feature issues the JWTs** (HS256) that platform validates — `JWT_SECRET` must match platform's.
 - **Never expose to LAN:** the service binds `127.0.0.1` only and *trusts* the `X-Tenant-Id`/`X-User-Id`/`X-User-Role` headers after `X-Internal-Token` passes. Its security model assumes only platform and workflow can reach it.
-- **Env:** `DB_CONNECTION_STRING`, `INTERNAL_API_TOKEN` (default `internal-dev-token`), `JWT_SECRET`, `EMBEDDINGS_PROVIDER`, `RABBITMQ_URL`.
+- **Env:** `DB_CONNECTION_STRING`, `INTERNAL_API_TOKEN` (default `internal-dev-token`), `JWT_SECRET`, `EMBEDDINGS_PROVIDER`, `RABBITMQ_URL`, `WORKFLOW_BASE_URL` (e.g. `http://localhost:8001`, used for skill validation at write time).
 
 ## Testing
 

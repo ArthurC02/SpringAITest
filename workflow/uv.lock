@@ -1059,6 +1059,7 @@ dependencies = [
     { name = "langfuse" },
     { name = "langgraph" },
     { name = "pydantic-settings" },
+    { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1076,6 +1077,7 @@ requires-dist = [
     { name = "langfuse", specifier = ">=3.0,<4.0" },
     { name = "langgraph", specifier = ">=1.0,<2.0" },
     { name = "pydantic-settings", specifier = ">=2.6,<3.0" },
+    { name = "pyyaml", specifier = ">=6.0,<7.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1.0" },
 ]
 

@@ -48,6 +48,9 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IConfigService>();
             services.AddScoped<IConfigService, FakeConfigService>();
+
+            services.RemoveAll<ISkillService>();
+            services.AddScoped<ISkillService, FakeSkillService>();
         });
     }
 

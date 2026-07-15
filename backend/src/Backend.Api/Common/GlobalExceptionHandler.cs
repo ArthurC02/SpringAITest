@@ -27,7 +27,9 @@ public sealed class GlobalExceptionHandler : IExceptionHandler
             _logger.LogError(exception, "未預期的伺服器錯誤：{訊息}", exception.Message);
         }
 
-        await ApiErrorWriter.WriteAsync(httpContext.Response, status, message, cancellationToken);
+        // 只有 ApiException 可能帶欄位級錯誤(如 Skill 存檔 422 的引擎錯誤碼);其餘一律空 map。
+        await ApiErrorWriter.WriteAsync(
+            httpContext.Response, status, message, cancellationToken, (exception as ApiException)?.FieldErrors);
         return true;
     }
 }

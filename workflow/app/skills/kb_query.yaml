@@ -1,0 +1,40 @@
+name: kb_query
+description: 可驗證可稽核的知識查詢：固定節點＋證據驗證閘門，未通過不輸出實質答案
+required_role: USER
+
+# 對齊 workflows/kb_query.py 的 KbQueryInput：query 必填非空，其餘皆選填。
+input_schema:
+  query: {type: str, required: true, min_length: 1}
+  user_role: {type: str}
+  session_context: {type: dict}
+  system_entrypoint: {type: str}
+  user_feedback: {type: str}
+
+# 節點一律鎖版：日後有人註冊 data_locator@2.0，本 Skill 不會靜默改用新版。
+flow:
+  - node: query_intake@1.0
+  - node: query_rewrite@1.0
+  - node: intent_classification@1.0
+  - node: context_resolver@1.0
+
+  # 檢索→驗證的重試迴圈（等價於手寫圖 evidence_verification 的條件邊回 retrieval_planner）。
+  # until 的三個離開條件對照 kbquery/routing.py::route_after_verification：
+  #   1. fatal_error 已設定 → 直接走安全 ABSTAIN + 稽核路徑（不再重試）
+  #   2. 驗證結果不是 RETRY（PASS / FAIL）→ 收斂
+  #   3. 檢索次數已達 max_retrieval_attempts（retrieval_planner 每輪 +1，intake 時定上限）
+  # max_iterations 是引擎的治理硬上限（規格 §3.2 的 1~10），與 max_retrieval_attempts
+  # 這個可由部署設定調整的業務上限並存：業務上限先到就先收斂，引擎上限保證絕不失控。
+  - loop:
+      max_iterations: 10
+      until: >-
+        state.fatal_error != None
+        or state.verification_result != 'RETRY'
+        or state.retrieval_attempt >= state.max_retrieval_attempts
+      body:
+        - node: retrieval_planner@1.0
+        - node: source_retrieval_rerank@1.0
+        - node: data_locator@1.0
+        - node: evidence_verification@1.0
+
+  - node: answer_composer@1.0
+  # audit_feedback 不寫在這裡：引擎強制附加於每條終止路徑（規格 §6.3-3）

@@ -1,5 +1,6 @@
 """Answer Composer：PASS 用確定性模板組稿（不呼叫 LLM，輸出才可稽核），其餘一律 ABSTAIN。"""
 
+from app.engine.node_registry import node
 from app.kbquery.models import AnswerMode, Citation, VerificationResult
 
 _ABSTAIN_HEADLINE = "【無法提供答案】現有證據不足以可靠回答此問題。"
@@ -94,6 +95,36 @@ def _compose_answer(state: dict) -> dict:
     }
 
 
+@node(
+    name="answer_composer",
+    version="1.0",
+    description="PASS 才用確定性模板組稿（不呼叫 LLM），其餘一律 ABSTAIN",
+    reads=[
+        "fatal_error",
+        "errors",
+        "verification_result",
+        "verified_evidence",
+        "failure_codes",
+        "unresolved_context",
+        "context_warnings",
+        "target_period",
+        "canonical_metric",
+        "version_policy",
+        "candidate_answer",
+        "calculation_trace",
+        "answer_format_policy",
+    ],
+    writes=[
+        "answer_mode",
+        "final_answer",
+        "source_citations",
+        "assumption_note",
+        "answer_format_policy",
+    ],
+    deps=[],
+    requires_tools=[],
+    run_on_fatal=True,  # fatal 後仍需組出安全 ABSTAIN 回覆
+)
 def make_answer_composer_node():
     """建立 answer_composer 節點：不檢索、不呼叫 LLM，只依驗證結果組稿。"""
 

@@ -1,9 +1,9 @@
 ---
 name: e2e-verifier
-description: 端到端驗證代理:以 docker compose --profile full 啟動全套服務,用 curl 驗證整條鏈路(auth、SSE 聊天、文件 202→ready、rag_qa、AG-UI、角色權限、錯誤格式),完成後收攤且保留 volume。
+description: 端到端驗證代理:以 docker compose --profile full 啟動全套服務,用 curl 驗證整條鏈路(auth、SSE 聊天、文件 202→ready、rag_qa、AG-UI、角色權限、錯誤格式),跨服務 UI 變更時再用 Playwright MCP 開真瀏覽器驗前端(login、五個 view、CopilotKit sidebar、瀏覽器內 SSE 逐字流),完成後收攤且保留 volume。
 model: sonnet
-tools: Read, Glob, Grep, Bash, PowerShell, LSP
-# mcp: none — verifies running services via curl, not code structure
+tools: Read, Glob, Grep, Bash, PowerShell, LSP, mcp__playwright__browser_navigate, mcp__playwright__browser_snapshot, mcp__playwright__browser_click, mcp__playwright__browser_type, mcp__playwright__browser_fill_form, mcp__playwright__browser_press_key, mcp__playwright__browser_wait_for, mcp__playwright__browser_console_messages, mcp__playwright__browser_network_requests, mcp__playwright__browser_tabs, mcp__playwright__browser_evaluate, mcp__playwright__browser_take_screenshot, mcp__playwright__browser_select_option, mcp__playwright__browser_close
+# mcp: playwright — curl 驗鏈路;真瀏覽器行為(React 渲染、SSE 逐字流、CopilotKit)curl 測不到,靠 Playwright MCP 補
 hooks:
   PreToolUse:
     - matcher: Bash|PowerShell
@@ -24,4 +24,9 @@ hooks:
 - 啟動期已知雜訊,不算 FAIL:backend 的 BrokerUnreachableException 會退避重試;litellm 未就緒時第一發聊天/AG-UI 可能 RUN_ERROR,重試即可;mem0 容器已知會啟動失敗但聊天不受影響(best-effort 吞錯)。
 - 起 full 模式前先確認 :8080 沒被殘留程序占走(`Get-NetTCPConnection -LocalPort 8080`)。
 - Git Bash 的 curl 傳中文 body 會亂碼 — 先把 JSON 寫成 UTF-8 檔案再 `--data-binary @file`。
-- 回報格式:逐項列出「測項 / 指令 / 預期 / 實際 / PASS-FAIL」,最後給總結與 volume 清點結果。
+- **瀏覽器驗證(Playwright MCP)**:curl 只驗 API 鏈路,測不到 React 渲染、瀏覽器內 SSE 逐字流、CopilotKit sidebar 這些前端行為。**只有當變更牽涉前端 UI 或跨服務 UI 行為時才開瀏覽器**(純後端/workflow 變更維持 curl,別多花啟動成本)。full 模式的前端在 :8080(nginx 代理),不是 :5173:
+  - 流程:`browser_navigate` 到 `http://localhost:8080` → `browser_snapshot` 讀 accessibility tree(非截圖,免 vision)→ 用 admin-a / password123 登入 → 逐一走要驗的 view。
+  - SSE 逐字流:送出聊天後用 `browser_wait_for` 等文字出現,`browser_network_requests` 確認 `/api/chat/stream` 有回應;AG-UI 走 CopilotKit sidebar,同樣以 snapshot + wait_for 斷言訊息出現。
+  - `browser_console_messages` 抓前端 error(SSE 解析、CORS、401 清 session 這類),有 error 就記進回報。
+  - 收攤前 `browser_close`。截圖(`browser_take_screenshot`)只在需要人工佐證時用。
+- 回報格式:逐項列出「測項 / 指令或瀏覽器操作 / 預期 / 實際 / PASS-FAIL」,最後給總結與 volume 清點結果。

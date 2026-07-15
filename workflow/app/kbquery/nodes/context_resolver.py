@@ -1,5 +1,6 @@
 """Context Resolver：解析期間、口徑版本與 canonical 指標；資料不足只進 unresolved，不猜測。"""
 
+from app.engine.node_registry import node
 from app.kbquery import textutils
 from app.kbquery.models import IntentType
 from app.kbquery.ports import GlossaryPort
@@ -31,6 +32,23 @@ _NEEDS_PERIOD_AND_METRIC = {
 }
 
 
+@node(
+    name="context_resolver",
+    version="1.0",
+    description="解析期間、口徑版本與 canonical 指標；資料不足只進 unresolved，不猜測",
+    reads=["normalized_query", "intent_type"],
+    writes=[
+        "target_period",
+        "version_policy",
+        "canonical_metric",
+        "metric_terms",
+        "excluded_terms",
+        "unresolved_context",
+        "context_warnings",
+    ],
+    deps=["glossary"],
+    requires_tools=[],
+)
 def make_context_resolver_node(glossary: GlossaryPort):
     """建立 context_resolver 節點：全部確定性解析，不呼叫 LLM。"""
 

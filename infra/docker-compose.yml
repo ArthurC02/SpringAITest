@@ -50,12 +50,10 @@ services:
   # 官方 mem0/mem0-api-server（:8000）。LLM 與 embedder 都改走現有 LiteLLM 閘道（OpenAI 相容協定），
   # 向量儲存用它預設的 pgvector —— 即上面那台 postgres（已換成 pgvector 映像）。
   mem0:
-    # 用薄封裝映像（見 mem0.Dockerfile）：官方 image 缺 libpq 會 crash，這層補上帶 libpq 的 psycopg。
-    # 官方 image 目前只發布 linux/arm64（amd64 已從 manifest 消失），amd64 主機釘 platform 走 QEMU 模擬。
-    platform: linux/arm64
-    build:
-      context: .
-      dockerfile: mem0.Dockerfile
+    # 直接用本機預建的薄封裝映像（見 mem0.Dockerfile：官方 image 缺 libpq 會 crash，該封裝補上 psycopg）。
+    # 刻意用 image 而非 build：start-full 帶 --build，若由 compose 重建會卡在 mem0 而整批失敗；
+    # 改用既有本機映像即可。需重建時手動：docker build -f mem0.Dockerfile -t springaitest-mem0:latest .
+    image: springaitest-mem0:latest
     restart: always
     depends_on:
       postgres:
@@ -176,6 +174,10 @@ services:
       EMBEDDINGS_PROVIDER: ${WORKFLOW_EMBEDDINGS_PROVIDER:-fake}   # fake=免金鑰確定性嵌入；openai=經 LiteLLM 的 text-embedding-3-small
       LLM_BASE_URL: http://litellm:4000
       LITELLM_KEY: ${LITELLM_KEY:-sk-1234}
+      # Skill 寫入(POST/PUT /api/skills)時呼叫工作流引擎做驗證 — 驗證的唯一事實來源在引擎。
+      # 刻意不加 depends_on: workflow(它 depends_on backend，會成環)；這是請求期依賴，不是啟動期依賴，
+      # 引擎不可達時 skill 寫入回 502，其餘 backend 功能不受影響。
+      WORKFLOW_BASE_URL: http://workflow:8000
 
   # ---------------- LangGraph 工作流服務（Python/FastAPI，只管狀態管理，資料存取走 backend）----------------
   workflow:

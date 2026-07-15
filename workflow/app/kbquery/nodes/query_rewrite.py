@@ -1,5 +1,6 @@
 """Query Rewrite：LLM 改寫問題並產生變體；所有輸出都經確定性語意防護才寫入 State。"""
 
+from app.engine.node_registry import node
 from app.kbquery import textutils
 from app.kbquery.models import QueryRewriteOutput
 from app.kbquery.ports import GlossaryPort, StructuredLLMPort
@@ -14,6 +15,15 @@ _SYSTEM_PROMPT = (
 _FALLBACK_REASON = "改寫服務不可用，退回原始問題"
 
 
+@node(
+    name="query_rewrite",
+    version="1.0",
+    description="LLM 改寫問題並產生變體；輸出經確定性語意防護才寫入 State",
+    reads=["original_query"],
+    writes=["normalized_query", "query_variants", "rewrite_reason"],
+    deps=["llm", "glossary"],
+    requires_tools=[],
+)
 def make_query_rewrite_node(llm: StructuredLLMPort | None, glossary: GlossaryPort):
     """建立 query_rewrite 節點：LLM 不可用或輸出未通過防護時，退回原始問題。"""
 

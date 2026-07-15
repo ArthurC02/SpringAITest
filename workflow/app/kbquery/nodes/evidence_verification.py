@@ -1,5 +1,6 @@
 """Evidence Verification：全部確定性檢查的驗證閘門，不用 LLM；未通過不放行任何答案。"""
 
+from app.engine.node_registry import node
 from app.kbquery import calculator, textutils
 from app.kbquery.models import Evidence, FailureCode, VerificationResult
 from app.kbquery.nodes.context_resolver import VERSION_TERMS
@@ -16,6 +17,32 @@ def _safe_parse(value: str) -> float | None:
         return None
 
 
+@node(
+    name="evidence_verification",
+    version="1.0",
+    description="確定性驗證閘門",
+    # calculation_result 亦為讀取鍵（數值一致性檢查用），規格書 §2.1 範例漏列
+    reads=[
+        "selected_evidence",
+        "target_period",
+        "canonical_metric",
+        "excluded_terms",
+        "metric_terms",
+        "candidate_answer",
+        "calculation_result",
+        "calculation_trace",
+        "requires_calculation",
+    ],
+    writes=[
+        "verification_result",
+        "confidence",
+        "failure_reason",
+        "failure_codes",
+        "verified_evidence",
+    ],
+    deps=[],
+    requires_tools=[],
+)
 def make_evidence_verification_node():
     """建立 evidence_verification 節點：逐筆檢查期間、指標、排除詞、表格對位與可追溯性。"""
 

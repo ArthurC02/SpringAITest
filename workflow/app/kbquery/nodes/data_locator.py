@@ -1,5 +1,6 @@
 """Data Locator：在檢索結果中定位可追溯證據，並用確定性計算組出候選答案。"""
 
+from app.engine.node_registry import node
 from app.kbquery import calculator, textutils
 from app.kbquery.models import Evidence
 from app.kbquery.ports import EvidenceLocatorPort
@@ -12,6 +13,33 @@ _FORMULA_RULES: list[tuple[tuple[str, ...], tuple[str, str, str]]] = [
 ]
 
 
+@node(
+    name="data_locator",
+    version="1.0",
+    description="在檢索結果中定位可追溯證據，並用確定性計算組出候選答案",
+    reads=[
+        "canonical_metric",
+        "metric_terms",
+        "target_period",
+        "excluded_terms",
+        "version_policy",
+        "normalized_query",
+        "ranked_sources",
+        "requires_multi_doc",
+        "requires_calculation",
+    ],
+    writes=[
+        "selected_evidence",
+        "page_evidence",
+        "table_cell_evidence",
+        "text_claims",
+        "candidate_answer",
+        "calculation_result",
+        "calculation_trace",
+    ],
+    deps=["locators"],
+    requires_tools=[],
+)
 def make_data_locator_node(locators: dict[str, EvidenceLocatorPort]):
     """建立 data_locator 節點：定位證據、依需求選證據、必要時做確定性計算。"""
 
@@ -75,7 +103,7 @@ def make_data_locator_node(locators: dict[str, EvidenceLocatorPort]):
                 a = textutils.parse_number(later.exact_value)
                 for keywords, (formula, unit, op) in _FORMULA_RULES:
                     if any(k in q for k in keywords):
-                        # calculator 拋錯不接：交給 runtime.traced 走安全路徑
+                        # calculator 拋錯不接：交給 Harness（engine/harness.py）走安全路徑
                         trace = calculator.build_trace(
                             formula,
                             {"a": a, "b": b},

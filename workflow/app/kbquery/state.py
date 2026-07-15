@@ -2,7 +2,7 @@
 
 - trace / errors / retrieval_plans 用 operator.add reducer 累加，其餘欄位覆寫。
 - original_query / query_id / query_timestamp 由 Query Intake 建立後不可覆寫，
-  由 runtime.traced() 強制剝除後續節點對這些鍵的寫入（見 runtime.py）。
+  由 Harness 強制剝除後續節點對這些鍵的寫入（見 app/engine/harness.py::harnessed）。
 - fatal_error：任一節點發生不可恢復錯誤時設定；之後的節點（除 Answer Composer
   與 Audit Feedback）一律短路跳過，最終走安全 ABSTAIN + 稽核路徑。
 """

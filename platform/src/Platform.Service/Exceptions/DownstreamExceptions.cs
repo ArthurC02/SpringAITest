@@ -15,10 +15,14 @@ public sealed class WorkflowForbiddenException : Exception
 /// <summary>
 /// 工作流輸入不符規範(下游 422)。
 /// 注意:下游的 422 在本服務對外映射成 HTTP 400。
+/// FieldErrors:下游 400 body 若帶欄位級錯誤(backend ApiError.fieldErrors),原樣帶上來讓全域處理輸出;
+/// null 表示沒有欄位級資訊(對外仍是空 map,維持 ApiError 形狀不變)。
 /// </summary>
 public sealed class WorkflowBadInputException : Exception
 {
     public WorkflowBadInputException(string message) : base(message) { }
+
+    public IReadOnlyDictionary<string, string>? FieldErrors { get; init; }
 }
 
 /// <summary>
@@ -33,10 +37,32 @@ public sealed class WorkflowInvocationException : Exception
         : base(message, innerException) { }
 }
 
+/// <summary>
+/// 下游回報資源衝突(下游 409,例如 skill 名稱已存在)。全域處理對應 HTTP 409。
+/// 既有例外型別無法表達 409,又不能用 502 吞掉 — 代理層必須原樣轉發狀態碼。
+/// </summary>
+public sealed class DownstreamConflictException : Exception
+{
+    public DownstreamConflictException(string message) : base(message) { }
+}
+
 /// <summary>下游回報找不到文件(下游 404)。全域處理對應 HTTP 404。</summary>
 public sealed class DocumentNotFoundException : Exception
 {
     public DocumentNotFoundException(string message) : base(message) { }
+}
+
+/// <summary>
+/// Skill 定義未通過引擎的靜態驗證(backend 422)。全域處理對應 HTTP **422**(不是 400):
+/// 422 是本契約中「語法正確但語意不合法」的專屬碼,前端編輯器靠它與欄位級的 400 區分開來。
+/// FieldErrors:引擎錯誤碼清單(key = unknown_node/unbounded_loop/…),必須原樣穿過代理層 —
+/// 錯誤碼被吞掉的話,編輯器就指不出是哪一條規則、哪一行出錯。
+/// </summary>
+public sealed class SkillValidationFailedException : Exception
+{
+    public SkillValidationFailedException(string message) : base(message) { }
+
+    public IReadOnlyDictionary<string, string>? FieldErrors { get; init; }
 }
 
 /// <summary>

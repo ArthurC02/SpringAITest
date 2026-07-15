@@ -1,5 +1,6 @@
 """Audit Feedback：組完整稽核紀錄並落地；失敗時產出議題標籤、回歸測項與改進清單。"""
 
+from app.engine.node_registry import node
 from app.kbquery.models import (
     AnswerMode,
     AuditTrail,
@@ -45,6 +46,51 @@ _RESOLVED_CONTEXT_KEYS = (
 )
 
 
+@node(
+    name="audit_feedback",
+    version="1.0",
+    description="組完整稽核紀錄並落地；失敗時產出議題標籤、回歸測項與改進清單",
+    reads=[
+        "query",
+        "query_id",
+        "query_timestamp",
+        "original_query",
+        "normalized_query",
+        "query_variants",
+        "intent_type",
+        "target_period",
+        "version_policy",
+        "canonical_metric",
+        "excluded_terms",
+        "unresolved_context",
+        "context_warnings",
+        "retrieval_plans",
+        "retrieval_attempt",
+        "ranked_sources",
+        "selected_evidence",
+        "verification_result",
+        "failure_codes",
+        "failure_reason",
+        "confidence",
+        "answer_mode",
+        "final_answer",
+        "source_citations",
+        "calculation_trace",
+        "trace",
+        "errors",
+        "fatal_error",
+        "user_feedback",
+    ],
+    writes=[
+        "audit_trail",
+        "issue_label",
+        "regression_test_item",
+        "improvement_backlog",
+    ],
+    deps=["audit_repo"],
+    requires_tools=[],
+    run_on_fatal=True,  # 稽核是治理硬規則：fatal 後也必須落地
+)
 def make_audit_feedback_node(repo: AuditRepositoryPort):
     """建立 audit_feedback 節點：成功、失敗、abstain 都會走到這裡。"""
 

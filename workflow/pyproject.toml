@@ -14,6 +14,8 @@ dependencies = [
     "langchain>=1.0,<2.0",
     # 資料檢索改呼叫 backend 的 /api/retrieval/search（核心商業邏輯與向量庫都搬到 backend/）
     "httpx>=0.27,<1.0",
+    # Skill 定義的權威格式是 YAML（app/skills/*.yaml 與 POST /skills/validate 的輸入）
+    "pyyaml>=6.0,<7.0",
 ]
 
 [dependency-groups]

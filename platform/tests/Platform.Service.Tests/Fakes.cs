@@ -133,6 +133,23 @@ public sealed class FakeWorkflowService : IWorkflowService
         };
         return Task.FromResult(new WorkflowInvokeResponse(name, output));
     }
+
+    // ---- Skill 引擎(:8001):ChatService 用不到,回空殼即可(真實行為由 WorkflowServiceTests 以 stub handler 驗)。----
+
+    public Task<System.Text.Json.JsonElement> InvokeSkillAsync(
+        string name, Dictionary<string, System.Text.Json.JsonElement> input, UserContext ctx,
+        CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(new { skill = name }));
+
+    public Task<System.Text.Json.JsonElement> ValidateSkillAsync(
+        string definition, UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(new { valid = true }));
+
+    public Task<System.Text.Json.JsonElement> GetSkillCatalogAsync(UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
+
+    public Task<System.Text.Json.JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
 }
 
 /// <summary>mem0 client fake:可設定 recall 回傳、記錄 remember 呼叫。</summary>

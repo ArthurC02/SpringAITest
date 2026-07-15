@@ -5,6 +5,7 @@ using Backend.Api.Common;
 using Backend.Api.Config;
 using Backend.Api.Conversations;
 using Backend.Api.Files;
+using Backend.Api.Skills;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -37,8 +38,18 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IConfigRepository>();
             services.AddSingleton<IConfigRepository, FakeConfigRepository>();
+
+            services.RemoveAll<ISkillRepository>();
+            services.AddSingleton<ISkillRepository, FakeSkillRepository>();
+
+            // Skill 驗證不打真的 workflow(:8001)。
+            services.RemoveAll<ISkillValidator>();
+            services.AddSingleton<ISkillValidator, FakeSkillValidator>();
         });
     }
+
+    /// <summary>取單例 fake(斷言 revision 稽核列/validate 呼叫紀錄用)。</summary>
+    public T Fake<T>() where T : notnull => Services.GetRequiredService<T>();
 
     /// <summary>建立已帶 X-Internal-Token 的 client(通過守門);可再加身分 header。</summary>
     public HttpClient CreateInternalClient()

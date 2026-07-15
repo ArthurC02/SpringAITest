@@ -1,5 +1,6 @@
 """Retrieval Planner：依意圖排定檢索方法；重試時依 failure_codes 做針對性調整。"""
 
+from app.engine.node_registry import node
 from app.kbquery.models import FailureCode, IntentType, RetrievalPlan
 
 # 意圖 → 檢索方法基本盤
@@ -15,6 +16,34 @@ _INTENT_METHODS: dict[IntentType, list[str]] = {
 }
 
 
+@node(
+    name="retrieval_planner",
+    version="1.0",
+    description="依意圖排定檢索方法；重試時依 failure_codes 做針對性調整",
+    reads=[
+        "retrieval_attempt",
+        "intent_type",
+        "requires_multi_doc",
+        "target_period",
+        "canonical_metric",
+        "excluded_terms",
+        "version_policy",
+        "failure_codes",
+    ],
+    writes=[
+        "retrieval_plan",
+        "retrieval_plans",
+        "retrieval_attempt",
+        "filters",
+        "source_priority",
+        "top_k",
+        "rerank_policy",
+    ],
+    # retrieval_plans 是累加語意：每輪重試各留一份計畫供稽核（覆寫的話稽核只剩最後一次）
+    appends=["retrieval_plans"],
+    deps=["default_top_k"],
+    requires_tools=[],
+)
 def make_retrieval_planner_node(default_top_k: int):
     """建立 retrieval_planner 節點：只產出計畫，不執行檢索。"""
 

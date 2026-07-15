@@ -34,13 +34,11 @@ export function consumeSessionExpired(): boolean {
 }
 
 /**
- * fetch 薄封裝。自動帶 Authorization、對 JSON body 補 Content-Type、
- * 解析 ApiError、處理 204（無 body）。回傳已解析的 JSON。
+ * 共用請求核心：自動帶 Authorization、對 JSON body 補 Content-Type、
+ * 錯誤一律轉成 ApiError（401 觸發全域登出）。成功時回傳原始 Response，
+ * 由呼叫端決定解析成 JSON（apiFetch）或 blob（apiFetchBlob）。
  */
-export async function apiFetch<T = unknown>(
-  path: string,
-  options: RequestInit = {},
-): Promise<T> {
+async function request(path: string, options: RequestInit): Promise<Response> {
   const session = getSession()
   const headers = new Headers(options.headers)
   if (options.body && !headers.has('Content-Type')) {
@@ -50,12 +48,9 @@ export async function apiFetch<T = unknown>(
 
   const res = await fetch(path, { ...options, headers })
 
-  if (res.status === 204) {
-    return undefined as T
-  }
-
-  const data = await res.json().catch(() => null)
   if (!res.ok) {
+    // 錯誤 body 一律是 ApiError JSON（blob 端點也不例外）。
+    const data = await res.json().catch(() => null)
     const message =
       data && typeof data.message === 'string'
         ? data.message
@@ -72,5 +67,25 @@ export async function apiFetch<T = unknown>(
     }
     throw new ApiError(res.status, message, fieldErrors)
   }
-  return data as T
+  return res
+}
+
+/** fetch 薄封裝。回傳已解析的 JSON；204（無 body）回 undefined。 */
+export async function apiFetch<T = unknown>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const res = await request(path, options)
+  if (res.status === 204) {
+    return undefined as T
+  }
+  return (await res.json().catch(() => null)) as T
+}
+
+/** 同 apiFetch，但回傳二進位 body（檔案下載，例：skill export zip）。 */
+export async function apiFetchBlob(
+  path: string,
+  options: RequestInit = {},
+): Promise<Blob> {
+  return (await request(path, options)).blob()
 }

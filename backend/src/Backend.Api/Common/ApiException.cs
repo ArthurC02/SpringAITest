@@ -9,5 +9,11 @@ public sealed class ApiException : Exception
 {
     public int Status { get; }
 
+    /// <summary>
+    /// 欄位級錯誤(選填)。Skill 存檔的 422 用它帶引擎回報的驗證錯誤碼:key = 錯誤碼、value = 人話訊息。
+    /// null → GlobalExceptionHandler 輸出空 map(ApiError 形狀不變)。
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? FieldErrors { get; init; }
+
     public ApiException(int status, string message) : base(message) => Status = status;
 }

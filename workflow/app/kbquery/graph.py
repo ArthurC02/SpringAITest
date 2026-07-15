@@ -1,4 +1,4 @@
-"""kb_query 圖的組裝：依賴注入 + 十個 traced 節點 + 驗證閘門迴圈。
+"""kb_query 圖的組裝：依賴注入 + Node Registry 的十個節點（經 Harness 包裝）+ 驗證閘門迴圈。
 
 流程（Mermaid）::
 
@@ -22,18 +22,11 @@ from dataclasses import dataclass
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.kbquery.nodes import (
-    make_answer_composer_node,
-    make_audit_feedback_node,
-    make_context_resolver_node,
-    make_data_locator_node,
-    make_evidence_verification_node,
-    make_intent_classification_node,
-    make_query_intake_node,
-    make_query_rewrite_node,
-    make_retrieval_planner_node,
-    make_source_retrieval_rerank_node,
-)
+from app.engine import node_registry
+from app.engine.harness import harnessed
+
+# import 觸發十個節點的 @node 註冊；圖只認名字，節點本體由 registry 提供
+from app.kbquery import nodes as _nodes  # noqa: F401
 from app.kbquery.ports import (
     AuditRepositoryPort,
     EvidenceLocatorPort,
@@ -43,8 +36,26 @@ from app.kbquery.ports import (
     StructuredLLMPort,
 )
 from app.kbquery.routing import route_after_verification
-from app.kbquery.runtime import traced
 from app.kbquery.state import KbQueryState
+
+# 圖上的節點 (name, version)（拓樸見 module docstring）；實際邊在下方明確連接。
+# 版本一律鎖死：日後有人註冊 data_locator@2.0 時，本圖不會靜默改用新版，
+# 切版必須是這裡的一次明確 code change（P2 的 skills/kb_query.yaml 同樣寫 node@version）。
+_NODES = (
+    ("query_intake", "1.0"),
+    ("query_rewrite", "1.0"),
+    ("intent_classification", "1.0"),
+    ("context_resolver", "1.0"),
+    ("retrieval_planner", "1.0"),
+    ("source_retrieval_rerank", "1.0"),
+    ("data_locator", "1.0"),
+    ("evidence_verification", "1.0"),
+    ("answer_composer", "1.0"),
+    ("audit_feedback", "1.0"),
+)
+
+# 只有呼叫 LLM 的節點需要在 trace 記下模型版本
+_LLM_NODES = frozenset({"query_rewrite", "intent_classification"})
 
 
 @dataclass
@@ -62,63 +73,23 @@ class KbQueryDeps:
 
 
 def build_kb_query_graph(deps: KbQueryDeps) -> CompiledStateGraph:
-    """組圖：所有節點經 runtime.traced 包裝；composer/audit 在 fatal 後仍會執行。"""
+    """組圖：節點一律從 Node Registry 取得並經 Harness 包裝（run_on_fatal 由節點契約宣告）。"""
     llm_version = getattr(deps.llm, "version", "")
     g = StateGraph(KbQueryState)
-    g.add_node(
-        "query_intake",
-        traced("query_intake", make_query_intake_node(deps.max_retrieval_attempts)),
-    )
-    g.add_node(
-        "query_rewrite",
-        traced(
-            "query_rewrite",
-            make_query_rewrite_node(deps.llm, deps.glossary),
-            component_version=llm_version,
-        ),
-    )
-    g.add_node(
-        "intent_classification",
-        traced(
-            "intent_classification",
-            make_intent_classification_node(deps.llm),
-            component_version=llm_version,
-        ),
-    )
-    g.add_node(
-        "context_resolver",
-        traced("context_resolver", make_context_resolver_node(deps.glossary)),
-    )
-    g.add_node(
-        "retrieval_planner",
-        traced("retrieval_planner", make_retrieval_planner_node(deps.default_top_k)),
-    )
-    g.add_node(
-        "source_retrieval_rerank",
-        traced(
-            "source_retrieval_rerank",
-            make_source_retrieval_rerank_node(deps.searchers, deps.reranker),
-        ),
-    )
-    g.add_node(
-        "data_locator", traced("data_locator", make_data_locator_node(deps.locators))
-    )
-    g.add_node(
-        "evidence_verification",
-        traced("evidence_verification", make_evidence_verification_node()),
-    )
-    g.add_node(
-        "answer_composer",
-        traced("answer_composer", make_answer_composer_node(), run_on_fatal=True),
-    )
-    g.add_node(
-        "audit_feedback",
-        traced(
-            "audit_feedback",
-            make_audit_feedback_node(deps.audit_repo),
-            run_on_fatal=True,
-        ),
-    )
+    for name, version in _NODES:
+        spec = node_registry.get(name, version=version)
+        if spec is None:  # 節點模組未被 import，或名字／版本打錯 → 建圖當下就炸，不拖到執行期
+            raise ValueError(f"unknown node: {name}@{version}")
+        g.add_node(
+            name,
+            harnessed(
+                spec.name,
+                spec.build(deps),
+                run_on_fatal=spec.run_on_fatal,
+                component_version=llm_version if name in _LLM_NODES else "",
+                writes=spec.writes,
+            ),
+        )
 
     g.add_edge(START, "query_intake")
     g.add_edge("query_intake", "query_rewrite")

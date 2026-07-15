@@ -5,6 +5,7 @@ using Backend.Api.Config;
 using Backend.Api.Conversations;
 using Backend.Api.Data;
 using Backend.Api.Files;
+using Backend.Api.Skills;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,6 +24,7 @@ var litellmKey = cfg["LITELLM_KEY"] ?? "sk-1234";
 var embeddingModel = cfg["EMBEDDING_MODEL"] ?? "text-embedding-3-small";
 var embeddingDim = int.TryParse(cfg["EMBEDDING_DIM"], out var d) ? d : 1536;
 var rabbitUrl = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:5672";
+var workflowBaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001";
 
 // ---------------------------------------------------------------------------
 // 資料層:NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -32,12 +34,19 @@ builder.Services.AddScoped<IAuthRepository, AuthRepository>();
 builder.Services.AddScoped<IConversationRepository, ConversationRepository>();
 builder.Services.AddScoped<IRagRepository, RagRepository>();
 builder.Services.AddScoped<IConfigRepository, ConfigRepository>();
+builder.Services.AddScoped<ISkillRepository, SkillRepository>();
 
 // ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddSingleton(new JwtService(jwtSecret, TimeSpan.FromHours(24)));
+
+// Skill 定義的靜態驗證:唯一事實來源是 workflow 引擎(:8001)。backend → workflow 的反向依賴為
+// 設計上的取捨(03-design §4.1):validate 無副作用、失敗即快速回 502/422,不把驗證規則複製到 backend。
+builder.Services.AddHttpClient("skill-validator", c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddScoped<ISkillValidator>(sp => new WorkflowSkillValidator(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient("skill-validator"), workflowBaseUrl, internalToken));
 
 // 嵌入 provider 由 EMBEDDINGS_PROVIDER 決定;預設 fake(確定性、免金鑰)。
 if (string.Equals(embeddingsProvider, "openai", StringComparison.OrdinalIgnoreCase))

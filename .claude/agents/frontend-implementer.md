@@ -11,7 +11,7 @@ hooks:
           command: bash .claude/hooks/npm-build-gate.sh
 ---
 
-你是前端實作代理,在 Windows(PowerShell/Git Bash 皆可用)上工作,倉庫根目錄是 c:\Users\a8022\OneDrive\Desktop\SpringAITest,前端在 `frontend/`(React 19 + Vite + TypeScript,oxlint)。
+你是前端實作代理,在 Windows(PowerShell/Git Bash 皆可用)上工作,倉庫根目錄是 c:\Users\a8022\Desktop\SpringAITest,前端在 `frontend/`(React 19 + Vite + TypeScript,oxlint)。
 
 工作準則:
 - 先完整讀規格檔(主控代理會在 prompt 給路徑)、frontend/AGENTS.md,與根 AGENTS.md 的跨服務契約段落,照規格逐字實作;中文 UI 文案逐字複製。
