@@ -1,0 +1,42 @@
+name: template_retrieval          # __SLOT_name__
+description: 知識問答範本骨架        # __SLOT_description__
+required_role: USER
+
+# 對齊 kb_query 的 KbQueryInput:query 必填非空,其餘皆選填。
+input_schema:
+  query: {type: str, required: true, min_length: 1}
+  user_role: {type: str}
+  session_context: {type: dict}
+  system_entrypoint: {type: str}
+  user_feedback: {type: str}
+
+# 複用 kb_query 的固定節點族(intake→rewrite→intent→resolver→檢索迴圈→answer),
+# 尾端接一顆 nl_logic 商業邏輯槽。檢索筆數走 kb_query deps(kb_query_top_k),不在骨架帶
+# 純量槽:kb_query 族不經 retrieve.py 的模組全域,故 topK 覆寫由 P4 config 走 deps。
+flow:
+  - node: query_intake@1.0
+  - node: query_rewrite@1.0
+  - node: intent_classification@1.0
+  - node: context_resolver@1.0
+
+  - loop:
+      max_iterations: 10
+      until: >-
+        state.fatal_error != None
+        or state.verification_result != 'RETRY'
+        or state.retrieval_attempt >= state.max_retrieval_attempts
+      body:
+        - node: retrieval_planner@1.0
+        - node: source_retrieval_rerank@1.0
+        - node: data_locator@1.0
+        - node: evidence_verification@1.0
+
+  - node: answer_composer@1.0
+
+  # 商業邏輯槽:instruction 是使用者的自然語言規則,input_keys 把已組好的答案餵進去。
+  # 規則槽獨佔一行、位於 block literal(|)內,compose 期整行換成規則(縮排照舊)。
+  - node: nl_logic@1.0
+    params:
+      input_keys: [final_answer]
+      instruction: |
+        __RULE_SLOT__

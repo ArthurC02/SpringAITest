@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Backend.Api.Auth;
 using Backend.Api.Common;
 using Backend.Api.Config;
+using Backend.Api.Configuration;
 using Backend.Api.Conversations;
 using Backend.Api.Files;
 using Backend.Api.Skills;
@@ -41,6 +42,9 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<ISkillRepository>();
             services.AddSingleton<ISkillRepository, FakeSkillRepository>();
+
+            services.RemoveAll<IConfigurationSetRepository>();
+            services.AddSingleton<IConfigurationSetRepository, FakeConfigurationSetRepository>();
 
             // Skill 驗證不打真的 workflow(:8001)。
             services.RemoveAll<ISkillValidator>();

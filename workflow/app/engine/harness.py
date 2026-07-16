@@ -34,6 +34,12 @@ IMMUTABLE_KEYS = {"query_id", "original_query", "query_timestamp"}
 # 可以在流程中途換租戶 —— 多租戶隔離邊界會直接破功）。
 IDENTITY_KEYS = {"tenant_id", "user_id", "role"}
 
+# 由伺服器於 invoke 期依 active Configuration Set 注入的執行參數鍵（設計 §10 縫⑦ runtime
+# apply）：與身分鍵同屬 server-injected，故一併納入 skill.RESERVED_KEYS —— 是 state 頻道
+# （seed 值不被 TypedDict schema 濾掉）、資料流檢查視為「一定有」、呼叫端不得經 input 夾帶、
+# 節點/Script 不得寫入（只讀）。目前只有通用 retrieve@1.0 讀的 retrieval_top_k。
+CONFIG_SEED_KEYS = {"retrieval_top_k"}
+
 
 @dataclass
 class _Step:

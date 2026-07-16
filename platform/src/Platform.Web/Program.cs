@@ -24,7 +24,9 @@ var llmOptions = new LlmOptions
     BaseUrl = cfg["LLM_BASE_URL"] ?? "http://localhost:4000",
     ApiKey = cfg["LITELLM_KEY"] ?? "sk-1234",
     ChatModel = cfg["CHAT_MODEL"] ?? "gpt-4o-mini",
-    Temperature = 0.7f,
+    // 0.2:偏低溫度讓小模型更傾向乖乖呼叫工具、少自由發揮心算(數字問答的可靠性優先於閒聊創意)。
+    // ponytail: 之後若要讓閒聊更活潑可改回讀 env,現在單一用途不需要旋鈕。
+    Temperature = 0.2f,
 };
 var mem0Options = new Mem0Options
 {
@@ -76,6 +78,7 @@ builder.Services.AddSingleton<IDocumentQueue, RabbitDocumentQueue>();
 builder.Services.AddScoped<IAnalysisService, AnalysisService>();
 builder.Services.AddScoped<IConfigService, ConfigService>();
 builder.Services.AddScoped<ISkillService, SkillService>();
+builder.Services.AddScoped<IConfigurationSetService, ConfigurationSetService>();
 builder.Services.AddSingleton<IChatMemoryStore, InMemoryChatMemoryStore>();
 builder.Services.AddSingleton<IJwtService, JwtService>();
 

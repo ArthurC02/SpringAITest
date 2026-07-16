@@ -7,13 +7,18 @@ from app import skills, tracing
 from app.engine import compiler, node_registry
 from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
 from app.engine.skill import ValidationResult, schema_from_model, validate_source
-from app.skills import custom
+from app.skills import config_apply, custom
 
-# 這兩行 import 執行各節點模組頂層的 @node 裝飾器，讓 GET /nodes 的目錄完整
+# 這幾行 import 執行各節點模組頂層的 @node 裝飾器，讓 GET /nodes 的目錄完整
 # （不倚賴「某個工作流剛好有 import 到該節點」這種間接關係）。同理，app.tools 的 import
-# 執行 @tool 裝飾器，讓 Skill 的 tool/script 步驟查得到 Tool Registry。
+# 執行 @tool 裝飾器，讓 Skill 的 tool/script 步驟查得到 Tool Registry。nl_logic 走
+# app.nodes、非 kb_query 族，故這裡明列一行讓 catalog 查得到它（縫⑥）。
+# 冷啟動「編譯」template_* 所需的 nl_logic / retrieve 註冊由 app.skills 自身負責觸發
+# （見 skills/__init__.py），故 app.skills 單獨匯入亦自足。
 from app import tools as _tools  # noqa: F401
 from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes import nl_extract as _nl_extract  # noqa: F401
+from app.nodes import nl_logic as _nl_logic  # noqa: F401
 from app.nodes import retrieve as _retrieve_node  # noqa: F401
 from app.schemas import (
     InvokeRequest,
@@ -108,6 +113,8 @@ async def list_skills(ctx: RequestContext = Depends(get_context)) -> list[SkillI
             source=loaded.source,
             revision=loaded.skill.revision,
             input_schema=loaded.skill.input_schema or None,
+            # 內建骨架帶原文供前端 compose patch;custom 不帶（catalog dict 無此鍵 → None）
+            definition=loaded.definition or None,
         )
         for loaded in skills.all_skills()
     ]
@@ -143,10 +150,22 @@ async def invoke_skill(
     名稱先查內建、再向 backend 查自訂。backend 不可達 → 500（受控）而不是 404：
     「取不到定義」與「skill 不存在」是兩件事，混為一談會讓呼叫端刪錯東西。
     """
+    # P4c apply-at-execution：先取本租戶 active Configuration Set 的有效設定與 per-config
+    # deps（取不到/故障 → per_config=None + 全域逾時，走全域路徑）。custom skill 直接以
+    # per_config 編圖；builtin 若有覆寫則在下方以 per_config 重編（縫⑤）。
+    # retrieval_top_k：租戶明確覆寫 retrieval.top_k 時才非 None，下方 seed 進初始 state，讓
+    # 通用 retrieve@1.0 執行期收到覆寫值（縫⑦ runtime apply，既有 compare/stats skill 免重 compose）。
+    per_config, timeout_default, retrieval_top_k = await config_apply.resolve(ctx)
+
     loaded = skills.get(name)
     if loaded is None:
         try:
-            loaded = await custom.load(name, ctx)
+            # per_config=None（無覆寫）時以位置慣例呼叫，沿用原簽章
+            loaded = (
+                await custom.load(name, ctx, deps=per_config)
+                if per_config is not None
+                else await custom.load(name, ctx)
+            )
         except (custom.BackendUnavailable, custom.InvalidCustomSkill) as e:
             raise HTTPException(
                 status_code=500,
@@ -184,14 +203,25 @@ async def invoke_skill(
                 },
             )
 
+    # builtin 有覆寫 → 以 per_config 重編（縫⑤：靠 id(deps) 去重、不沿用啟動圖）；
+    # 無覆寫 → 沿用啟動預編圖（零額外成本，回歸現況）。custom 的圖已在 load 時以 per_config 編好。
+    graph = loaded.graph
+    if per_config is not None and loaded.source == "builtin":
+        graph = compiler.compile(loaded.skill, per_config)
+
     state = {"tenant_id": ctx.tenant_id, **_clean_skill_input(req.input)}
-    timeout_seconds = loaded.skill.timeout_seconds or settings.workflow_timeout_seconds
+    # 縫⑦ runtime apply：租戶覆寫了 retrieval.top_k 才 seed（retrieval_top_k 是 RESERVED_KEYS，
+    # _clean_skill_input 已把呼叫端夾帶的同名 input 剝掉 → 此處是唯一可信注入點，杜絕偽造）。
+    if retrieval_top_k is not None:
+        state["retrieval_top_k"] = retrieval_top_k
+    # 逾時讀有效設定的 workflow.timeout_seconds（skill 自帶的 timeout_seconds 仍優先）
+    timeout_seconds = loaded.skill.timeout_seconds or timeout_default
     # recursion_limit：規格 §6.3-2 的全圖護欄（langgraph 預設 10007 形同沒有護欄）
     config = {**tracing.runnable_config(), "recursion_limit": loaded.recursion_limit}
 
     try:
         async with asyncio.timeout(timeout_seconds):
-            output = await loaded.graph.ainvoke(state, config=config)
+            output = await graph.ainvoke(state, config=config)
     except TimeoutError:
         raise HTTPException(
             status_code=504,

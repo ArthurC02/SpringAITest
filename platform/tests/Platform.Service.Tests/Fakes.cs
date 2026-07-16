@@ -60,7 +60,11 @@ public sealed class FakeConversationStore : IConversationStore
             Items.OrderByDescending(c => c.CreatedAt).ThenByDescending(c => c.Id).ToList());
 }
 
-/// <summary>可控回覆的 LLM 代理 fake;會記下最後一次收到的訊息列與工具列以供斷言。</summary>
+/// <summary>
+/// 可控回覆的 LLM 代理 fake;會記下最後一次收到的訊息列與工具列以供斷言。
+/// 路由 → 摘要多次呼叫:以 Responses 佇列腳本化「連續 CompleteAsync」的回覆(用盡後退回 Response);
+/// CompleteCalls 逐次記下每一次 CompleteAsync 收到的訊息列,供斷言路由/摘要各自的內容。
+/// </summary>
 public sealed class FakeLlmAgent : ILlmAgent
 {
     public string Response { get; set; } = "測試回覆";
@@ -68,14 +72,31 @@ public sealed class FakeLlmAgent : ILlmAgent
     public IReadOnlyList<LlmMessage>? LastMessages { get; private set; }
     public IReadOnlyList<LlmTool>? LastTools { get; private set; }
 
+    /// <summary>腳本化的連續 CompleteAsync 回覆(第 1 次=路由、第 2 次=摘要…);空或用盡後回退 Response。</summary>
+    public Queue<string> Responses { get; } = new();
+
+    /// <summary>每一次 CompleteAsync 收到的訊息列(索引 0 = 第一次呼叫);用來分別斷言路由與摘要訊息。</summary>
+    public List<IReadOnlyList<LlmMessage>> CompleteCalls { get; } = new();
+
     /// <summary>非 null 時:吐出第 N 塊後擲例外(模擬串流中途失敗),用來驗半截回覆不持久化。</summary>
     public int? ThrowAfterChunks { get; set; }
 
+    /// <summary>true 時:第一次 CompleteAsync(即路由呼叫)擲例外,用來驗路由失敗退純聊天不炸。</summary>
+    public bool ThrowOnFirstComplete { get; set; }
+
     public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, CancellationToken ct)
     {
+        CompleteCalls.Add(messages);
         LastMessages = messages;
         LastTools = tools;
-        return Task.FromResult(Response);
+
+        if (ThrowOnFirstComplete && CompleteCalls.Count == 1)
+        {
+            throw new InvalidOperationException("路由呼叫失敗");
+        }
+
+        var reply = Responses.Count > 0 ? Responses.Dequeue() : Response;
+        return Task.FromResult(reply);
     }
 
     public async IAsyncEnumerable<string> StreamAsync(
@@ -134,19 +155,58 @@ public sealed class FakeWorkflowService : IWorkflowService
         return Task.FromResult(new WorkflowInvokeResponse(name, output));
     }
 
-    // ---- Skill 引擎(:8001):ChatService 用不到,回空殼即可(真實行為由 WorkflowServiceTests 以 stub handler 驗)。----
+    // ---- Skill 引擎(:8001):聊天 → Skill 路由用得到,可注入目錄與 skill invoke 行為並記錄呼叫。----
+
+    /// <summary>非 null 時 GetSkillCatalogAsync 回這包目錄;預設回空陣列(等同「無 skill」)。</summary>
+    public System.Text.Json.JsonElement? Catalog { get; set; }
+
+    /// <summary>非 null 時 GetSkillCatalogAsync 擲此例外(模擬 workflow 502 / 逾時 / 壞 JSON)。</summary>
+    public Exception? ThrowOnCatalog { get; set; }
+
+    /// <summary>catalog 每次呼叫記下呼叫者身分;Count 即取目錄次數(驗匿名不讀、每輪一次)。</summary>
+    public List<UserContext> CatalogContexts { get; } = new();
+
+    /// <summary>非 null 時 InvokeSkillAsync 擲此例外(模擬 skill invoke 失敗)。</summary>
+    public Exception? ThrowOnSkillInvoke { get; set; }
+
+    /// <summary>非 null 時 InvokeSkillAsync 回這包輸出;預設回 {skill=name}。</summary>
+    public System.Text.Json.JsonElement? SkillOutput { get; set; }
+
+    /// <summary>skill invoke 呼叫序:name + input 字典 + 身分,供斷言。</summary>
+    public List<(string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)> SkillInvokes { get; } = new();
+
+    public (string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)? LastSkillInvoke
+        => SkillInvokes.Count > 0 ? SkillInvokes[^1] : null;
 
     public Task<System.Text.Json.JsonElement> InvokeSkillAsync(
         string name, Dictionary<string, System.Text.Json.JsonElement> input, UserContext ctx,
         CancellationToken ct = default)
-        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(new { skill = name }));
+    {
+        if (ThrowOnSkillInvoke is not null)
+        {
+            throw ThrowOnSkillInvoke;
+        }
+
+        SkillInvokes.Add((name, input, ctx));
+        return Task.FromResult(SkillOutput
+            ?? System.Text.Json.JsonSerializer.SerializeToElement(new { skill = name }));
+    }
 
     public Task<System.Text.Json.JsonElement> ValidateSkillAsync(
         string definition, UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(new { valid = true }));
 
     public Task<System.Text.Json.JsonElement> GetSkillCatalogAsync(UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
+    {
+        CatalogContexts.Add(ctx);
+        if (ThrowOnCatalog is not null)
+        {
+            throw ThrowOnCatalog;
+        }
+
+        return Task.FromResult(Catalog
+            ?? System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
+    }
 
     public Task<System.Text.Json.JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));

@@ -989,6 +989,16 @@ details > summary {
   }
 }
 
+/* B2: CopilotKit dev web-inspector 是 z-index 2147483646 的除錯浮層(Lit shadow DOM),
+   拖到某些捲動位置會蓋住底下表單送出鈕的 pointer-events(真人得點兩次)。它是 dev-only
+   除錯元件、非產品 UX,直接讓整個元件 click-through。浮動聊天鈕(.copilotKitButton)不受影響;
+   收合的 .copilotKitWindow 由 CopilotKit 自帶 pointer-events:none,刻意不覆寫以免全螢幕攔截。
+   ponytail: 整個元件 none 會連帶關掉除錯面板互動;要保留請改成官方 showDevConsole 開關而非 CSS。 */
+cpk-web-inspector,
+cpk-thread-inspector {
+  pointer-events: none;
+}
+
 /* AI 副駕的刪除確認(renderAndWaitForResponse)氣泡:清楚間距,避免誤按。 */
 .copilot-confirm {
   display: flex;
@@ -1145,4 +1155,84 @@ details > summary {
   .bubble {
     max-width: 92%;
   }
+}
+
+/* Skill 功能樹（系統設定 › Skill）：清單↔三子功能。 */
+.skill-tree__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.skill-tree__title {
+  margin: 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-tree__head .seg {
+  margin-left: auto;
+}
+
+/* 簡單模式（雙門其一）：四塊零術語外殼。 */
+.simple-skill__block {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.simple-skill__block-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--text-h);
+}
+.simple-skill__templates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.simple-skill__template {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.simple-skill__template--on {
+  border-color: var(--accent);
+  background: var(--accent-bg, transparent);
+}
+.simple-skill__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.simple-skill__errors {
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.simple-skill__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* CodeMirror Python 編輯器容器（動態載入）。 */
+.cm-python {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.cm-python .cm-editor {
+  max-height: 360px;
 }

@@ -46,7 +46,7 @@ from functools import lru_cache
 from types import CodeType
 from typing import Any, Protocol
 
-from app.engine.harness import IDENTITY_KEYS, IMMUTABLE_KEYS
+from app.engine.harness import CONFIG_SEED_KEYS, IDENTITY_KEYS, IMMUTABLE_KEYS
 from app.engine.node_registry import ENGINE_KEYS
 from app.kbquery.models import TraceEntry
 
@@ -61,8 +61,11 @@ MAX_WRITE_BYTES = 256 * 1024  # 單次寫入 state 的值總大小上限
 MAX_ALLOC = 10**6  # range() 長度上限（唯一完整可界定的配置護欄，見 module docstring）
 
 # script 一律不得寫入的鍵：身分鍵（換租戶）、不可變鍵（偽造稽核的原始問題）、
-# 引擎鍵（偽造 trace / fatal_error 可繞過短路與稽核）。__ 前綴另外擋（引擎內部鍵）。
-FORBIDDEN_WRITE_KEYS = frozenset(IDENTITY_KEYS | IMMUTABLE_KEYS | ENGINE_KEYS)
+# 引擎鍵（偽造 trace / fatal_error 可繞過短路與稽核）、Configuration Set 執行參數
+# （竄改 retrieval_top_k 等伺服器注入的只讀 seed）。__ 前綴另外擋（引擎內部鍵）。
+FORBIDDEN_WRITE_KEYS = frozenset(
+    IDENTITY_KEYS | IMMUTABLE_KEYS | ENGINE_KEYS | CONFIG_SEED_KEYS
+)
 
 # 白名單 builtins（規格 §5.2 逐字）。random/time/datetime 這類非確定性來源不在此列。
 SAFE_BUILTIN_NAMES = frozenset(

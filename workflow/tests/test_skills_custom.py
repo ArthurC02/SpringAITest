@@ -212,7 +212,16 @@ def test_list_skills_survives_backend_down(backend, fake_deps):
 
     assert resp.status_code == 200
     names = [i["name"] for i in resp.json()]
-    assert names == ["kb_query"]
+    # 內建集合 = kb_query + 五支 template_* 骨架（設計 §5.4 縫④：骨架亦入 GET /skills，
+    # 由前端過濾 template_ 前綴）。backend 不可達時只缺自訂項，內建照列。
+    assert names == [
+        "kb_query",
+        "template_compare",
+        "template_infer",
+        "template_inspire",
+        "template_retrieval",
+        "template_stats",
+    ]
 
 
 def test_list_skills_keeps_entry_when_definition_unreadable(backend, fake_deps):

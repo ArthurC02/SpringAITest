@@ -1,0 +1,23 @@
+name: template_stats              # __SLOT_name__
+description: 統計聚合範本骨架        # __SLOT_description__
+required_role: USER
+
+input_schema:
+  query: {type: str, required: true, min_length: 1}
+
+# 同 compare,但檢索筆數預設較高(讓聚合看到全集)。retrieve 用通用 retrieve@1.0,
+# 檢索筆數由純量槽顯式帶(不經 deps,見 template_compare 的說明)。
+flow:
+  - node: query_intake@1.0
+  - node: retrieve@1.0
+    params:
+      query_key: query
+      top_k: 50                   # __SLOT_topK__
+
+  # 商業邏輯槽(script):metric/period 是可覆寫的聚合設定(骨架給合法預設,規則可直接
+  # 引用該區域變數);規則槽獨佔一行、位於 block literal(|)內,compose 期整行換成聚合規則。
+  # 三行都是合法、可編譯的 no-op,骨架載入即 valid。
+  - script: |
+      metric = "count"  # __SLOT_metric__
+      period = "all"  # __SLOT_period__
+      # __RULE_SLOT__

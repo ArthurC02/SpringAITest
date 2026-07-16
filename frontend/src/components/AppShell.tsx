@@ -8,18 +8,16 @@ import { ToastProvider } from './Toast'
 import ErrorBoundary from './ErrorBoundary'
 import ChatView from './ChatView'
 import DocumentsView from './DocumentsView'
-import WorkflowsView from './WorkflowsView'
 import AnalysisView from './AnalysisView'
 import ConfigView from './ConfigView'
 
-type View = 'chat' | 'documents' | 'workflows' | 'analysis' | 'config'
+type View = 'chat' | 'documents' | 'analysis' | 'config'
 
-const VIEWS: View[] = ['chat', 'documents', 'workflows', 'analysis', 'config']
+const VIEWS: View[] = ['chat', 'documents', 'analysis', 'config']
 
 const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
   { id: 'chat', icon: '💬', label: '聊天' },
   { id: 'documents', icon: '📄', label: '文件' },
-  { id: 'workflows', icon: '⚙', label: '工作流與 Skill' },
   { id: 'analysis', icon: '📊', label: '分析' },
   { id: 'config', icon: '🔧', label: '系統設定', adminOnly: true },
 ]
@@ -51,7 +49,7 @@ export default function AppShell({ session, onLogout }: Props) {
     value: { username: session.username, role: session.role, tenantCode: session.tenantCode },
   })
   useCopilotReadable({
-    description: '目前開啟的視圖（五選一：chat/documents/workflows/analysis/config）',
+    description: '目前開啟的視圖（四選一：chat/documents/analysis/config）',
     value: view,
   })
   useCopilotReadable(
@@ -106,7 +104,7 @@ export default function AppShell({ session, onLogout }: Props) {
     {
       name: 'switchView',
       description:
-        '切換主畫面視圖。允許值:chat(聊天)、documents(文件)、workflows(工作流與 Skill)、analysis(分析)、config(系統設定,僅管理員)。',
+        '切換主畫面視圖。允許值:chat(聊天)、documents(文件)、analysis(分析)、config(系統設定,僅管理員)。',
       parameters: [
         { name: 'view', type: 'string', description: '目標視圖(見上述允許值)', required: true },
       ],
@@ -200,7 +198,6 @@ export default function AppShell({ session, onLogout }: Props) {
             <ErrorBoundary key={view}>
               {view === 'chat' && <ChatView />}
               {view === 'documents' && <DocumentsView documents={documents} />}
-              {view === 'workflows' && <WorkflowsView isAdmin={isAdmin} />}
               {view === 'analysis' && <AnalysisView />}
               {view === 'config' && <ConfigView isAdmin={isAdmin} />}
             </ErrorBoundary>
@@ -216,9 +213,8 @@ export default function AppShell({ session, onLogout }: Props) {
             '平台操作手冊(使用者問「怎麼做」時照此說明步驟):',
             '- 文件:AI 檢索用的知識庫。新增:文件視圖 → 填標題 → 內容來源選「上傳檔案」(.txt/.md)或「貼上文字」→ 按「新增文件」。送出後狀態「處理中」,背景切塊與向量化完成後轉「就緒」,失敗則顯示「失敗」;清單可刪除文件。',
             '- 聊天:與 AI 對話(串流回覆),「新對話」會重開上下文。',
-            '- 工作流與 Skill:「執行」分頁選一個工作流或 Skill(如 rag_qa 檢索問答、kb_query 知識查詢),填輸入後按「執行」,結果下方可展開節點軌跡。管理員另有「Skill 管理」(YAML 編輯器)與「節點目錄」分頁。',
             '- 分析:查看統計摘要。',
-            '- 系統設定:僅管理員(ADMIN)可見可改。',
+            '- 系統設定:僅管理員(ADMIN)可見可改。Skill 編輯在「系統設定 › Skill」(僅管理員):可新增/編輯/試跑/查版本;試跑會執行已存在的 Skill 並可展開節點軌跡。',
             '文件依租戶隔離,使用者只看得到自己租戶的資料。',
             '',
             '你可代為執行的動作:createDocument(建文件)、deleteDocument(刪文件,務必先經使用者確認)、askKnowledgeBase(用知識庫回答問題)、switchView(切換視圖)。',

@@ -41,6 +41,8 @@ class SkillInfo(BaseModel):
     source: str
     revision: int
     input_schema: dict[str, InputField] | None = None
+    # 內建 template_* 骨架的 YAML 原文,供前端 compose 定點 patch;custom 項不帶（None）。
+    definition: str | None = None
 
 
 class SkillValidateRequest(BaseModel):

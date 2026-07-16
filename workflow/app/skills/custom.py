@@ -44,12 +44,16 @@ class InvalidCustomSkill(RuntimeError):
 _deps: Any = None
 
 
-def deps() -> Any:
+def singleton_deps() -> Any:
     """自訂 skill 共用的依賴容器（延遲建立：測試可先以 fake 覆寫 _deps）。"""
     global _deps
     if _deps is None:
         _deps = _default_deps()
     return _deps
+
+
+# 既有呼叫端沿用 custom.deps() 名稱（re-export 別名，避免與 load 的 deps 參數混淆）。
+deps = singleton_deps
 
 
 def _headers(ctx: RequestContext) -> dict[str, str]:
@@ -113,8 +117,15 @@ async def _entry(ctx: RequestContext, info: dict) -> dict:
     }
 
 
-async def load(name: str, ctx: RequestContext) -> LoadedSkill | None:
-    """取回 + 驗證 + 編譯一個自訂 skill；本租戶查無（含軟刪）→ None（呼叫端回 404）。"""
+async def load(
+    name: str, ctx: RequestContext, deps: Any = None
+) -> LoadedSkill | None:
+    """取回 + 驗證 + 編譯一個自訂 skill；本租戶查無（含軟刪）→ None（呼叫端回 404）。
+
+    deps 可帶入 per-config 依賴容器（P4c apply-at-execution）：租戶有效設定覆寫時，
+    以覆寫後的 deps 編圖（compiler 快取鍵含 id(deps) → 同組覆寫命中同一張圖）；
+    None 時回退共用單例 deps()（無覆寫、行為與過去一致）。
+    """
     data = await _fetch(f"/api/skills/{name}", ctx)
     if data is None or not data.get("enabled", True):
         return None
@@ -136,7 +147,7 @@ async def load(name: str, ctx: RequestContext) -> LoadedSkill | None:
         skill = skill.model_copy(
             update={"revision": int(data.get("current_revision") or 1)}
         )
-        container = deps()
+        container = deps if deps is not None else singleton_deps()
         graph = compiler.compile(skill, container)
     except Exception as e:
         raise InvalidCustomSkill(f"自訂 skill '{name}' 編譯失敗: {e}") from e

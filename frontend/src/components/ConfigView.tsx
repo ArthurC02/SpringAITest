@@ -1,22 +1,24 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listConfig, updateConfig } from '../api/config'
-import { listWorkflows } from '../api/workflows'
-import type { ConfigEntry, WorkflowInfo } from '../types'
+import type { ConfigEntry } from '../types'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
+import SkillHome from './SkillHome'
+import NodeParamsTab from './NodeParamsTab'
 
 function fmtDate(s: string): string {
   const d = new Date(s)
   return Number.isNaN(d.getTime()) ? s : d.toLocaleString()
 }
 
-// Skill 管理已移到「工作流與 Skill」視圖的 Tab 2（設計文稿 §5.1：不新增頂層視圖，
-// skill 的家在工作流視圖，不在系統設定）。這裡只留一般設定 + 工作流唯讀清單。
-type Tab = 'general' | 'workflows'
+// 系統設定重構（設計 §1）：Skill 功能樹進駐系統設定，工作流唯讀 tab 退場，
+// 頂層導覽的「工作流與 Skill」視圖一併移除。順序 = Skill 優先、一般設定墊底。
+type Tab = 'skill' | 'nodeParams' | 'general'
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: 'skill', label: 'Skill' },
+  { id: 'nodeParams', label: '工作流節點參數' },
   { id: 'general', label: '一般設定' },
-  { id: 'workflows', label: '工作流' },
 ]
 
 /** 一般設定：GET 表格；ADMIN 可就地編輯 value + 儲存(PUT)。非 ADMIN 只讀。 */
@@ -123,66 +125,9 @@ function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
   )
 }
 
-/** 工作流:code 註冊的工作流唯讀清單(無新增/編輯/刪除)。資料源沿用 GET /api/workflows。 */
-function WorkflowsConfigTab() {
-  const [flows, setFlows] = useState<WorkflowInfo[]>([])
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    listWorkflows()
-      .then(setFlows)
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false))
-  }, [])
-
-  return (
-    <>
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
-
-      {loading ? (
-        <Skeleton rows={3} />
-      ) : flows.length === 0 && !error ? (
-        <p className="muted">尚無工作流。</p>
-      ) : (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>名稱</th>
-                <th>描述</th>
-                <th>角色</th>
-              </tr>
-            </thead>
-            <tbody>
-              {flows.map((f) => (
-                <tr key={f.name}>
-                  <td>{f.name}</td>
-                  <td>{f.description}</td>
-                  <td>
-                    <span
-                      className={`badge badge--${f.required_role === 'ADMIN' ? 'admin' : 'user'}`}
-                    >
-                      {f.required_role}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </>
-  )
-}
-
-/** 系統設定:兩分頁容器(一般設定/工作流),用 useState 切換,無 router。 */
+/** 系統設定:三分頁容器(Skill/工作流節點參數/一般設定),用 useState 切換,無 router。 */
 export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
-  const [tab, setTab] = useState<Tab>('general')
+  const [tab, setTab] = useState<Tab>('skill')
 
   return (
     <div className="view">
@@ -204,8 +149,9 @@ export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
         ))}
       </div>
 
+      {tab === 'skill' && <SkillHome isAdmin={isAdmin} />}
+      {tab === 'nodeParams' && <NodeParamsTab isAdmin={isAdmin} />}
       {tab === 'general' && <GeneralConfigTab isAdmin={isAdmin} />}
-      {tab === 'workflows' && <WorkflowsConfigTab />}
     </div>
   )
 }

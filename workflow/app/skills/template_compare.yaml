@@ -1,0 +1,23 @@
+name: template_compare            # __SLOT_name__
+description: 比對排序範本骨架        # __SLOT_description__
+required_role: USER
+
+input_schema:
+  query: {type: str, required: true, min_length: 1}
+
+# 薄檢索(登記 → 通用 retrieve)後接一段 Python 商業邏輯做排序/比對。
+# retrieve 用通用 retrieve@1.0,檢索筆數由骨架顯式帶純量槽(retrieve.py 讀的是模組全域
+# settings.retrieval_top_k,不經 deps,所以覆寫值必須組譯期填進那一行)。
+flow:
+  - node: query_intake@1.0
+  - node: retrieve@1.0
+    params:
+      query_key: query
+      top_k: 8                    # __SLOT_topK__
+
+  # 商業邏輯槽(script):sort_by 是可覆寫的排序依據(骨架給合法預設,規則可直接引用該
+  # 區域變數);規則槽獨佔一行、位於 block literal(|)內,compose 期整行換成規則。
+  # 預設賦值與規則槽(註解)都是合法、可編譯的 no-op,骨架載入即 valid。
+  - script: |
+      sort_by = "score"  # __SLOT_sortBy__
+      # __RULE_SLOT__

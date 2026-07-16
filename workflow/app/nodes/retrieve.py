@@ -20,8 +20,11 @@ from app.settings import settings
     name="retrieve",
     version="1.0",
     description="向 backend 的資料檢索 API 查詢與 state[query_key] 最相關的租戶片段",
-    # query_key 是建構期參數（各工作流用不同的鍵），因此 reads 只能列出固定讀取的鍵
-    reads=["tenant_id"],
+    # query_key 是建構期參數（各工作流用不同的鍵），因此 reads 只能列出固定讀取的鍵。
+    # retrieval_top_k 是 invoke 期由 active Configuration Set seed 的執行參數（縫⑦ runtime
+    # apply）：宣告成 reads 讓它成為 state 頻道（seed 值不被 schema 濾掉）；它是 RESERVED_KEYS
+    # 之一 → 資料流檢查視為「一定有」，不會誤報 dataflow_error。
+    reads=["tenant_id", "retrieval_top_k"],
     # 真正讀的是 state[query_key]；dynamic_reads 列的是「參數名」，由 compiler 用該步驟
     # 的 params: 解析成實際 state 鍵再做資料流檢查。少了這條，Skill 跑 retrieve 卻沒有
     # 前置步驟供給那個 query 鍵時，靜態檢查不會報 dataflow_error，要到執行期才 KeyError。
@@ -39,14 +42,22 @@ def make_retrieve_node(query_key: str, top_k: int | None = None):
     呼叫 backend 的 POST /api/retrieval/search，並把結果寫入 state["docs"]
     （list[dict]，每筆含 document_id、title、content、score）。
 
-    top_k 未指定時，使用 settings.retrieval_top_k 這個全域預設值；
-    呼叫端可視需求（例如分析類工作流想看更多資料）傳入不同的 top_k。
+    top_k 取值精度（高→低）：invoke 期由 active Configuration Set seed 進 state 的
+    retrieval_top_k（租戶調參，最高優先）＞ compose 期烤進的建構參數 top_k（骨架 SLOT）
+    ＞ 模組全域 settings.retrieval_top_k。租戶沒覆寫 retrieval.top_k 時不會 seed，
+    retrieve 精確回落骨架/全域，零行為變更（設計 §9／§10 縫⑦ runtime apply）。
     """
 
     async def retrieve(state: dict[str, Any]) -> dict:
         query = state[query_key]
         tenant_id = state["tenant_id"]
-        k = top_k if top_k is not None else settings.retrieval_top_k
+        seeded = state.get("retrieval_top_k")
+        if seeded is not None:
+            k = seeded
+        elif top_k is not None:
+            k = top_k
+        else:
+            k = settings.retrieval_top_k
 
         # 逾時放寬到 30s：openai 嵌入模式下 backend 要先算查詢嵌入，httpx 預設 5s 偶發不夠
         async with httpx.AsyncClient(

@@ -73,6 +73,20 @@ public static class DbBootstrap
           created_at timestamptz NOT NULL DEFAULT now(),
           CONSTRAINT uq_skill_revision UNIQUE (skill_id, revision));
         CREATE INDEX IF NOT EXISTS ix_skill_revision_skill ON skill_revision (skill_id);
+        -- Configuration Set(設計 §7.1):一組可調的執行期覆寫鍵(values jsonb),per-tenant。
+        -- tenant_id 用 text(= 租戶 code,與 skill/rag_documents 一致)。is_active 一租戶至多一筆為 true,
+        -- 由部分唯一索引 uq_confset_active 於 DB 級兜底(不靠應用碼保唯一)。
+        CREATE TABLE IF NOT EXISTS configuration_set (
+          id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          tenant_id   text NOT NULL,
+          name        text NOT NULL,
+          is_active   boolean NOT NULL DEFAULT false,
+          values      jsonb NOT NULL DEFAULT '{}',
+          created_by  text NOT NULL DEFAULT '',
+          created_at  timestamptz NOT NULL DEFAULT now(),
+          updated_at  timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_confset_tenant_name UNIQUE (tenant_id, name));
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_confset_active ON configuration_set (tenant_id) WHERE is_active;
         """;
 
     public static async Task RunAsync(NpgsqlDataSource dataSource, ILogger logger, CancellationToken ct = default)

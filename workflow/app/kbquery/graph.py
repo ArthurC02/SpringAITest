@@ -70,6 +70,8 @@ class KbQueryDeps:
     audit_repo: AuditRepositoryPort
     default_top_k: int = 8
     max_retrieval_attempts: int = 2
+    # intent_classification 的 LLM 補位信心門檻（P4c 促升，per-config 可覆寫；預設對齊節點內建 0.6）
+    intent_confidence_threshold: float = 0.6
 
 
 def build_kb_query_graph(deps: KbQueryDeps) -> CompiledStateGraph:

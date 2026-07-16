@@ -39,6 +39,10 @@ public sealed class ChatServiceTests
         Assert.Equal(("u1", "你好嗎", "AI 答覆"), mem0.Remembered[0]);
     }
 
+    // 每輪都注入的固定護欄逐字(與 ChatService.ChatGuardPrompt 同步)。
+    private const string GuardPrompt =
+        "回答前先判斷問題類型，不要急著搶答。若問題涉及任何數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，你「必須」先呼叫對應的 skill 工具，並只依工具回傳的結果作答。嚴禁在未呼叫工具的情況下自行給出數字；嚴禁自己做任何算術（加減乘除、百分比、成長率）——這類計算一律交給工具，因為你自行心算常常算錯。若沒有合適的工具、文件未提供該數據、或你無法確定，請直接說「查無此數據」，不要編造或估算。只有純聊天或不涉及數字的問題，才可直接回答。";
+
     [Fact]
     public async Task Chat_InjectsSystemMemory_WhenMem0HasResults()
     {
@@ -48,21 +52,28 @@ public sealed class ChatServiceTests
 
         await svc.ChatAsync("問題", "u1", "c1");
 
-        var first = agent.LastMessages![0];
-        Assert.Equal("system", first.Role);
-        Assert.Contains("以下是你先前記住、關於這位使用者的長期記憶", first.Content);
-        Assert.Contains("使用者喜歡貓", first.Content);
+        // 護欄永遠第一;mem0 前言緊接在後(獨立的第二則 system)。
+        Assert.Equal("system", agent.LastMessages![0].Role);
+        Assert.Equal(GuardPrompt, agent.LastMessages![0].Content);
+
+        var mem0Msg = agent.LastMessages![1];
+        Assert.Equal("system", mem0Msg.Role);
+        Assert.Contains("以下是你先前記住、關於這位使用者的長期記憶", mem0Msg.Content);
+        Assert.Contains("使用者喜歡貓", mem0Msg.Content);
     }
 
     [Fact]
-    public async Task Chat_NoSystemMessage_WhenMem0Empty()
+    public async Task Chat_GuardIsFirstSystemMessage_WhenMem0Empty()
     {
         var agent = new FakeLlmAgent();
         var svc = Build(agent, new FakeMem0Client { RecallResult = string.Empty }, new FakeConversationStore());
 
         await svc.ChatAsync("問題", "u1", "c1");
 
-        Assert.DoesNotContain(agent.LastMessages!, m => m.Role == "system");
+        // mem0 無記憶時,唯一的 system 訊息就是護欄,且排在最前。
+        Assert.Equal("system", agent.LastMessages![0].Role);
+        Assert.Equal(GuardPrompt, agent.LastMessages![0].Content);
+        Assert.Single(agent.LastMessages!, m => m.Role == "system");
     }
 
     [Fact]
@@ -200,9 +211,9 @@ public sealed class ChatServiceTests
         var workflows = new FakeWorkflowService { Answer = "文件說 42" };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
-        await svc.ChatAsync("問題", "u1", "c1", UserA);
+        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
 
-        var tool = agent.LastTools!.Single(t => t.Name == "search_knowledge_base");
+        var tool = tools!.Single(t => t.Name == "search_knowledge_base");
 
         // 工具實際執行:以呼叫者的租戶身分打 rag_qa,question 進 input,回 answer 字串。
         var answer = await tool.InvokeAsync("平台有哪些文件?", CancellationToken.None);
@@ -218,9 +229,9 @@ public sealed class ChatServiceTests
         var agent = new FakeLlmAgent();
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
 
-        await svc.ChatAsync("問題", "u1", "c1", UserA);
+        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
 
-        var names = agent.LastTools!.Select(t => t.Name).ToArray();
+        var names = tools!.Select(t => t.Name).ToArray();
         Assert.Equal(
             new[] { "search_knowledge_base", "verified_knowledge_query", "summarize_text", "triage_question" },
             names);
@@ -232,10 +243,10 @@ public sealed class ChatServiceTests
         var agent = new FakeLlmAgent();
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
 
-        await svc.ChatAsync("問題", "u1", "c1", AdminA);
+        var tools = await svc.BuildToolsAsync(AdminA, CancellationToken.None);
 
-        Assert.Equal(5, agent.LastTools!.Count);
-        Assert.Contains(agent.LastTools!, t => t.Name == "generate_analysis_report");
+        Assert.Equal(5, tools!.Count);
+        Assert.Contains(tools!, t => t.Name == "generate_analysis_report");
     }
 
     // 每個工具都要打對工作流、用對輸入 key(對照表驅動,一條測試涵蓋全部)。
@@ -251,8 +262,8 @@ public sealed class ChatServiceTests
         var workflows = new FakeWorkflowService();
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
-        await svc.ChatAsync("問題", "u1", "c1", AdminA);
-        var tool = agent.LastTools!.Single(t => t.Name == toolName);
+        var tools = await svc.BuildToolsAsync(AdminA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == toolName);
 
         await tool.InvokeAsync("輸入內容", CancellationToken.None);
 
@@ -261,18 +272,16 @@ public sealed class ChatServiceTests
     }
 
     [Fact]
-    public async Task Chat_Anonymous_PassesNoTools()
+    public async Task Chat_Anonymous_BuildsNoTools()
     {
-        var agent = new FakeLlmAgent();
-        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
+        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), new FakeConversationStore());
 
-        await svc.ChatAsync("問題", "u1", "c1");
-
-        Assert.Null(agent.LastTools);
+        // 匿名(userCtx null)→ 無路由表(Skill 需租戶身分)。
+        Assert.Null(await svc.BuildToolsAsync(null, CancellationToken.None));
     }
 
     [Fact]
-    public async Task StreamChat_WithUserContext_AlsoPassesTools()
+    public async Task StreamChat_WithUserContext_RoutesWithToolCatalog()
     {
         var agent = new FakeLlmAgent();
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
@@ -281,7 +290,8 @@ public sealed class ChatServiceTests
         {
         }
 
-        Assert.Contains(agent.LastTools!, t => t.Name == "search_knowledge_base");
+        // 串流也先路由:第一次(阻塞)CompleteAsync 的 system 目錄列出可用工具。
+        Assert.Contains(agent.CompleteCalls, m => m.Count > 0 && m[0].Content.Contains("search_knowledge_base"));
     }
 
     [Fact]
@@ -299,8 +309,8 @@ public sealed class ChatServiceTests
         };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
-        await svc.ChatAsync("問題", "u1", "c1", UserA);
-        var tool = agent.LastTools!.Single(t => t.Name == "verified_knowledge_query");
+        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "verified_knowledge_query");
 
         var result = await tool.InvokeAsync("寵物守則對貓的規定?", CancellationToken.None);
 
@@ -326,8 +336,8 @@ public sealed class ChatServiceTests
         };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
-        await svc.ChatAsync("問題", "u1", "c1", UserA);
-        var tool = agent.LastTools!.Single(t => t.Name == "verified_knowledge_query");
+        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "verified_knowledge_query");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
 
@@ -342,8 +352,8 @@ public sealed class ChatServiceTests
         var workflows = new FakeWorkflowService { ThrowOnInvoke = new InvalidOperationException("下游爆炸") };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
-        await svc.ChatAsync("問題", "u1", "c1", UserA);
-        var tool = agent.LastTools!.Single(t => t.Name == "search_knowledge_base");
+        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "search_knowledge_base");
 
         // 工具失敗不往外拋(否則整輪聊天 500),回錯誤文字讓模型照實轉述。
         var result = await tool.InvokeAsync("q", CancellationToken.None);

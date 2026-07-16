@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from app.kbquery.models import AuditTrail, SourceResult
-from app.llm import get_llm
+from app.llm import build_llm, get_llm
 from app.settings import settings
 from pydantic import BaseModel
 
@@ -54,16 +54,35 @@ class StaticGlossary:
 
 
 class LangChainStructuredLLM:
-    """StructuredLLMPort：LangChain with_structured_output，失敗回 None。"""
+    """StructuredLLMPort：LangChain with_structured_output，失敗回 None。
 
-    def __init__(self):
-        self.version = settings.llm_model
+    無參數 → 全域單例（get_llm：model=settings.llm_model、temperature 0.7），行為與過去一致。
+    帶 model / temperature → per-config（P4c）：繞開 get_llm 的 lru_cache，各建一顆客戶端。
+    version 記錄實際 model 供 trace 稽核；temperature 暴露供測試觀察覆寫值（全域路徑為 None）。
+    """
+
+    def __init__(self, model: str | None = None, temperature: float | None = None):
+        self.version = model or settings.llm_model
+        self.temperature = temperature  # 公開供測試觀察覆寫值（全域路徑為 None）
+        self._model = model
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            if self._model is None and self.temperature is None:
+                self._client = get_llm()  # 全域路徑：單例、0.7，不變
+            else:
+                self._client = build_llm(
+                    self._model or settings.llm_model,
+                    self.temperature if self.temperature is not None else 0.7,
+                )
+        return self._client
 
     async def structured(
         self, system: str, user: str, schema: type[BaseModel]
     ) -> BaseModel | None:
         try:
-            llm = get_llm().with_structured_output(schema)
+            llm = self._get_client().with_structured_output(schema)
             out = await llm.ainvoke([("system", system), ("user", user)])
             # with_structured_output 依設定可能回 dict；一律轉成已驗證的 schema 實例
             return out if isinstance(out, schema) else schema.model_validate(out)

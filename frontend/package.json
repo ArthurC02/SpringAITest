@@ -11,14 +11,19 @@
   },
   "dependencies": {
     "@ag-ui/client": "0.0.57",
+    "@codemirror/lang-python": "6.2.1",
     "@copilotkit/react-core": "1.62.3",
     "@copilotkit/react-ui": "1.62.3",
+    "codemirror": "6.0.2",
     "highlight.js": "^11.11.1",
+    "katex": "^0.16.22",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
-    "remark-gfm": "^4.0.1"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

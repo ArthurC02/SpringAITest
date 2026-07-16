@@ -24,6 +24,7 @@ Start services with `.\scripts\start-infra.ps1` / `./scripts/start-infra.sh` (in
 | `frontend-implementer` | Any implementation in `frontend/`                                                   |
 | `python-implementer`   | Any implementation in `workflow/` (nodes, engine, skill compiler, sandbox + pytest) |
 | `code-reviewer`        | Review after every non-trivial change, before declaring done                        |
+| `code-simplifier`      | Simplify/refine recently changed code (clarity, reuse, dead flexibility) — behavior-preserving, after review |
 | `e2e-verifier`         | Full-chain verification via docker compose when cross-service behavior changed      |
 | `docs-updater`         | Sync README/AGENTS files after feature or architecture changes                      |
 

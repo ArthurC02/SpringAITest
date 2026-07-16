@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Platform.Web.Tests;
 
+[Collection("EngineCalls")]
 public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 {
     private readonly TestWebAppFactory _factory;
@@ -42,6 +43,21 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.DoesNotContain("data: 你好", raw);
     }
 
+    // CSR-P1-026 / W3:以 raw bytes 斷言精確 wire contract — body 精確為 data:<value>\n\n 串接,
+    // data: 後無空格、每事件空行結尾、無自訂 event type / tool JSON / trace。
+    [Fact]
+    public async Task Stream_ExactWireContract_RawBytes_NoSpaceAfterData()
+    {
+        var client = _factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        var expected = System.Text.Encoding.UTF8.GetBytes("data:你好\n\ndata:世界\n\n");
+        Assert.Equal(expected, bytes);
+    }
+
     [Fact]
     public async Task Stream_ChunkWithNewline_SplitsIntoMultipleDataLines()
     {
@@ -70,45 +86,91 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
     }
 
-    // ---- 工作流工具:帶有效 JWT 的聊天掛工具,匿名不掛(工作流需要租戶身分) ----
+    // ---- 路由目錄:帶有效 JWT 的聊天以工具目錄做路由,匿名不路由(工作流需要租戶身分) ----
+    // 新流程:工具改以「路由目錄」文字經路由呼叫傳入,故斷言 LastRoutingCatalog 而非原生 tools 引數。
+
+    /// <summary>路由目錄中的工具行數(排除路由指令段)。目錄格式為「指令\n\n名稱: 說明(每行一支)」。</summary>
+    private static int ToolLineCount(string catalog)
+        => catalog.Split("\n\n")[^1].Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
 
     [Fact]
     public async Task Chat_WithBearer_EnablesWorkflowTools_UserRoleGetsFour()
     {
+        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+        agent.Reset();
         var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
         var resp = await client.PostAsJsonAsync("/api/chat", new { message = "文件裡有什麼?" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-        Assert.Equal(4, agent.LastTools!.Count);
-        Assert.Contains(agent.LastTools!, t => t.Name == "search_knowledge_base");
-        Assert.DoesNotContain(agent.LastTools!, t => t.Name == "generate_analysis_report");
+        var catalog = agent.LastRoutingCatalog!;
+        Assert.Equal(4, ToolLineCount(catalog));
+        Assert.Contains("search_knowledge_base", catalog);
+        Assert.DoesNotContain("generate_analysis_report", catalog);
+    }
+
+    // W1:帶有效 JWT + 可路由目錄 → 動態 Skill 進入路由目錄(端到端經 DI 走 BuildToolsAsync → SkillCatalogToTools)。
+    [Fact]
+    public async Task Chat_WithBearer_RoutesDynamicSkillsFromCatalog()
+    {
+        FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse("""
+        [
+          { "name":"kb_query", "description":"內建檢索", "required_role":"USER", "source":"builtin",
+            "input_schema": { "query": { "type":"str", "required":true } } },
+          { "name":"tenant_a_private_search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
+            "input_schema": { "question_text": { "type":"str", "required":true } } }
+        ]
+        """).RootElement.Clone();
+        try
+        {
+            var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+            agent.Reset();
+            var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+            var resp = await client.PostAsJsonAsync("/api/chat", new { message = "文件裡有什麼?" });
+
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var catalog = agent.LastRoutingCatalog!;
+            // 2 支動態 Skill + 4 支殘留靜態(USER)。
+            Assert.Contains("kb_query", catalog);
+            Assert.Contains("tenant_a_private_search", catalog);
+            Assert.Contains("search_knowledge_base", catalog);
+            Assert.Equal(6, ToolLineCount(catalog));
+        }
+        finally
+        {
+            FakeWorkflowService.CatalogOverride = null;
+        }
     }
 
     [Fact]
     public async Task Chat_WithAdminBearer_AlsoGetsAnalysisReportTool()
     {
+        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+        agent.Reset();
         var client = _factory.CreateClient().WithToken(_factory.IssueToken(username: "admin-a", role: "ADMIN"));
 
         var resp = await client.PostAsJsonAsync("/api/chat", new { message = "给我一份報告" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-        Assert.Equal(5, agent.LastTools!.Count);
-        Assert.Contains(agent.LastTools!, t => t.Name == "generate_analysis_report");
+        var catalog = agent.LastRoutingCatalog!;
+        Assert.Equal(5, ToolLineCount(catalog));
+        Assert.Contains("generate_analysis_report", catalog);
     }
 
     [Fact]
     public async Task Chat_Anonymous_HasNoTools()
     {
+        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+        agent.Reset();
         var client = _factory.CreateClient();
 
         var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-        Assert.Null(agent.LastTools);
+        // 匿名不路由:沒有路由目錄,只有一次純聊天呼叫。
+        Assert.Null(agent.LastRoutingCatalog);
+        Assert.Equal(1, agent.CompleteCallCount);
     }
 
     [Fact]

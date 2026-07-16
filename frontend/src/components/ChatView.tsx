@@ -8,8 +8,8 @@ export default function ChatView() {
   return (
     <div className="chatview">
       <div className="chatview__bar">
-        <button className="btn" onClick={clear} disabled={messages.length === 0} title="清除對話">
-          清除對話
+        <button className="btn" onClick={clear} disabled={messages.length === 0} title="清空目前對話並開一段新對話（重置上下文）">
+          ＋ 新對話
         </button>
       </div>
       <MessageList messages={messages} loading={loading} />

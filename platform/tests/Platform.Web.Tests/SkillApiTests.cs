@@ -9,6 +9,7 @@ namespace Platform.Web.Tests;
 /// (b) 下游的狀態碼與 ApiError(含 fieldErrors)原樣穿透,代理層不改寫。
 /// 身分 header 的實際附加由 SkillServiceTests / WorkflowServiceTests 以 stub handler 驗(此處下游是 fake service)。
 /// </summary>
+[Collection("EngineCalls")]
 public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 {
     private readonly TestWebAppFactory _factory;

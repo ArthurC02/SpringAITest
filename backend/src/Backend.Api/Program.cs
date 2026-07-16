@@ -2,6 +2,7 @@ using Backend.Api.Analysis;
 using Backend.Api.Auth;
 using Backend.Api.Common;
 using Backend.Api.Config;
+using Backend.Api.Configuration;
 using Backend.Api.Conversations;
 using Backend.Api.Data;
 using Backend.Api.Files;
@@ -35,6 +36,7 @@ builder.Services.AddScoped<IConversationRepository, ConversationRepository>();
 builder.Services.AddScoped<IRagRepository, RagRepository>();
 builder.Services.AddScoped<IConfigRepository, ConfigRepository>();
 builder.Services.AddScoped<ISkillRepository, SkillRepository>();
+builder.Services.AddScoped<IConfigurationSetRepository, ConfigurationSetRepository>();
 
 // ---------------------------------------------------------------------------
 // Services

@@ -28,3 +28,4 @@ pnpm-debug.log*
 
 ### 雜項 ###
 litellm-venv/
+.playwright-mcp/

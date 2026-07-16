@@ -5,4 +5,9 @@
     <PackageReference Include="RabbitMQ.Client" Version="7.2.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 單元測試直接驗證路由表(BuildToolsAsync 產出);其餘皆走公開 API。 -->
+    <InternalsVisibleTo Include="Platform.Service.Tests" />
+  </ItemGroup>
+
 </Project>

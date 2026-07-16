@@ -24,6 +24,20 @@ public sealed class ChatService : IChatService
     private const string SystemMemoryPrefix =
         "以下是你先前記住、關於這位使用者的長期記憶，回答時可參考（與當前問題無關者請忽略）：";
 
+    // 每輪都注入的固定護欄:抑制模型自行心算/編造文件數字,改走 skill 工具。與 mem0 前言生命週期獨立,是獨立的一則 system。
+    // 只用於純聊天兜底路徑(路由路徑改由確定性管線把關,不靠模型自律)。
+    private const string ChatGuardPrompt =
+        "回答前先判斷問題類型，不要急著搶答。若問題涉及任何數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，你「必須」先呼叫對應的 skill 工具，並只依工具回傳的結果作答。嚴禁在未呼叫工具的情況下自行給出數字；嚴禁自己做任何算術（加減乘除、百分比、成長率）——這類計算一律交給工具，因為你自行心算常常算錯。若沒有合適的工具、文件未提供該數據、或你無法確定，請直接說「查無此數據」，不要編造或估算。只有純聊天或不涉及數字的問題，才可直接回答。";
+
+    // 路由指令:LLM 只做「選工具」,只輸出工具名稱或 NONE;不帶歷史/mem0,避免污染路由判斷。
+    private const string RoutingInstruction =
+        "你是一個路由器。以下是可用工具，每行「名稱: 說明」。判斷使用者訊息最適合哪一個工具，只輸出那個工具的名稱（原樣、不加任何其他字）；若只是閒聊、打招呼、或不需要查資料／計算，只輸出 NONE。"
+        + "若清單中有『說明明確對應到這個問題主題』的專門工具，優先選它；通用的知識庫檢索工具（例如一般文件問答）只有在沒有更專門的工具時才選。務必只輸出一個工具名稱或 NONE，不要多餘文字。";
+
+    // 摘要指令:LLM 只把工具的確定性結果改寫成自然語言,嚴禁竄改任何數字(gpt-4o-mini 自行心算常算錯)。
+    private const string SummaryInstruction =
+        "把以下『工具結果』改寫成給使用者的自然、完整中文回覆。數字、金額、比率、百分比一字都不得更改、刪除或新增，只做語言潤飾與說明。若工具結果表示查無資料或發生錯誤，如實轉達，不要編造。";
+
     private readonly ILlmAgent _agent;
     private readonly IChatMemoryStore _memory;
     private readonly IMem0Client _mem0;
@@ -58,9 +72,12 @@ public sealed class ChatService : IChatService
         using var activity = StartSpan(message);
         try
         {
-            var messages = await BuildPromptAsync(uid, cid, message, ct);
+            // 命中工具 → 用「摘要訊息」讓 LLM 只潤飾確定性結果(不心算);否則走純聊天(護欄 + mem0 + 短期歷史)。
+            var summaryMessages = await TryRouteAndExecuteAsync(message, userCtx, ct);
+            var messages = summaryMessages ?? await BuildPromptAsync(uid, cid, message, ct);
 
-            var reply = await _agent.CompleteAsync(messages, BuildTools(userCtx), ct);
+            // 一律不啟用原生 tool-calling(tools: null):路由/執行已由確定性管線完成。
+            var reply = await _agent.CompleteAsync(messages, null, ct);
             activity?.SetTag("completion.length", reply.Length);
 
             // 阻塞式:持久化失敗照舊往上拋(對外 500),不吞。
@@ -91,10 +108,12 @@ public sealed class ChatService : IChatService
         var accumulated = new StringBuilder();
         try
         {
-            var messages = await BuildPromptAsync(uid, cid, message, ct);
+            // 路由 + 執行在串流開始「前」阻塞完成:命中工具則串流摘要,否則串流純聊天。
+            var summaryMessages = await TryRouteAndExecuteAsync(message, userCtx, ct);
+            var messages = summaryMessages ?? await BuildPromptAsync(uid, cid, message, ct);
 
-            // 手動列舉以便在串流出錯時替 span 記 error(yield 不能放在 try/catch 內)。
-            var enumerator = _agent.StreamAsync(messages, BuildTools(userCtx), ct).GetAsyncEnumerator(ct);
+            // 手動列舉以便在串流出錯時替 span 記 error(yield 不能放在 try/catch 內)。tools: null(不用原生 tool-calling)。
+            var enumerator = _agent.StreamAsync(messages, null, ct).GetAsyncEnumerator(ct);
             try
             {
                 while (true)
@@ -165,24 +184,155 @@ public sealed class ChatService : IChatService
     {
         var messages = new List<LlmMessage>();
 
-        // 1. 短期記憶(先前訊息)。
+        // 1. 固定護欄:永遠是第一則 system(先於 mem0 前言),抑制自行心算/編造文件數字。
+        messages.Add(new LlmMessage("system", ChatGuardPrompt));
+
+        // 2. 短期記憶(先前訊息)。
         var recent = _memory.GetRecent(cid);
 
-        // 2. 在呼叫 LLM 之前先取 mem0 長期記憶。
+        // 3. 在呼叫 LLM 之前先取 mem0 長期記憶。
         var memories = await _mem0.RecallAsync(uid, message, ct);
 
-        // 3. memories 非空白時,前置一則 system 訊息(前綴 + 換行 + memories)。
+        // 4. memories 非空白時,前置一則 system 訊息(前綴 + 換行 + memories)。
         if (!string.IsNullOrWhiteSpace(memories))
         {
             messages.Add(new LlmMessage("system", SystemMemoryPrefix + "\n" + memories));
         }
 
-        // 4. 短期記憶 + 本輪 user 訊息。
+        // 5. 短期記憶 + 本輪 user 訊息。
         messages.AddRange(recent);
         messages.Add(new LlmMessage("user", message));
 
         return messages;
     }
+
+    /// <summary>
+    /// 路由 + 執行(確定性管線)。userCtx 為 null / 無工具 / NONE / 任一步失敗 → 回 null,由呼叫端走純聊天兜底;
+    /// 命中工具則執行工具並回「摘要訊息」,交由呼叫端做最後一次(阻塞或串流)LLM 潤飾。
+    /// 整段以 try/catch 包住:任何例外都吞成 null(退純聊天)並記 warning——一輪聊天絕不可因路由失敗而 500。
+    /// </summary>
+    private async Task<IReadOnlyList<LlmMessage>?> TryRouteAndExecuteAsync(string message, UserContext? userCtx, CancellationToken ct)
+    {
+        if (userCtx is null)
+        {
+            return null;   // 匿名不路由(Skill 需租戶身分),直接純聊天。
+        }
+
+        try
+        {
+            var tools = await BuildToolsAsync(userCtx, ct);
+            if (tools is null || tools.Count == 0)
+            {
+                return null;
+            }
+
+            // 路由最多兩次:第一次 NONE/無命中就再試一次(路由 LLM 偶爾漏選專門工具),第二次仍不中才退純聊天。
+            LlmTool? selected = null;
+            string lastReply = "";
+            var attempt = 0;
+            for (attempt = 1; attempt <= 2; attempt++)
+            {
+                var (tool, reply) = await RouteAsync(tools, message, ct);
+                lastReply = reply;
+                if (tool is not null)
+                {
+                    selected = tool;
+                    break;
+                }
+            }
+
+            LogRouteDecision(selected, lastReply, attempt);
+
+            if (selected is null)
+            {
+                return null;   // 兩次皆 NONE 或無法解析 → 純聊天。
+            }
+
+            // 執行確定性工具:以使用者原訊息為輸入;回傳已是抽取後的答案字串(business_result 等)或工具自身的錯誤/查無字串。
+            var toolResult = await selected.InvokeAsync(message, ct);
+            return BuildSummaryMessages(message, toolResult);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "聊天路由/執行失敗，退回純聊天：{訊息}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 路由:以工具目錄(每行「名稱: 說明」)+ 使用者訊息做一次「無工具」的路由呼叫,回選中的工具或 null(NONE/無法解析)。
+    /// 刻意不帶短期歷史與 mem0,避免污染路由判斷。
+    /// </summary>
+    private async Task<(LlmTool? Tool, string Reply)> RouteAsync(IReadOnlyList<LlmTool> tools, string message, CancellationToken ct)
+    {
+        var catalog = string.Join("\n", tools.Select(t => $"{t.Name}: {t.Description}"));
+        var routeMessages = new List<LlmMessage>
+        {
+            new("system", RoutingInstruction + "\n\n" + catalog),
+            new("user", message),
+        };
+
+        var reply = (await _agent.CompleteAsync(routeMessages, null, ct)).Trim();
+        return (MatchTool(reply, tools), reply);
+    }
+
+    /// <summary>
+    /// 記一行路由決策供 `docker compose logs platform` 觀察路由漏選:命中工具名 / NONE / no-match,以及第幾次嘗試命中。
+    /// 只帶工具名 + 短原始回覆片段,不記完整使用者訊息。
+    /// </summary>
+    private void LogRouteDecision(LlmTool? selected, string lastReply, int attempt)
+    {
+        string outcome;
+        if (selected is not null)
+        {
+            outcome = selected.Name;
+        }
+        else if (string.IsNullOrWhiteSpace(lastReply) || lastReply.Equals("NONE", StringComparison.OrdinalIgnoreCase))
+        {
+            outcome = "NONE";
+        }
+        else
+        {
+            outcome = "no-match";
+        }
+
+        var snippet = lastReply.Length > 40 ? lastReply[..40] : lastReply;
+        _logger.LogInformation(
+            "聊天路由決策：{結果}（第 {嘗試} 次嘗試；原始回覆片段：{片段}）",
+            outcome, Math.Min(attempt, 2), snippet);
+    }
+
+    /// <summary>
+    /// 把路由回覆對回工具:先大小寫無關全等,再寬鬆包含比對(取最長名稱避免前綴誤命中);空白 / NONE / 無命中 → null。
+    /// </summary>
+    private static LlmTool? MatchTool(string reply, IReadOnlyList<LlmTool> tools)
+    {
+        if (string.IsNullOrWhiteSpace(reply) || reply.Equals("NONE", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        foreach (var t in tools)
+        {
+            if (reply.Equals(t.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                return t;
+            }
+        }
+
+        return tools
+            .Where(t => reply.Contains(t.Name, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(t => t.Name.Length)
+            .FirstOrDefault();
+    }
+
+    /// <summary>摘要訊息:system(禁改數字)+ user(原問題 + 工具結果)。LLM 只潤飾,不計算。</summary>
+    private static IReadOnlyList<LlmMessage> BuildSummaryMessages(string message, string toolResult) =>
+        new List<LlmMessage>
+        {
+            new("system", SummaryInstruction),
+            new("user", $"使用者問題：{message}\n\n工具結果：\n{toolResult}"),
+        };
 
     /// <summary>聊天工具 → 工作流的對照表。RequiredRole 非 null 時只掛給該角色。</summary>
     private sealed record ChatToolSpec(string ToolName, string Workflow, string InputKey, string Description, string? RequiredRole = null);
@@ -190,9 +340,9 @@ public sealed class ChatService : IChatService
     private static readonly ChatToolSpec[] ChatToolSpecs =
     {
         new("search_knowledge_base", "rag_qa", "question",
-            "檢索使用者所屬租戶的文件知識庫並回答問題,附引用。凡是問文件內容、內部資料或平台內知識,一律預設用這個工具;question 放完整的自然語言問句。"),
+            "一般文件知識庫問答(通用檢索),當沒有更專門的工具可用時才用;question 放完整問句。"),
         new("verified_knowledge_query", "kb_query", "query",
-            "嚴格稽核版知識查詢,專為財務/數據類問題設計:有確定性證據驗證閘門,證據不足時棄答並自動改用一般檢索兜底(結果會註明)。僅在使用者明確要求「可稽核」「有憑據」時使用;query 放查詢問句。"),
+            "需要可稽核、附證據驗證的知識查詢時才用(有證據不足即棄答的閘門);query 放查詢問句。"),
         new("summarize_text", "summarize", "text",
             "將輸入的原文濃縮成三句以內的摘要。使用者明確要求摘要一段長文字時使用;text 放要摘要的原文全文(不是描述)。"),
         new("triage_question", "triage", "question",
@@ -202,20 +352,59 @@ public sealed class ChatService : IChatService
             RequiredRole: "ADMIN"),
     };
 
-    /// <summary>工作流輸出取字串答案時依序嘗試的 key;都沒有就整包序列化回給模型。</summary>
-    private static readonly string[] OutputKeys = { "answer", "final_answer", "report", "summary" };
+    /// <summary>
+    /// 輸出取字串答案時依序嘗試的 key;都沒有就整包序列化回給模型。
+    /// business_result 排最前:template_* composed skill 的 nl_logic 節點把「使用者規則套用後」的權威答案
+    /// 寫入 business_result(retrieval 型同時有套規則前的 final_answer),須先於 final_answer 命中。
+    /// </summary>
+    private static readonly string[] OutputKeys = { "business_result", "answer", "final_answer", "report", "summary" };
 
     /// <summary>
-    /// 已登入(userCtx 非 null)時把工作流包成聊天工具;匿名聊天不掛工具(工作流需要租戶身分)。
+    /// 已登入(userCtx 非 null)時把可用的 Skill 目錄包成聊天工具;匿名聊天不掛工具(Skill 需要租戶身分)。
+    /// 工具來源:動態 Skill 目錄(內建+自訂,租戶已由下游過濾)優先,殘留靜態工具依名去重兜底。
+    /// 目錄抓取失敗採 best-effort:退回靜態工具(類比 mem0 吞錯),聊天不炸。
     /// 工具失敗回錯誤文字給模型照實轉述,不讓整輪聊天失敗。
     /// </summary>
-    private IReadOnlyList<LlmTool>? BuildTools(UserContext? userCtx)
+    internal async Task<IReadOnlyList<LlmTool>?> BuildToolsAsync(UserContext? userCtx, CancellationToken ct)
     {
         if (userCtx is null)
         {
             return null;
         }
 
+        JsonElement catalog;
+        try
+        {
+            catalog = await _workflows.GetSkillCatalogAsync(userCtx, ct);
+        }
+        catch (Exception ex)
+        {
+            // best-effort:目錄抓不到不讓聊天炸;退回殘留靜態工具(或空)。
+            _logger.LogWarning(ex, "Skill 目錄取得失敗,退回靜態工具:{訊息}", ex.Message);
+            return BuildStaticTools(userCtx);
+        }
+
+        // ponytail: 每輪 GET /skills 的 N+1;若量到痛 → IMemoryCache per-(tenant,role) 30–60s TTL。
+        var skillTools = SkillCatalogToTools(catalog, userCtx);
+        var names = new HashSet<string>(skillTools.Select(t => t.Name), StringComparer.Ordinal);
+
+        var result = new List<LlmTool>(skillTools);
+        foreach (var t in BuildStaticTools(userCtx))
+        {
+            // 名稱未被 Skill 佔用才補(Skill 目錄優先)。
+            if (names.Add(t.Name))
+            {
+                result.Add(t);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>殘留靜態 ChatToolSpecs → 工具。RequiredRole 非 null 時只掛給該角色(語義零變)。</summary>
+    // ponytail: settings-skill-redesign 把這些 workflow 遷成 skill 後,ChatToolSpecs 縮到空即可整段刪。
+    private IReadOnlyList<LlmTool> BuildStaticTools(UserContext userCtx)
+    {
         var tools = new List<LlmTool>(ChatToolSpecs.Length);
         foreach (var spec in ChatToolSpecs)
         {
@@ -229,6 +418,111 @@ public sealed class ChatService : IChatService
         }
 
         return tools;
+    }
+
+    /// <summary>
+    /// Skill 目錄(原樣穿透的 JsonElement 陣列)→ 聊天工具。純函式,可獨立單測。
+    /// 過濾:template_* 內建骨架(空殼,不可路由)→ 跳過;角色不符 → 跳過;
+    /// 非「恰好一個必填字串輸入」→ 跳過(P1 天花板,多參/非字串待 P3)。
+    /// </summary>
+    private IReadOnlyList<LlmTool> SkillCatalogToTools(JsonElement catalog, UserContext userCtx)
+    {
+        var tools = new List<LlmTool>();
+        if (catalog.ValueKind != JsonValueKind.Array)
+        {
+            return tools;
+        }
+
+        foreach (var item in catalog.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object
+                || !item.TryGetProperty("name", out var nameEl)
+                || nameEl.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var name = nameEl.GetString()!;
+
+            // template_* 內建骨架是空殼,不可被路由當工具(與前端同一條規則)。
+            var source = item.TryGetProperty("source", out var s) ? s.GetString() : null;
+            if (source == "builtin" && name.StartsWith("template_", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // 角色過濾:required_role 空或 =="USER" 視為無限制,否則要求完全相符。
+            var requiredRole = item.TryGetProperty("required_role", out var r) ? r.GetString() : "USER";
+            if (!IsRoleAllowed(requiredRole, userCtx.Role))
+            {
+                continue;
+            }
+
+            // 挑輸入鍵:input_schema 中唯一的必填 str 欄位;挑不出 → P1 跳過。
+            var inputKey = SingleRequiredStringKey(item);
+            if (inputKey is null)
+            {
+                continue;
+            }
+
+            var description = item.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "";
+            var desc = $"{description}（輸入 {inputKey}:一段自然語言）";
+
+            // name / inputKey 是本輪迭代的區域變數,lambda 直接捕捉即安全。
+            tools.Add(new LlmTool(name, desc,
+                (arg, ct) => InvokeSkillToolAsync(name, inputKey, arg, userCtx, ct)));
+        }
+
+        return tools;
+    }
+
+    private static bool IsRoleAllowed(string? requiredRole, string userRole)
+        => string.IsNullOrEmpty(requiredRole) || requiredRole == "USER" || requiredRole == userRole;
+
+    /// <summary>
+    /// input_schema({ key: {type, required, min_length, default} } 或 null)中挑出唯一的必填欄位,
+    /// 且該欄位型別為 str → 回其鍵名;否則回 null。
+    /// 「唯一必填」才路由:多於一個必填欄位(即使其中一個是 str)會導致只填一參的錯參呼叫,故一律跳過。
+    /// 零個必填、唯一必填但非 str、或 input_schema 非物件 → 回 null(P1 天花板,多參待 P3)。
+    /// </summary>
+    private static string? SingleRequiredStringKey(JsonElement item)
+    {
+        if (!item.TryGetProperty("input_schema", out var schema) || schema.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        string? found = null;
+        foreach (var field in schema.EnumerateObject())
+        {
+            var f = field.Value;
+            if (f.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var required = f.TryGetProperty("required", out var req) && req.ValueKind == JsonValueKind.True;
+            if (!required)
+            {
+                continue;   // optional 欄位不影響單參資格。
+            }
+
+            if (found is not null)
+            {
+                return null; // 第二個必填欄位(不論型別)→ 多參,跳過。
+            }
+
+            var isStr = f.TryGetProperty("type", out var t)
+                && t.ValueKind == JsonValueKind.String && t.GetString() == "str";
+            if (!isStr)
+            {
+                return null; // 唯一必填但非字串 → 跳過。
+            }
+
+            found = field.Name;
+        }
+
+        return found;
     }
 
     private async Task<string> InvokeWorkflowToolAsync(ChatToolSpec spec, string arg, UserContext userCtx, CancellationToken ct)
@@ -260,6 +554,49 @@ public sealed class ChatService : IChatService
             _logger.LogWarning(ex, "聊天工具 {工具} 呼叫工作流 {工作流} 失敗:{訊息}", spec.ToolName, spec.Workflow, ex.Message);
             return $"工作流 {spec.Workflow} 呼叫失敗:{ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// Skill 版工具委派:打 /skills/{name}/invoke,輸入鍵由 §1.3 從 input_schema 挑出。
+    /// 失敗回錯誤字串給模型轉述,不炸整輪(對映 InvokeWorkflowToolAsync 的 catch)。
+    /// ponytail: P1 不移植 kb_query→rag_qa abstain 兜底(等 kb_query 真的遷成 skill 且量到需要再說)。
+    /// </summary>
+    private async Task<string> InvokeSkillToolAsync(
+        string name, string inputKey, string arg, UserContext userCtx, CancellationToken ct)
+    {
+        try
+        {
+            var input = new Dictionary<string, JsonElement>
+            {
+                [inputKey] = JsonSerializer.SerializeToElement(arg),
+            };
+            var res = await _workflows.InvokeSkillAsync(name, input, userCtx, ct);
+            return ExtractSkillAnswer(res);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "聊天工具 {工具} 呼叫 skill 失敗:{訊息}", name, ex.Message);
+            return $"Skill {name} 呼叫失敗:{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// skill invoke 回的是整包 JsonElement,形狀 {skill, output:{…}};取外層 output(無則根),
+    /// 依 OutputKeys 取字串,都沒有回整包 raw JSON。不改既有 ExtractAnswer(它服務字典路徑)。
+    /// </summary>
+    private static string ExtractSkillAnswer(JsonElement res)
+    {
+        var output = res.ValueKind == JsonValueKind.Object && res.TryGetProperty("output", out var o) ? o : res;
+        foreach (var key in OutputKeys)
+        {
+            if (output.ValueKind == JsonValueKind.Object
+                && output.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String)
+            {
+                return v.GetString()!;
+            }
+        }
+
+        return output.GetRawText();
     }
 
     private static bool IsAbstain(Dictionary<string, JsonElement> output) =>

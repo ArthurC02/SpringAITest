@@ -30,19 +30,6 @@ export interface DocumentInfo {
   created_at: string
 }
 
-/**
- * 工作流清單一列（required_role 為 snake_case，照實宣告）。
- * `input_schema` 為 node-first D7 補上的欄位：workflow 服務端由 code workflow 的
- * input schema 匯出，platform 原樣代理；有 schema 時執行表單走與 skill 相同的
- * 動態字串欄位流程，缺欄或含非 str 型別 → WorkflowsView 退回 JSON textarea。
- */
-export interface WorkflowInfo {
-  name: string
-  description: string
-  required_role: string
-  input_schema?: Record<string, SkillInputField> | null
-}
-
 /** POST /api/workflows/{name} 回應。output 形狀因工作流而異，故用寬鬆型別。 */
 export interface WorkflowResult {
   workflow: string
@@ -122,17 +109,8 @@ export interface SkillCatalogEntry {
   source: 'builtin' | 'custom'
   revision: number | null
   input_schema?: Record<string, SkillInputField> | null
-}
-
-/** 執行分頁的合併列：舊 code 工作流與 skill 共用同一張清單，以 source 區分徽章。 */
-export interface Runnable {
-  name: string
-  description: string
-  required_role: string
-  source: 'code' | 'builtin' | 'custom'
-  revision: number | null
-  /** 舊 code 工作流沒有 input_schema（清單 API 不回）→ 執行表單退回 JSON textarea。 */
-  input_schema?: Record<string, SkillInputField> | null
+  /** 內建骨架項（template_* / kb_query）的 YAML 原文；compose patch 用。custom 為 undefined。 */
+  definition?: string
 }
 
 /** POST /api/skills/validate 的一條錯誤；line 為 YAML 行號（引擎給得出來時才有）。 */
@@ -146,6 +124,37 @@ export interface SkillValidationError {
 export interface SkillValidation {
   valid: boolean
   errors: SkillValidationError[]
+}
+
+/** Configuration Set 的七個可覆寫鍵（snake_case，含 dot 命名空間）。 */
+export type ConfigKey =
+  | 'retrieval.top_k'
+  | 'kb_query.top_k'
+  | 'kb_query.max_retrieval_attempts'
+  | 'workflow.timeout_seconds'
+  | 'llm.model'
+  | 'intent.confidence_threshold'
+  | 'llm.temperature'
+
+/** 只存覆寫值：未覆寫的鍵回落全域預設。model 為 string、其餘為 number。 */
+export type ConfigurationValues = Partial<Record<ConfigKey, number | string>>
+
+/**
+ * Configuration Set 清單一列（snake_case，比照 skill）。`values` 在清單可能不帶
+ * （後端 ConfigurationSetInfo 只回 id/name/is_active/updated_at）——編輯時一律 GET {id} 取完整值。
+ */
+export interface ConfigurationSetInfo {
+  id: string
+  name: string
+  is_active: boolean
+  updated_at: string
+  values?: ConfigurationValues
+}
+
+/** 單筆 Configuration Set（GET {id}）：含 values 與 created_at。 */
+export interface ConfigurationSet extends ConfigurationSetInfo {
+  values: ConfigurationValues
+  created_at: string
 }
 
 /** GET /api/nodes 一列：節點契約（reads/writes 是 state 鍵名）。 */

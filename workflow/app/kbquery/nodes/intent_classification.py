@@ -74,11 +74,18 @@ def classify_by_rules(text: str) -> tuple[IntentType, str]:
         "requires_calculation",
         "requires_multi_doc",
     ],
-    deps=["llm"],
+    # confidence 門檻由注入的依賴帶入（P4c 促升為 per-config 可覆寫）：deps 依序取
+    # llm、intent_confidence_threshold 當位置參數，由 KbQueryDeps 的同名欄位提供。
+    deps=["llm", "intent_confidence_threshold"],
     requires_tools=[],
 )
-def make_intent_classification_node(llm: StructuredLLMPort | None):
-    """建立 intent_classification 節點：規則先行，LLM 僅補位且 confidence >= 0.6 才採用。"""
+def make_intent_classification_node(
+    llm: StructuredLLMPort | None, confidence_threshold: float = 0.6
+):
+    """建立 intent_classification 節點：規則先行，LLM 僅補位且 confidence >= 門檻才採用。
+
+    confidence_threshold 預設 0.6（歷史寫死值），可由租戶 Configuration Set 覆寫。
+    """
 
     async def intent_classification_node(state: dict) -> dict:
         q = state.get("normalized_query", "")
@@ -88,7 +95,7 @@ def make_intent_classification_node(llm: StructuredLLMPort | None):
             out = await llm.structured(
                 system=_SYSTEM_PROMPT, user=q, schema=IntentOutput
             )
-            if isinstance(out, IntentOutput) and out.confidence >= 0.6:
+            if isinstance(out, IntentOutput) and out.confidence >= confidence_threshold:
                 intent = out.intent_type
                 question_type = out.question_type or _LABELS.get(intent, "unknown")
 

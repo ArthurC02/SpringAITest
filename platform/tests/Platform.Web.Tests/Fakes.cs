@@ -7,21 +7,40 @@ using Platform.Service.Exceptions;
 
 namespace Platform.Web.Tests;
 
-/// <summary>Web 整合測試用的 LLM 代理 fake:阻塞回固定字串、串流吐「你好」「世界」。記下最後一次工具列供斷言。</summary>
+/// <summary>
+/// Web 整合測試用的 LLM 代理 fake:一律回固定字串 → 路由回覆不匹配任何工具 → 走純聊天兜底(reply 仍是「測試回覆」)。
+/// 新流程下工具改以「路由目錄」文字經路由呼叫傳入(非原生 tools 引數);測試改斷言 LastRoutingCatalog。
+/// 單例跨同一測試類的方法共用,測試以 Reset() 隔離每次請求。
+/// </summary>
 public sealed class FakeLlmAgent : ILlmAgent
 {
-    public IReadOnlyList<LlmTool>? LastTools { get; private set; }
+    /// <summary>最近一次「路由呼叫」的 system 目錄內容(以路由指令開頭者);未路由的請求維持 null。</summary>
+    public string? LastRoutingCatalog { get; private set; }
+
+    /// <summary>本輪 CompleteAsync 的次數(匿名純聊天=1;路由+兜底/摘要=2)。</summary>
+    public int CompleteCallCount { get; private set; }
+
+    public void Reset()
+    {
+        LastRoutingCatalog = null;
+        CompleteCallCount = 0;
+    }
 
     public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, CancellationToken ct)
     {
-        LastTools = tools;
+        CompleteCallCount++;
+        if (messages.Count > 0 && messages[0].Role == "system"
+            && messages[0].Content.StartsWith("你是一個路由器", StringComparison.Ordinal))
+        {
+            LastRoutingCatalog = messages[0].Content;
+        }
+
         return Task.FromResult("測試回覆");
     }
 
     public async IAsyncEnumerable<string> StreamAsync(
         IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, [EnumeratorCancellation] CancellationToken ct)
     {
-        LastTools = tools;
         await Task.Yield();
         // 訊息為「多行」時,吐一塊含換行的 chunk,驗 SSE 把單一 chunk 拆成多個 data: 行。
         if (messages.Count > 0 && messages[^1].Content == "多行")
@@ -163,9 +182,21 @@ public sealed class FakeWorkflowService : IWorkflowService
             : Json("""{"valid":true,"errors":[],"skill":{"name":"quarterly_qa","description":"季報問答","required_role":"USER"}}"""));
     }
 
+    /// <summary>
+    /// 非 null 時 GetSkillCatalogAsync 回這包目錄(供聊天 → Skill 路由的 Web 整合測試注入可路由目錄)。
+    /// 設計成與 Catalog_Returns200 的斷言結構相容(2 筆、source 依序 builtin/custom),即使並行讀取也安全。
+    /// 用後務必在 finally 還原為 null。
+    /// </summary>
+    public static JsonElement? CatalogOverride { get; set; }
+
     public Task<JsonElement> GetSkillCatalogAsync(UserContext ctx, CancellationToken ct = default)
     {
         EngineCalls.Add("catalog");
+        if (CatalogOverride is JsonElement over)
+        {
+            return Task.FromResult(over);
+        }
+
         return Task.FromResult(Json(
             """[{"name":"kb_query","description":"知識查詢","required_role":"USER","source":"builtin","revision":null},"""
             + """{"name":"quarterly_qa","description":"季報問答","required_role":"USER","source":"custom","revision":3}]"""));
@@ -334,6 +365,97 @@ public sealed class FakeSkillService : ISkillService
         }
 
         return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Configuration Set CRUD 服務 fake(代表 backend :8002)。依 upsert 的 name / route 的 id 重現 backend 錯誤:
+/// name=dup_set → 409、name=bad_values → 422(values 越界的 fieldErrors)、id=GhostId → 404。
+/// Calls 是靜態的:讓「401 時請求不得抵達 backend」與「/active 不得被 {id} 吞掉轉發」可被斷言。
+/// </summary>
+public sealed class FakeConfigurationSetService : IConfigurationSetService
+{
+    public static readonly List<string> Calls = new();
+
+    public const string ExistingId = "11111111-1111-1111-1111-111111111111";
+    public const string GhostId = "22222222-2222-2222-2222-222222222222";
+
+    /// <summary>backend 422 的 values 越界 fieldErrors:必須原樣穿過 platform。</summary>
+    public static readonly Dictionary<string, string> RangeErrors =
+        new() { ["retrieval.top_k"] = "必須介於 1 到 50" };
+
+    private static JsonElement El(object v) => JsonSerializer.SerializeToElement(v);
+
+    private static ConfigurationSet Make(string id, string name, bool active) =>
+        new(id, name, active,
+            new Dictionary<string, JsonElement> { ["retrieval.top_k"] = El(8), ["llm.model"] = El("gpt-4o-mini") },
+            "admin-a", "2026-07-14T00:00:00Z", "2026-07-14T00:00:00Z");
+
+    public Task<IReadOnlyList<ConfigurationSetInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("list");
+        return Task.FromResult<IReadOnlyList<ConfigurationSetInfo>>(new List<ConfigurationSetInfo>
+        {
+            new(ExistingId, "prod", true, "2026-07-14T00:00:00Z"),
+        });
+    }
+
+    public Task<ConfigurationSet> GetAsync(string id, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("get:" + id);
+        if (id == GhostId)
+        {
+            throw new WorkflowNotFoundException("找不到 Configuration Set");
+        }
+
+        return Task.FromResult(Make(id, "prod", true));
+    }
+
+    public Task<ConfigurationSet> CreateAsync(ConfigurationSetUpsert request, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("create:" + request.Name);
+        ThrowForName(request.Name);
+        return Task.FromResult(Make(ExistingId, request.Name!, false));
+    }
+
+    public Task<ConfigurationSet> UpdateAsync(string id, ConfigurationSetUpsert request, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("update:" + id);
+        ThrowForName(request.Name);
+        return Task.FromResult(Make(id, request.Name!, false));
+    }
+
+    public Task DeleteAsync(string id, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("delete:" + id);
+        if (id == GhostId)
+        {
+            throw new WorkflowNotFoundException("找不到 Configuration Set");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<ConfigurationSet> ActivateAsync(string id, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("activate:" + id);
+        if (id == GhostId)
+        {
+            throw new WorkflowNotFoundException("找不到 Configuration Set");
+        }
+
+        return Task.FromResult(Make(id, "prod", true));
+    }
+
+    private static void ThrowForName(string? name)
+    {
+        switch (name)
+        {
+            case "dup_set":
+                throw new DownstreamConflictException("Configuration Set 名稱已存在：" + name);
+            case "bad_values":
+                throw new SkillValidationFailedException("Configuration Set 驗證失敗") { FieldErrors = RangeErrors };
+        }
     }
 }
 

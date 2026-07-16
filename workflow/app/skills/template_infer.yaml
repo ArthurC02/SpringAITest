@@ -1,0 +1,22 @@
+name: template_infer              # __SLOT_name__
+description: 推論範本骨架            # __SLOT_description__
+required_role: USER
+
+input_schema:
+  query: {type: str, required: true, min_length: 1}
+
+# 薄檢索(登記 → 通用 retrieve)後接 nl_logic 做推論:把檢索到的 docs 餵給 LLM,
+# 由使用者的自然語言規則(instruction)解讀並寫回 business_result。
+flow:
+  - node: query_intake@1.0
+  - node: retrieve@1.0
+    params:
+      query_key: query
+
+  # 商業邏輯槽(nl_logic):input_keys 把檢索結果 docs 餵進 LLM。
+  # 規則槽獨佔一行、位於 block literal(|)內,compose 期整行換成推論規則。
+  - node: nl_logic@1.0
+    params:
+      input_keys: [docs]
+      instruction: |
+        __RULE_SLOT__
