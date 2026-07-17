@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
 from app.engine import harness
-from app.kbquery.models import TraceEntry
+from app.engine.models import TraceEntry
 from pydantic import computed_field
 
 ToolKind = Literal["http", "local"]

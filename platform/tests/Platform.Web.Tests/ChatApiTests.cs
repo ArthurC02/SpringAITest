@@ -94,20 +94,44 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     private static int ToolLineCount(string catalog)
         => catalog.Split("\n\n")[^1].Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
 
+    // 五顆內建可路由 skill(鏡射 workflow GET /skills 真實回應形狀),供以下三個路由目錄端到端測試共用。
+    private const string BuiltinCatalog = """
+    [
+      { "name":"kb_query", "description":"可稽核的知識查詢", "required_role":"USER", "source":"builtin",
+        "input_schema": { "query": { "type":"str", "required":true } } },
+      { "name":"rag_qa", "description":"一般文件知識庫問答", "required_role":"USER", "source":"builtin",
+        "input_schema": { "question": { "type":"str", "required":true } } },
+      { "name":"summarize", "description":"文字摘要", "required_role":"USER", "source":"builtin",
+        "input_schema": { "text": { "type":"str", "required":true } } },
+      { "name":"triage", "description":"問題分流", "required_role":"USER", "source":"builtin",
+        "input_schema": { "question": { "type":"str", "required":true } } },
+      { "name":"analyze_report", "description":"分析報告", "required_role":"ADMIN", "source":"builtin",
+        "input_schema": { "topic": { "type":"str", "required":true } } }
+    ]
+    """;
+
     [Fact]
-    public async Task Chat_WithBearer_EnablesWorkflowTools_UserRoleGetsFour()
+    public async Task Chat_WithBearer_EnablesSkillTools_UserRoleGetsFour()
     {
-        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-        agent.Reset();
-        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse(BuiltinCatalog).RootElement.Clone();
+        try
+        {
+            var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+            agent.Reset();
+            var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
-        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "文件裡有什麼?" });
+            var resp = await client.PostAsJsonAsync("/api/chat", new { message = "文件裡有什麼?" });
 
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var catalog = agent.LastRoutingCatalog!;
-        Assert.Equal(4, ToolLineCount(catalog));
-        Assert.Contains("search_knowledge_base", catalog);
-        Assert.DoesNotContain("generate_analysis_report", catalog);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var catalog = agent.LastRoutingCatalog!;
+            Assert.Equal(4, ToolLineCount(catalog));
+            Assert.Contains("kb_query", catalog);
+            Assert.DoesNotContain("analyze_report", catalog);
+        }
+        finally
+        {
+            FakeWorkflowService.CatalogOverride = null;
+        }
     }
 
     // W1:帶有效 JWT + 可路由目錄 → 動態 Skill 進入路由目錄(端到端經 DI 走 BuildToolsAsync → SkillCatalogToTools)。
@@ -132,11 +156,10 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
             var catalog = agent.LastRoutingCatalog!;
-            // 2 支動態 Skill + 4 支殘留靜態(USER)。
+            // 單軌後路由目錄恰等於動態 Skill 目錄(builtin + custom),沒有殘留靜態工具混入。
             Assert.Contains("kb_query", catalog);
             Assert.Contains("tenant_a_private_search", catalog);
-            Assert.Contains("search_knowledge_base", catalog);
-            Assert.Equal(6, ToolLineCount(catalog));
+            Assert.Equal(2, ToolLineCount(catalog));
         }
         finally
         {
@@ -145,18 +168,26 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
-    public async Task Chat_WithAdminBearer_AlsoGetsAnalysisReportTool()
+    public async Task Chat_WithAdminBearer_AlsoGetsAnalyzeReportTool()
     {
-        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-        agent.Reset();
-        var client = _factory.CreateClient().WithToken(_factory.IssueToken(username: "admin-a", role: "ADMIN"));
+        FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse(BuiltinCatalog).RootElement.Clone();
+        try
+        {
+            var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
+            agent.Reset();
+            var client = _factory.CreateClient().WithToken(_factory.IssueToken(username: "admin-a", role: "ADMIN"));
 
-        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "给我一份報告" });
+            var resp = await client.PostAsJsonAsync("/api/chat", new { message = "给我一份報告" });
 
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var catalog = agent.LastRoutingCatalog!;
-        Assert.Equal(5, ToolLineCount(catalog));
-        Assert.Contains("generate_analysis_report", catalog);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var catalog = agent.LastRoutingCatalog!;
+            Assert.Equal(5, ToolLineCount(catalog));
+            Assert.Contains("analyze_report", catalog);
+        }
+        finally
+        {
+            FakeWorkflowService.CatalogOverride = null;
+        }
     }
 
     [Fact]

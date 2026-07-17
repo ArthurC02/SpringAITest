@@ -1,8 +1,8 @@
-"""自訂 Skill 的 workflow 側（AT4-09 / AT4-10 / AT4-11）+ /workflows 的 input_schema 回歸。
+"""自訂 Skill 的 workflow 側（AT4-09 / AT4-10 / AT4-11）。
 
-backend 一律用手寫 fake（monkeypatch httpx.AsyncClient.get，比照 test_api.py 對
-httpx.AsyncClient.post 的做法）——不打網路、不引 mocking 套件。fake 依 X-Tenant-Id
-分租戶存放，因此「跨租戶不可見」不是靠斷言假設，而是 fake 真的回 404。
+backend 一律用手寫 fake（monkeypatch httpx.AsyncClient.get）——不打網路、不引 mocking
+套件。fake 依 X-Tenant-Id 分租戶存放，因此「跨租戶不可見」不是靠斷言假設，而是 fake
+真的回 404。
 """
 
 import httpx
@@ -213,14 +213,19 @@ def test_list_skills_survives_backend_down(backend, fake_deps):
     assert resp.status_code == 200
     names = [i["name"] for i in resp.json()]
     # 內建集合 = kb_query + 五支 template_* 骨架（設計 §5.4 縫④：骨架亦入 GET /skills，
-    # 由前端過濾 template_ 前綴）。backend 不可達時只缺自訂項，內建照列。
+    # 由前端過濾 template_ 前綴）+ Node-First 遷移（Phase 1）新增的四顆內建 skill
+    # （analyze_report/rag_qa/summarize/triage）。backend 不可達時只缺自訂項，內建照列。
     assert names == [
+        "analyze_report",
         "kb_query",
+        "rag_qa",
+        "summarize",
         "template_compare",
         "template_infer",
         "template_inspire",
         "template_retrieval",
         "template_stats",
+        "triage",
     ]
 
 
@@ -473,22 +478,3 @@ def test_validate_has_no_side_effects_on_custom_catalog(backend, fake_deps):
     assert skills.get("quarterly_qa") is None  # 自訂 skill 不會被寫進內建註冊表
     assert skills.get("broken_skill") is None
 
-
-# ---------------------------------------------------------------------------
-# GET /workflows 的 input_schema（前端回歸修復；新增欄位，既有欄位不動）
-# ---------------------------------------------------------------------------
-
-
-def test_list_workflows_exposes_input_schema():
-    """有 input_model 的工作流回同一形狀的 input_schema；沒宣告的回 null。"""
-    body = {i["name"]: i for i in client.get("/workflows", headers=_headers()).json()}
-
-    assert body["rag_qa"]["input_schema"] == {
-        "question": {"type": "str", "required": True, "min_length": 1, "default": None}
-    }
-    assert body["kb_query"]["input_schema"]["query"]["min_length"] == 1
-    assert body["analyze_report"]["input_schema"]["topic"]["required"] is True
-    assert body["summarize"]["input_schema"] is None  # 沒宣告 input_model
-    # 既有欄位一個沒動（AT-REG-01 只禁止刪欄位／改型別）
-    assert body["analyze_report"]["required_role"] == "ADMIN"
-    assert body["summarize"]["description"]

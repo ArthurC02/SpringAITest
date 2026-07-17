@@ -10,13 +10,9 @@ import {
 import { ApiError } from '../api/http'
 import type { ConfigurationSetInfo } from '../types'
 import { CONFIG_FIELDS, draftToValues, validateConfigValues } from '../nodeParams'
+import { fmtDate } from '../format'
 import Skeleton from './Skeleton'
 import { useToast } from './Toast'
-
-function fmtDate(s: string): string {
-  const d = new Date(s)
-  return Number.isNaN(d.getTime()) ? s : d.toLocaleString()
-}
 
 /** 編輯中的組（id=null 代表新建）。draft 為各鍵的字串草稿（未填 = 不覆寫）。 */
 type Editing = { id: string | null; name: string; draft: Record<string, string> }

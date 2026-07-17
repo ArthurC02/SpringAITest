@@ -27,7 +27,7 @@ public sealed class AuthService
         // 3. 帳號不可重複。
         if (await _repo.UsernameExistsAsync(request.Username!, ct))
         {
-            throw new ApiException(StatusCodes.Status409Conflict, "使用者名稱已存在：" + request.Username);
+            throw new ApiException(StatusCodes.Status409Conflict, AuthMessages.UsernameExists(request.Username!));
         }
 
         // 4. 存使用者:BCrypt hash、role 一律 USER、掛在該租戶下。

@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -31,13 +30,6 @@ public sealed class ConfigurationSetServiceTests
         ["llm.model"] = JsonSerializer.SerializeToElement("gpt-4o-mini"),
     });
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
-    private static HttpResponseMessage Error(HttpStatusCode status, string message) =>
-        Json(status, "{\"timestamp\":\"2026-07-14T00:00:00Z\",\"status\":" + (int)status
-            + ",\"message\":" + JsonSerializer.Serialize(message) + ",\"fieldErrors\":{}}");
-
     private static void AssertIdentityHeaders(StubHttpMessageHandler stub)
     {
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
@@ -49,7 +41,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact]
     public async Task List_MapsSnakeCase_OmitsValues_ForwardsIdentityHeaders()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             """[{"id":"11111111-1111-1111-1111-111111111111","name":"prod","is_active":true,"updated_at":"2026-07-14T00:00:00Z"}]"""));
 
         var list = await Build(stub).ListAsync(AdminCtx);
@@ -68,7 +60,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact]
     public async Task Get_ForwardsIdInPath_MapsValues()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, SetJson));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SetJson));
 
         var set = await Build(stub).GetAsync(SetId, AdminCtx);
 
@@ -86,7 +78,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact] // body 只有 name + values —— is_active 不得經 upsert(啟用走 activate 端點)。
     public async Task Create_PostsNameAndValuesOnly_NoIsActive_MapsCreated()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.Created, SetJson));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created, SetJson));
 
         var created = await Build(stub).CreateAsync(Upsert(), AdminCtx);
 
@@ -106,7 +98,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact]
     public async Task Update_PutsToIdPath_SendsBody()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, SetJson));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SetJson));
 
         await Build(stub).UpdateAsync(SetId, Upsert(), AdminCtx);
 
@@ -132,7 +124,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact] // activate 是 POST {id}/activate —— 專屬子路徑,非 upsert。
     public async Task Activate_PostsToActivatePath_MapsSet()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, SetJson));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SetJson));
 
         var set = await Build(stub).ActivateAsync(SetId, AdminCtx);
 
@@ -152,7 +144,7 @@ public sealed class ConfigurationSetServiceTests
     public async Task Create_BackendError_MapsToSameStatusException_KeepsMessage(
         int status, Type expected, string message)
     {
-        var stub = new StubHttpMessageHandler(_ => Error((HttpStatusCode)status, message));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error((HttpStatusCode)status, message));
 
         var ex = await Assert.ThrowsAnyAsync<Exception>(() => Build(stub).CreateAsync(Upsert(), AdminCtx));
 
@@ -163,7 +155,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact] // values 越界 → backend 422 + fieldErrors,錯誤碼必須穿過代理層(前端才指得出哪個鍵越界)。
     public async Task Create_Backend422_KeepsValueRangeFieldErrors()
     {
-        var stub = new StubHttpMessageHandler(_ => Json((HttpStatusCode)422,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
             """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Configuration Set 驗證失敗","fieldErrors":{"retrieval.top_k":"必須介於 1 到 50","llm.model":"不在允許清單"}}"""));
 
         var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
@@ -177,7 +169,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact] // backend 400 的 fieldErrors 必須穿過代理層。
     public async Task Update_Backend400WithFieldErrors_KeepsFieldErrors()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.BadRequest,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
             """{"timestamp":"2026-07-14T00:00:00Z","status":400,"message":"輸入驗證失敗","fieldErrors":{"name":"name 不可為空"}}"""));
 
         var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(
@@ -190,7 +182,7 @@ public sealed class ConfigurationSetServiceTests
     [Fact] // 跨租戶 GET {id} → backend 404(租戶隔離),原樣轉發。
     public async Task Get_Backend404_ThrowsNotFound()
     {
-        var stub = new StubHttpMessageHandler(_ => Error(HttpStatusCode.NotFound, "找不到 Configuration Set"));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.NotFound, "找不到 Configuration Set"));
 
         var ex = await Assert.ThrowsAsync<WorkflowNotFoundException>(
             () => Build(stub).GetAsync(SetId, AdminCtx));

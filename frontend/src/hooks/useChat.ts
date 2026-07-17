@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { streamChat, newConversation } from '../api/chat'
+import { CHAT_MESSAGES_KEY } from '../storageKeys'
 import type { Message } from '../types'
-
-const STORAGE_KEY = 'springai-chat:messages'
 
 function loadMessages(): Message[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(CHAT_MESSAGES_KEY)
     return raw ? (JSON.parse(raw) as Message[]) : []
   } catch {
     return []
@@ -26,7 +25,7 @@ export function useChat() {
   // 每次 messages 變動就寫回 localStorage（容量滿等情況靜默忽略）。
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(messages))
+      localStorage.setItem(CHAT_MESSAGES_KEY, JSON.stringify(messages))
     } catch {
       /* ignore */
     }

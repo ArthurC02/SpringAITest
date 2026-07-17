@@ -1,15 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listConfig, updateConfig } from '../api/config'
 import type { ConfigEntry } from '../types'
+import { fmtDate } from '../format'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
 import SkillHome from './SkillHome'
 import NodeParamsTab from './NodeParamsTab'
-
-function fmtDate(s: string): string {
-  const d = new Date(s)
-  return Number.isNaN(d.getTime()) ? s : d.toLocaleString()
-}
 
 // 系統設定重構（設計 §1）：Skill 功能樹進駐系統設定，工作流唯讀 tab 退場，
 // 頂層導覽的「工作流與 Skill」視圖一併移除。順序 = Skill 優先、一般設定墊底。

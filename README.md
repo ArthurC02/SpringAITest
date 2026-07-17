@@ -22,18 +22,17 @@ SpringAITest/
 │   ├── Dockerfile              選用：容器模式用到
 │   ├── src/
 │   │   └── Backend.Api/         單一專案（feature folders：Auth、Conversations、Files、Retrieval、Analysis、Skills、Config）
-│   └── tests/                  xUnit 測試專案 ~100 個（Backend.Api.Tests）
-├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、Workflows & Skills、分析、系統設定五視圖）
+│   └── tests/                  xUnit 測試專案 165 個（Backend.Api.Tests）
+├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、分析、系統設定四視圖）
 │   ├── vite.config.ts          dev 時把 /api proxy 到 :8080（免 CORS）
 │   ├── Dockerfile / nginx.conf 正式：多階段 build → nginx 靜態檔 + /api 反代（SSE 關緩衝）
-│   └── src/                    api/{http,auth,chat,documents,workflows,analysis,config}.ts、hooks/{useAuth,useChat,useDocuments}.ts、components/{AuthPage,AppShell,ChatView,...}.tsx
+│   └── src/                    api/{http,auth,chat,documents,skills,analysis,config}.ts、hooks/{useAuth,useChat,useDocuments}.ts、components/{AuthPage,AppShell,ChatView,...}.tsx
 ├── workflow/                   工作流：Python + LangGraph + FastAPI（Skill 引擎、多個具名工作流、向量檢索、分析工作流、權限邊界）
 │   ├── app/
 │   │   ├── engine/             Skill 引擎層（@node、@tool 裝飾器、YAML 編譯器、表達式求值器、沙箱執行器）
 │   │   ├── skills/             Skill 定義（kb_query.yaml 內建範例、custom.py 自訂載入）
 │   │   ├── tools.py            四個初始 tool（retrieve、embed、chunk、rerank）
-│   │   ├── workflows/          每個工作流一個模組 + registry（新增工作流只要新增一個模組檔）
-│   │   ├── nodes/              可重用節點（retrieve：租戶過濾向量檢索）
+│   │   ├── nodes/              可重用節點（retrieve：租戶過濾向量檢索）、kb_query 節點家族（十個細粒度節點）
 │   │   └── main.py             FastAPI 進入點（內部密鑰驗證 + 多租戶 context）
 │   ├── pyproject.toml          uv 管理依賴（langgraph、langchain-openai、fastapi、httpx…）
 │   └── Dockerfile              正式：容器內經服務名連 LiteLLM，檢索經 HTTP 呼叫 backend
@@ -47,10 +46,10 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit ~175 個 + 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit ~100 個、手寫 fake repository（未引入 mocking 套件）。
-- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。Workflows 視圖擴充為三分頁（執行工作流、Skill 管理 [ADMIN]、節點目錄）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）。
-- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 343 個。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 262 個 + 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 165 個、手寫 fake repository（未引入 mocking 套件）。
+- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）。
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 434 個。
 
 > .NET 後端需 .NET SDK 10 以上才能建置（`dotnet --version` 應顯示 `10.x`）。
 
@@ -278,9 +277,9 @@ curl -H "Authorization: Bearer eyJhbGc..." http://localhost:8080/api/documents
 | ------------------------------- | ---- | ----- | -------------------------------------- |
 | `/api/documents`                | POST | USER  | 新增文件（切塊 + 嵌入,存入租戶向量庫） |
 | `/api/documents`                | GET  | USER  | 列出文件（租戶隔離）                   |
-| `/api/workflows`                | GET  | USER  | 列出工作流（含 `required_role`）       |
-| `/api/workflows/rag_qa`         | POST | USER  | RAG 問答（使用租戶向量庫,附引用）      |
-| `/api/workflows/analyze_report` | POST | ADMIN | 生成分析報告（權限受限）               |
+| `/api/skills`                   | GET  | USER  | 列出技能（內建 + 自訂，含 `required_role`） |
+| `/api/skills/{name}/invoke`     | POST | USER  | 執行技能（rag_qa、summarize 等）      |
+| `/api/skills/validate`          | POST | ADMIN | 驗證 YAML 技能定義（語法 + schema）   |
 
 ```bash
 # 新增文件（非同步）—— 立即回 202，含文件 id、status 為 "processing"
@@ -295,40 +294,44 @@ curl -H "Authorization: Bearer <token>" http://localhost:8080/api/documents
 # 回應：[{"id":"doc-uuid","title":"我的文件","status":"ready"},{...}]
 # 待 status 變 "ready" 或 "failed" 表示完成
 
-# RAG 問答
-curl -X POST http://localhost:8080/api/workflows/rag_qa \
+# 列出所有技能
+curl -H "Authorization: Bearer <token>" http://localhost:8080/api/skills
+
+# 執行 rag_qa 技能（RAG 問答）
+curl -X POST http://localhost:8080/api/skills/rag_qa/invoke \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"input":{"question":"文件裡提到什麼？"}}'
 
-# 分析報告（ADMIN only，USER 會得 403）
-curl -X POST http://localhost:8080/api/workflows/analyze_report \
+# 執行 analyze_report 技能（分析報告,ADMIN only）
+curl -X POST http://localhost:8080/api/skills/analyze_report/invoke \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"input":{"topic":"市場分析"}}'
 ```
 
-## 工作流與技能（LangGraph + Skill 引擎）
+## 技能（LangGraph Skill 引擎）
 
-### 內建工作流
+### 內建技能
 
-| 工作流           | 說明                        | 權限  |
+| 技能             | 說明                        | 權限  |
 | ---------------- | --------------------------- | ----- |
 | `summarize`      | 文本摘要                    | USER  |
 | `triage`         | 問題分流分類                | USER  |
 | `rag_qa`         | RAG 問答（向量檢索 + 生成） | USER  |
+| `kb_query`       | 向量知識庫檢索              | USER  |
 | `analyze_report` | 生成分析報告                | ADMIN |
 
-> 上述端點都在 `/api/workflows/**` 之下，平台端一律要求 JWT 認證（見「認證與多租戶」），
-> 需帶 `Authorization: Bearer <token>`；`summarize`、`triage`、`rag_qa` 任一登入使用者（USER）
+> 上述技能透過 `/api/skills/{name}/invoke` 端點執行，平台端一律要求 JWT 認證（見「認證與多租戶」），
+> 需帶 `Authorization: Bearer <token>`；`summarize`、`triage`、`rag_qa`、`kb_query` 任一登入使用者（USER）
 > 皆可呼叫，`analyze_report` 則限 ADMIN。
 
 ### 技能（Skill）管理與執行
 
-前端「Workflows & Skills」視圖新增三個分頁：
+前端「Chat」視圖中，聊天會自動根據內容選擇合適的技能；另有「Config」視圖新增三個分頁：
 
-1. **執行工作流** — 執行上述內建工作流或自訂技能（需登入）。
-2. **技能管理** [ADMIN] — CRUD 自訂技能；上傳 YAML 定義；自動語法驗證（後端呼叫工作流引擎）。
+1. **執行技能** — 手動執行上述內建技能或自訂技能（需登入）。
+2. **技能管理** [ADMIN] — CRUD 自訂技能；上傳 YAML 定義；自動語法驗證（呼叫 LangGraph 引擎）。
 3. **節點目錄** — 瀏覽所有註冊節點的輸入/輸出契約與工具庫。
 
 新增 API 端點（皆需 JWT 認證 + `X-Internal-Token`）：
@@ -337,25 +340,31 @@ curl -X POST http://localhost:8080/api/workflows/analyze_report \
 - `POST /api/skills` — 新增技能（含上傳 YAML）。
 - `PUT /api/skills/{name}` — 更新技能（驗證後存新 revision）。
 - `DELETE /api/skills/{name}` — 軟刪除技能（disabled=false）。
-- `POST /api/skills/{name}/invoke` — 執行技能，回傳 `{status, output, trace}`。
+- `POST /api/skills/{name}/invoke` — 執行技能，回傳 `{skill, output}`。
 - `POST /api/skills/validate` — 驗證 YAML 語法（寫入前檢查）。
 - `GET /api/nodes` — 節點目錄（契約清單）。
 
 ```bash
-# 觸發 summarize（摘要）
-curl -X POST http://localhost:8080/api/workflows/summarize \
+# 執行 summarize 技能（文本摘要）
+curl -X POST http://localhost:8080/api/skills/summarize/invoke \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"input":{"text":"..."}}'
 
-# 觸發 triage（分流）
-curl -X POST http://localhost:8080/api/workflows/triage \
+# 執行 triage 技能（問題分流）
+curl -X POST http://localhost:8080/api/skills/triage/invoke \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"input":{"question":"退款要多久？"}}'
+
+# 驗證 Skill YAML 定義
+curl -X POST http://localhost:8080/api/skills/validate \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"yaml":"name: my_skill\ninput_schema: {...}"}'
 ```
 
-> 平台收到請求後會轉呼叫 workflow 服務；若要略過平台直接測工作流本身，也可以打 `http://localhost:8001/workflows/...`
+> 平台收到請求後會轉呼叫 LangGraph 引擎服務（`:8001`）；若要略過平台直接測技能本身，也可以打 `http://localhost:8001/skills/{name}/invoke`
 > （但工作流服務本身走的是服務間認證 `X-Internal-Token`／租戶標頭，不是 JWT，見 `workflow/README.md`）。
 
 ### 注意事項

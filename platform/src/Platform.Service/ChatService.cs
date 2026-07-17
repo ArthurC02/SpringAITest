@@ -351,24 +351,6 @@ public sealed class ChatService : IChatService
             new("user", $"使用者問題：{message}\n\n工具結果：\n{toolResult}"),
         };
 
-    /// <summary>聊天工具 → 工作流的對照表。RequiredRole 非 null 時只掛給該角色。</summary>
-    private sealed record ChatToolSpec(string ToolName, string Workflow, string InputKey, string Description, string? RequiredRole = null);
-
-    private static readonly ChatToolSpec[] ChatToolSpecs =
-    {
-        new("search_knowledge_base", "rag_qa", "question",
-            "一般文件知識庫問答(通用檢索),當沒有更專門的工具可用時才用;question 放完整問句。"),
-        new("verified_knowledge_query", "kb_query", "query",
-            "需要可稽核、附證據驗證的知識查詢時才用(有證據不足即棄答的閘門);query 放查詢問句。"),
-        new("summarize_text", "summarize", "text",
-            "將輸入的原文濃縮成三句以內的摘要。使用者明確要求摘要一段長文字時使用;text 放要摘要的原文全文(不是描述)。"),
-        new("triage_question", "triage", "question",
-            "依問題複雜度分流後回答(簡單問題快答、複雜問題詳答)。使用者明確要求用分流(triage)方式處理問題時使用;question 放原始問題。"),
-        new("generate_analysis_report", "analyze_report", "topic",
-            "檢索租戶文件並產出指定主題的分析報告(檢索→分析→綜整多步流程)。使用者需要完整分析報告時使用;topic 放報告主題。",
-            RequiredRole: "ADMIN"),
-    };
-
     /// <summary>
     /// 輸出取字串答案時依序嘗試的 key;都沒有就整包序列化回給模型。
     /// business_result 排最前:template_* composed skill 的 nl_logic 節點把「使用者規則套用後」的權威答案
@@ -378,8 +360,8 @@ public sealed class ChatService : IChatService
 
     /// <summary>
     /// 已登入(userCtx 非 null)時把可用的 Skill 目錄包成聊天工具;匿名聊天不掛工具(Skill 需要租戶身分)。
-    /// 工具來源:動態 Skill 目錄(內建+自訂,租戶已由下游過濾)優先,殘留靜態工具依名去重兜底。
-    /// 目錄抓取失敗採 best-effort:退回靜態工具(類比 mem0 吞錯),聊天不炸。
+    /// 工具來源單軌:動態 Skill 目錄(內建+自訂,租戶已由下游過濾)。
+    /// 目錄抓取失敗採 best-effort:這輪回空工具清單(類比 mem0 吞錯),聊天照常走純聊天兜底,不炸。
     /// 工具失敗回錯誤文字給模型照實轉述,不讓整輪聊天失敗。
     /// </summary>
     internal async Task<IReadOnlyList<LlmTool>?> BuildToolsAsync(UserContext? userCtx, CancellationToken ct)
@@ -396,45 +378,13 @@ public sealed class ChatService : IChatService
         }
         catch (Exception ex)
         {
-            // best-effort:目錄抓不到不讓聊天炸;退回殘留靜態工具(或空)。
-            _logger.LogWarning(ex, "Skill 目錄取得失敗,退回靜態工具:{訊息}", ex.Message);
-            return BuildStaticTools(userCtx);
+            // best-effort:目錄抓不到不讓聊天炸;沒有靜態工具可退了,這輪就是空清單(純聊天兜底接手)。
+            _logger.LogWarning(ex, "Skill 目錄取得失敗,本輪無可用工具:{訊息}", ex.Message);
+            return Array.Empty<LlmTool>();
         }
 
         // ponytail: 每輪 GET /skills 的 N+1;若量到痛 → IMemoryCache per-(tenant,role) 30–60s TTL。
-        var skillTools = SkillCatalogToTools(catalog, userCtx);
-        var names = new HashSet<string>(skillTools.Select(t => t.Name), StringComparer.Ordinal);
-
-        var result = new List<LlmTool>(skillTools);
-        foreach (var t in BuildStaticTools(userCtx))
-        {
-            // 名稱未被 Skill 佔用才補(Skill 目錄優先)。
-            if (names.Add(t.Name))
-            {
-                result.Add(t);
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>殘留靜態 ChatToolSpecs → 工具。RequiredRole 非 null 時只掛給該角色(語義零變)。</summary>
-    // ponytail: settings-skill-redesign 把這些 workflow 遷成 skill 後,ChatToolSpecs 縮到空即可整段刪。
-    private IReadOnlyList<LlmTool> BuildStaticTools(UserContext userCtx)
-    {
-        var tools = new List<LlmTool>(ChatToolSpecs.Length);
-        foreach (var spec in ChatToolSpecs)
-        {
-            if (spec.RequiredRole is not null && userCtx.Role != spec.RequiredRole)
-            {
-                continue;
-            }
-
-            tools.Add(new LlmTool(spec.ToolName, spec.Description,
-                (arg, ct) => InvokeWorkflowToolAsync(spec, arg, userCtx, ct)));
-        }
-
-        return tools;
+        return SkillCatalogToTools(catalog, userCtx);
     }
 
     /// <summary>
@@ -542,41 +492,11 @@ public sealed class ChatService : IChatService
         return found;
     }
 
-    private async Task<string> InvokeWorkflowToolAsync(ChatToolSpec spec, string arg, UserContext userCtx, CancellationToken ct)
-    {
-        try
-        {
-            var input = new Dictionary<string, JsonElement>
-            {
-                [spec.InputKey] = JsonSerializer.SerializeToElement(arg),
-            };
-            var res = await _workflows.InvokeAsync(spec.Workflow, input, userCtx, ct);
-
-            // kb_query 證據不足棄答時,確定性退回 rag_qa 兜底(不依賴模型自己補打第二刀),並如實註明。
-            if (spec.Workflow == "kb_query" && IsAbstain(res.Output))
-            {
-                var ragInput = new Dictionary<string, JsonElement>
-                {
-                    ["question"] = JsonSerializer.SerializeToElement(arg),
-                };
-                var rag = await _workflows.InvokeAsync("rag_qa", ragInput, userCtx, ct);
-                return "嚴格稽核查詢因證據不足而棄答;以下是一般知識庫檢索(不含稽核保證)的結果:"
-                    + ExtractAnswer(rag.Output);
-            }
-
-            return ExtractAnswer(res.Output);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "聊天工具 {工具} 呼叫工作流 {工作流} 失敗:{訊息}", spec.ToolName, spec.Workflow, ex.Message);
-            return $"工作流 {spec.Workflow} 呼叫失敗:{ex.Message}";
-        }
-    }
-
     /// <summary>
     /// Skill 版工具委派:打 /skills/{name}/invoke,輸入鍵由 §1.3 從 input_schema 挑出。
-    /// 失敗回錯誤字串給模型轉述,不炸整輪(對映 InvokeWorkflowToolAsync 的 catch)。
-    /// ponytail: P1 不移植 kb_query→rag_qa abstain 兜底(等 kb_query 真的遷成 skill 且量到需要再說)。
+    /// 失敗回錯誤字串給模型轉述,不炸整輪聊天。
+    /// kb_query 證據不足棄答時,確定性退回 rag_qa 兜底(不依賴模型自己補打第二刀),並如實註明。
+    /// ponytail: kb_query→rag_qa 是寫死的專屬特判,等有第二顆需要同類兜底的 skill 再抽象成表驅動。
     /// </summary>
     private async Task<string> InvokeSkillToolAsync(
         string name, string inputKey, string arg, UserContext userCtx, CancellationToken ct)
@@ -588,6 +508,18 @@ public sealed class ChatService : IChatService
                 [inputKey] = JsonSerializer.SerializeToElement(arg),
             };
             var res = await _workflows.InvokeSkillAsync(name, input, userCtx, ct);
+
+            if (name == "kb_query" && IsAbstain(res))
+            {
+                var ragInput = new Dictionary<string, JsonElement>
+                {
+                    ["question"] = JsonSerializer.SerializeToElement(arg),
+                };
+                var rag = await _workflows.InvokeSkillAsync("rag_qa", ragInput, userCtx, ct);
+                return "嚴格稽核查詢因證據不足而棄答;以下是一般知識庫檢索(不含稽核保證)的結果:"
+                    + ExtractSkillAnswer(rag);
+            }
+
             return ExtractSkillAnswer(res);
         }
         catch (Exception ex)
@@ -597,13 +529,14 @@ public sealed class ChatService : IChatService
         }
     }
 
-    /// <summary>
-    /// skill invoke 回的是整包 JsonElement,形狀 {skill, output:{…}};取外層 output(無則根),
-    /// 依 OutputKeys 取字串,都沒有回整包 raw JSON。不改既有 ExtractAnswer(它服務字典路徑)。
-    /// </summary>
+    /// <summary>skill invoke 回應形狀 {skill, output:{…}} 取外層 output(無則回根本身),供取答案字串與棄答判定共用。</summary>
+    private static JsonElement SkillOutputElement(JsonElement res) =>
+        res.ValueKind == JsonValueKind.Object && res.TryGetProperty("output", out var o) ? o : res;
+
+    /// <summary>依 OutputKeys 從 output 取字串答案,都沒有回整包 raw JSON。</summary>
     private static string ExtractSkillAnswer(JsonElement res)
     {
-        var output = res.ValueKind == JsonValueKind.Object && res.TryGetProperty("output", out var o) ? o : res;
+        var output = SkillOutputElement(res);
         foreach (var key in OutputKeys)
         {
             if (output.ValueKind == JsonValueKind.Object
@@ -616,22 +549,14 @@ public sealed class ChatService : IChatService
         return output.GetRawText();
     }
 
-    private static bool IsAbstain(Dictionary<string, JsonElement> output) =>
-        output.TryGetValue("answer_mode", out var mode)
-        && mode.ValueKind == JsonValueKind.String
-        && mode.GetString() == "ABSTAIN";
-
-    private static string ExtractAnswer(Dictionary<string, JsonElement> output)
+    /// <summary>output.answer_mode == "ABSTAIN" → kb_query 稽核閘門判定證據不足而棄答。</summary>
+    private static bool IsAbstain(JsonElement res)
     {
-        foreach (var key in OutputKeys)
-        {
-            if (output.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.String)
-            {
-                return value.GetString()!;
-            }
-        }
-
-        return JsonSerializer.Serialize(output);
+        var output = SkillOutputElement(res);
+        return output.ValueKind == JsonValueKind.Object
+            && output.TryGetProperty("answer_mode", out var mode)
+            && mode.ValueKind == JsonValueKind.String
+            && mode.GetString() == "ABSTAIN";
     }
 
     private void AppendExchange(string cid, string message, string reply)

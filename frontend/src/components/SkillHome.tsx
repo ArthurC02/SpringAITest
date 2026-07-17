@@ -25,7 +25,7 @@ type Sub = 'edit' | 'run' | 'history'
 type Selected = { name: string; source: 'custom' | 'builtin'; schema: Row['schema'] } | null
 
 /**
- * Skill 功能樹：可編輯 Skill 清單（custom 全部 + 內建 kb_query 唯讀）＋ 三子功能（編輯/試跑/版本）。
+ * Skill 功能樹：可編輯 Skill 清單（custom 全部 + 全部內建唯讀）＋ 三子功能（編輯/試跑/版本）。
  * template_* 骨架一律過濾（縫④，SSR-P1-004）——它們只在 compose 依 basedOn 精確取用。
  */
 export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
@@ -56,23 +56,18 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
         enabled: s.enabled,
         schema: schemaOf(s.name),
       }))
-      // 內建：只補 kb_query 唯讀一列；template_* 一律排除（縫④）。
-      const kb = catalog.find(
-        (c: SkillCatalogEntry) => c.source === 'builtin' && c.name === 'kb_query',
-      )
-      const builtinRows: Row[] = kb
-        ? [
-            {
-              name: kb.name,
-              description: kb.description,
-              required_role: kb.required_role,
-              source: 'builtin',
-              revision: kb.revision,
-              enabled: true,
-              schema: kb.input_schema ?? null,
-            },
-          ]
-        : []
+      // 內建：全部列出（唯讀）；template_* 骨架一律排除（縫④）——它們只在 compose 依 basedOn 精確取用。
+      const builtinRows: Row[] = catalog
+        .filter((c: SkillCatalogEntry) => c.source === 'builtin' && !c.name.startsWith('template_'))
+        .map((c) => ({
+          name: c.name,
+          description: c.description,
+          required_role: c.required_role,
+          source: 'builtin',
+          revision: c.revision,
+          enabled: true,
+          schema: c.input_schema ?? null,
+        }))
       setRows([...customRows, ...builtinRows])
     } catch (e) {
       setError((e as Error).message)

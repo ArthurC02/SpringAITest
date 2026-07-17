@@ -9,6 +9,7 @@
 from pydantic import BaseModel
 
 from app.engine.node_registry import node
+from app.nodes._llm_input import build_user_message
 
 
 class _NlLogicOutput(BaseModel):
@@ -31,17 +32,13 @@ def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="busi
     """建立 nl_logic 節點函式。
 
     - instruction:使用者的自然語言規則,原樣當成 LLM 的 system 提示。
-    - input_keys:要餵給 LLM 的 state 鍵,依序組成 user 訊息(`k: repr(value)`);
-      空時退回 normalized_query → query → 空字串(不讀未宣告的任意 state)。
+    - input_keys:要餵給 LLM 的 state 鍵,依序組成 user 訊息;組裝規則見
+      app.nodes._llm_input.build_user_message。
     - output_key:見下方 ponytail 註解,v1 只有 business_result 會存活。
     """
 
     async def nl_logic(state: dict) -> dict:
-        keys = tuple(input_keys)
-        if keys:
-            user = "\n".join(f"{k}: {state.get(k)!r}" for k in keys)
-        else:
-            user = str(state.get("normalized_query") or state.get("query") or "")
+        user = build_user_message(state, tuple(input_keys))
         out = await llm.structured(system=instruction, user=user, schema=_NlLogicOutput)
         # ponytail: output_key 照傳、照寫,但 @node.writes 靜態鎖死 business_result →
         # Harness 剝除未宣告的鍵,等於 v1 output_key 只能落在 business_result。要真開放

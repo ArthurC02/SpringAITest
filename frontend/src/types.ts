@@ -30,12 +30,6 @@ export interface DocumentInfo {
   created_at: string
 }
 
-/** POST /api/workflows/{name} 回應。output 形狀因工作流而異，故用寬鬆型別。 */
-export interface WorkflowResult {
-  workflow: string
-  output: Record<string, unknown>
-}
-
 /**
  * POST /api/skills/{name}/invoke 回應。名稱鍵是 `skill` 不是 `workflow`
  * （workflow 服務的 SkillInvokeResponse，platform 原樣透傳）——兩條路徑形狀確實不同，

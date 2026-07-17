@@ -26,7 +26,7 @@ from app.settings import settings
 from app.skills import LoadedSkill
 
 # 自訂 skill 沒有專屬的依賴組裝：沿用 kb_query 那組正式依賴（節點需要 llm/檢索/稽核時取得到）
-from app.workflows.kb_query import _default_deps
+from app.skills.deps import _default_deps
 
 logger = logging.getLogger(__name__)
 

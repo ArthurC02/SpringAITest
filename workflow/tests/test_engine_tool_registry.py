@@ -17,9 +17,9 @@ from app.engine.skill import UNKNOWN_TOOL, Skill, validate_definition
 from app.engine.tool_registry import ToolContext, ToolNotAllowed, ToolTraceEntry
 
 # import 觸發節點與 4 個初始 tool 的註冊
-from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from app import tools as _tools  # noqa: F401
-from app.kbquery.adapters import StaticGlossary
+from app.nodes.kbquery.adapters import StaticGlossary
 from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch, RecordingAuditRepo
 
 PROBE_TOOL = "local.probe"
@@ -423,7 +423,7 @@ def test_local_glossary_tool_wraps_existing_port():
 
 def test_local_rerank_tool_wraps_existing_port():
     """local.rerank 只是既有 RerankerPort 的包裝。"""
-    from app.kbquery.adapters import ScoreReranker
+    from app.nodes.kbquery.adapters import ScoreReranker
 
     deps = _deps(reranker=ScoreReranker())
     out = asyncio.run(

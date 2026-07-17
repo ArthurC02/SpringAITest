@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Platform.Service.Abstractions;
@@ -8,48 +9,70 @@ using Platform.Service.Options;
 namespace Platform.Service;
 
 /// <summary>
-/// 工作流服務:代理下游 Python。角色把關在 Python 端,本服務只轉發 X-User-Role 並轉譯狀態碼:
+/// Skill 引擎服務:代理下游 Python。角色把關在 Python 端,本服務只轉發 X-User-Role 並轉譯狀態碼:
 /// 404 → NotFound、403 → Forbidden、422 → BadInput(對外變 400)、其他 → Invocation(對外 502)。
 /// </summary>
-public sealed class WorkflowService : DownstreamServiceBase, IWorkflowService
+public sealed class WorkflowService : IWorkflowService
 {
     private const string FailurePrefix = "工作流服務呼叫失敗：";
 
-    public WorkflowService(HttpClient http, WorkflowOptions options) : base(http, options)
+    // 下游 JSON 用 Web 預設(camelCase、大小寫不敏感);snake_case 欄位靠 DTO 上的 JsonPropertyName 對應。
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+
+    private readonly HttpClient _http;
+    private readonly WorkflowOptions _options;
+
+    public WorkflowService(HttpClient http, WorkflowOptions options)
     {
+        _http = http;
+        _options = options;
     }
 
-    public async Task<IReadOnlyList<WorkflowInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = BuildRequest(HttpMethod.Get, $"{BaseUrl}/workflows", ctx);
-        using var resp = await SendAsync(req, FailurePrefix, ct);
+    private string BaseUrl => _options.BaseUrl.TrimEnd('/');
 
-        // list:任何失敗(含 4xx/5xx)都當成呼叫失敗。
-        if (!resp.IsSuccessStatusCode)
+    /// <summary>組一個帶 4 個內部 header 的下游請求;可選 JSON body。</summary>
+    private HttpRequestMessage BuildRequest(HttpMethod method, string url, UserContext ctx, object? body = null)
+    {
+        var req = new HttpRequestMessage(method, url)
         {
-            throw new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
+            // 強制 HTTP/1.1(.NET 預設即 1.1,不開 h2c;避免下游 uvicorn 在 h2c 升級時掉 body)。
+            Version = HttpVersion.Version11,
+            VersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+        };
+
+        req.Headers.TryAddWithoutValidation("X-Internal-Token", _options.InternalToken);
+        req.Headers.TryAddWithoutValidation("X-Tenant-Id", ctx.TenantCode);
+        req.Headers.TryAddWithoutValidation("X-User-Id", ctx.UserId);
+        req.Headers.TryAddWithoutValidation("X-User-Role", ctx.Role);
+
+        if (body is not null)
+        {
+            req.Content = JsonContent.Create(body, options: JsonOpts);
         }
 
-        return await resp.Content.ReadFromJsonAsync<List<WorkflowInfo>>(JsonOpts, ct)
-            ?? new List<WorkflowInfo>();
+        return req;
     }
 
-    public async Task<WorkflowInvokeResponse> InvokeAsync(
-        string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default)
+    /// <summary>送出請求;網路錯誤與逾時統一轉成 WorkflowInvocationException(前綴由呼叫端指定)。</summary>
+    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, string failurePrefix, CancellationToken ct)
     {
-        using var req = BuildRequest(HttpMethod.Post, $"{BaseUrl}/workflows/{name}/invoke", ctx, new { input });
-        using var resp = await SendAsync(req, FailurePrefix, ct);
-
-        if (!resp.IsSuccessStatusCode)
+        try
         {
-            throw await MapInvokeErrorAsync(resp, "工作流", name, ct);
+            return await _http.SendAsync(req, ct);
         }
-
-        return await resp.Content.ReadFromJsonAsync<WorkflowInvokeResponse>(JsonOpts, ct)
-            ?? throw new WorkflowInvocationException(FailurePrefix + "回應內容為空");
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 呼叫端主動取消,原樣拋出(不算下游失敗)。
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // 連線失敗、逾時(HttpClient.Timeout 觸發的 TaskCanceledException)等,都算下游呼叫失敗。
+            throw new WorkflowInvocationException(failurePrefix + ex.Message, ex);
+        }
     }
 
-    /// <summary>執行 skill:錯誤碼映射與 /workflows/{name}/invoke 逐一相同(前端可共用呼叫程式)。</summary>
+    /// <summary>執行 skill:錯誤碼映射見 MapInvokeErrorAsync。</summary>
     public async Task<JsonElement> InvokeSkillAsync(
         string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default)
     {
@@ -85,7 +108,7 @@ public sealed class WorkflowService : DownstreamServiceBase, IWorkflowService
     public Task<JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default)
         => GetCatalogAsync("/nodes", ctx, ct);
 
-    /// <summary>目錄類 GET:任何失敗(含 4xx/5xx)都當成呼叫失敗(同 ListAsync 的既有語義)。</summary>
+    /// <summary>目錄類 GET:任何失敗(含 4xx/5xx)都當成呼叫失敗。</summary>
     private async Task<JsonElement> GetCatalogAsync(string path, UserContext ctx, CancellationToken ct)
     {
         using var req = BuildRequest(HttpMethod.Get, BaseUrl + path, ctx);

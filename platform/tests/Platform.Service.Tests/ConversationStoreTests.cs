@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -12,14 +11,11 @@ public sealed class ConversationStoreTests
 
     private static ConversationStore Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
     [Fact]
     public async Task Add_PostsPromptAndReply_SendsIdentityHeaders_MapsResult()
     {
         var stub = new StubHttpMessageHandler(_ =>
-            Json(HttpStatusCode.Created, "{\"id\":5,\"createdAt\":\"2026-07-12T10:00:00Z\"}"));
+            TestHttp.Json(HttpStatusCode.Created, "{\"id\":5,\"createdAt\":\"2026-07-12T10:00:00Z\"}"));
         var store = Build(stub);
 
         var saved = await store.AddAsync("問句", "答句", Ctx);
@@ -43,7 +39,7 @@ public sealed class ConversationStoreTests
     [Fact]
     public async Task ListDesc_MapsItems_PreservesBackendOrder_SendsIdentityHeaders()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             "[{\"id\":2,\"reply\":\"r2\",\"createdAt\":\"2026-07-12T10:01:00Z\"}," +
             "{\"id\":1,\"reply\":\"r1\",\"createdAt\":\"2026-07-12T10:00:00Z\"}]"));
         var store = Build(stub);

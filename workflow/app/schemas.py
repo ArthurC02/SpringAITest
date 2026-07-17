@@ -6,30 +6,9 @@ from app.engine.skill import InputField
 
 
 class InvokeRequest(BaseModel):
-    """呼叫工作流的請求本體：input 會（移除保留鍵後）當成圖的初始 state 傳入。"""
+    """呼叫 skill 的請求本體：input 會（移除保留鍵後）當成圖的初始 state 傳入。"""
 
     input: dict[str, Any]
-
-
-class InvokeResponse(BaseModel):
-    """呼叫工作流的回應本體：output 為圖執行結束後的最終 state。"""
-
-    workflow: str
-    output: dict[str, Any]
-
-
-class WorkflowInfo(BaseModel):
-    """工作流清單項目：供 GET /workflows 回傳。
-
-    input_schema 是**新增**欄位（既有欄位一個沒動）：由 WorkflowSpec.input_model 轉出，
-    讓前端的執行表單對 code 工作流也能動態渲染；沒宣告 input_model 的工作流回 null
-    （前端據此退回 JSON textarea）。
-    """
-
-    name: str
-    description: str
-    required_role: str
-    input_schema: dict[str, InputField] | None = None
 
 
 class SkillInfo(BaseModel):

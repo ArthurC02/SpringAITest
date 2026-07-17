@@ -3,16 +3,10 @@ using Platform.Service.Dtos;
 
 namespace Platform.Service.Abstractions;
 
-/// <summary>工作流 / Skill 引擎服務:代理下游 Python(:8001)。轉發 4 個 X-* header 並轉譯下游狀態碼。
+/// <summary>Skill 引擎服務:代理下游 Python(:8001)。轉發 4 個 X-* header 並轉譯下游狀態碼。
 /// Skill 的 CRUD 不在此介面 — 那是 backend 的職責,見 ISkillService。</summary>
 public interface IWorkflowService
 {
-    /// <summary>列出可用工作流。</summary>
-    Task<IReadOnlyList<WorkflowInfo>> ListAsync(UserContext ctx, CancellationToken ct = default);
-
-    /// <summary>執行指定工作流。</summary>
-    Task<WorkflowInvokeResponse> InvokeAsync(string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default);
-
     /// <summary>
     /// 執行指定 Skill(GET /skills 清單裡的內建或自訂 skill)。錯誤碼與 /workflows/{name}/invoke 一致。
     /// 回應原樣穿透(JsonElement,不映射成 DTO):引擎的輸出鍵(output/trace/…)由引擎定義,

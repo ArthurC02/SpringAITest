@@ -23,7 +23,6 @@ var embeddingsProvider = cfg["EMBEDDINGS_PROVIDER"] ?? "fake";
 var llmBaseUrl = cfg["LLM_BASE_URL"] ?? "http://localhost:4000";
 var litellmKey = cfg["LITELLM_KEY"] ?? "sk-1234";
 var embeddingModel = cfg["EMBEDDING_MODEL"] ?? "text-embedding-3-small";
-var embeddingDim = int.TryParse(cfg["EMBEDDING_DIM"], out var d) ? d : 1536;
 var rabbitUrl = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:5672";
 var workflowBaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001";
 
@@ -61,7 +60,9 @@ if (string.Equals(embeddingsProvider, "openai", StringComparison.OrdinalIgnoreCa
 }
 else
 {
-    builder.Services.AddSingleton<IEmbeddingProvider>(new FakeEmbeddingProvider(embeddingDim));
+    // 與 Data/DbBootstrap 的 rag_chunks.embedding vector(1536) 綁定 — 改維度要一起改 DDL。
+    const int EmbeddingDim = 1536;
+    builder.Services.AddSingleton<IEmbeddingProvider>(new FakeEmbeddingProvider(EmbeddingDim));
 }
 
 // ---------------------------------------------------------------------------

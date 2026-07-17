@@ -9,13 +9,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/../infra"
 
-# 等 postgres 就緒（最多 ~60s）
-i=0
-until docker compose exec -T postgres pg_isready -U postgres >/dev/null 2>&1; do
-  i=$((i + 1))
-  [ "$i" -ge 30 ] && { echo "✗ postgres 未就緒，放棄準備 mem0 資料庫" >&2; exit 1; }
-  sleep 2
-done
+# 等 postgres 就緒（compose healthcheck 即 pg_isready，--wait 原生等它轉 healthy）
+docker compose up -d --wait postgres || { echo "✗ postgres 未就緒，放棄準備 mem0 資料庫" >&2; exit 1; }
 
 # 先刷新 collation 版本（相同時無動作），否則沿用舊 volume 時下面的 CREATE DATABASE 會被擋。
 docker compose exec -T postgres psql -U postgres -q \

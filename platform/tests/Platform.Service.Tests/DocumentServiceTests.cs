@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using Platform.Service;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -12,9 +11,6 @@ public sealed class DocumentServiceTests
 
     private static DocumentService Build(StubHttpMessageHandler stub, FakeDocumentQueue? queue = null)
         => new(TestBackend.Client(stub), queue ?? new FakeDocumentQueue());
-
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
 
     [Fact]
     public async Task Create_PublishesMessage_ReturnsProcessing()
@@ -53,7 +49,7 @@ public sealed class DocumentServiceTests
     [Fact]
     public async Task List_MapsResponse()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             "[{\"id\":\"d1\",\"title\":\"T\",\"chunk_count\":2,\"created_at\":\"2026-07-11T00:00:00Z\",\"status\":\"ready\"}]"));
         var svc = Build(stub);
 

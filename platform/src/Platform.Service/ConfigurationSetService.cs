@@ -87,33 +87,6 @@ public sealed class ConfigurationSetService : IConfigurationSetService
             ?? throw new WorkflowInvocationException(FailurePrefix + "回應內容為空");
     }
 
-    /// <summary>
-    /// backend 錯誤 → 對外同狀態碼的例外,message 沿用 backend(platform 不改寫);
-    /// 400 與 422 另外把 backend 的 fieldErrors 帶上,否則欄位級/values 越界原因會在代理層被吞成空 map。
-    /// 422 復用 SkillValidationFailedException(全域處理裡它是唯一映射到 422 的載體;語意上就是「下游 422」)。
-    /// </summary>
-    private async Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)
-    {
-        var status = (int)resp.StatusCode;
-        if (status is not (400 or 403 or 404 or 409 or 422))
-        {
-            return new WorkflowInvocationException(FailurePrefix + "HTTP " + status);
-        }
-
-        var error = await _backend.ReadErrorAsync(resp, ct);
-        var message = error.Message;
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            message = FailurePrefix + "HTTP " + status;
-        }
-
-        return status switch
-        {
-            400 => new WorkflowBadInputException(message) { FieldErrors = error.FieldErrors },
-            403 => new WorkflowForbiddenException(message),
-            404 => new WorkflowNotFoundException(message),
-            409 => new DownstreamConflictException(message),
-            _ => new SkillValidationFailedException(message) { FieldErrors = error.FieldErrors },
-        };
-    }
+    private Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)
+        => BackendErrorMapper.MapErrorAsync(resp, _backend, FailurePrefix, ct);
 }

@@ -52,7 +52,7 @@ public sealed class ConfigurationSetController : ControllerBase
         var tenantId = Request.RequireTenant();
         ConfigurationValues.Validate(request.Values);
 
-        var created = await _repo.CreateAsync(tenantId, request.Name!, request.Values ?? new(), UserId(), ct);
+        var created = await _repo.CreateAsync(tenantId, request.Name!, request.Values ?? new(), Request.UserIdOrEmpty(), ct);
         if (created is null)
         {
             throw new ApiException(StatusCodes.Status409Conflict, "Configuration Set 名稱已存在：" + request.Name);
@@ -95,6 +95,4 @@ public sealed class ConfigurationSetController : ControllerBase
 
     private static ApiException NotFound(Guid id)
         => new(StatusCodes.Status404NotFound, "找不到 Configuration Set：" + id);
-
-    private string UserId() => Request.UserId() ?? string.Empty;
 }

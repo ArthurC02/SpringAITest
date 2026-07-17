@@ -10,7 +10,7 @@ namespace Platform.Web.Auth;
 /// 刻意不驗 issuer/audience;ClockSkew 設為 0(過期即拒,不給寬限)。
 /// platform 不再簽發 token(改由 backend 簽發,claims/secret 位元相容),此處只驗證。
 /// </summary>
-public sealed class JwtService : IJwtService
+public sealed class JwtService
 {
     private readonly JwtOptions _options;
 

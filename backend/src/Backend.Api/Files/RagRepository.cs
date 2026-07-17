@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using Backend.Api.Analysis;
 using Backend.Api.Retrieval;
 using Dapper;
@@ -138,21 +137,6 @@ public sealed class RagRepository : IRagRepository
     }
 
     /// <summary>把 float 向量格式化成 pgvector 文字字面值 '[0.1,0.2,...]'(invariant,避免地區小數點)。</summary>
-    private static string FormatVector(float[] v)
-    {
-        var sb = new StringBuilder(v.Length * 8 + 2);
-        sb.Append('[');
-        for (var i = 0; i < v.Length; i++)
-        {
-            if (i > 0)
-            {
-                sb.Append(',');
-            }
-
-            sb.Append(v[i].ToString(CultureInfo.InvariantCulture));
-        }
-
-        sb.Append(']');
-        return sb.ToString();
-    }
+    private static string FormatVector(float[] v) =>
+        "[" + string.Join(',', v.Select(x => x.ToString(CultureInfo.InvariantCulture))) + "]";
 }

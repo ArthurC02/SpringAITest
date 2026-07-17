@@ -25,19 +25,10 @@ from app.engine import skill as skill_mod
 from app.engine.node_registry import get as get_node
 from app.main import app
 from app.nodes.nl_logic import _NlLogicOutput, make_nl_logic_node
+from tests.conftest import auth_headers
 from tests.kbquery_fakes import FakeStructuredLLM, make_deps
 
 client = TestClient(app)
-INTERNAL_TOKEN = "internal-dev-token"
-
-
-def _headers(tenant_id="demo-a", user_id="alice", role="USER"):
-    return {
-        "X-Internal-Token": INTERNAL_TOKEN,
-        "X-Tenant-Id": tenant_id,
-        "X-User-Id": user_id,
-        "X-User-Role": role,
-    }
 
 
 class RecordingLLM:
@@ -158,7 +149,7 @@ def test_nl_logic_output_key_other_is_stripped_by_harness():
 
 
 def test_nodes_catalog_lists_nl_logic():
-    resp = client.get("/nodes", headers=_headers())
+    resp = client.get("/nodes", headers=auth_headers())
     assert resp.status_code == 200
     by_name = {(n["name"], n["version"]): n for n in resp.json()}
     assert ("nl_logic", "1.0") in by_name
@@ -179,7 +170,7 @@ def test_nl_logic_skill_validates_and_compiles():
         "    params:\n"
         "      instruction: rule\n"
     )
-    resp = client.post("/skills/validate", json={"definition": definition}, headers=_headers())
+    resp = client.post("/skills/validate", json={"definition": definition}, headers=auth_headers())
     assert resp.status_code == 200
     assert resp.json()["valid"] is True
 
@@ -216,7 +207,7 @@ def test_nl_logic_end_to_end_trace_has_component_version():
         resp = client.post(
             "/skills/__nl_e2e__/invoke",
             json={"input": {"query": "問題"}},
-            headers=_headers(),
+            headers=auth_headers(),
         )
         assert resp.status_code == 200
         output = resp.json()["output"]

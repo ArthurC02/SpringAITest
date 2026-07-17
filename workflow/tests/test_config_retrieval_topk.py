@@ -25,10 +25,10 @@ from app.engine import skill as skill_mod
 from app.main import app
 from app.settings import settings
 from app.skills import config_apply, custom
+from tests.conftest import auth_headers
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
-INTERNAL_TOKEN = "internal-dev-token"
 
 # 已存 skill：薄檢索（通用 retrieve@1.0，SLOT top_k=8）+ 一段 no-op script。模擬 compare/stats
 # 範本 compose 後的產物；SLOT 值刻意 = 8 ≠ 全域 4，才驗得出「未覆寫回落 SLOT，不是回落全域」。
@@ -46,15 +46,6 @@ flow:
   - script: |
       state["final_answer"] = "done"
 """
-
-
-def _headers(tenant_id="demo-a", user_id="alice", role="USER"):
-    return {
-        "X-Internal-Token": INTERNAL_TOKEN,
-        "X-Tenant-Id": tenant_id,
-        "X-User-Id": user_id,
-        "X-User-Role": role,
-    }
 
 
 class _ActiveResponse:
@@ -174,7 +165,7 @@ def _invoke(name, tenant_id="demo-a"):
     resp = client.post(
         f"/skills/{name}/invoke",
         json={"input": {"query": "q"}},
-        headers=_headers(tenant_id=tenant_id),
+        headers=auth_headers(tenant_id=tenant_id),
     )
     assert resp.status_code == 200, resp.text
     return resp

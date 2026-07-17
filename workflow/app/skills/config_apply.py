@@ -18,12 +18,12 @@ import logging
 from collections import OrderedDict
 from typing import Any
 
-from app.kbquery.adapters import LangChainStructuredLLM
-from app.kbquery.graph import KbQueryDeps
 from app.llm import DEFAULT_TEMPERATURE
+from app.nodes.kbquery.adapters import LangChainStructuredLLM
 from app.security import RequestContext
 from app.settings import settings
 from app.skills import custom
+from app.skills.deps import KbQueryDeps
 
 logger = logging.getLogger(__name__)
 

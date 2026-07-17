@@ -6,14 +6,14 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app import skills
 from app.engine import node_registry
 from app.engine.node_registry import NodeSpec
-from app.kbquery import graph
+from app.main import app
 
 # import 觸發註冊：kb_query 十節點 + 共用 retrieve
-from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
-from app.main import app
 from app.nodes import retrieve as _retrieve_node  # noqa: F401
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 
 client = TestClient(app)
 
@@ -149,10 +149,11 @@ def test_duplicate_name_version_raises_value_error():
     )
 
 
-def test_same_name_different_version_can_coexist_and_graph_pins_v1():
+def test_same_name_different_version_can_coexist_and_skill_pins_v1():
     """同名不同版可並存（Skill 以 node@version 鎖版本）；get() 無版本時取最新。
 
-    關鍵回歸：註冊 v2 後 kb_query 圖必須仍用 v1（_NODES 鎖版），不得靜默升版。
+    關鍵回歸：註冊 v2 後 kb_query.yaml 的 flow 仍寫死 evidence_verification@1.0，
+    不得靜默升版（Node-First：版本鎖在 Skill YAML 的 flow，不再是手寫圖的 _NODES tuple）。
     """
     name = "evidence_verification"
     try:
@@ -162,7 +163,7 @@ def test_same_name_different_version_can_coexist_and_graph_pins_v1():
 
         assert node_registry.get(name, version="1.0").version == "1.0"
         assert node_registry.get(name).version == "2.0"  # 未指定 → 最新版
-        assert (name, "1.0") in graph._NODES  # 圖鎖 v1，不隨最新版飄移
+        assert f"{name}@1.0" in skills.get("kb_query").definition
     finally:
         node_registry._REGISTRY.pop((name, "2.0"), None)
 

@@ -30,7 +30,7 @@ from app.engine.script_runner import (
 from app.engine.skill import FORBIDDEN_SCRIPT, INVALID_FLOW, validate_definition
 
 # import 觸發節點註冊（validate_definition 會查 registry）
-from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # 規格 §4.1 的 11 個攻擊樣本

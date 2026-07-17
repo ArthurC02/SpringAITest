@@ -85,7 +85,7 @@ public sealed class SkillController : ControllerBase
     public async Task<ActionResult<JsonElement>> Validate([FromBody] SkillUpsert request, CancellationToken ct)
         => Ok(await _engine.ValidateSkillAsync(request.Definition!, User.ToUserContext(), ct));
 
-    /// <summary>執行 Skill;錯誤碼與 POST /api/workflows/{name} 一致。</summary>
+    /// <summary>執行 Skill;錯誤碼映射見 WorkflowService.MapInvokeErrorAsync。</summary>
     [HttpPost("{name}/invoke")]
     public async Task<ActionResult<JsonElement>> Invoke(
         string name, [FromBody] WorkflowInvokeRequest request, CancellationToken ct)

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Platform.Service.Dtos;
 using Platform.Service.Options;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -14,6 +15,26 @@ public sealed class ChatServiceTests
 
     private static readonly UserContext UserA = new("user-a", "demo-a", "USER");
     private static readonly UserContext AdminA = new("admin-a", "demo-a", "ADMIN");
+
+    private static JsonElement Cat(string json) => JsonDocument.Parse(json).RootElement.Clone();
+
+    // 五顆內建可路由 skill(鏡射 workflow GET /skills 真實回應形狀)+ 一顆 template_* 骨架(須被濾掉)。
+    private const string BuiltinCatalog = """
+    [
+      { "name":"kb_query", "description":"可稽核的知識查詢", "required_role":"USER", "source":"builtin",
+        "input_schema": { "query": { "type":"str", "required":true } } },
+      { "name":"rag_qa", "description":"一般文件知識庫問答", "required_role":"USER", "source":"builtin",
+        "input_schema": { "question": { "type":"str", "required":true } } },
+      { "name":"summarize", "description":"文字摘要", "required_role":"USER", "source":"builtin",
+        "input_schema": { "text": { "type":"str", "required":true } } },
+      { "name":"triage", "description":"問題分流", "required_role":"USER", "source":"builtin",
+        "input_schema": { "question": { "type":"str", "required":true } } },
+      { "name":"analyze_report", "description":"分析報告", "required_role":"ADMIN", "source":"builtin",
+        "input_schema": { "topic": { "type":"str", "required":true } } },
+      { "name":"template_infer", "description":"骨架,不可路由", "required_role":"USER", "source":"builtin",
+        "input_schema": { "query": { "type":"str", "required":true } } }
+    ]
+    """;
 
     [Fact]
     public async Task Chat_CallsLlm_AndPersistsPromptAndReply()
@@ -203,73 +224,55 @@ public sealed class ChatServiceTests
         Assert.DoesNotContain(agent.LastMessages!, m => m.Content == "乙");
     }
 
-    // ---- 工作流聊天工具(已登入才掛;每個工具轉呼叫對應工作流) ----
+    // ---- Skill 聊天工具(單軌:動態目錄,已登入才掛;每個工具轉呼叫對應 skill) ----
 
     [Fact]
-    public async Task Chat_WithUserContext_PassesKnowledgeTool_AndToolInvokesRagQa()
+    public async Task Chat_UserRole_GetsFourBuiltinSkills_TemplateAndAdminOnlyFiltered()
     {
         var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService { Answer = "文件說 42" };
+        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
-
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
-
-        var tool = tools!.Single(t => t.Name == "search_knowledge_base");
-
-        // 工具實際執行:以呼叫者的租戶身分打 rag_qa,question 進 input,回 answer 字串。
-        var answer = await tool.InvokeAsync("平台有哪些文件?", CancellationToken.None);
-        Assert.Equal("文件說 42", answer);
-        Assert.Equal("rag_qa", workflows.LastInvoke!.Value.Name);
-        Assert.Equal("demo-a", workflows.LastInvoke!.Value.Ctx.TenantCode);
-        Assert.Equal("平台有哪些文件?", workflows.LastInvoke!.Value.Input["question"].GetString());
-    }
-
-    [Fact]
-    public async Task Chat_UserRole_GetsFourTools_WithoutAdminReport()
-    {
-        var agent = new FakeLlmAgent();
-        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
 
         var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Equal(
-            new[] { "search_knowledge_base", "verified_knowledge_query", "summarize_text", "triage_question" },
-            names);
+        Assert.Equal(new[] { "kb_query", "rag_qa", "summarize", "triage" }, names);
     }
 
     [Fact]
-    public async Task Chat_AdminRole_AlsoGetsAnalysisReportTool()
+    public async Task Chat_AdminRole_AlsoGetsAnalyzeReportSkill()
     {
         var agent = new FakeLlmAgent();
-        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
+        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
+        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await svc.BuildToolsAsync(AdminA, CancellationToken.None);
 
         Assert.Equal(5, tools!.Count);
-        Assert.Contains(tools!, t => t.Name == "generate_analysis_report");
+        Assert.Contains(tools!, t => t.Name == "analyze_report");
+        Assert.DoesNotContain(tools!, t => t.Name == "template_infer");
     }
 
-    // 每個工具都要打對工作流、用對輸入 key(對照表驅動,一條測試涵蓋全部)。
+    // 每個內建 skill 都要用對輸入 key,走 /skills/{name}/invoke。
     [Theory]
-    [InlineData("search_knowledge_base", "rag_qa", "question")]
-    [InlineData("verified_knowledge_query", "kb_query", "query")]
-    [InlineData("summarize_text", "summarize", "text")]
-    [InlineData("triage_question", "triage", "question")]
-    [InlineData("generate_analysis_report", "analyze_report", "topic")]
-    public async Task EachTool_InvokesItsWorkflow_WithItsInputKey(string toolName, string workflow, string inputKey)
+    [InlineData("kb_query", "query")]
+    [InlineData("rag_qa", "question")]
+    [InlineData("summarize", "text")]
+    [InlineData("triage", "question")]
+    [InlineData("analyze_report", "topic")]
+    public async Task EachBuiltinSkill_InvokesSkillEndpoint_WithItsInputKey(string skillName, string inputKey)
     {
         var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService();
+        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await svc.BuildToolsAsync(AdminA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == toolName);
+        var tool = tools!.Single(t => t.Name == skillName);
 
         await tool.InvokeAsync("輸入內容", CancellationToken.None);
 
-        Assert.Equal(workflow, workflows.LastInvoke!.Value.Name);
-        Assert.Equal("輸入內容", workflows.LastInvoke!.Value.Input[inputKey].GetString());
+        Assert.Equal(skillName, workflows.LastSkillInvoke!.Value.Name);
+        Assert.Equal("輸入內容", workflows.LastSkillInvoke!.Value.Input[inputKey].GetString());
     }
 
     [Fact]
@@ -282,83 +285,96 @@ public sealed class ChatServiceTests
     }
 
     [Fact]
-    public async Task StreamChat_WithUserContext_RoutesWithToolCatalog()
+    public async Task StreamChat_WithUserContext_RoutesWithSkillCatalog()
     {
         var agent = new FakeLlmAgent();
-        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore());
+        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
+        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         await foreach (var _ in svc.StreamChatAsync("問題", "u1", "c1", UserA))
         {
         }
 
         // 串流也先路由:第一次(阻塞)CompleteAsync 的 system 目錄列出可用工具。
-        Assert.Contains(agent.CompleteCalls, m => m.Count > 0 && m[0].Content.Contains("search_knowledge_base"));
+        Assert.Contains(agent.CompleteCalls, m => m.Count > 0 && m[0].Content.Contains("kb_query"));
     }
 
     [Fact]
-    public async Task KbQueryTool_Abstains_FallsBackToRagQa_WithHonestLabel()
+    public async Task KbQuerySkill_Abstains_FallsBackToRagQaSkill_WithHonestLabel()
     {
         var agent = new FakeLlmAgent();
         var workflows = new FakeWorkflowService
         {
-            Answer = "rag 的答案",
-            KbQueryOutput = new()
+            Catalog = Cat(BuiltinCatalog),
+            SkillOutputByName = new()
             {
-                ["answer_mode"] = System.Text.Json.JsonSerializer.SerializeToElement("ABSTAIN"),
-                ["final_answer"] = System.Text.Json.JsonSerializer.SerializeToElement("【無法提供答案】證據不足"),
+                ["kb_query"] = JsonSerializer.SerializeToElement(new
+                {
+                    skill = "kb_query",
+                    output = new { answer_mode = "ABSTAIN", final_answer = "【無法提供答案】證據不足" },
+                }),
+                ["rag_qa"] = JsonSerializer.SerializeToElement(new
+                {
+                    skill = "rag_qa",
+                    output = new { answer = "rag 的答案" },
+                }),
             },
         };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "verified_knowledge_query");
+        var tool = tools!.Single(t => t.Name == "kb_query");
 
         var result = await tool.InvokeAsync("寵物守則對貓的規定?", CancellationToken.None);
 
-        // 棄答 → 確定性改打 rag_qa,結果如實註明「不含稽核保證」。
-        Assert.Contains("棄答", result);
-        Assert.Contains("rag 的答案", result);
-        Assert.Equal(new[] { "kb_query", "rag_qa" }, workflows.Invokes.Select(i => i.Name).ToArray());
-        Assert.Equal("寵物守則對貓的規定?", workflows.Invokes[1].Input["question"].GetString());
+        // 棄答 → 確定性改打 rag_qa skill,結果如實註明「不含稽核保證」(文案逐字對照 InvokeSkillToolAsync)。
+        Assert.Equal(
+            "嚴格稽核查詢因證據不足而棄答;以下是一般知識庫檢索(不含稽核保證)的結果:rag 的答案",
+            result);
+        Assert.Equal(new[] { "kb_query", "rag_qa" }, workflows.SkillInvokes.Select(i => i.Name).ToArray());
+        Assert.Equal("寵物守則對貓的規定?", workflows.SkillInvokes[1].Input["question"].GetString());
     }
 
     [Fact]
-    public async Task KbQueryTool_AnswersNormally_ExtractsFinalAnswer_NotWholeJson()
+    public async Task KbQuerySkill_AnswersNormally_DoesNotFallBackToRagQa()
     {
         var agent = new FakeLlmAgent();
         var workflows = new FakeWorkflowService
         {
-            KbQueryOutput = new()
+            Catalog = Cat(BuiltinCatalog),
+            SkillOutputByName = new()
             {
-                ["answer_mode"] = System.Text.Json.JsonSerializer.SerializeToElement("ANSWER"),
-                ["final_answer"] = System.Text.Json.JsonSerializer.SerializeToElement("有憑據的答案"),
-                ["trace"] = System.Text.Json.JsonSerializer.SerializeToElement(new[] { "一大包不該回給模型的雜訊" }),
+                ["kb_query"] = JsonSerializer.SerializeToElement(new
+                {
+                    skill = "kb_query",
+                    output = new { answer_mode = "ANSWER", final_answer = "有憑據的答案" },
+                }),
             },
         };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "verified_knowledge_query");
+        var tool = tools!.Single(t => t.Name == "kb_query");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
 
         Assert.Equal("有憑據的答案", result);
-        Assert.Single(workflows.Invokes); // 沒棄答就不兜底
+        Assert.Single(workflows.SkillInvokes); // 沒棄答就不兜底
     }
 
     [Fact]
-    public async Task Tool_WorkflowFails_ReturnsErrorText_InsteadOfThrowing()
+    public async Task CatalogFailure_ToolsListIsEmpty_ChatStillRepliesNormally()
     {
-        var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService { ThrowOnInvoke = new InvalidOperationException("下游爆炸") };
+        var agent = new FakeLlmAgent { Response = "純聊天回覆" };
+        var workflows = new FakeWorkflowService { ThrowOnCatalog = new InvalidOperationException("目錄爆炸") };
         var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
+        // 目錄取得失敗 → 這輪無工具(不再有靜態工具可退),但聊天仍正常回覆(純聊天兜底接手)。
         var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "search_knowledge_base");
+        Assert.Empty(tools!);
 
-        // 工具失敗不往外拋(否則整輪聊天 500),回錯誤文字讓模型照實轉述。
-        var result = await tool.InvokeAsync("q", CancellationToken.None);
-        Assert.StartsWith("工作流 rag_qa 呼叫失敗", result);
+        var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
+        Assert.Equal("純聊天回覆", reply.Reply);
     }
 
     [Fact]

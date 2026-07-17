@@ -17,7 +17,7 @@ from app.engine.skill import (
 )
 
 # import 觸發節點註冊（驗證器要查 registry）
-from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from app.nodes import retrieve as _retrieve_node  # noqa: F401
 
 HEAD = """

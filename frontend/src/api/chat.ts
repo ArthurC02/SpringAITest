@@ -3,6 +3,7 @@
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
 import { getSession } from './auth'
 import { triggerLogout } from './http'
+import { CHAT_USER_ID_KEY, CHAT_CONVERSATION_ID_KEY } from '../storageKeys'
 
 /**
  * mem0 長期記憶的分群鍵。登入後跟著使用者走（用 username），
@@ -12,33 +13,30 @@ function getUserId(): string {
   const session = getSession()
   if (session?.username) return session.username
 
-  const KEY = 'springai-chat:userId'
-  let id = localStorage.getItem(KEY)
+  let id = localStorage.getItem(CHAT_USER_ID_KEY)
   if (!id) {
     id = crypto.randomUUID()
-    localStorage.setItem(KEY, id)
+    localStorage.setItem(CHAT_USER_ID_KEY, id)
   }
   return id
 }
-
-const CONVERSATION_KEY = 'springai-chat:conversationId'
 
 /**
  * 一次對話的識別，供後端短期記憶（同對話多輪脈絡）分群用。
  * 與 userId 不同：userId 是「這個人」（跨對話長期記憶），conversationId 是「這一串對話」。
  */
 function getConversationId(): string {
-  let id = localStorage.getItem(CONVERSATION_KEY)
+  let id = localStorage.getItem(CHAT_CONVERSATION_ID_KEY)
   if (!id) {
     id = crypto.randomUUID()
-    localStorage.setItem(CONVERSATION_KEY, id)
+    localStorage.setItem(CHAT_CONVERSATION_ID_KEY, id)
   }
   return id
 }
 
 /** 開一段新對話：換掉 conversationId，讓後端的短期記憶重新開始（清除對話時呼叫）。 */
 export function newConversation(): void {
-  localStorage.setItem(CONVERSATION_KEY, crypto.randomUUID())
+  localStorage.setItem(CHAT_CONVERSATION_ID_KEY, crypto.randomUUID())
 }
 
 /**

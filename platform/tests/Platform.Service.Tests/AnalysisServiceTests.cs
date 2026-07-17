@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using Platform.Service;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -12,13 +11,10 @@ public sealed class AnalysisServiceTests
 
     private static AnalysisService Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
     [Fact]
     public async Task Summary_ForwardsTenant_MapsSnakeCaseResponse()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             "{\"document_count\":3,\"chunk_count\":12,\"latest_titles\":[\"甲\",\"乙\"]}"));
         var svc = Build(stub);
 

@@ -1,0 +1,13 @@
+name: rag_qa
+description: 檢索增強問答：以租戶內文件回答問題並附引用
+required_role: USER
+
+# 對齊 workflows/rag_qa.py 的 RagQaInput：question 必填非空。
+input_schema:
+  question: {type: str, required: true, min_length: 1}
+
+flow:
+  - node: retrieve@1.0
+    params:
+      query_key: question
+  - node: rag_answer@1.0

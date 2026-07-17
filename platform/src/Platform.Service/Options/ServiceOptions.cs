@@ -1,53 +1,53 @@
 namespace Platform.Service.Options;
 
 /// <summary>
-/// LLM(經 LiteLLM 閘道)相關設定。值在 Program.cs 由 flat 環境變數組裝,
-/// 環境變數名稱(LLM_BASE_URL、LITELLM_KEY、CHAT_MODEL)不可變。
+/// LLM(經 LiteLLM 閘道)相關設定。值一律由 Program.cs 從 flat 環境變數組裝並提供 fallback
+/// (LLM_BASE_URL、LITELLM_KEY、CHAT_MODEL);此處不設字面預設,避免與 Program.cs 的 fallback 漂移。
 /// </summary>
 public sealed class LlmOptions
 {
-    public string BaseUrl { get; set; } = "http://localhost:4000";
-    public string ApiKey { get; set; } = "sk-1234";
-    public string ChatModel { get; set; } = "gpt-4o-mini";
+    public string BaseUrl { get; set; } = "";
+    public string ApiKey { get; set; } = "";
+    public string ChatModel { get; set; } = "";
 
-    /// <summary>取樣溫度,固定 0.7(與原 Java 一致)。</summary>
-    public float Temperature { get; set; } = 0.7f;
+    /// <summary>取樣溫度;實際值由 Program.cs 設定。</summary>
+    public float Temperature { get; set; }
 }
 
-/// <summary>mem0 長期記憶服務設定。對應環境變數 MEM0_BASE_URL。</summary>
+/// <summary>mem0 長期記憶服務設定。對應環境變數 MEM0_BASE_URL(由 Program.cs 提供 fallback)。</summary>
 public sealed class Mem0Options
 {
-    public string BaseUrl { get; set; } = "http://localhost:8000";
+    public string BaseUrl { get; set; } = "";
 }
 
 /// <summary>
-/// 下游 Python 工作流服務設定。對應環境變數 WORKFLOW_BASE_URL、INTERNAL_API_TOKEN。
+/// 下游 Python 工作流服務設定。對應環境變數 WORKFLOW_BASE_URL、INTERNAL_API_TOKEN(由 Program.cs 提供 fallback)。
 /// </summary>
 public sealed class WorkflowOptions
 {
-    public string BaseUrl { get; set; } = "http://localhost:8001";
+    public string BaseUrl { get; set; } = "";
 
     /// <summary>每個下游請求都會帶的 X-Internal-Token 值。</summary>
-    public string InternalToken { get; set; } = "internal-dev-token";
+    public string InternalToken { get; set; } = "";
 }
 
 /// <summary>
 /// 核心 backend 服務設定(認證/聊天歷史/文件/檢索/分析/組態)。
-/// 對應環境變數 BACKEND_BASE_URL、INTERNAL_API_TOKEN。
+/// 對應環境變數 BACKEND_BASE_URL、INTERNAL_API_TOKEN(由 Program.cs 提供 fallback)。
 /// </summary>
 public sealed class BackendOptions
 {
-    public string BaseUrl { get; set; } = "http://localhost:8002";
+    public string BaseUrl { get; set; } = "";
 
     /// <summary>每個 backend 請求都會帶的 X-Internal-Token 值。</summary>
-    public string InternalToken { get; set; } = "internal-dev-token";
+    public string InternalToken { get; set; } = "";
 }
 
 /// <summary>
-/// RabbitMQ 連線設定(文件處理訊息發佈)。對應環境變數 RABBITMQ_URL。
+/// RabbitMQ 連線設定(文件處理訊息發佈)。對應環境變數 RABBITMQ_URL(由 Program.cs 提供 fallback)。
 /// guest 帳號僅允許 loopback,容器間一律用自訂帳號(compose 以 RABBITMQ_DEFAULT_USER/PASS 建立)。
 /// </summary>
 public sealed class RabbitMqOptions
 {
-    public string Url { get; set; } = "amqp://app:app-dev-password@localhost:5672";
+    public string Url { get; set; } = "";
 }

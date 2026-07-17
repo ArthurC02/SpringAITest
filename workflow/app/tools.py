@@ -11,9 +11,9 @@ adapter —— 自訂 skill（P4）沒有專屬依賴容器時走這條路。
 from typing import Any
 
 from app.engine.tool_registry import ToolContext, tool
-from app.kbquery import calculator
-from app.kbquery.adapters import BackendVectorSearch, ScoreReranker, StaticGlossary
-from app.kbquery.models import SourceResult
+from app.nodes.kbquery import calculator
+from app.nodes.kbquery.adapters import BackendVectorSearch, ScoreReranker, StaticGlossary
+from app.nodes.kbquery.models import SourceResult
 
 
 def _dep(ctx: ToolContext, name: str) -> Any:

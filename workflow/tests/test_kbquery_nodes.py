@@ -8,10 +8,11 @@ import asyncio
 
 import pytest
 
-from app.kbquery import calculator
-from app.kbquery.adapters import ScoreReranker, StaticGlossary
-from app.kbquery.locators import TableCellLocator
-from app.kbquery.models import (
+from app.engine.harness import harnessed as traced
+from app.nodes.kbquery import calculator
+from app.nodes.kbquery.adapters import ScoreReranker, StaticGlossary
+from app.nodes.kbquery.locators import TableCellLocator
+from app.nodes.kbquery.models import (
     AnswerMode,
     Evidence,
     FailureCode,
@@ -19,14 +20,15 @@ from app.kbquery.models import (
     QueryRewriteOutput,
     VerificationResult,
 )
-from app.kbquery.nodes.answer_composer import make_answer_composer_node
-from app.kbquery.nodes.context_resolver import make_context_resolver_node
-from app.kbquery.nodes.evidence_verification import make_evidence_verification_node
-from app.kbquery.nodes.intent_classification import classify_by_rules
-from app.kbquery.nodes.query_intake import make_query_intake_node
-from app.kbquery.nodes.query_rewrite import make_query_rewrite_node
-from app.kbquery.nodes.retrieval_planner import make_retrieval_planner_node
-from app.kbquery.runtime import traced
+from app.nodes.kbquery.nodes.answer_composer import make_answer_composer_node
+from app.nodes.kbquery.nodes.context_resolver import make_context_resolver_node
+from app.nodes.kbquery.nodes.evidence_verification import (
+    make_evidence_verification_node,
+)
+from app.nodes.kbquery.nodes.intent_classification import classify_by_rules
+from app.nodes.kbquery.nodes.query_intake import make_query_intake_node
+from app.nodes.kbquery.nodes.query_rewrite import make_query_rewrite_node
+from app.nodes.kbquery.nodes.retrieval_planner import make_retrieval_planner_node
 from tests.kbquery_fakes import (
     TABLE_2025,
     TEXT_2025Q3,

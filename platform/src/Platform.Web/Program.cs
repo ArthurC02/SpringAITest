@@ -80,7 +80,6 @@ builder.Services.AddScoped<IConfigService, ConfigService>();
 builder.Services.AddScoped<ISkillService, SkillService>();
 builder.Services.AddScoped<IConfigurationSetService, ConfigurationSetService>();
 builder.Services.AddSingleton<IChatMemoryStore, InMemoryChatMemoryStore>();
-builder.Services.AddSingleton<IJwtService, JwtService>();
 
 // LLM 代理:Agent Framework 實作,無狀態、單例即可。
 builder.Services.AddSingleton<ILlmAgent>(_ => new AgentFrameworkLlmAgent(llmOptions));

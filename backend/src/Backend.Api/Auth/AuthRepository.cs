@@ -43,7 +43,7 @@ public sealed class AuthRepository : IAuthRepository
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
         {
             // 併發同名註冊的 TOCTOU 兜底:UsernameExistsAsync 預檢通過後、INSERT 前被搶註冊。
-            throw new ApiException(StatusCodes.Status409Conflict, "使用者名稱已存在：" + username);
+            throw new ApiException(StatusCodes.Status409Conflict, AuthMessages.UsernameExists(username));
         }
     }
 

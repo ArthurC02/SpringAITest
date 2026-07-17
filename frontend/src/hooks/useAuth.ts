@@ -7,6 +7,7 @@ import {
   type RegisterResult,
 } from '../api/auth'
 import { setLogoutHandler } from '../api/http'
+import { CHAT_MESSAGES_KEY, CHAT_CONVERSATION_ID_KEY, CHAT_USER_ID_KEY } from '../storageKeys'
 import type { Session } from '../types'
 
 /**
@@ -19,10 +20,9 @@ export function useAuth() {
   const logout = useCallback(() => {
     clearSession()
     // 一併清掉聊天資料，避免共用瀏覽器時下一位使用者看到前一位的完整對話。
-    // key 定義在 hooks/useChat.ts 與 api/chat.ts，這裡直接列出（最小 diff）。
-    localStorage.removeItem('springai-chat:messages')
-    localStorage.removeItem('springai-chat:conversationId')
-    localStorage.removeItem('springai-chat:userId')
+    localStorage.removeItem(CHAT_MESSAGES_KEY)
+    localStorage.removeItem(CHAT_CONVERSATION_ID_KEY)
+    localStorage.removeItem(CHAT_USER_ID_KEY)
     setSession(null)
   }, [])
 

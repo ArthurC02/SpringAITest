@@ -1,12 +1,8 @@
 import { useState, type ChangeEvent, type FormEvent } from 'react'
 import type { useDocuments } from '../hooks/useDocuments'
+import { fmtDate } from '../format'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
-
-function fmtDate(s: string): string {
-  const d = new Date(s)
-  return Number.isNaN(d.getTime()) ? s : d.toLocaleString()
-}
 
 const STATUS_LABEL: Record<string, string> = {
   processing: '處理中',

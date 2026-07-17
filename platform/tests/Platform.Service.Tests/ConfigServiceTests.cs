@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using Platform.Service;
 using Platform.Service.Dtos;
@@ -14,16 +13,10 @@ public sealed class ConfigServiceTests
 
     private static ConfigService Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
-    private static HttpResponseMessage Error(HttpStatusCode status, string message) =>
-        Json(status, $"{{\"timestamp\":\"2026-07-12T00:00:00Z\",\"status\":{(int)status},\"message\":{JsonSerializer.Serialize(message)},\"fieldErrors\":{{}}}}");
-
     [Fact]
     public async Task List_MapsResponse_ForwardsHeaders()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             "[{\"key\":\"a\",\"value\":\"1\",\"updatedAt\":\"2026-07-12T00:00:00Z\"}]"));
         var svc = Build(stub);
 
@@ -40,7 +33,7 @@ public sealed class ConfigServiceTests
     [Fact]
     public async Task Update_Succeeds_SendsValue_ForwardsAdminRole_MapsResult()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             "{\"key\":\"a\",\"value\":\"2\",\"updatedAt\":\"2026-07-12T00:00:00Z\"}"));
         var svc = Build(stub);
 
@@ -60,7 +53,7 @@ public sealed class ConfigServiceTests
     [Fact]
     public async Task Update_403_ThrowsWorkflowForbidden_WithBackendMessage()
     {
-        var svc = Build(new StubHttpMessageHandler(_ => Error(HttpStatusCode.Forbidden, "權限不足，無法修改系統組態")));
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足，無法修改系統組態")));
 
         var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(() =>
             svc.UpdateAsync("a", new ConfigUpdateRequest("2"), UserCtx));

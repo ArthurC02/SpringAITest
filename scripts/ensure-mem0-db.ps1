@@ -7,12 +7,9 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..' 'infra')
 
-# 等 postgres 就緒（最多 ~60s）
-for ($i = 0; $i -lt 30; $i++) {
-    docker compose exec -T postgres pg_isready -U postgres *> $null
-    if ($LASTEXITCODE -eq 0) { break }
-    Start-Sleep -Seconds 2
-}
+# 等 postgres 就緒（compose healthcheck 即 pg_isready，--wait 原生等它轉 healthy）
+docker compose up -d --wait postgres *> $null
+if ($LASTEXITCODE -ne 0) { Write-Error "✗ postgres 未就緒，放棄準備 mem0 資料庫" }
 
 # 先刷新 collation 版本（相同時無動作），否則沿用舊 volume 時下面的 CREATE DATABASE 會被擋。
 docker compose exec -T postgres psql -U postgres -q `

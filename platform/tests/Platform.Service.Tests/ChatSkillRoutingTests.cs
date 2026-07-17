@@ -176,22 +176,19 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal("原文問句", invoke.Input["query"].GetString());
     }
 
-    // ---- CSR-P1-012:非陣列 catalog 不產生動態工具 ----
+    // ---- CSR-P1-012:非陣列 catalog 不產生動態工具(單軌後即無任何工具,不拋例外) ----
     [Theory]
     [InlineData("""{ "not":"an-array" }""")]
     [InlineData("\"just-a-string\"")]
     [InlineData("null")]
-    public async Task NonArrayCatalog_ProducesNoDynamicTools_ButStaticStillWork(string catalogJson)
+    public async Task NonArrayCatalog_ProducesNoTools_DoesNotThrow(string catalogJson)
     {
         var wf = new FakeWorkflowService { Catalog = Cat(catalogJson) };
         var svc = Build(new FakeLlmAgent(), wf);
 
         var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
 
-        // 不拋例外;殘留靜態工具(USER 4 支)仍可用。
-        var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Contains("search_knowledge_base", names);
-        Assert.Equal(4, tools!.Count);
+        Assert.Empty(tools!);
     }
 
     // ---- 跨案關鍵修正:template_* 內建骨架不可被路由 ----
@@ -239,41 +236,6 @@ public sealed class ChatSkillRoutingTests
         Assert.Contains(tools!, t => t.Name == "template_custom_thing");
     }
 
-    // ---- T6 / CSR-P1-013:Skill 優先的同名去重(Ordinal) ----
-    [Fact]
-    public async Task NameCollision_SkillWins_StaticDeduped_NoDuplicateNames()
-    {
-        var wf = new FakeWorkflowService
-        {
-            // 與靜態 ChatToolSpec "search_knowledge_base" 撞名,另有一個不撞名的 skill。
-            Catalog = Cat("""
-            [
-              { "name":"search_knowledge_base", "description":"skill 版檢索", "required_role":"USER", "source":"custom",
-                "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"tenant_a_private_search", "description":"不撞名", "required_role":"USER", "source":"custom",
-                "input_schema": { "question_text": { "type":"str", "required":true } } }
-            ]
-            """),
-        };
-        var svc = Build(new FakeLlmAgent(), wf);
-
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
-
-        // 沒有重複名稱。
-        var names = tools!.Select(t => t.Name).ToList();
-        Assert.Equal(names.Count, names.Distinct(StringComparer.Ordinal).Count());
-
-        // 撞名的那支只留一個,且是 skill 版(呼叫走 InvokeSkillAsync,不走 workflow InvokeAsync)。
-        var collided = Assert.Single(tools!, t => t.Name == "search_knowledge_base");
-        await collided.InvokeAsync("問句", CancellationToken.None);
-        Assert.Single(wf.SkillInvokes);
-        Assert.Empty(wf.Invokes);   // 沒走舊 workflow 委派
-
-        // 不撞名的靜態工具與 skill 都還在。
-        Assert.Contains(names, n => n == "tenant_a_private_search");
-        Assert.Contains(names, n => n == "summarize_text");
-    }
-
     // ---- T7 / CSR-P1-008,015:呼叫正確 Skill、輸入鍵與身分 ----
     [Fact]
     public async Task SelectedTool_InvokesCorrectSkill_WithInputKeyAndIdentity()
@@ -292,7 +254,6 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal("比較 Q1 與 Q2", invoke.Input["question_text"].GetString());
         Assert.Equal("demo-a", invoke.Ctx.TenantCode);
         Assert.Equal("USER", invoke.Ctx.Role);
-        Assert.Empty(wf.Invokes);   // 不得改打舊 /workflows/{name}/invoke
     }
 
     // ---- T8 / CSR-P1-016:標準 output key 取值 ----
@@ -425,7 +386,7 @@ public sealed class ChatSkillRoutingTests
         Assert.StartsWith("Skill s 呼叫失敗", result);
     }
 
-    // ---- T10 / CSR-P1-020,021:catalog 抓取失敗 → best-effort 退靜態工具 ----
+    // ---- T10 / CSR-P1-020,021:catalog 抓取失敗 → best-effort 回空工具清單,聊天仍不炸 ----
     public static IEnumerable<object[]> CatalogErrors() => new[]
     {
         new object[] { new WorkflowInvocationException("工作流服務呼叫失敗：HTTP 502") },
@@ -436,22 +397,19 @@ public sealed class ChatSkillRoutingTests
 
     [Theory]
     [MemberData(nameof(CatalogErrors))]
-    public async Task CatalogFailure_FallsBackToStaticTools_ChatDoesNotThrow(Exception error)
+    public async Task CatalogFailure_ToolsEmpty_ChatDoesNotThrow(Exception error)
     {
         var agent = new FakeLlmAgent();
         var wf = new FakeWorkflowService { ThrowOnCatalog = error };
         var svc = Build(agent, wf);
 
-        // 聊天不炸(路由拿到靜態工具、fake 回 NONE → 純聊天)。
+        // 聊天不炸(路由表為空 → 純聊天兜底)。
         var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
         Assert.Equal("測試回覆", reply.Reply);
 
-        // 路由表 = 角色允許的靜態工具,不產生半套動態工具。
+        // 沒有靜態工具可退了:目錄失敗這輪就是空清單。
         var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
-        var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Equal(4, names.Length);
-        Assert.Contains("search_knowledge_base", names);
-        Assert.DoesNotContain("generate_analysis_report", names);   // USER 不含 ADMIN 靜態工具
+        Assert.Empty(tools!);
     }
 
     // ---- T11 / CSR-P1-019:路由回 NONE → 純聊天 ----

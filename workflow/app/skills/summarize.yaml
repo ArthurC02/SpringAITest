@@ -1,0 +1,10 @@
+name: summarize
+description: 將輸入文字做三句以內的摘要
+required_role: USER
+
+# 對齊 P1 天花板（SingleRequiredStringKey）：input_schema 恰好一個必填 str 欄位。
+input_schema:
+  text: {type: str, required: true, min_length: 1}
+
+flow:
+  - node: summarize_text@1.0

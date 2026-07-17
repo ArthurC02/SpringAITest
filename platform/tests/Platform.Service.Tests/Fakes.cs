@@ -1,4 +1,7 @@
+using System.Net;
 using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -11,6 +14,16 @@ internal static class TestBackend
 {
     public static BackendClient Client(StubHttpMessageHandler stub, string baseUrl = "http://backend", string token = "tok")
         => new(new HttpClient(stub), new BackendOptions { BaseUrl = baseUrl, InternalToken = token });
+}
+
+/// <summary>建 stub HttpResponseMessage 的共用輔助:任意 JSON body、ApiError 形狀的錯誤 body。</summary>
+internal static class TestHttp
+{
+    public static HttpResponseMessage Json(HttpStatusCode status, string body) =>
+        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+
+    public static HttpResponseMessage Error(HttpStatusCode status, string message) =>
+        Json(status, $"{{\"timestamp\":\"2026-07-12T00:00:00Z\",\"status\":{(int)status},\"message\":{JsonSerializer.Serialize(message)},\"fieldErrors\":{{}}}}");
 }
 
 /// <summary>
@@ -119,43 +132,9 @@ public sealed class FakeLlmAgent : ILlmAgent
     }
 }
 
-/// <summary>工作流 fake:可控 answer、可模擬失敗、可覆寫 kb_query 輸出;記下呼叫序供斷言。</summary>
+/// <summary>Skill 引擎 fake:可注入目錄、可模擬失敗、可覆寫輸出;記下呼叫序供斷言。</summary>
 public sealed class FakeWorkflowService : IWorkflowService
 {
-    public string Answer { get; set; } = "知識庫答案";
-    public Exception? ThrowOnInvoke { get; set; }
-
-    /// <summary>非 null 時:kb_query 回這包輸出(其餘工作流照舊回 answer),用來測棄答兜底。</summary>
-    public Dictionary<string, System.Text.Json.JsonElement>? KbQueryOutput { get; set; }
-
-    public List<(string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)> Invokes { get; } = new();
-    public (string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)? LastInvoke
-        => Invokes.Count > 0 ? Invokes[^1] : null;
-
-    public Task<IReadOnlyList<WorkflowInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult<IReadOnlyList<WorkflowInfo>>(Array.Empty<WorkflowInfo>());
-
-    public Task<WorkflowInvokeResponse> InvokeAsync(
-        string name, Dictionary<string, System.Text.Json.JsonElement> input, UserContext ctx, CancellationToken ct = default)
-    {
-        if (ThrowOnInvoke is not null)
-        {
-            throw ThrowOnInvoke;
-        }
-
-        Invokes.Add((name, input, ctx));
-        if (name == "kb_query" && KbQueryOutput is not null)
-        {
-            return Task.FromResult(new WorkflowInvokeResponse(name, KbQueryOutput));
-        }
-
-        var output = new Dictionary<string, System.Text.Json.JsonElement>
-        {
-            ["answer"] = System.Text.Json.JsonSerializer.SerializeToElement(Answer),
-        };
-        return Task.FromResult(new WorkflowInvokeResponse(name, output));
-    }
-
     // ---- Skill 引擎(:8001):聊天 → Skill 路由用得到,可注入目錄與 skill invoke 行為並記錄呼叫。----
 
     /// <summary>非 null 時 GetSkillCatalogAsync 回這包目錄;預設回空陣列(等同「無 skill」)。</summary>
@@ -173,6 +152,9 @@ public sealed class FakeWorkflowService : IWorkflowService
     /// <summary>非 null 時 InvokeSkillAsync 回這包輸出;預設回 {skill=name}。</summary>
     public System.Text.Json.JsonElement? SkillOutput { get; set; }
 
+    /// <summary>非 null 時,依 skill 名個別覆寫回應(優先於 SkillOutput);用來模擬同一輪呼叫兩個不同 skill 各回不同輸出(例如 kb_query 棄答兜底打 rag_qa)。</summary>
+    public Dictionary<string, System.Text.Json.JsonElement>? SkillOutputByName { get; set; }
+
     /// <summary>skill invoke 呼叫序:name + input 字典 + 身分,供斷言。</summary>
     public List<(string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)> SkillInvokes { get; } = new();
 
@@ -189,6 +171,11 @@ public sealed class FakeWorkflowService : IWorkflowService
         }
 
         SkillInvokes.Add((name, input, ctx));
+        if (SkillOutputByName is not null && SkillOutputByName.TryGetValue(name, out var byName))
+        {
+            return Task.FromResult(byName);
+        }
+
         return Task.FromResult(SkillOutput
             ?? System.Text.Json.JsonSerializer.SerializeToElement(new { skill = name }));
     }

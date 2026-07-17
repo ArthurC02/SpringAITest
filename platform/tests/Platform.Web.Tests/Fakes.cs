@@ -116,35 +116,9 @@ public sealed class FakeAuthService : IAuthService
     }
 }
 
-/// <summary>工作流服務 fake:依名稱決定行為(ghost → NotFound),用來測 controller/認證/序列化/例外映射。</summary>
+/// <summary>Skill 引擎服務 fake:依名稱決定行為(ghost → NotFound),用來測 controller/認證/序列化/例外映射。</summary>
 public sealed class FakeWorkflowService : IWorkflowService
 {
-    public Task<IReadOnlyList<WorkflowInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult<IReadOnlyList<WorkflowInfo>>(new List<WorkflowInfo>
-        {
-            new("rag_qa", "檢索式問答", "USER"),
-        });
-
-    public Task<WorkflowInvokeResponse> InvokeAsync(
-        string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default)
-    {
-        // 特殊名稱觸發各類下游/服務例外,驗全域例外→狀態碼映射(對外 404/400/502/500)。
-        switch (name)
-        {
-            case "ghost":
-                throw new WorkflowNotFoundException("找不到工作流：" + name);
-            case "boom":
-                throw new WorkflowInvocationException("工作流服務呼叫失敗：HTTP 500");
-            case "badinput":
-                throw new WorkflowBadInputException("工作流輸入不符合規範：欄位錯誤");
-            case "explode":
-                throw new InvalidOperationException("非預期錯誤");
-        }
-
-        var output = new Dictionary<string, JsonElement> { ["ok"] = JsonSerializer.SerializeToElement(true) };
-        return Task.FromResult(new WorkflowInvokeResponse(name, output));
-    }
-
     // ---- Skill 引擎(:8001)----
 
     /// <summary>記錄引擎端的呼叫,用來斷言「catalog 走引擎、不走 backend CRUD」。</summary>

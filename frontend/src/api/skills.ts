@@ -13,7 +13,7 @@ export function listSkillCatalog(): Promise<SkillCatalogEntry[]> {
   return apiFetch<SkillCatalogEntry[]>('/api/skills/catalog')
 }
 
-/** 執行 skill。body 與錯誤碼與 /api/workflows/{name} 對齊，但回應是 {skill, output}。 */
+/** 執行 skill。回應是 {skill, output}（原 workflow 執行端點已退役）。 */
 export function invokeSkill(
   name: string,
   input: Record<string, unknown>,

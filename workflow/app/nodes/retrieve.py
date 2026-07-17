@@ -10,8 +10,7 @@
 
 from typing import Any
 
-import httpx
-
+from app.backend_http import search_chunks
 from app.engine.node_registry import node
 from app.settings import settings
 
@@ -59,20 +58,7 @@ def make_retrieve_node(query_key: str, top_k: int | None = None):
         else:
             k = settings.retrieval_top_k
 
-        # 逾時放寬到 30s：openai 嵌入模式下 backend 要先算查詢嵌入，httpx 預設 5s 偶發不夠
-        async with httpx.AsyncClient(
-            base_url=settings.backend_base_url, timeout=httpx.Timeout(30.0)
-        ) as client:
-            resp = await client.post(
-                "/api/retrieval/search",
-                json={"query": query, "top_k": k},
-                headers={
-                    "X-Internal-Token": settings.internal_api_token,
-                    "X-Tenant-Id": tenant_id,
-                },
-            )
-            resp.raise_for_status()
-            chunks = resp.json()["chunks"]
+        chunks = await search_chunks(query, k, tenant_id)
 
         docs = [
             {

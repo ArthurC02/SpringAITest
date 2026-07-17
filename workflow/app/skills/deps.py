@@ -1,0 +1,66 @@
+"""kb_query 族節點共用的依賴容器與正式環境組裝：Skill 引擎的 DI 組裝點。
+
+KbQueryDeps 與 _default_deps 原本活在已退役的手寫圖（app/workflows/kb_query.py +
+app/kbquery/graph.py）；Node-First 遷移後這裡是唯一的組裝點，節點不碰全域 settings
+或單例，全部由這裡注入（app/skills/__init__.py、custom.py、config_apply.py 共用同一份）。
+"""
+
+from dataclasses import dataclass
+
+from app.nodes.kbquery.adapters import (
+    BackendVectorSearch,
+    LangChainStructuredLLM,
+    LoggingAuditRepository,
+    ScoreReranker,
+    StaticGlossary,
+)
+from app.nodes.kbquery.locators import (
+    StructuredDataLocator,
+    TableCellLocator,
+    TextEvidenceLocator,
+)
+from app.nodes.kbquery.ports import (
+    AuditRepositoryPort,
+    EvidenceLocatorPort,
+    GlossaryPort,
+    RerankerPort,
+    SearchPort,
+    StructuredLLMPort,
+)
+from app.settings import settings
+
+
+@dataclass
+class KbQueryDeps:
+    """kb_query 族節點的所有外部依賴；節點不碰全域 settings 或單例，全部由這裡注入。"""
+
+    llm: StructuredLLMPort | None
+    glossary: GlossaryPort
+    searchers: dict[str, SearchPort]
+    reranker: RerankerPort
+    locators: dict[str, EvidenceLocatorPort]
+    audit_repo: AuditRepositoryPort
+    default_top_k: int = 8
+    max_retrieval_attempts: int = 2
+    # intent_classification 的 LLM 補位信心門檻（P4c 促升，per-config 可覆寫；預設對齊節點內建 0.6）
+    intent_confidence_threshold: float = 0.6
+
+
+def _default_deps() -> KbQueryDeps:
+    """組出正式環境的依賴組合。"""
+    return KbQueryDeps(
+        llm=LangChainStructuredLLM(),
+        glossary=StaticGlossary(),
+        # ponytail: 只串接 vector；keyword/metadata/table/structured 檢索來源
+        # 後端尚未提供，等 API 就緒後在這個 dict 加上對應 adapter 即可
+        searchers={"vector": BackendVectorSearch()},
+        reranker=ScoreReranker(),
+        locators={
+            "text": TextEvidenceLocator(),
+            "table": TableCellLocator(),
+            "structured": StructuredDataLocator(),
+        },
+        audit_repo=LoggingAuditRepository(),
+        default_top_k=settings.kb_query_top_k,
+        max_retrieval_attempts=settings.kb_query_max_retrieval_attempts,
+    )

@@ -21,20 +21,10 @@ from app.engine import compiler
 from app.engine import skill as skill_mod
 from app.main import app
 from app.nodes.nl_extract import make_nl_extract_node
-from tests.conftest import FakeBackendResponse
+from tests.conftest import FakeBackendResponse, auth_headers
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
-INTERNAL_TOKEN = "internal-dev-token"
-
-
-def _headers(tenant_id="demo-a", user_id="alice", role="USER"):
-    return {
-        "X-Internal-Token": INTERNAL_TOKEN,
-        "X-Tenant-Id": tenant_id,
-        "X-User-Id": user_id,
-        "X-User-Role": role,
-    }
 
 
 class RecordingExtractLLM:
@@ -117,7 +107,7 @@ def test_nl_extract_raises_loudly_when_llm_returns_none():
 
 
 def test_nodes_catalog_lists_nl_extract():
-    resp = client.get("/nodes", headers=_headers())
+    resp = client.get("/nodes", headers=auth_headers())
     assert resp.status_code == 200
     by_name = {(n["name"], n["version"]): n for n in resp.json()}
     assert ("nl_extract", "1.0") in by_name
@@ -200,7 +190,7 @@ flow:
 
 def test_final_revenue_qa_yaml_validates():
     resp = client.post(
-        "/skills/validate", json={"definition": REVENUE_QA_YAML}, headers=_headers()
+        "/skills/validate", json={"definition": REVENUE_QA_YAML}, headers=auth_headers()
     )
     assert resp.status_code == 200
     body = resp.json()

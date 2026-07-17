@@ -13,11 +13,11 @@ import pytest
 from app.engine import compiler, node_registry
 from app.engine.script_runner import ScriptTraceEntry
 from app.engine.skill import Skill
-from app.kbquery.adapters import StaticGlossary
+from app.nodes.kbquery.adapters import StaticGlossary
 
 # import 觸發 kb_query 節點註冊（compiler 強制附加的 audit_feedback 來自這裡）
-from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
-from app.kbquery.models import QueryRewriteOutput
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes.kbquery.models import QueryRewriteOutput
 from tests.kbquery_fakes import FakeStructuredLLM, RecordingAuditRepo
 
 TEST_NODES = ("s_next",)

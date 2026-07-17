@@ -7,7 +7,9 @@ export interface SkillTemplate {
   slotKind: 'nl_logic' | 'script' // 決定 rule 欄注入 instruction 還是 Python body
   openFields: Array<keyof SkillForm> // 簡單模式可填白名單
   labels: Partial<Record<keyof SkillForm, string>>
-  inputWidgets: Partial<Record<keyof SkillForm, 'text' | 'textarea' | 'number' | 'select'>>
+  // 'select' 不在型別內：渲染端（SimpleSkillEditor）只判斷 number/text，加 select
+  // 要連渲染分支一起加，否則會靜默退化成 text input。
+  inputWidgets: Partial<Record<keyof SkillForm, 'text' | 'textarea' | 'number'>>
 }
 
 export type SkillForm = Partial<

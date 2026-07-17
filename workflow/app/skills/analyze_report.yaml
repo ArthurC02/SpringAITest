@@ -1,0 +1,14 @@
+name: analyze_report
+description: 檢索租戶文件並產出主題分析報告（管理員限定）
+required_role: ADMIN
+
+# 對齊 workflows/analyze_report.py 的 AnalyzeReportInput：topic 必填非空。
+input_schema:
+  topic: {type: str, required: true, min_length: 1}
+
+flow:
+  - node: retrieve@1.0
+    params:
+      query_key: topic
+  - node: doc_insights@1.0
+  - node: report_synthesize@1.0

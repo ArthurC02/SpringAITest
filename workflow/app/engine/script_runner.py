@@ -48,7 +48,7 @@ from typing import Any, Protocol
 
 from app.engine.harness import CONFIG_SEED_KEYS, IDENTITY_KEYS, IMMUTABLE_KEYS
 from app.engine.node_registry import ENGINE_KEYS
-from app.kbquery.models import TraceEntry
+from app.engine.models import TraceEntry
 
 # ---------------------------------------------------------------------------
 # 限制（規格 §5.1／§5.2／§5.0）

@@ -12,7 +12,7 @@ Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfus
 - **向量檢索（RAG）**：`/documents` 負責文件的切塊、嵌入、儲存；`app/nodes/retrieve.py` 提供共用的
   LangGraph 檢索節點，各工作流可直接掛用。
 - **分析工作流**：`rag_qa`（檢索增強問答）、`analyze_report`（主題分析報告，管理員限定）。
-- **服務間認證**：所有 `/workflows*`、`/documents*` 端點都要求 `X-Internal-Token` 與 Spring 端共享的密鑰吻合。
+- **服務間認證**：所有 `/skills*`、`/nodes`、`/documents*` 端點都要求 `X-Internal-Token` 與 Spring 端共享的密鑰吻合。
 - **角色權限邊界**：每個工作流宣告 `required_role`（`USER` 或 `ADMIN`），由 `X-User-Role` 標頭核對。
 - **多租戶隔離**：所有文件與檢索操作皆以 `X-Tenant-Id` 為第一層邊界，租戶之間資料互不可見。
 
@@ -29,27 +29,29 @@ Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfus
 | `X-User-Id` | 呼叫者的使用者名稱 | 可省略，僅供追蹤用途，不影響授權判斷 |
 | `X-User-Role` | `USER` 或 `ADMIN` | 缺少 → **400**（同上） |
 
-### 工作流
+### 技能（Skill）與節點
 
 | 方法 | 路徑 | 說明 | 請求 | 回應 |
 | --- | --- | --- | --- | --- |
 | GET | `/health` | 健康檢查（無需任何標頭） | 無 | `{"status": "ok"}` |
-| GET | `/workflows` | 列出所有已註冊工作流 | 無 | `[{"name", "description", "required_role"}, ...]`（依 name 排序） |
-| POST | `/workflows/{name}/invoke` | 同步觸發指定工作流並取回結果 | `{"input": {...}}` | `{"workflow": "...", "output": {...最終 state...}}` |
+| GET | `/skills` | 列出所有已註冊技能 | 無 | `[{"name", "description", "required_role", "input_schema", "output_schema"}, ...]`（依 name 排序） |
+| POST | `/skills/{name}/invoke` | 同步觸發指定技能並取回結果 | `{"input": {...}}` | `{"skill": "...", "output": {...最終 state...}}` |
+| POST | `/skills/validate` | 驗證 YAML 技能定義（語法 + schema 檢查） | `{"yaml": "..."}` | `{"valid": true}` 或 `{"error": "..."}` |
+| GET | `/nodes` | 列出所有已註冊節點及其 I/O 契約 | 無 | `[{"name", "reads", "writes", "deps", ...}, ...]` |
 
 `input` 裡的 `tenant_id`／`user_id`／`role` 為保留鍵，一律會被忽略並由伺服器依標頭覆寫，
 避免呼叫端夾帶假的租戶／使用者資訊破壞隔離邊界。
 
-`POST /workflows/{name}/invoke` 的驗證順序與對應錯誤：
+`POST /skills/{name}/invoke` 的驗證順序與對應錯誤：
 
-1. 工作流是否存在 → 否則 **404** `{"error": "workflow_not_found", "message": "...", "workflows": [...]}`
-2. 呼叫者角色是否足夠（`ADMIN` 可執行一切，`USER` 只能執行 `required_role=USER` 的工作流）
-   → 否則 **403** `{"error": "workflow_forbidden", "message": "..."}`
-3. `input` 是否符合該工作流宣告的 `input_model`（若有宣告）
-   → 否則 **422** `{"error": "workflow_input_invalid", "message": "..."}`
-4. 執行圖，並套用逾時保護（預設 `WORKFLOW_TIMEOUT_SECONDS`，工作流可自行覆蓋）
-   → 逾時 **504** `{"error": "workflow_timeout", "message": "..."}`；
-     其他例外 **500** `{"error": "workflow_execution_failed", "message": "..."}`
+1. 技能是否存在 → 否則 **404** `{"error": "skill_not_found", "message": "...", "skills": [...]}`
+2. 呼叫者角色是否足夠（`ADMIN` 可執行一切，`USER` 只能執行 `required_role=USER` 的技能）
+   → 否則 **403** `{"error": "skill_forbidden", "message": "..."}`
+3. `input` 是否符合該技能宣告的 `input_schema`（若有宣告）
+   → 否則 **422** `{"error": "skill_input_invalid", "message": "..."}`
+4. 編譯並執行 YAML 定義的技能圖，套用逾時保護（預設 `WORKFLOW_TIMEOUT_SECONDS`，技能可自行覆蓋）
+   → 逾時 **504** `{"error": "skill_timeout", "message": "..."}`；
+     其他例外 **500** `{"error": "skill_execution_failed", "message": "..."}`
 
 ### 文件（RAG 資料來源）
 
@@ -59,13 +61,14 @@ Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfus
 | GET | `/documents` | 列出呼叫者所在租戶的所有文件 | 無 | **200** `[{"id", "title", "chunk_count", "created_at"}, ...]`（僅本租戶） |
 | DELETE | `/documents/{id}` | 刪除指定文件 | 無 | **204**；非本租戶或不存在 → **404** `{"error": "document_not_found", "message": "..."}` |
 
-### 已註冊工作流一覽
+### 內建技能一覽
 
 | 名稱 | 說明 | 權限 | input |
 | --- | --- | --- | --- |
 | `summarize` | 將輸入文字做三句以內的摘要（線性流程） | USER | `{"text": "..."}` |
 | `triage` | 依問題複雜度分流回答（條件分支流程） | USER | `{"question": "..."}` |
 | `rag_qa` | 檢索增強問答：以租戶內文件回答問題並附引用 | USER | `{"question": "..."}`（非空） |
+| `kb_query` | 向量知識庫檢索：查詢租戶文件內容 | USER | `{"query": "..."}`（非空） |
 | `analyze_report` | 檢索租戶文件並產出主題分析報告 | **ADMIN** | `{"topic": "..."}`（非空） |
 
 `rag_qa` 與 `analyze_report` 的狀態都含 `docs`（檢索到的片段列表，每筆有 `document_id`／`title`／
@@ -104,11 +107,11 @@ $headers = @{
   "X-User-Role"      = "USER"
 }
 
-curl -Headers $headers http://localhost:8001/workflows
+curl -Headers $headers http://localhost:8001/skills
 
 curl -Method Post -Headers ($headers + @{"Content-Type"="application/json"}) `
   -Body '{"input":{"question":"退款政策是什麼？"}}' `
-  http://localhost:8001/workflows/rag_qa/invoke
+  http://localhost:8001/skills/rag_qa/invoke
 ```
 
 > 文件的新增/列表/刪除已移到 backend 核心服務（經 platform 的 `/api/documents`）；
@@ -134,57 +137,26 @@ curl -Method Post -Headers ($headers + @{"Content-Type"="application/json"}) `
 > `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` 並非由本專案的 `Settings` 讀取，
 > 而是 langfuse SDK 依其慣例直接從環境變數取得，因此不會出現在 `app/settings.py` 裡。
 
-## 如何新增一個有權限邊界的工作流
+## 如何新增一個有權限邊界的技能（YAML 方式）
 
-1. 在 `app/workflows/` 底下新增一個模組檔（例如 `app/workflows/my_flow.py`）。
-2. 定義輸入驗證用的 `pydantic.BaseModel`（想維持寬鬆驗證則可省略，`input_model` 留空即可）：
+內建與自訂技能均以 **YAML 定義**、由引擎編譯為 LangGraph 圖執行。編寫 YAML 技能定義時：
 
-   ```python
-   from pydantic import BaseModel, Field
+1. 在 `app/skills/` 底下新增一個 YAML 檔（例如 `app/skills/my_skill.yaml`）。
+2. 定義技能的 YAML 結構，包括：
+   - `name` — 技能識別符
+   - `description` — 簡短說明
+   - `required_role` — 所需角色（`USER` 或 `ADMIN`，預設 `USER`）
+   - `input_schema` — 輸入 schema（Pydantic 格式或 JSON schema）
+   - `output_schema` — 輸出 schema
+   - `nodes` — 技能包含的節點清單（節點引用與邊的拓樸圖）
 
-   class MyFlowInput(BaseModel):
-       """my_flow 工作流的輸入 schema。"""
-       topic: str = Field(min_length=1)
-   ```
+3. 若需檢索租戶文件，在 YAML 中引用內建節點 `retrieve`。技能編譯器會依據節點契約自動串接資料流。
 
-3. 定義工作流的 `State`（`TypedDict`）、各節點函式；若需要檢索租戶文件，直接掛用共用節點：
+4. 完成 YAML 定義後，透過 `POST /api/skills` 端點上傳（或直接放在 `app/skills/` 使引擎在啟動時載入）。
 
-   ```python
-   from app.nodes.retrieve import make_retrieve_node
+5. 驗證技能語法，使用 `POST /api/skills/validate` 端點檢查 YAML 與 schema 是否有效。
 
-   g.add_node("retrieve", make_retrieve_node(query_key="topic"))
-   ```
+6. 重新啟動服務（或由後端重新載入），`GET /skills` 應該就能看到新項目（含 `required_role`），
+   `POST /skills/{name}/invoke` 即可呼叫；權限不足會收到 403，input 不符 schema 會收到 422。
 
-4. 用 `@register(...)` 裝飾負責建圖並回傳已編譯圖的函式（通常命名為 `build`），
-   並依需求宣告 `required_role`（預設 `"USER"`）、`input_model`、`timeout_seconds`：
-
-   ```python
-   from langgraph.graph import END, START, StateGraph
-   from app.workflows.registry import register
-
-   @register(
-       "my_flow",
-       description="說明這個工作流做什麼",
-       required_role="ADMIN",       # 不需要角色邊界時可省略，預設 USER
-       input_model=MyFlowInput,     # 不需要輸入驗證時可省略
-       timeout_seconds=60,          # 不需要覆蓋全域逾時秒數時可省略
-   )
-   def build():
-       g = StateGraph(MyFlowState)
-       g.add_node("step", step)
-       g.add_edge(START, "step")
-       g.add_edge("step", END)
-       return g.compile()
-   ```
-
-5. 到 `app/workflows/__init__.py` 補上一行 import，讓模組頂層的 `@register` 裝飾器在應用程式啟動時被執行：
-
-   ```python
-   from app.workflows import analyze_report, my_flow, rag_qa, summarize, triage  # noqa: F401
-   ```
-
-6. 重新啟動服務，`GET /workflows` 應該就能看到新項目（含 `required_role`），
-   `POST /workflows/my_flow/invoke` 即可呼叫；權限不足會收到 403，input 不符 schema 會收到 422。
-
-> 未來若工作流數量變多，可考慮改用 `pkgutil.iter_modules` 掃描 `app/workflows/` 底下所有模組並自動 import，
-> 取代目前手動列舉的 `__init__.py`。
+> 自訂技能由 `app/skills/custom.py` 負責從 backend 載入並合併到技能目錄，無需在此服務端手動 import。

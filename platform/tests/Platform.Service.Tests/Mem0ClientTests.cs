@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using Platform.Service;
 using Platform.Service.Options;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,14 +14,11 @@ public sealed class Mem0ClientTests
     private static Mem0Client Build(StubHttpMessageHandler stub) =>
         new(new HttpClient(stub), new Mem0Options { BaseUrl = "http://mem0" }, NullLogger<Mem0Client>.Instance);
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
     [Fact]
     public async Task Recall_TwoResults_FormatsBulletList()
     {
         var stub = new StubHttpMessageHandler(_ =>
-            Json(HttpStatusCode.OK, "{\"results\":[{\"memory\":\"喜歡貓\"},{\"memory\":\"住台北\"}]}"));
+            TestHttp.Json(HttpStatusCode.OK, "{\"results\":[{\"memory\":\"喜歡貓\"},{\"memory\":\"住台北\"}]}"));
         var client = Build(stub);
 
         var result = await client.RecallAsync("u1", "查詢");
@@ -51,7 +47,7 @@ public sealed class Mem0ClientTests
     [InlineData("{\"results\":null}")]
     public async Task Recall_EmptyOrNullResults_ReturnsEmpty(string body)
     {
-        var client = Build(new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, body)));
+        var client = Build(new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, body)));
 
         Assert.Equal(string.Empty, await client.RecallAsync("u1", "查詢"));
     }

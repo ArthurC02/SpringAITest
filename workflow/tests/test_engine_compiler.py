@@ -11,10 +11,10 @@ import pytest
 
 from app.engine import compiler, node_registry
 from app.engine.skill import Skill
-from app.kbquery.adapters import StaticGlossary
+from app.nodes.kbquery.adapters import StaticGlossary
 
 # import 觸發 kb_query 節點註冊（compiler 強制附加的 audit_feedback 來自這裡）
-from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from tests.kbquery_fakes import RecordingAuditRepo
 
 TEST_NODES = ("t_seed", "t_a", "t_b", "t_tick")

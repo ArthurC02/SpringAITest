@@ -10,15 +10,17 @@ from typing import Any, Callable
 
 from pydantic import BaseModel
 
-from app.kbquery.adapters import ScoreReranker, StaticGlossary
-from app.kbquery.graph import KbQueryDeps, build_kb_query_graph
-from app.kbquery.locators import (
+from app import skills
+from app.engine import compiler
+from app.nodes.kbquery.adapters import ScoreReranker, StaticGlossary
+from app.nodes.kbquery.locators import (
     StructuredDataLocator,
     TableCellLocator,
     TextEvidenceLocator,
 )
-from app.kbquery.models import AuditTrail, SourceResult
-from app.kbquery.ports import SearchPort
+from app.nodes.kbquery.models import AuditTrail, SourceResult
+from app.nodes.kbquery.ports import SearchPort
+from app.skills.deps import KbQueryDeps
 
 
 class FakeStructuredLLM:
@@ -164,8 +166,12 @@ def make_deps(
 
 
 def run_graph(deps: KbQueryDeps, query: str, **extra_state) -> dict:
-    """建圖並同步執行一次 kb_query（無 pytest-asyncio，統一用 asyncio.run）。"""
-    graph = build_kb_query_graph(deps)
+    """編譯並同步執行一次 kb_query skill 的圖（無 pytest-asyncio，統一用 asyncio.run）。
+
+    手寫圖（原 build_kb_query_graph）已隨 Node-First 遷移退役；kb_query 現在只有
+    skills/kb_query.yaml 這一張圖，直接用 compiler 編譯後執行。
+    """
+    graph = compiler.compile(skills.get("kb_query").skill, deps)
     return asyncio.run(
         graph.ainvoke({"query": query, "tenant_id": "t-test", **extra_state})
     )

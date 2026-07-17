@@ -23,9 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable
 
-# ponytail: TraceEntry 借用 kbquery.models —— 目前唯一的 trace 型別，等第二個
-# 領域出現再抽到 engine/models.py，先抽只是搬檔案不產生價值
-from app.kbquery.models import TraceEntry
+from app.engine.models import TraceEntry
 
 # Query Intake 建立後不可被任何後續節點覆寫的鍵
 IMMUTABLE_KEYS = {"query_id", "original_query", "query_timestamp"}

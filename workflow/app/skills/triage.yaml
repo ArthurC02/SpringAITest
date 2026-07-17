@@ -1,0 +1,18 @@
+name: triage
+description: 依問題複雜度分流回答
+required_role: USER
+
+# 對齊 P1 天花板（SingleRequiredStringKey）：input_schema 恰好一個必填 str 欄位。
+input_schema:
+  question: {type: str, required: true, min_length: 1}
+
+flow:
+  # triage_classify 已把輸出正規化成 'SIMPLE'/'COMPLEX' 兩個字面值（含 route() 的
+  # 確定性預設：找不到 COMPLEX 一律 SIMPLE），branch 條件式只需簡單的字面量比較。
+  - node: triage_classify@1.0
+  - branch:
+      when: state.category == 'COMPLEX'
+      then:
+        - node: triage_deep_answer@1.0
+      else:
+        - node: triage_quick_answer@1.0

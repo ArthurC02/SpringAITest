@@ -26,11 +26,10 @@ from app.engine import compiler
 from app.engine import skill as skill_mod
 from app.main import app
 from app.nodes.nl_logic import _NlLogicOutput
-from tests.conftest import FakeBackendResponse
+from tests.conftest import FakeBackendResponse, auth_headers
 from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch, FakeStructuredLLM, make_deps
 
 client = TestClient(app)
-INTERNAL_TOKEN = "internal-dev-token"
 
 TEMPLATE_NAMES = (
     "template_retrieval",
@@ -41,15 +40,6 @@ TEMPLATE_NAMES = (
 )
 NL_TEMPLATES = ("template_retrieval", "template_infer", "template_inspire")
 SCRIPT_TEMPLATES = ("template_compare", "template_stats")
-
-
-def _headers(tenant_id="demo-a", user_id="alice", role="USER"):
-    return {
-        "X-Internal-Token": INTERNAL_TOKEN,
-        "X-Tenant-Id": tenant_id,
-        "X-User-Id": user_id,
-        "X-User-Role": role,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +136,7 @@ def test_health_ok_after_templates_loaded():
 
 
 def test_catalog_builtin_templates_carry_non_empty_definition():
-    body = {i["name"]: i for i in client.get("/skills", headers=_headers()).json()}
+    body = {i["name"]: i for i in client.get("/skills", headers=auth_headers()).json()}
     for name in TEMPLATE_NAMES:
         assert name in body
         assert body[name]["source"] == "builtin"
@@ -173,7 +163,7 @@ def test_catalog_custom_entry_has_no_definition(monkeypatch):
     from app.skills import custom
 
     monkeypatch.setattr(custom, "catalog", fake_catalog)
-    body = {i["name"]: i for i in client.get("/skills", headers=_headers()).json()}
+    body = {i["name"]: i for i in client.get("/skills", headers=auth_headers()).json()}
     assert body["sales_rule"]["definition"] is None
     # 內建仍帶定義（未被 custom 影響）
     assert body["kb_query"]["definition"]

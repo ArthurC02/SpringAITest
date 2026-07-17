@@ -14,6 +14,9 @@ public static class IdentityHeaders
 
     public static string? UserId(this HttpRequest request) => Value(request, UserHeader);
 
+    /// <summary>UserId 缺標頭時的空字串回落(寫入用途:AddedBy/CreatedBy 等欄位不接受 null)。</summary>
+    public static string UserIdOrEmpty(this HttpRequest request) => Value(request, UserHeader) ?? string.Empty;
+
     public static string? UserRole(this HttpRequest request) => Value(request, RoleHeader);
 
     /// <summary>需要租戶的端點:缺 X-Tenant-Id 直接 400。</summary>

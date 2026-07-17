@@ -6,50 +6,40 @@ from pydantic import ValidationError
 from app import skills, tracing
 from app.engine import compiler, node_registry
 from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
-from app.engine.skill import ValidationResult, schema_from_model, validate_source
+from app.engine.skill import ValidationResult, validate_source
 from app.skills import config_apply, custom
 
 # 這幾行 import 執行各節點模組頂層的 @node 裝飾器，讓 GET /nodes 的目錄完整
-# （不倚賴「某個工作流剛好有 import 到該節點」這種間接關係）。同理，app.tools 的 import
+# （不倚賴「某個 skill 剛好有 import 到該節點」這種間接關係）。同理，app.tools 的 import
 # 執行 @tool 裝飾器，讓 Skill 的 tool/script 步驟查得到 Tool Registry。nl_logic 走
 # app.nodes、非 kb_query 族，故這裡明列一行讓 catalog 查得到它（縫⑥）。
 # 冷啟動「編譯」template_* 所需的 nl_logic / retrieve 註冊由 app.skills 自身負責觸發
 # （見 skills/__init__.py），故 app.skills 單獨匯入亦自足。
 from app import tools as _tools  # noqa: F401
-from app.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes import analyze_report as _analyze_report_nodes  # noqa: F401
 from app.nodes import nl_extract as _nl_extract  # noqa: F401
 from app.nodes import nl_logic as _nl_logic  # noqa: F401
+from app.nodes import rag_answer as _rag_answer  # noqa: F401
 from app.nodes import retrieve as _retrieve_node  # noqa: F401
+from app.nodes import summarize_text as _summarize_text  # noqa: F401
+from app.nodes import triage as _triage_nodes  # noqa: F401
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from app.schemas import (
     InvokeRequest,
-    InvokeResponse,
     NodeInfo,
     SkillInfo,
     SkillInvokeResponse,
     SkillValidateRequest,
-    WorkflowInfo,
 )
 from app.security import RequestContext, get_context
-from app.settings import settings
-
-# 這行 import 除了取得 registry 模組本身，也會連帶執行
-# app/workflows/__init__.py 內各工作流模組的 @register 裝飾器，
-# 讓 registry 在應用程式啟動時就已經填好所有工作流。
-from app.workflows import registry
-
-# 這些鍵一律由伺服器依 RequestContext 自動注入 state，不允許呼叫端經 input 蓋掉，
-# 避免有心（或不小心）的呼叫端夾帶假的租戶／使用者資訊，破壞多租戶隔離邊界。
-_RESERVED_INPUT_KEYS = {"tenant_id", "user_id", "role"}
 
 
 def _clean_skill_input(raw: dict) -> dict:
-    """skill invoke 的 input 過濾：比 /workflows 嚴格，因為 skill 的 flow 是任意的。
+    """skill invoke 的 input 過濾：剝除保留鍵與引擎內部鍵。
 
-    /workflows 只需剝三個身分鍵，是因為手寫圖的第一個節點固定是 query_intake，
-    query_id / original_query / query_timestamp 必被無條件覆寫。Skill 沒有這個保證
-    （flow 由作者決定，query_intake 不是強制附加的節點），呼叫端夾帶 query_id 進來
-    就會原封不動流進 audit_trail —— 一般 USER 即可偽造稽核軌跡上的「原始問題」。
-    Harness 的 IMMUTABLE_KEYS 只擋節點寫入，擋不住 input，所以這一關必須在這裡做。
+    query_id / original_query / query_timestamp 等保留鍵若被呼叫端夾帶，會原封不動
+    流進 audit_trail —— 一般 USER 即可偽造稽核軌跡上的「原始問題」。Harness 的
+    IMMUTABLE_KEYS 只擋節點寫入，擋不住 input，所以這一關必須在這裡做。
     引擎內部鍵（__ 前綴）同理一併剝除。
     """
     return {
@@ -59,6 +49,57 @@ def _clean_skill_input(raw: dict) -> dict:
     }
 
 
+def _require_role(required_role: str | None, ctx: RequestContext, name: str) -> None:
+    """403 角色檢查。"""
+    if required_role == "ADMIN" and ctx.role != "ADMIN":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "workflow_forbidden",
+                "message": f"skill '{name}' 需要 {required_role} 角色權限",
+            },
+        )
+
+
+def _validate_input(model, raw: dict, name: str) -> None:
+    """422 input schema 檢查。model 為 None 時不驗證。"""
+    if model is None:
+        return
+    try:
+        model.model_validate(raw)
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "workflow_input_invalid",
+                "message": str(e),
+            },
+        )
+
+
+async def _run_with_timeout(coro, timeout_seconds: float, name: str):
+    """套用逾時保護並執行圖，504／500 錯誤處理。"""
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            return await coro
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "workflow_timeout",
+                "message": f"skill '{name}' 執行超過 {timeout_seconds} 秒",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "workflow_execution_failed",
+                "message": str(e),
+            },
+        )
+
+
 app = FastAPI(title="springaitest-workflow")
 
 
@@ -66,20 +107,6 @@ app = FastAPI(title="springaitest-workflow")
 async def health() -> dict:
     """健康檢查端點，供 compose / Spring 端探活使用；刻意不掛任何驗證，避免探活受認證設定影響。"""
     return {"status": "ok"}
-
-
-@app.get("/workflows", response_model=list[WorkflowInfo])
-async def list_workflows(ctx: RequestContext = Depends(get_context)) -> list[WorkflowInfo]:
-    """列出目前已註冊的所有工作流（含各自的最低角色需求與輸入 schema）。"""
-    return [
-        WorkflowInfo(
-            name=spec.name,
-            description=spec.description,
-            required_role=spec.required_role,
-            input_schema=schema_from_model(spec.input_model),
-        )
-        for spec in registry.all_specs()
-    ]
 
 
 @app.get("/nodes", response_model=list[NodeInfo])
@@ -144,7 +171,7 @@ async def invoke_skill(
     req: InvokeRequest,
     ctx: RequestContext = Depends(get_context),
 ) -> SkillInvokeResponse:
-    """執行指定 skill（內建或本租戶自訂）。驗證順序與錯誤碼一律沿用 /workflows/{name}/invoke：
+    """執行指定 skill（內建或本租戶自訂）。驗證順序：
     存在（404）→ 角色（403）→ input schema（422）→ 逾時（504）／未預期例外（500）。
 
     名稱先查內建、再向 backend 查自訂。backend 不可達 → 500（受控）而不是 404：
@@ -182,26 +209,8 @@ async def invoke_skill(
             },
         )
 
-    if loaded.skill.required_role == "ADMIN" and ctx.role != "ADMIN":
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "workflow_forbidden",
-                "message": f"skill '{name}' 需要 {loaded.skill.required_role} 角色權限",
-            },
-        )
-
-    if loaded.input_model is not None:
-        try:
-            loaded.input_model.model_validate(req.input)
-        except ValidationError as e:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "workflow_input_invalid",
-                    "message": str(e),
-                },
-            )
+    _require_role(loaded.skill.required_role, ctx, name)
+    _validate_input(loaded.input_model, req.input, name)
 
     # builtin 有覆寫 → 以 per_config 重編（縫⑤：靠 id(deps) 去重、不沿用啟動圖）；
     # 無覆寫 → 沿用啟動預編圖（零額外成本，回歸現況）。custom 的圖已在 load 時以 per_config 編好。
@@ -219,94 +228,8 @@ async def invoke_skill(
     # recursion_limit：規格 §6.3-2 的全圖護欄（langgraph 預設 10007 形同沒有護欄）
     config = {**tracing.runnable_config(), "recursion_limit": loaded.recursion_limit}
 
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            output = await graph.ainvoke(state, config=config)
-    except TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail={
-                "error": "workflow_timeout",
-                "message": f"skill '{name}' 執行超過 {timeout_seconds} 秒",
-            },
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "workflow_execution_failed",
-                "message": str(e),
-            },
-        )
+    output = await _run_with_timeout(
+        graph.ainvoke(state, config=config), timeout_seconds, name
+    )
 
     return SkillInvokeResponse(skill=name, output=compiler.public_output(output))
-
-
-@app.post("/workflows/{name}/invoke", response_model=InvokeResponse)
-async def invoke_workflow(
-    name: str,
-    req: InvokeRequest,
-    ctx: RequestContext = Depends(get_context),
-) -> InvokeResponse:
-    """觸發指定工作流，同步執行到底並回傳最終 state。
-
-    驗證順序：工作流是否存在（404）→ 呼叫者角色是否足夠（403）→
-    input 是否符合該工作流宣告的 schema（422）→ 執行圖並套用逾時保護（504／500）。
-    """
-    spec = registry.get(name)
-    if spec is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "workflow_not_found",
-                "message": f"unknown workflow: {name}",
-                "workflows": [s.name for s in registry.all_specs()],
-            },
-        )
-
-    if spec.required_role == "ADMIN" and ctx.role != "ADMIN":
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "workflow_forbidden",
-                "message": f"workflow '{name}' 需要 {spec.required_role} 角色權限",
-            },
-        )
-
-    if spec.input_model is not None:
-        try:
-            spec.input_model.model_validate(req.input)
-        except ValidationError as e:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "workflow_input_invalid",
-                    "message": str(e),
-                },
-            )
-
-    cleaned_input = {k: v for k, v in req.input.items() if k not in _RESERVED_INPUT_KEYS}
-    state = {"tenant_id": ctx.tenant_id, **cleaned_input}
-    timeout_seconds = spec.timeout_seconds or settings.workflow_timeout_seconds
-
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            output = await spec.graph.ainvoke(state, config=tracing.runnable_config())
-    except TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail={
-                "error": "workflow_timeout",
-                "message": f"workflow '{name}' 執行超過 {timeout_seconds} 秒",
-            },
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "workflow_execution_failed",
-                "message": str(e),
-            },
-        )
-
-    return InvokeResponse(workflow=name, output=output)

@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using Platform.Service;
 using Platform.Service.Dtos;
@@ -11,19 +10,13 @@ public sealed class AuthServiceTests
 {
     private static AuthService Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
-    private static HttpResponseMessage Error(HttpStatusCode status, string message) =>
-        Json(status, $"{{\"timestamp\":\"2026-07-12T00:00:00Z\",\"status\":{(int)status},\"message\":{JsonSerializer.Serialize(message)},\"fieldErrors\":{{}}}}");
-
     // ---- register ----
 
     [Fact]
     public async Task Register_Succeeds_SendsHeadersAndBody_MapsResult()
     {
         var stub = new StubHttpMessageHandler(_ =>
-            Json(HttpStatusCode.Created, "{\"username\":\"newbie\",\"role\":\"USER\",\"tenantCode\":\"demo-a\"}"));
+            TestHttp.Json(HttpStatusCode.Created, "{\"username\":\"newbie\",\"role\":\"USER\",\"tenantCode\":\"demo-a\"}"));
         var svc = Build(stub);
 
         var result = await svc.RegisterAsync(new RegisterRequest("newbie", "password123", "demo-a", "demo-a-invite"));
@@ -48,7 +41,7 @@ public sealed class AuthServiceTests
     [Fact]
     public async Task Register_404_ThrowsTenantNotFound_WithBackendMessage()
     {
-        var svc = Build(new StubHttpMessageHandler(_ => Error(HttpStatusCode.NotFound, "找不到租戶：nope")));
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.NotFound, "找不到租戶：nope")));
 
         var ex = await Assert.ThrowsAsync<TenantNotFoundException>(() =>
             svc.RegisterAsync(new RegisterRequest("x", "password123", "nope", "x")));
@@ -58,7 +51,7 @@ public sealed class AuthServiceTests
     [Fact]
     public async Task Register_403_ThrowsInvalidInviteCode_WithBackendMessage()
     {
-        var svc = Build(new StubHttpMessageHandler(_ => Error(HttpStatusCode.Forbidden, "邀請碼無效")));
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "邀請碼無效")));
 
         var ex = await Assert.ThrowsAsync<InvalidInviteCodeException>(() =>
             svc.RegisterAsync(new RegisterRequest("x", "password123", "demo-a", "wrong")));
@@ -68,7 +61,7 @@ public sealed class AuthServiceTests
     [Fact]
     public async Task Register_409_ThrowsUsernameTaken_WithBackendMessage()
     {
-        var svc = Build(new StubHttpMessageHandler(_ => Error(HttpStatusCode.Conflict, "使用者名稱已存在：user-a")));
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Conflict, "使用者名稱已存在：user-a")));
 
         var ex = await Assert.ThrowsAsync<UsernameTakenException>(() =>
             svc.RegisterAsync(new RegisterRequest("user-a", "password123", "demo-a", "demo-a-invite")));
@@ -81,7 +74,7 @@ public sealed class AuthServiceTests
     public async Task Login_Succeeds_ReturnsBackendToken_AndSendsBody()
     {
         var stub = new StubHttpMessageHandler(_ =>
-            Json(HttpStatusCode.OK, "{\"token\":\"backend.signed.jwt\",\"username\":\"user-a\",\"role\":\"USER\",\"tenantCode\":\"demo-a\"}"));
+            TestHttp.Json(HttpStatusCode.OK, "{\"token\":\"backend.signed.jwt\",\"username\":\"user-a\",\"role\":\"USER\",\"tenantCode\":\"demo-a\"}"));
         var svc = Build(stub);
 
         var result = await svc.LoginAsync(new LoginRequest("user-a", "password123"));
@@ -102,7 +95,7 @@ public sealed class AuthServiceTests
     [Fact]
     public async Task Login_401_ThrowsInvalidCredentials_WithBackendMessage()
     {
-        var svc = Build(new StubHttpMessageHandler(_ => Error(HttpStatusCode.Unauthorized, "帳號或密碼錯誤")));
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Unauthorized, "帳號或密碼錯誤")));
 
         var ex = await Assert.ThrowsAsync<InvalidCredentialsException>(() =>
             svc.LoginAsync(new LoginRequest("user-a", "wrong")));

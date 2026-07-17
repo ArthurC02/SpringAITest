@@ -7,7 +7,7 @@ namespace Backend.Api.Skills;
 /// Skill CRUD(規格 §7.2)。路由鍵一律用 name(不是 id);回應欄位 snake_case。
 /// 角色:GET 清單/單筆/revisions = USER(執行清單要讓一般使用者列得出自訂 skill);
 /// POST/PUT/DELETE = ADMIN(撰寫者等同可注入執行碼)。
-/// ADMIN 把關以 [SkillAdminOnly] 掛在各撰寫動作上(authorization filter 階段,早於模型驗證):
+/// ADMIN 把關以 [AdminOnly("權限不足，無法存取 Skill")] 掛在各撰寫動作上(authorization filter 階段,早於模型驗證):
 /// 非 ADMIN 送不合法 body 也是 403,不會先被 400 短路而洩漏欄位規則。
 /// 每一條查詢都以 X-Tenant-Id 過濾:跨租戶一律「不存在」(404),不洩漏存在性。
 /// POST/PUT 的 body 只有 definition(YAML 原文):先送引擎 validate(唯一事實來源),
@@ -53,7 +53,7 @@ public sealed class SkillController : ControllerBase
 
     /// <summary>
     /// 匯出為 Claude Skill 格式 zip(SKILL.md + skill.yaml)。內容與 GET {name} 完全相同(只是打包),
-    /// 故角色與該端點一致 = USER 可用(不掛 [SkillAdminOnly])。租戶過濾靠 RequireTenant → 跨租戶自然 404。
+    /// 故角色與該端點一致 = USER 可用(不掛 [AdminOnly])。租戶過濾靠 RequireTenant → 跨租戶自然 404。
     /// </summary>
     [HttpGet("{name}/export")]
     public async Task<IActionResult> Export(string name, CancellationToken ct)
@@ -79,7 +79,7 @@ public sealed class SkillController : ControllerBase
 
     /// <summary>建立 skill — 201(revision 1)。定義未通過引擎驗證 → 422;同名(含既有工作流)→ 409。</summary>
     [HttpPost]
-    [SkillAdminOnly]
+    [AdminOnly("權限不足，無法存取 Skill")]
     public async Task<ActionResult<Skill>> Create([FromBody] SkillUpsert request, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
@@ -91,7 +91,7 @@ public sealed class SkillController : ControllerBase
         }
 
         var created = await _repo.CreateAsync(
-            tenantId, ToSkill(meta, request.Definition!), UserId(), ct);
+            tenantId, ToSkill(meta, request.Definition!), Request.UserIdOrEmpty(), ct);
         if (created is null)
         {
             throw new ApiException(StatusCodes.Status409Conflict, "Skill 名稱已存在：" + meta.Name);
@@ -106,7 +106,7 @@ public sealed class SkillController : ControllerBase
     /// 不支援改名:要改名就刪了重建。
     /// </summary>
     [HttpPut("{name}")]
-    [SkillAdminOnly]
+    [AdminOnly("權限不足，無法存取 Skill")]
     public async Task<ActionResult<Skill>> Update(string name, [FromBody] SkillUpsert request, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
@@ -126,7 +126,7 @@ public sealed class SkillController : ControllerBase
         }
 
         var updated = await _repo.UpdateAsync(
-            tenantId, name, ToSkill(meta, request.Definition!), UserId(), ct);
+            tenantId, name, ToSkill(meta, request.Definition!), Request.UserIdOrEmpty(), ct);
         if (updated is null)
         {
             throw NotFound(name);
@@ -137,7 +137,7 @@ public sealed class SkillController : ControllerBase
 
     /// <summary>停用 skill(軟刪 enabled=false)— 204;不存在(含跨租戶不可見、已停用)回 404。revision 保留供稽核。</summary>
     [HttpDelete("{name}")]
-    [SkillAdminOnly]
+    [AdminOnly("權限不足，無法存取 Skill")]
     public async Task<IActionResult> Delete(string name, CancellationToken ct)
     {
         var deleted = await _repo.DeleteAsync(Request.RequireTenant(), name, ct);
@@ -186,8 +186,6 @@ public sealed class SkillController : ControllerBase
 
     private static ApiException NotFound(string name)
         => new(StatusCodes.Status404NotFound, "找不到 Skill：" + name);
-
-    private string UserId() => Request.UserId() ?? string.Empty;
 
     /// <summary>DB 列 = 引擎中繼資料 + YAML 原文。enabled/revision/時間戳由 DB 決定,此處佔位。</summary>
     private static Skill ToSkill(SkillMetadata meta, string definition) => new(

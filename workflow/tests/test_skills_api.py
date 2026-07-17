@@ -63,9 +63,24 @@ def test_list_skills_returns_builtin_kb_query():
 
 
 def test_skills_endpoints_require_internal_token():
-    """服務間標頭要求同 /workflows：缺 token → 401，缺租戶標頭 → 400。"""
+    """服務間標頭要求：缺 token → 401，缺租戶標頭 → 400。"""
     assert client.get("/skills").status_code == 401
     assert client.get("/skills", headers=_headers(tenant_id=None)).status_code == 400
+
+
+@pytest.mark.parametrize("token", [None, "wrong-token"], ids=["missing", "wrong"])
+def test_skills_endpoint_bad_token_returns_401(token):
+    """承接已刪除的 test_api.py::test_list_workflows_bad_token_returns_401（換到 /skills）。"""
+    resp = client.get("/skills", headers=_headers(token=token))
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "unauthorized"
+
+
+def test_skills_endpoint_missing_role_returns_400():
+    """承接已刪除的 test_api.py::test_list_workflows_missing_role_returns_400。"""
+    resp = client.get("/skills", headers=_headers(role=None))
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "missing_context"
 
 
 # ---------------------------------------------------------------------------

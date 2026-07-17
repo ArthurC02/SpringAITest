@@ -308,7 +308,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
     }
 
-    // invoke 的錯誤碼與 POST /api/workflows/{name} 逐一相同(前端共用同一套呼叫程式)。
+    // invoke 的下游狀態碼映射:404 → NotFound、403 → Forbidden、422 → BadInput(400)、其他 → 502。
     [Theory]
     [InlineData("ghost", HttpStatusCode.NotFound)]
     [InlineData("forbidden", HttpStatusCode.Forbidden)]

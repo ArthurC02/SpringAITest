@@ -3,6 +3,9 @@ using System.Net.Http.Json;
 
 namespace Platform.Web.Tests;
 
+// /api/skills/catalog 探針呼叫真的會打到 FakeWorkflowService.GetSkillCatalogAsync,累加靜態
+// EngineCalls;需與 ChatApiTests/SkillApiTests 序列化,理由同 EngineCallsCollection 上的說明。
+[Collection("EngineCalls")]
 public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
 {
     private readonly TestWebAppFactory _factory;
@@ -14,7 +17,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
     {
         var client = _factory.CreateClient();
 
-        var resp = await client.GetAsync("/api/workflows");
+        var resp = await client.GetAsync("/api/skills/catalog");
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -48,9 +51,9 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
         var token = (await login.ReadJsonAsync())["token"]!.GetValue<string>();
 
         var authed = _factory.CreateClient().WithToken(token);
-        var workflows = await authed.GetAsync("/api/workflows");
+        var resp = await authed.GetAsync("/api/skills/catalog");
 
-        Assert.Equal(HttpStatusCode.OK, workflows.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
 
     // 過期與竄改的 token 同屬「憑證無效」等價類:JwtBearer OnChallenge 一律回 401 + 同一 ApiError。
@@ -65,7 +68,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
             : TestTokens.Mint() + "x"; // 竄改簽章尾段。
         var client = _factory.CreateClient().WithToken(token);
 
-        var resp = await client.GetAsync("/api/workflows");
+        var resp = await client.GetAsync("/api/skills/catalog");
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         var body = await resp.ReadJsonAsync();

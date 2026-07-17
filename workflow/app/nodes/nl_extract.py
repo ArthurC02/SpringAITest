@@ -17,6 +17,7 @@ script 就能用字面鍵 state["extracted"]["revenue_2024"] 直接讀出 typed 
 from pydantic import create_model
 
 from app.engine.node_registry import node
+from app.nodes._llm_input import build_user_message
 
 # system prompt 的固定前綴(規格逐字):只抽純數值,不做任何推估或計算。
 _EXTRACT_INSTRUCTION = (
@@ -40,8 +41,8 @@ def make_nl_extract_node(llm, *, fields=(), input_keys=(), instruction: str = ""
 
     - fields:要抽取的欄位名清單(如 ["revenue_2024", "revenue_2025"]);動態 pydantic
       模型每欄鎖死 float,LLM 結構化輸出被逼只回這幾個數值欄位。
-    - input_keys:要餵給 LLM 的 state 鍵,依序組成 user 訊息(`k: repr(value)`,比照
-      nl_logic);空時退回 normalized_query → query → 空字串。
+    - input_keys:要餵給 LLM 的 state 鍵,依序組成 user 訊息;組裝規則見
+      app.nodes._llm_input.build_user_message。
     - instruction:選填的額外指引,附在固定抽取指令之後。
     """
 
@@ -59,11 +60,7 @@ def make_nl_extract_node(llm, *, fields=(), input_keys=(), instruction: str = ""
         system = system + "\n" + instruction
 
     async def nl_extract(state: dict) -> dict:
-        keys = tuple(input_keys)
-        if keys:
-            user = "\n".join(f"{k}: {state.get(k)!r}" for k in keys)
-        else:
-            user = str(state.get("normalized_query") or state.get("query") or "")
+        user = build_user_message(state, tuple(input_keys))
 
         out = await llm.structured(system=system, user=user, schema=output_model)
         if out is None:

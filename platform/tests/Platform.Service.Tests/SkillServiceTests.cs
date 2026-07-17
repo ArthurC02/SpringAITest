@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -24,17 +23,10 @@ public sealed class SkillServiceTests
 
     private static SkillUpsert Upsert() => new(Yaml);
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
-        new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
-    private static HttpResponseMessage Error(HttpStatusCode status, string message) =>
-        Json(status, "{\"timestamp\":\"2026-07-14T00:00:00Z\",\"status\":" + (int)status
-            + ",\"message\":" + JsonSerializer.Serialize(message) + ",\"fieldErrors\":{}}");
-
     [Fact]
     public async Task List_MapsSnakeCaseResponse_ForwardsIdentityHeaders()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             """[{"name":"quarterly_qa","description":"季報問答","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
 
         var list = await Build(stub).ListAsync(AdminCtx);
@@ -58,7 +50,7 @@ public sealed class SkillServiceTests
     [Fact]
     public async Task Get_ForwardsNameInPath_MapsFullSkill()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, SkillJson));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SkillJson));
 
         var skill = await Build(stub).GetAsync("quarterly_qa", AdminCtx);
 
@@ -72,7 +64,7 @@ public sealed class SkillServiceTests
     [Fact]
     public async Task GetRevisions_ForwardsPath_MapsSnakeCaseRows()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             """[{"revision":2,"definition":"name: q","definition_sha256":"abc","created_by":"admin-a","created_at":"2026-07-14T00:00:00Z"}]"""));
 
         var revisions = await Build(stub).GetRevisionsAsync("quarterly_qa", AdminCtx);
@@ -88,7 +80,7 @@ public sealed class SkillServiceTests
     [Fact]
     public async Task GetRevisions_404_ThrowsNotFound()
     {
-        var stub = new StubHttpMessageHandler(_ => Error(HttpStatusCode.NotFound, "找不到 Skill：ghost"));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.NotFound, "找不到 Skill：ghost"));
 
         var ex = await Assert.ThrowsAsync<WorkflowNotFoundException>(
             () => Build(stub).GetRevisionsAsync("ghost", AdminCtx));
@@ -98,7 +90,7 @@ public sealed class SkillServiceTests
     [Fact] // body 只有 definition — name/description/required_role 都在 YAML 裡,不得另外送。
     public async Task Create_PostsDefinitionOnlyBody_MapsCreatedSkill()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.Created, SkillJson));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created, SkillJson));
 
         var created = await Build(stub).CreateAsync(Upsert(), AdminCtx);
 
@@ -117,7 +109,7 @@ public sealed class SkillServiceTests
     [Fact]
     public async Task Update_PutsToNamedPath_SendsDefinition()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, SkillJson));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SkillJson));
 
         await Build(stub).UpdateAsync("quarterly_qa", Upsert(), AdminCtx);
 
@@ -186,7 +178,7 @@ public sealed class SkillServiceTests
     [Fact] // backend 404 → WorkflowNotFoundException(對外 404),不誤判成 zip。
     public async Task Export_Backend404_ThrowsNotFound()
     {
-        var stub = new StubHttpMessageHandler(_ => Error(HttpStatusCode.NotFound, "找不到 Skill：ghost"));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.NotFound, "找不到 Skill：ghost"));
 
         var ex = await Assert.ThrowsAsync<WorkflowNotFoundException>(
             () => Build(stub).ExportAsync("ghost", AdminCtx));
@@ -213,7 +205,7 @@ public sealed class SkillServiceTests
     public async Task Create_BackendError_MapsToSameStatusException_KeepsMessage(
         int status, Type expected, string message)
     {
-        var stub = new StubHttpMessageHandler(_ => Error((HttpStatusCode)status, message));
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error((HttpStatusCode)status, message));
 
         var ex = await Assert.ThrowsAnyAsync<Exception>(() => Build(stub).CreateAsync(Upsert(), AdminCtx));
 
@@ -225,7 +217,7 @@ public sealed class SkillServiceTests
     [Fact]
     public async Task Create_Backend422_KeepsEngineErrorCodes()
     {
-        var stub = new StubHttpMessageHandler(_ => Json((HttpStatusCode)422,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
             """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 定義驗證失敗","fieldErrors":{"unbounded_loop":"loop 缺少 max_iterations（第 7 行）","unknown_node":"節點不存在"}}"""));
 
         var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
@@ -239,7 +231,7 @@ public sealed class SkillServiceTests
     [Fact] // PUT 的 name 不符也是 422(backend 判斷);訊息與 fieldErrors 一樣要穿過來。
     public async Task Update_Backend422_NameMismatch_KeepsFieldErrors()
     {
-        var stub = new StubHttpMessageHandler(_ => Json((HttpStatusCode)422,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
             """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 定義的 name 與路由不符：定義為 b，路由為 a","fieldErrors":{"name":"定義的 name（b）必須與路由的 name（a）相同"}}"""));
 
         var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
@@ -253,7 +245,7 @@ public sealed class SkillServiceTests
     [Fact]
     public async Task Create_Backend400WithFieldErrors_KeepsFieldErrors()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.BadRequest,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
             """{"timestamp":"2026-07-14T00:00:00Z","status":400,"message":"輸入驗證失敗","fieldErrors":{"definition":"definition 不可為空"}}"""));
 
         var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(
@@ -266,7 +258,7 @@ public sealed class SkillServiceTests
     [Fact] // backend 400 沒帶 fieldErrors → null(全域處理輸出空 map,ApiError 形狀不變)。
     public async Task Create_Backend400WithoutFieldErrors_HasNullFieldErrors()
     {
-        var stub = new StubHttpMessageHandler(_ => Json(HttpStatusCode.BadRequest,
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
             """{"timestamp":"2026-07-14T00:00:00Z","status":400,"message":"輸入驗證失敗"}"""));
 
         var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(

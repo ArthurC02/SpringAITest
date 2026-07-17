@@ -5,7 +5,7 @@
 第一個使用者呼叫 invoke 才 500。
 
 依賴注入：節點不碰全域 settings，deps 由這裡按 skill 名字組好傳給 compiler。
-P2 只有 kb_query 一個內建 skill，直接沿用 workflows/kb_query.py 已經組好的正式依賴
+P2 只有 kb_query 一個內建 skill，直接沿用 deps.py 已經組好的正式依賴
 （同一份依賴組合不重寫第二遍）；自訂 skill（P4，來自 backend）走同一條路徑。
 """
 
@@ -24,7 +24,8 @@ from app.engine.skill import Skill
 from app import tools as _tools  # noqa: F401
 
 # import 亦觸發 kb_query 十節點的 @node 註冊（build_input_model 之外，compile 需要它們）
-from app.workflows.kb_query import _default_deps as _kb_query_deps
+from app.skills.deps import _default_deps as _kb_query_deps
+from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 
 # 內建骨架 template_* 引用 nl_logic / retrieve 節點：_load_builtin 在本模組匯入時就會編譯
 # 這些骨架，因此節點的 @node 註冊必須先觸發。skills 匯入即自足（不倚賴呼叫端先匯入
@@ -32,6 +33,13 @@ from app.workflows.kb_query import _default_deps as _kb_query_deps
 # 會在冷啟動編譯期炸 unknown node。移除任一行 → 冷啟動編譯失敗、測試轉紅（縫⑥⑦ 護欄）。
 from app.nodes import nl_logic as _nl_logic  # noqa: F401
 from app.nodes import retrieve as _retrieve  # noqa: F401
+
+# Node-First 遷移（Phase 1）：rag_qa/summarize/triage/analyze_report 四顆內建 skill
+# 引用的節點，同樣必須在 _load_builtin 編譯前先觸發 @node 註冊（理由同上）。
+from app.nodes import analyze_report as _analyze_report_nodes  # noqa: F401
+from app.nodes import rag_answer as _rag_answer  # noqa: F401
+from app.nodes import summarize_text as _summarize_text  # noqa: F401
+from app.nodes import triage as _triage_nodes  # noqa: F401
 
 _SKILL_DIR = Path(__file__).parent
 
@@ -47,10 +55,17 @@ _TEMPLATE_NAMES = (
     "template_inspire",
 )
 
+# Node-First 遷移（Phase 1）四顆新內建 skill：與 kb_query/template_* 共用同一組
+# 正式依賴——rag_answer/summarize_text/triage_*/doc_insights/report_synthesize
+# 只用得到其中的 llm 埠，其餘（檢索/稽核各埠）用不到但無妨（同一支 KbQueryDeps
+# 也滿足編譯器強制附加的 audit_feedback 節點所需的 audit_repo）。
+_NODE_FIRST_MIGRATION_NAMES = ("rag_qa", "summarize", "triage", "analyze_report")
+
 # skill 名 → 依賴組裝函式。沒有對應項目的 skill 以 None 建圖（節點若需要依賴會在編譯期炸）。
 _DEPS_BUILDERS = {
     "kb_query": _kb_query_deps,
     **{name: _kb_query_deps for name in _TEMPLATE_NAMES},
+    **{name: _kb_query_deps for name in _NODE_FIRST_MIGRATION_NAMES},
 }
 
 
