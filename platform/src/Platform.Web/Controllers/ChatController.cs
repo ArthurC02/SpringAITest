@@ -25,6 +25,7 @@ public sealed class ChatController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<ChatResponse>> Chat([FromBody] ChatRequest request, CancellationToken ct)
     {
+        SetAuthInvalidHeaderIfNeeded();
         var result = await _chat.ChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct);
         return Ok(result);
     }
@@ -39,6 +40,7 @@ public sealed class ChatController : ControllerBase
     {
         Response.ContentType = "text/event-stream; charset=utf-8";
         Response.Headers.CacheControl = "no-cache";
+        SetAuthInvalidHeaderIfNeeded();
 
         // 關閉回應緩衝,確保 chunk 即時送出。
         var bodyFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
@@ -60,11 +62,27 @@ public sealed class ChatController : ControllerBase
     private UserContext? MaybeUserContext()
         => User.Identity?.IsAuthenticated == true ? User.ToUserContext() : null;
 
-    /// <summary>聊天歷史 — 回 List&lt;ChatResponse&gt;,createdAt DESC(全域,不分租戶/使用者)。</summary>
+    /// <summary>
+    /// 帶了 Authorization header 但驗證未通過(過期/無效 JWT)時回 X-Auth-Invalid: 1,
+    /// 讓前端全域登出機制能偵測到聊天路徑上的失效 token(這兩個端點 AllowAnonymous,永遠不會回 401)。
+    /// 完全沒帶 Authorization(真匿名)不加這個 header。
+    /// </summary>
+    private void SetAuthInvalidHeaderIfNeeded()
+    {
+        if (Request.Headers.ContainsKey("Authorization") && User.Identity?.IsAuthenticated != true)
+        {
+            Response.Headers["X-Auth-Invalid"] = "1";
+        }
+    }
+
+    /// <summary>
+    /// 聊天歷史 — 回 List&lt;ChatResponse&gt;,createdAt DESC,依登入身分過濾(只回自己租戶+自己的紀錄);
+    /// 匿名(無有效 JWT)回空陣列。
+    /// </summary>
     [HttpGet("history")]
     public async Task<ActionResult<IReadOnlyList<ChatResponse>>> History(CancellationToken ct)
     {
-        var history = await _chat.HistoryAsync(ct);
+        var history = await _chat.HistoryAsync(MaybeUserContext(), ct);
         return Ok(history);
     }
 }

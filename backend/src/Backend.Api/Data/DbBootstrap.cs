@@ -27,6 +27,10 @@ public static class DbBootstrap
           id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
           prompt text NOT NULL, reply text NOT NULL,
           created_at timestamptz NOT NULL DEFAULT now());
+        -- 跨租戶/使用者隔離:新增 tenant_id/user_id 欄位;舊資料以空字串補(冪等)。
+        ALTER TABLE conversations ADD COLUMN IF NOT EXISTS tenant_id text NOT NULL DEFAULT '';
+        ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT '';
+        CREATE INDEX IF NOT EXISTS conversations_tenant_user_idx ON conversations (tenant_id, user_id);
         CREATE TABLE IF NOT EXISTS rag_documents (
           id uuid PRIMARY KEY, tenant_id text NOT NULL, title text NOT NULL,
           chunk_count int NOT NULL, created_at timestamptz NOT NULL DEFAULT now());

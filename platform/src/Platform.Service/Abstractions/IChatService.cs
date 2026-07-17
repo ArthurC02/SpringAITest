@@ -14,6 +14,9 @@ public interface IChatService
     /// <summary>串流式聊天:逐塊吐出回覆;串流完成時才持久化串接後的全文與更新記憶。userCtx 同上。</summary>
     IAsyncEnumerable<string> StreamChatAsync(string message, string? userId, string? conversationId, UserContext? userCtx = null, CancellationToken ct = default);
 
-    /// <summary>聊天歷史:全撈依 CreatedAt DESC(全域,不分租戶/使用者)。</summary>
-    Task<IReadOnlyList<ChatResponse>> HistoryAsync(CancellationToken ct = default);
+    /// <summary>
+    /// 聊天歷史:依 CreatedAt DESC,只回 userCtx 所屬租戶+使用者的紀錄。
+    /// userCtx 為 null(匿名)時直接回空清單,不呼叫 backend。
+    /// </summary>
+    Task<IReadOnlyList<ChatResponse>> HistoryAsync(UserContext? userCtx = null, CancellationToken ct = default);
 }

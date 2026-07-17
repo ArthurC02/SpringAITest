@@ -23,6 +23,16 @@ export function setLogoutHandler(fn: (() => void) | null): void {
   logoutHandler = fn
 }
 
+/**
+ * 走與「收到 401」相同的全域登出路徑（顯示 session 過期提示、回登入頁）。
+ * 供不走 apiFetch 的手寫 fetch（例如 chat.ts 的 SSE 串流）在自行偵測到 session 失效時呼叫，
+ * 不讓它們繞過既有機制自己清 localStorage。
+ */
+export function triggerLogout(): void {
+  sessionExpired = true
+  logoutHandler?.()
+}
+
 // 「已登入卻被 401 踢出」的一次性旗標，AuthPage 讀一次即清，用來顯示過期提示。
 // 登入帳密錯誤的 401 不會設（當下沒有 session）。module 變數即可：
 // 401 踢出不會整頁重載，App 只是 re-render 到 AuthPage。

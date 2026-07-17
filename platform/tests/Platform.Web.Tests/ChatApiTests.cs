@@ -14,7 +14,8 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Chat_Returns_IdAndReply_WithoutPromptField()
     {
-        var client = _factory.CreateClient();
+        // 匿名聊天不持久化(對話以 (tenant_id, user_id) 隔離),id 一律為 0;帶身分才驗證 backend 產生的 id。
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
         var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好嗎" });
 
@@ -185,5 +186,67 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("application/json", resp.Content.Headers.ContentType!.MediaType);
         var body = await resp.ReadJsonAsync();
         Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
+    }
+
+    // ---- X-Auth-Invalid：AllowAnonymous 端點永遠不回 401,靠這個 header 讓前端全域登出機制打得到 ----
+
+    [Fact]
+    public async Task Chat_WithValidToken_HasNoAuthInvalidHeader()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.False(resp.Headers.Contains("X-Auth-Invalid"));
+    }
+
+    [Fact]
+    public async Task Chat_WithoutToken_HasNoAuthInvalidHeader()
+    {
+        var client = _factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.False(resp.Headers.Contains("X-Auth-Invalid"));
+    }
+
+    [Fact]
+    public async Task Chat_WithInvalidToken_HasAuthInvalidHeader()
+    {
+        var token = TestTokens.Mint() + "x"; // 竄改簽章尾段。
+        var client = _factory.CreateClient().WithToken(token);
+
+        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("1", resp.Headers.GetValues("X-Auth-Invalid").Single());
+    }
+
+    // ---- 聊天歷史依身分過濾:匿名回空陣列(不是 401,維持 AllowAnonymous 契約) ----
+
+    [Fact]
+    public async Task History_Anonymous_ReturnsEmptyArray()
+    {
+        var client = _factory.CreateClient();
+
+        var resp = await client.GetAsync("/api/chat/history");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var arr = (await resp.ReadJsonAsync()).AsArray();
+        Assert.Empty(arr);
+    }
+
+    [Fact]
+    public async Task Stream_WithInvalidToken_HasAuthInvalidHeader()
+    {
+        var token = TestTokens.Mint() + "x"; // 竄改簽章尾段。
+        var client = _factory.CreateClient().WithToken(token);
+
+        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("1", resp.Headers.GetValues("X-Auth-Invalid").Single());
     }
 }

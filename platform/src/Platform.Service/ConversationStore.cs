@@ -19,9 +19,9 @@ public sealed class ConversationStore : IConversationStore
 
     private Exception WrapTransport(Exception ex) => new BackendCallException(FailurePrefix + ex.Message, ex);
 
-    public async Task<ChatResponse> AddAsync(string prompt, string reply, CancellationToken ct = default)
+    public async Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
     {
-        using var req = _backend.BuildRequest(HttpMethod.Post, "/api/conversations", body: new { prompt, reply });
+        using var req = _backend.BuildRequest(HttpMethod.Post, "/api/conversations", ctx, body: new { prompt, reply });
         using var resp = await _backend.SendAsync(req, WrapTransport, ct);
 
         if (!resp.IsSuccessStatusCode)
@@ -36,9 +36,9 @@ public sealed class ConversationStore : IConversationStore
         return new ChatResponse(created.Id, reply, DateTime.SpecifyKind(created.CreatedAt, DateTimeKind.Utc));
     }
 
-    public async Task<IReadOnlyList<ChatResponse>> ListDescAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)
     {
-        using var req = _backend.BuildRequest(HttpMethod.Get, "/api/conversations");
+        using var req = _backend.BuildRequest(HttpMethod.Get, "/api/conversations", ctx);
         using var resp = await _backend.SendAsync(req, WrapTransport, ct);
 
         if (!resp.IsSuccessStatusCode)

@@ -151,10 +151,11 @@ export interface ConfigurationSetInfo {
   values?: ConfigurationValues
 }
 
-/** 單筆 Configuration Set（GET {id}）：含 values 與 created_at。 */
+/** 單筆 Configuration Set（GET {id}）：含 values、created_at 與 created_by。 */
 export interface ConfigurationSet extends ConfigurationSetInfo {
   values: ConfigurationValues
   created_at: string
+  created_by: string
 }
 
 /** GET /api/nodes 一列：節點契約（reads/writes 是 state 鍵名）。 */

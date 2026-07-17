@@ -69,10 +69,10 @@ public sealed class FakeConversationStore : IConversationStore
 {
     private long _nextId = 1;
 
-    public Task<ChatResponse> AddAsync(string prompt, string reply, CancellationToken ct = default)
+    public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(new ChatResponse(_nextId++, reply, DateTime.UtcNow));
 
-    public Task<IReadOnlyList<ChatResponse>> ListDescAsync(CancellationToken ct = default)
+    public Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)
         => Task.FromResult<IReadOnlyList<ChatResponse>>(new List<ChatResponse>());
 }
 

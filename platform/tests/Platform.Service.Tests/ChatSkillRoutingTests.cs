@@ -584,6 +584,24 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal(GuardPrompt, agent.CompleteCalls[^1][0].Content);
     }
 
+    // 路由指令必須把「數字/YoY/比較」意圖導向工具(與 ChatGuardPrompt 同一組語義):
+    // 少了這一步,revenue_qa 這類 YoY 問題會被路由判成 NONE → 純聊天兜底吐「查無此數據」。
+    [Fact]
+    public async Task RoutingInstruction_SteersNumericIntent_TowardTool_NotNone()
+    {
+        var agent = new FakeLlmAgent { Response = "NONE" };
+        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var svc = Build(agent, wf);
+
+        await svc.ChatAsync("晴光科技 2025 相比 2024 的營收 YoY 年增率是多少?", "u1", "c1", UserA);
+
+        // 第一次 CompleteAsync 是路由;其 system prompt 必須帶「年增率(YoY)」與「跨期間比較」的正向導引。
+        var routingSystem = agent.CompleteCalls[0][0].Content;
+        Assert.Contains("年增率", routingSystem);
+        Assert.Contains("跨期間比較", routingSystem);
+        Assert.Contains("不要因為題目像在算數學就輸出 NONE", routingSystem);
+    }
+
     // 匿名:不路由、不讀目錄、不執行 skill,只有一次純聊天呼叫。
     [Fact]
     public async Task AnonymousPath_NoRouting_PlainChat_NoSkillInvoked()

@@ -13,7 +13,8 @@ namespace Platform.Service;
 /// 聊天服務。短期記憶(視窗)與長期記憶(mem0)兩層合成 prompt:
 /// 短期提供先前訊息、mem0 提供 system 前言。
 /// 阻塞式 chat 與串流 streamChat 共用正規化與 prompt 組裝。
-/// 持久化與歷史改走 backend(IConversationStore);mem0、短期記憶、Agent Framework、SSE、業務 span 全不動。
+/// 持久化與歷史改走 backend(IConversationStore),以 (tenant_id, user_id) 隔離;匿名(userCtx null)不持久化、
+/// 歷史直接回空清單。mem0、短期記憶、Agent Framework、SSE、業務 span 全不動。
 /// </summary>
 public sealed class ChatService : IChatService
 {
@@ -32,7 +33,10 @@ public sealed class ChatService : IChatService
     // 路由指令:LLM 只做「選工具」,只輸出工具名稱或 NONE;不帶歷史/mem0,避免污染路由判斷。
     private const string RoutingInstruction =
         "你是一個路由器。以下是可用工具，每行「名稱: 說明」。判斷使用者訊息最適合哪一個工具，只輸出那個工具的名稱（原樣、不加任何其他字）；若只是閒聊、打招呼、或不需要查資料／計算，只輸出 NONE。"
-        + "若清單中有『說明明確對應到這個問題主題』的專門工具，優先選它；通用的知識庫檢索工具（例如一般文件問答）只有在沒有更專門的工具時才選。務必只輸出一個工具名稱或 NONE，不要多餘文字。";
+        + "若清單中有『說明明確對應到這個問題主題』的專門工具，優先選它；通用的知識庫檢索工具（例如一般文件問答）只有在沒有更專門的工具時才選。"
+        // 與 ChatGuardPrompt 同一組數字語義:純聊天兜底會把這類問題判成「查無此數據」,所以路由這一關就必須把它們導向工具,否則等於沒答。
+        + "特別注意：若使用者問題涉及數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，幾乎都需要專門工具查證,只要清單中有說明相符的工具就選它,不要因為題目像在算數學就輸出 NONE。"
+        + "務必只輸出一個工具名稱或 NONE，不要多餘文字。";
 
     // 摘要指令:LLM 只把工具的確定性結果改寫成自然語言,嚴禁竄改任何數字(gpt-4o-mini 自行心算常算錯)。
     private const string SummaryInstruction =
@@ -80,8 +84,11 @@ public sealed class ChatService : IChatService
             var reply = await _agent.CompleteAsync(messages, null, ct);
             activity?.SetTag("completion.length", reply.Length);
 
+            // 匿名(userCtx null)不持久化:對話記錄以 (tenant_id, user_id) 隔離,匿名沒有身分可歸屬。
             // 阻塞式:持久化失敗照舊往上拋(對外 500),不吞。
-            var saved = await _conversations.AddAsync(message, reply, ct);
+            var saved = userCtx is not null
+                ? await _conversations.AddAsync(message, reply, userCtx, ct)
+                : new ChatResponse(0, reply, DateTime.UtcNow);
 
             // 取得回覆並存 backend 之後,才寫入 mem0 與短期記憶。
             await _mem0.RememberAsync(uid, message, reply, ct);
@@ -146,14 +153,18 @@ public sealed class ChatService : IChatService
             var reply = accumulated.ToString();
             activity?.SetTag("completion.length", reply.Length);
 
+            // 匿名(userCtx null)不持久化,同阻塞式。
             // best-effort:串流已送出,持久化失敗不可讓已送出的串流炸掉,只記 warning。
-            try
+            if (userCtx is not null)
             {
-                await _conversations.AddAsync(message, reply, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "串流聊天持久化失敗（串流已送出,略過）：{訊息}", ex.Message);
+                try
+                {
+                    await _conversations.AddAsync(message, reply, userCtx, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "串流聊天持久化失敗（串流已送出,略過）：{訊息}", ex.Message);
+                }
             }
 
             await _mem0.RememberAsync(uid, message, reply, ct);
@@ -166,9 +177,15 @@ public sealed class ChatService : IChatService
         }
     }
 
-    public async Task<IReadOnlyList<ChatResponse>> HistoryAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<ChatResponse>> HistoryAsync(UserContext? userCtx = null, CancellationToken ct = default)
     {
-        return await _conversations.ListDescAsync(ct);
+        // 匿名沒有身分可歸屬,直接回空清單,不打 backend。
+        if (userCtx is null)
+        {
+            return Array.Empty<ChatResponse>();
+        }
+
+        return await _conversations.ListDescAsync(userCtx, ct);
     }
 
     // ---- 私有輔助 ----

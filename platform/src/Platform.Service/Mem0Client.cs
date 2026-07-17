@@ -52,6 +52,11 @@ public sealed class Mem0Client : IMem0Client
 
             return sb.ToString();
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 呼叫端主動取消,原樣拋出(不算 mem0 失敗)。
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogWarning("mem0 recall 失敗，改用空記憶：{訊息}", ex.Message);
@@ -76,6 +81,11 @@ public sealed class Mem0Client : IMem0Client
             using var resp = await _http.PostAsJsonAsync($"{BaseUrl}/memories", body, JsonOpts, ct);
             resp.EnsureSuccessStatusCode();
             // 回應忽略。
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 呼叫端主動取消,原樣拋出(不算 mem0 失敗)。
+            throw;
         }
         catch (Exception ex)
         {

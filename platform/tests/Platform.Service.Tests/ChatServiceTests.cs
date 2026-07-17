@@ -1,4 +1,3 @@
-using Platform.Service;
 using Platform.Service.Dtos;
 using Platform.Service.Options;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -13,6 +12,9 @@ public sealed class ChatServiceTests
         => new(agent, memory ?? new InMemoryChatMemoryStore(), mem0, convos, workflows ?? new FakeWorkflowService(),
             new LlmOptions(), NullLogger<ChatService>.Instance);
 
+    private static readonly UserContext UserA = new("user-a", "demo-a", "USER");
+    private static readonly UserContext AdminA = new("admin-a", "demo-a", "ADMIN");
+
     [Fact]
     public async Task Chat_CallsLlm_AndPersistsPromptAndReply()
     {
@@ -21,7 +23,8 @@ public sealed class ChatServiceTests
         var convos = new FakeConversationStore();
         var svc = Build(agent, mem0, convos);
 
-        var response = await svc.ChatAsync("你好嗎", "u1", "c1");
+        // 持久化需要身分:對話以 (tenant_id, user_id) 隔離,匿名不持久化。
+        var response = await svc.ChatAsync("你好嗎", "u1", "c1", UserA);
 
         Assert.Equal("AI 答覆", response.Reply);
         Assert.True(response.Id > 0);
@@ -99,8 +102,8 @@ public sealed class ChatServiceTests
         var convos = new FakeConversationStore { ThrowOnAdd = true };
         var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), convos);
 
-        // 阻塞式:持久化失敗照舊往上拋(對外 500)。
-        await Assert.ThrowsAsync<Platform.Service.Exceptions.BackendCallException>(() => svc.ChatAsync("嗨", "u1", "c1"));
+        // 阻塞式:持久化失敗照舊往上拋(對外 500)。需有身分才會走到持久化那一步。
+        await Assert.ThrowsAsync<Platform.Service.Exceptions.BackendCallException>(() => svc.ChatAsync("嗨", "u1", "c1", UserA));
     }
 
     [Fact]
@@ -112,7 +115,8 @@ public sealed class ChatServiceTests
         var svc = Build(agent, mem0, convos);
 
         var collected = new List<string>();
-        await foreach (var chunk in svc.StreamChatAsync("嗨", "u1", "c1"))
+        // 持久化需要身分:對話以 (tenant_id, user_id) 隔離,匿名不持久化。
+        await foreach (var chunk in svc.StreamChatAsync("嗨", "u1", "c1", UserA))
         {
             collected.Add(chunk);
         }
@@ -135,8 +139,8 @@ public sealed class ChatServiceTests
         var svc = Build(agent, mem0, convos);
 
         var collected = new List<string>();
-        // 持久化失敗不可讓已送出的串流炸掉。
-        await foreach (var chunk in svc.StreamChatAsync("嗨", "u1", "c1"))
+        // 持久化失敗不可讓已送出的串流炸掉;需有身分才會走到持久化那一步。
+        await foreach (var chunk in svc.StreamChatAsync("嗨", "u1", "c1", UserA))
         {
             collected.Add(chunk);
         }
@@ -155,7 +159,7 @@ public sealed class ChatServiceTests
         convos.Items.Add(new ChatResponse(2, "r2", baseTime.AddMinutes(1)));
         var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), convos);
 
-        var history = await svc.HistoryAsync();
+        var history = await svc.HistoryAsync(UserA);
 
         Assert.Equal(2, history.Count);
         Assert.Equal(2, history[0].Id);
@@ -200,9 +204,6 @@ public sealed class ChatServiceTests
     }
 
     // ---- 工作流聊天工具(已登入才掛;每個工具轉呼叫對應工作流) ----
-
-    private static readonly UserContext UserA = new("user-a", "demo-a", "USER");
-    private static readonly UserContext AdminA = new("admin-a", "demo-a", "ADMIN");
 
     [Fact]
     public async Task Chat_WithUserContext_PassesKnowledgeTool_AndToolInvokesRagQa()
@@ -387,9 +388,10 @@ public sealed class ChatServiceTests
         var svc = Build(agent, mem0, convos);
 
         var collected = new List<string>();
+        // 帶身分(UserA)才會實際嘗試持久化,讓「半截不寫」的斷言有意義(而非匿名本就不寫)。
         await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            await foreach (var chunk in svc.StreamChatAsync("嗨", "u1", "c1"))
+            await foreach (var chunk in svc.StreamChatAsync("嗨", "u1", "c1", UserA))
             {
                 collected.Add(chunk);
             }
@@ -399,5 +401,46 @@ public sealed class ChatServiceTests
         Assert.Equal(new[] { "甲" }, collected);
         Assert.Empty(convos.Saved);
         Assert.Empty(mem0.Remembered);
+    }
+
+    // ---- 匿名不持久化:對話以 (tenant_id, user_id) 隔離,匿名沒有身分可歸屬 ----
+
+    [Fact]
+    public async Task Chat_Anonymous_DoesNotCallAddAsync()
+    {
+        var convos = new FakeConversationStore();
+        var svc = Build(new FakeLlmAgent { Response = "匿名回覆" }, new FakeMem0Client(), convos);
+
+        var response = await svc.ChatAsync("嗨", "u1", "c1"); // userCtx = null
+
+        Assert.Equal("匿名回覆", response.Reply);
+        Assert.Empty(convos.Saved);
+        Assert.Empty(convos.AddCalledWith);
+    }
+
+    [Fact]
+    public async Task StreamChat_Anonymous_DoesNotCallAddAsync()
+    {
+        var convos = new FakeConversationStore();
+        var svc = Build(new FakeLlmAgent { Chunks = new[] { "甲", "乙" } }, new FakeMem0Client(), convos);
+
+        await foreach (var _ in svc.StreamChatAsync("嗨", "u1", "c1")) // userCtx = null
+        {
+        }
+
+        Assert.Empty(convos.Saved);
+        Assert.Empty(convos.AddCalledWith);
+    }
+
+    [Fact]
+    public async Task History_Anonymous_ReturnsEmpty_WithoutCallingStore()
+    {
+        var convos = new FakeConversationStore();
+        convos.Items.Add(new ChatResponse(1, "r1", DateTime.UtcNow));
+        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), convos);
+
+        var history = await svc.HistoryAsync(); // userCtx = null
+
+        Assert.Empty(history);
     }
 }

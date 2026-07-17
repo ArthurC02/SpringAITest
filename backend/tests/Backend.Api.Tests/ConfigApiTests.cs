@@ -62,4 +62,23 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         Assert.Equal("value 不可為空", (await resp.ReadJsonAsync())["fieldErrors"]!["value"]!.GetValue<string>());
     }
+
+    // [AdminOnly] 是 authorization filter,早於模型驗證:非 ADMIN 送不合法 body 也是 403,
+    // 不會先被 400 短路而洩漏欄位規則(探測防護的另一半 — 對比 Put_Admin_BlankValue_Returns400)。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("USER")]
+    public async Task Put_NonAdmin_BlankValue_Returns403_NotBadRequest(string? role)
+    {
+        var client = _factory.CreateInternalClient();
+        if (role is not null)
+        {
+            client.WithRole(role);
+        }
+
+        var resp = await client.PutAsJsonAsync("/api/config/theme", new { value = "" });
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        Assert.Equal("權限不足，無法修改系統組態", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
 }

@@ -2,6 +2,7 @@
 // 開發時經由 Vite proxy 轉發到 http://localhost:8080（見 vite.config.ts），
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
 import { getSession } from './auth'
+import { triggerLogout } from './http'
 
 /**
  * mem0 長期記憶的分群鍵。登入後跟著使用者走（用 username），
@@ -52,15 +53,30 @@ export async function streamChat(
   onToken: (chunk: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream, application/json',
+  }
+  // 端點雖是 AllowAnonymous，但 ChatService 的工具路由（route→execute→summarize）在
+  // userCtx 為 null 時會整段跳過、退回純聊天。這裡手帶 Bearer（不走 apiFetch，因 SSE 要
+  // 原始 ReadableStream 處理），讓後端拿到 userCtx/tenant 才能執行數字類工具查詢；
+  // 未登入則不帶，匿名聊天仍允許。
+  const session = getSession()
+  if (session) headers.Authorization = `Bearer ${session.token}`
+
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream, application/json',
-    },
+    headers,
     body: JSON.stringify({ message, userId: getUserId(), conversationId: getConversationId() }),
     signal,
   })
+  // 這支端點 AllowAnonymous、驗證失敗永不回 401，platform 改用這個 header 標示
+  // 「帶了 Authorization 但 JWT 驗證失敗」——只有在我們原本以為有 session 時才代表過期。
+  if (res.headers.get('X-Auth-Invalid') && session) {
+    triggerLogout()
+    throw new Error('登入已過期，請重新登入')
+  }
+
   if (!res.ok || !res.body) {
     // 錯誤時 body 是 ApiError JSON（非 SSE），比照 apiFetch 取 message，
     // 免得整包原始 JSON 被當成訊息塞進聊天泡泡。

@@ -17,15 +17,10 @@ public sealed class ConfigController : ControllerBase
     public async Task<ActionResult<IReadOnlyList<ConfigItem>>> List(CancellationToken ct)
         => Ok(await _repo.ListAsync(ct));
 
-    /// <summary>更新組態 — 非 ADMIN 回 403。</summary>
+    /// <summary>更新組態 — 非 ADMIN 回 403。[AdminOnly] 是 authorization filter,早於模型驗證,
+    /// 非 ADMIN 送不合法 body 也是 403,不會先被 400 短路而洩漏欄位規則(比照 SkillController)。</summary>
     [HttpPut("{key}")]
+    [AdminOnly("權限不足，無法修改系統組態")]
     public async Task<ActionResult<ConfigItem>> Update(string key, [FromBody] ConfigUpdateRequest request, CancellationToken ct)
-    {
-        if (Request.UserRole() != "ADMIN")
-        {
-            throw new ApiException(StatusCodes.Status403Forbidden, "權限不足，無法修改系統組態");
-        }
-
-        return Ok(await _repo.UpsertAsync(key, request.Value!, ct));
-    }
+        => Ok(await _repo.UpsertAsync(key, request.Value!, ct));
 }

@@ -1,3 +1,4 @@
+using Backend.Api.Common;
 using Dapper;
 using Npgsql;
 
@@ -31,11 +32,19 @@ public sealed class AuthRepository : IAuthRepository
     public async Task AddUserAsync(string username, string passwordHash, string role, long tenantId, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(
-            new CommandDefinition(
-                "INSERT INTO users (username, password_hash, role, tenant_id)"
-                + " VALUES (@username, @passwordHash, @role, @tenantId)",
-                new { username, passwordHash, role, tenantId }, cancellationToken: ct));
+        try
+        {
+            await conn.ExecuteAsync(
+                new CommandDefinition(
+                    "INSERT INTO users (username, password_hash, role, tenant_id)"
+                    + " VALUES (@username, @passwordHash, @role, @tenantId)",
+                    new { username, passwordHash, role, tenantId }, cancellationToken: ct));
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            // 併發同名註冊的 TOCTOU 兜底:UsernameExistsAsync 預檢通過後、INSERT 前被搶註冊。
+            throw new ApiException(StatusCodes.Status409Conflict, "使用者名稱已存在：" + username);
+        }
     }
 
     public async Task<UserRow?> FindUserByUsernameAsync(string username, CancellationToken ct)

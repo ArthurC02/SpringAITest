@@ -23,10 +23,12 @@ public sealed class SkillController : ControllerBase
     /// 這種名字的 skill 建得起來卻永遠點不進去(GET /api/skills/catalog 回的是引擎目錄)。
     /// ponytail: 硬寫保留字，等 workflow 名單真的會變再改成打 GET /workflows。
     /// </summary>
+    // 新增 workflow 內建 skill 時必須同步此清單。
     private static readonly HashSet<string> ReservedNames = new(StringComparer.Ordinal)
     {
         "summarize", "triage", "rag_qa", "analyze_report", "kb_query",
         "catalog", "validate", "nodes",
+        "template_retrieval", "template_compare", "template_stats", "template_infer", "template_inspire",
     };
 
     private readonly ISkillRepository _repo;

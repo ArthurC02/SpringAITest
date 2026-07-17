@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using Platform.Service;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -40,11 +39,12 @@ public sealed class FakeDocumentQueue : IDocumentQueue
 public sealed class FakeConversationStore : IConversationStore
 {
     public List<(string Prompt, string Reply)> Saved { get; } = new();
+    public List<UserContext> AddCalledWith { get; } = new();
     public List<ChatResponse> Items { get; } = new();
     public bool ThrowOnAdd { get; set; }
     private long _nextId = 1;
 
-    public Task<ChatResponse> AddAsync(string prompt, string reply, CancellationToken ct = default)
+    public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
     {
         if (ThrowOnAdd)
         {
@@ -52,10 +52,11 @@ public sealed class FakeConversationStore : IConversationStore
         }
 
         Saved.Add((prompt, reply));
+        AddCalledWith.Add(ctx);
         return Task.FromResult(new ChatResponse(_nextId++, reply, DateTime.UtcNow));
     }
 
-    public Task<IReadOnlyList<ChatResponse>> ListDescAsync(CancellationToken ct = default)
+    public Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)
         => Task.FromResult<IReadOnlyList<ChatResponse>>(
             Items.OrderByDescending(c => c.CreatedAt).ThenByDescending(c => c.Id).ToList());
 }

@@ -49,23 +49,24 @@ public sealed class FakeAuthRepository : IAuthRepository
         => Task.FromResult(_users.GetValueOrDefault(username));
 }
 
-/// <summary>對話儲存庫 fake:行程記憶體遞增 id。</summary>
+/// <summary>對話儲存庫 fake:行程記憶體遞增 id,以 (tenant_id, user_id) 忠實模擬隔離。</summary>
 public sealed class FakeConversationRepository : IConversationRepository
 {
-    private readonly List<ConversationItem> _items = new();
+    private readonly List<(string Tenant, string User, ConversationItem Item)> _items = new();
     private long _seq;
 
-    public Task<ConversationCreated> AddAsync(string prompt, string reply, CancellationToken ct)
+    public Task<ConversationCreated> AddAsync(string tenantId, string userId, string prompt, string reply, CancellationToken ct)
     {
         var id = ++_seq;
         var now = DateTime.UtcNow;
-        _items.Add(new ConversationItem(id, reply, now));
+        _items.Add((tenantId, userId, new ConversationItem(id, reply, now)));
         return Task.FromResult(new ConversationCreated(id, now));
     }
 
-    public Task<IReadOnlyList<ConversationItem>> ListDescAsync(CancellationToken ct)
+    public Task<IReadOnlyList<ConversationItem>> ListDescAsync(string tenantId, string userId, CancellationToken ct)
         => Task.FromResult<IReadOnlyList<ConversationItem>>(
-            _items.OrderByDescending(i => i.CreatedAt).ThenByDescending(i => i.Id).ToList());
+            _items.Where(e => e.Tenant == tenantId && e.User == userId).Select(e => e.Item)
+                .OrderByDescending(i => i.CreatedAt).ThenByDescending(i => i.Id).ToList());
 }
 
 /// <summary>rag 儲存庫 fake:行程記憶體,per-tenant 隔離;不做真的向量距離(score 固定)。

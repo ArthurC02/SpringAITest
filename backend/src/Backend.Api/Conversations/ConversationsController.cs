@@ -1,8 +1,9 @@
+using Backend.Api.Common;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Backend.Api.Conversations;
 
-/// <summary>聊天歷史端點(全域,不分租戶/使用者)。</summary>
+/// <summary>聊天歷史端點,以 (tenant_id, user_id) 隔離。</summary>
 [ApiController]
 [Route("api/conversations")]
 public sealed class ConversationsController : ControllerBase
@@ -15,12 +16,14 @@ public sealed class ConversationsController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] ConversationCreateRequest request, CancellationToken ct)
     {
-        var created = await _repo.AddAsync(request.Prompt!, request.Reply!, ct);
+        var created = await _repo.AddAsync(Request.RequireTenant(), UserId(), request.Prompt!, request.Reply!, ct);
         return StatusCode(StatusCodes.Status201Created, created);
     }
 
-    /// <summary>歷史清單 — created_at DESC(最新在前)。</summary>
+    /// <summary>歷史清單 — created_at DESC(最新在前),同租戶同使用者。</summary>
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<ConversationItem>>> List(CancellationToken ct)
-        => Ok(await _repo.ListDescAsync(ct));
+        => Ok(await _repo.ListDescAsync(Request.RequireTenant(), UserId(), ct));
+
+    private string UserId() => Request.UserId() ?? string.Empty;
 }

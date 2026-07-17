@@ -438,6 +438,7 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("catalog")]
     [InlineData("validate")]
     [InlineData("nodes")]
+    [InlineData("template_infer")]
     public async Task Post_ReservedWorkflowName_Returns409(string name)
     {
         var resp = await Admin().PostAsJsonAsync("/api/skills", Body(Yaml(name)));
