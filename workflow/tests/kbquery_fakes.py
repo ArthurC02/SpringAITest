@@ -47,6 +47,25 @@ class FakeStructuredLLM:
         return self._outputs.get(schema)
 
 
+class RecordingLLM:
+    """手寫 fake：記錄每次 structured 呼叫的 system/user/schema，回傳固定 output。
+
+    原本 test_skill_{rag_qa,summarize,triage,analyze_report}.py 各有一份逐字相同的
+    版本，上移去重。nl_logic / nl_extract 的變體（依 schema 動態建構回傳物件）語意不同，
+    各自留在原檔。
+    """
+
+    version = "rec-llm-v1"
+
+    def __init__(self, output=None):
+        self.output = output
+        self.calls: list[dict] = []
+
+    async def structured(self, system, user, schema):
+        self.calls.append({"system": system, "user": user, "schema": schema})
+        return self.output
+
+
 class FakeSearch:
     """SearchPort 假實作：fn(query, filters) 決定回傳哪些 SourceResult。
 

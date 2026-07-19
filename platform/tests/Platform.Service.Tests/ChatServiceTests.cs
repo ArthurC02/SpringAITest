@@ -58,9 +58,9 @@ public sealed class ChatServiceTests
         Assert.Equal("user", agent.LastMessages!.Last().Role);
         Assert.Equal("你好嗎", agent.LastMessages!.Last().Content);
 
-        // 取得回覆後才寫 mem0。
+        // 取得回覆後才寫 mem0;已登入 → uid 用 JWT 身分(租戶碼:使用者),不信任 body 的 userId。
         Assert.Single(mem0.Remembered);
-        Assert.Equal(("u1", "你好嗎", "AI 答覆"), mem0.Remembered[0]);
+        Assert.Equal(("demo-a:user-a", "你好嗎", "AI 答覆"), mem0.Remembered[0]);
     }
 
     // 每輪都注入的固定護欄逐字(與 ChatService.ChatGuardPrompt 同步)。
@@ -222,6 +222,30 @@ public sealed class ChatServiceTests
         await svc.ChatAsync("丙", "u1", "c9");
         Assert.DoesNotContain(agent.LastMessages!, m => m.Content == "甲");
         Assert.DoesNotContain(agent.LastMessages!, m => m.Content == "乙");
+    }
+
+    // ---- IDOR 修正:已登入的記憶 key 綁 JWT 身分,不信任 body 的 userId/conversationId(跨租戶/跨使用者不外洩) ----
+
+    [Fact]
+    public async Task LoggedIn_MemoryKeys_BindToJwtIdentity_NotClientBody_IsolatingAcrossUsers()
+    {
+        var agent = new FakeLlmAgent { Response = "答" };
+        var mem0 = new FakeMem0Client();
+        var memory = new InMemoryChatMemoryStore();
+        var svc = Build(agent, mem0, new FakeConversationStore(), memory);
+
+        var userB = new UserContext("user-b", "demo-b", "USER");
+
+        // 兩位不同租戶/使用者刻意送「相同」的 body userId 與 conversationId(攻擊者猜/撞 key 的情境)。
+        await svc.ChatAsync("A 的秘密", userId: "victim", conversationId: "shared", UserA);
+        await svc.ChatAsync("B 問一句", userId: "victim", conversationId: "shared", userB);
+
+        // 短期視窗 key = 「租戶:使用者:對話」→ B 這輪看不到 A 的前一輪(body conversationId 相同也不撞)。
+        Assert.DoesNotContain(agent.LastMessages!, m => m.Content == "A 的秘密");
+
+        // mem0 uid 一律用 JWT 身分,body 的 userId="victim" 完全不採用。
+        Assert.Equal("demo-a:user-a", mem0.Remembered[0].UserId);
+        Assert.Equal("demo-b:user-b", mem0.Remembered[1].UserId);
     }
 
     // ---- Skill 聊天工具(單軌:動態目錄,已登入才掛;每個工具轉呼叫對應 skill) ----

@@ -1,9 +1,10 @@
 import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import ValidationError
 
-from app import skills, tracing
+from app import backend_http, skills, tracing
 from app.engine import compiler, node_registry
 from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
 from app.engine.skill import ValidationResult, validate_source
@@ -35,17 +36,21 @@ from app.security import RequestContext, get_context
 
 
 def _clean_skill_input(raw: dict) -> dict:
-    """skill invoke 的 input 過濾：剝除保留鍵與引擎內部鍵。
+    """skill invoke 的 input 過濾：剝除保留鍵、引擎鍵與引擎內部鍵。
 
     query_id / original_query / query_timestamp 等保留鍵若被呼叫端夾帶，會原封不動
     流進 audit_trail —— 一般 USER 即可偽造稽核軌跡上的「原始問題」。Harness 的
     IMMUTABLE_KEYS 只擋節點寫入，擋不住 input，所以這一關必須在這裡做。
-    引擎內部鍵（__ 前綴）同理一併剝除。
+    引擎鍵（trace / errors / fatal_error，由 Harness 寫入）同樣不可經 input 夾帶：
+    夾帶 fatal_error 會讓所有節點走 fatal 短路而跳過，夾帶 trace/errors 更會讓 reducer
+    型別不符而 500。引擎內部鍵（__ 前綴）同理一併剝除。
     """
     return {
         k: v
         for k, v in raw.items()
-        if k not in skill_reserved_keys and not k.startswith("__")
+        if k not in skill_reserved_keys
+        and k not in node_registry.ENGINE_KEYS
+        and not k.startswith("__")
     }
 
 
@@ -100,7 +105,17 @@ async def _run_with_timeout(coro, timeout_seconds: float, name: str):
         )
 
 
-app = FastAPI(title="springaitest-workflow")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """服務生命週期：暖身並在關機時釋放共用 backend HTTP client（連線池不外洩）。"""
+    backend_http.get_client()  # 暖身：啟動時就備好連線池，首個請求不必臨時建立
+    try:
+        yield
+    finally:
+        await backend_http.aclose_client()
+
+
+app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -161,8 +176,12 @@ async def validate_skill(
     valid=true 時多回一段 skill 中繼資料（name/description/required_role/input_schema）：
     backend 不裝 YAML parser，這是它寫入 DB 的唯一資料來源。exclude_none 保證
     valid=false 時**不出現** skill 欄位 —— backend 以它的有無決定能不能寫。
+
+    撰寫者角色 gate（保守版）：帶入呼叫者真實角色（backend 的 WorkflowSkillValidator 與
+    platform proxy 都會轉發真實作者身分），非 ADMIN 提交含 script 步驟的定義即驗證失敗。
+    僅在此寫入路徑生效；不改 required_role 語意，也不影響 invoke／custom.load。
     """
-    return validate_source(req.definition)
+    return validate_source(req.definition, author_role=ctx.role)
 
 
 @app.post("/skills/{name}/invoke", response_model=SkillInvokeResponse)
@@ -218,7 +237,15 @@ async def invoke_skill(
     if per_config is not None and loaded.source == "builtin":
         graph = compiler.compile(loaded.skill, per_config)
 
-    state = {"tenant_id": ctx.tenant_id, **_clean_skill_input(req.input)}
+    # 身分鍵（tenant_id/user_id/role）一律以呼叫者真實 ctx seed —— 節點/tool 的 ToolContext
+    # 從 state 這三鍵取身分。input 偽造的同名鍵已被 _clean_skill_input 剝除（RESERVED_KEYS
+    # 涵蓋 IDENTITY_KEYS），故此處是唯一可信注入點，杜絕偽造。
+    state = {
+        "tenant_id": ctx.tenant_id,
+        "user_id": ctx.user_id,
+        "role": ctx.role,
+        **_clean_skill_input(req.input),
+    }
     # 縫⑦ runtime apply：租戶覆寫了 retrieval.top_k 才 seed（retrieval_top_k 是 RESERVED_KEYS，
     # _clean_skill_input 已把呼叫端夾帶的同名 input 剝掉 → 此處是唯一可信注入點，杜絕偽造）。
     if retrieval_top_k is not None:

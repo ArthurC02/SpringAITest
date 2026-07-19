@@ -14,9 +14,20 @@ namespace Platform.Web.Tests;
 /// </summary>
 public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 {
+    private readonly bool _enableRateLimiting;
+
+    public TestWebAppFactory()
+    {
+    }
+
+    internal TestWebAppFactory(bool enableRateLimiting)
+    {
+        _enableRateLimiting = enableRateLimiting;
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.UseEnvironment("Testing");
+        builder.UseEnvironment(_enableRateLimiting ? "RateLimitingTesting" : "Testing");
         builder.ConfigureTestServices(services =>
         {
             // 對外相依:LLM 與 mem0(真實 ChatService 仍會用到)。

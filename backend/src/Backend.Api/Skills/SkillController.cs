@@ -184,8 +184,7 @@ public sealed class SkillController : ControllerBase
         };
     }
 
-    private static ApiException NotFound(string name)
-        => new(StatusCodes.Status404NotFound, "找不到 Skill：" + name);
+    private static ApiException NotFound(string name) => ApiErrors.NotFound(" Skill", name);
 
     /// <summary>DB 列 = 引擎中繼資料 + YAML 原文。enabled/revision/時間戳由 DB 決定,此處佔位。</summary>
     private static Skill ToSkill(SkillMetadata meta, string definition) => new(

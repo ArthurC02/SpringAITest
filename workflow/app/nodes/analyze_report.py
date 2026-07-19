@@ -5,6 +5,7 @@
 from pydantic import BaseModel
 
 from app.engine.node_registry import node
+from app.nodes._llm_input import format_docs_context, structured_field
 
 # 手寫圖 analyze_report.py 的固定文案，逐字保留。
 _NO_DATA_INSIGHTS = "（無資料）"
@@ -35,18 +36,18 @@ def make_doc_insights_node(llm):
         if not docs:
             return {"insights": _NO_DATA_INSIGHTS}
 
-        context = "\n\n".join(
-            f"[{i + 1}] {doc['title']}：{doc['content']}" for i, doc in enumerate(docs)
-        )
-        out = await llm.structured(
+        context = format_docs_context(docs)
+        insights = await structured_field(
+            llm,
             system=(
                 "你是資料分析助手，請從下方提供的租戶文件內容中，"
                 "萃取與指定主題相關的重點，以條列式繁體中文呈現。"
             ),
             user=f"主題：{state['topic']}\n\n文件內容：\n{context}",
             schema=_DocInsightsOutput,
+            field="insights",
         )
-        return {"insights": out.insights if out is not None else ""}
+        return {"insights": insights}
 
     return doc_insights
 
@@ -64,14 +65,16 @@ def make_report_synthesize_node(llm):
     """建立 report_synthesize 節點函式（對齊 workflows/analyze_report.py::synthesize 的語意）。"""
 
     async def report_synthesize(state: dict) -> dict:
-        out = await llm.structured(
+        report = await structured_field(
+            llm,
             system=(
                 "你是資料分析助手，請依提供的要點撰寫結構化報告，"
                 "包含摘要、關鍵發現、建議三個段落，全程使用繁體中文。"
             ),
             user=f"主題：{state['topic']}\n\n要點：\n{state['insights']}",
             schema=_ReportSynthesizeOutput,
+            field="report",
         )
-        return {"report": out.report if out is not None else ""}
+        return {"report": report}
 
     return report_synthesize

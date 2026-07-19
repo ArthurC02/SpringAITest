@@ -1,6 +1,6 @@
 # 多階段建置：先用 Node 把 SPA 打包成靜態檔，再交給 nginx 提供並反向代理 /api。
 # 只有 docker compose --profile full 會用到此映像（平常前端用 Vite dev server 跑主機）。
-# nginx 透過 host.docker.internal 反代 /api → 主機 :8080（full 模式下即後端容器發佈到主機的埠）。
+# nginx 反向代理 /api → compose service DNS http://platform:8080（容器間直連，不經主機）。
 
 # ---- build 階段：產出 dist/ ----
 FROM node:22-alpine AS build

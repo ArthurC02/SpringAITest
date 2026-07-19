@@ -9,6 +9,7 @@ prompt 文字（system/user）與「docs 為空 → 固定文案、不呼叫 LLM
 from pydantic import BaseModel
 
 from app.engine.node_registry import node
+from app.nodes._llm_input import format_docs_context, structured_field
 
 # 手寫圖 rag_qa.py 的固定文案，逐字保留。
 _NOT_FOUND_ANSWER = "在你的租戶資料中找不到相關內容，請先上傳文件。"
@@ -37,16 +38,16 @@ def make_rag_answer_node(llm):
         if not docs:
             return {"answer": _NOT_FOUND_ANSWER, "citations": []}
 
-        context = "\n\n".join(
-            f"[{i + 1}] {doc['title']}：{doc['content']}" for i, doc in enumerate(docs)
-        )
-        out = await llm.structured(
+        context = format_docs_context(docs)
+        answer = await structured_field(
+            llm,
             system=(
                 "你是問答助手，請只根據下方提供的租戶文件內容回答問題，"
                 "不要編造文件中沒有的資訊；請用繁體中文作答。"
             ),
             user=f"文件內容：\n{context}\n\n問題：{state['question']}",
             schema=_RagAnswerOutput,
+            field="answer",
         )
         citations = [
             {
@@ -56,6 +57,6 @@ def make_rag_answer_node(llm):
             }
             for doc in docs
         ]
-        return {"answer": out.answer if out is not None else "", "citations": citations}
+        return {"answer": answer, "citations": citations}
 
     return rag_answer

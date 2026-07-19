@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -45,34 +44,19 @@ public sealed class DocumentService : IDocumentService
     }
 
     public async Task<IReadOnlyList<DocumentInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Get, "/api/documents", ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
+        => await _backend.SendForJsonListAsync<DocumentInfo>(
+            _backend.BuildRequest(HttpMethod.Get, "/api/documents", ctx),
+            WrapTransport,
+            (r, _) => Task.FromResult<Exception>(new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)r.StatusCode)),
+            ct);
 
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
-        }
-
-        return await resp.Content.ReadFromJsonAsync<List<DocumentInfo>>(_backend.Json, ct)
-            ?? new List<DocumentInfo>();
-    }
-
-    public async Task DeleteAsync(string id, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Delete, $"/api/documents/{id}", ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
-
-        if (resp.IsSuccessStatusCode)
-        {
-            return;
-        }
-
-        if ((int)resp.StatusCode == 404)
-        {
-            throw new DocumentNotFoundException("找不到文件：" + id);
-        }
-
-        throw new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
-    }
+    public Task DeleteAsync(string id, UserContext ctx, CancellationToken ct = default)
+        => _backend.SendExpectSuccessAsync(
+            _backend.BuildRequest(HttpMethod.Delete, $"/api/documents/{id}", ctx),
+            WrapTransport,
+            // backend 404 特別映射成 DocumentNotFoundException;其餘 → 502。
+            (r, _) => Task.FromResult<Exception>((int)r.StatusCode == 404
+                ? new DocumentNotFoundException("找不到文件：" + id)
+                : new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)r.StatusCode)),
+            ct);
 }

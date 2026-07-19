@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using Backend.Api.Analysis;
 using Backend.Api.Retrieval;
 using Dapper;
@@ -49,19 +50,32 @@ public sealed class RagRepository : IRagRepository
             "DELETE FROM rag_chunks WHERE document_id = @docId AND tenant_id = @tenantId",
             new { docId, tenantId }, tx, cancellationToken: ct));
 
-        for (var i = 0; i < chunks.Count; i++)
+        // 單一多行 INSERT(一次 round-trip),取代逐 chunk 各一次往返。交易語意不變。
+        // ponytail: 每列 3 個參數,受 PostgreSQL 65535 參數上限約束(約 21k chunks/文件);
+        // 文件切塊數遠低於此,超過再分批。
+        if (chunks.Count > 0)
         {
-            await conn.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO rag_chunks (id, document_id, tenant_id, content, embedding)"
-                + " VALUES (@id, @docId, @tenantId, @content, @embedding::vector)",
-                new
+            var sql = new StringBuilder(
+                "INSERT INTO rag_chunks (id, document_id, tenant_id, content, embedding) VALUES ");
+            var p = new DynamicParameters();
+            p.Add("docId", docId);
+            p.Add("tenantId", tenantId);
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                if (i > 0)
                 {
-                    id = Guid.NewGuid(),
-                    docId,
-                    tenantId,
-                    content = chunks[i],
-                    embedding = FormatVector(embeddings[i]),
-                }, tx, cancellationToken: ct));
+                    sql.Append(',');
+                }
+
+                sql.Append("(@id").Append(i)
+                    .Append(", @docId, @tenantId, @content").Append(i)
+                    .Append(", @embedding").Append(i).Append("::vector)");
+                p.Add($"id{i}", Guid.NewGuid());
+                p.Add($"content{i}", chunks[i]);
+                p.Add($"embedding{i}", FormatVector(embeddings[i]));
+            }
+
+            await conn.ExecuteAsync(new CommandDefinition(sql.ToString(), p, tx, cancellationToken: ct));
         }
 
         await conn.ExecuteAsync(new CommandDefinition(

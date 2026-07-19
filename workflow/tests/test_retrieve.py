@@ -15,7 +15,7 @@ import pytest
 
 from app.nodes.retrieve import make_retrieve_node
 from app.settings import settings
-from tests.conftest import FakeBackendResponse
+from tests.conftest import FakeBackendResponse, patch_retrieve
 
 
 def test_retrieve_sends_expected_request_and_maps_chunks_to_docs(monkeypatch):
@@ -60,10 +60,7 @@ def test_retrieve_sends_expected_request_and_maps_chunks_to_docs(monkeypatch):
 
 
 def test_retrieve_empty_chunks_returns_empty_docs(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse([])
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(monkeypatch, [])
 
     node = make_retrieve_node(query_key="question")
     result = asyncio.run(node({"question": "沒有相關資料", "tenant_id": "demo-b"}))

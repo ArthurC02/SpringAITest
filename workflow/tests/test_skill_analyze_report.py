@@ -6,7 +6,6 @@
 
 import asyncio
 
-import httpx
 from fastapi.testclient import TestClient
 
 from app import skills
@@ -18,22 +17,10 @@ from app.nodes.analyze_report import (
     make_doc_insights_node,
     make_report_synthesize_node,
 )
-from tests.conftest import FakeBackendResponse, auth_headers
-from tests.kbquery_fakes import FakeStructuredLLM, make_deps
+from tests.conftest import auth_headers, invoke_builtin, patch_retrieve
+from tests.kbquery_fakes import FakeStructuredLLM, RecordingLLM, make_deps
 
 client = TestClient(app)
-
-
-class RecordingLLM:
-    version = "rec-llm-v1"
-
-    def __init__(self, output=None):
-        self.output = output
-        self.calls: list[dict] = []
-
-    async def structured(self, system, user, schema):
-        self.calls.append({"system": system, "user": user, "schema": schema})
-        return self.output
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +77,7 @@ def test_report_synthesize_sends_expected_prompt():
 
 
 def _invoke(deps, **state) -> dict:
-    skill = skills.get("analyze_report").skill
-    graph = compiler.compile(skill, deps)
-    out = asyncio.run(graph.ainvoke({"tenant_id": "t", **state}))
-    return compiler.public_output(out)
+    return invoke_builtin("analyze_report", deps, **state)
 
 
 def test_analyze_report_skill_cold_start_compiles():
@@ -105,10 +89,7 @@ def test_analyze_report_skill_cold_start_compiles():
 
 
 def test_analyze_report_skill_no_docs_guard(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse([])
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(monkeypatch, [])
     llm = FakeStructuredLLM(
         outputs={_ReportSynthesizeOutput: _ReportSynthesizeOutput(report="報告（無資料）")}
     )
@@ -120,12 +101,10 @@ def test_analyze_report_skill_no_docs_guard(monkeypatch):
 
 
 def test_analyze_report_skill_with_docs_produces_report(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse(
-            [{"document_id": "d1", "title": "季報", "content": "營收成長 10%", "score": 0.8}]
-        )
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(
+        monkeypatch,
+        [{"document_id": "d1", "title": "季報", "content": "營收成長 10%", "score": 0.8}],
+    )
     llm = FakeStructuredLLM(
         outputs={
             _DocInsightsOutput: _DocInsightsOutput(insights="營收成長"),
@@ -156,12 +135,10 @@ def test_analyze_report_invoke_forbidden_for_user_role():
 
 
 def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse(
-            [{"document_id": "d1", "title": "季報", "content": "營收成長", "score": 0.8}]
-        )
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(
+        monkeypatch,
+        [{"document_id": "d1", "title": "季報", "content": "營收成長", "score": 0.8}],
+    )
 
     original = skills.get("analyze_report")
     llm = FakeStructuredLLM(

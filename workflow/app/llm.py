@@ -14,12 +14,18 @@ def build_llm(model: str, temperature: float) -> ChatOpenAI:
 
     P4c apply-at-execution 需要以租戶有效設定的 model / temperature 各建一顆，
     不能共用 get_llm 的單例（那顆鎖死在啟動時的全域 model 與 0.7）。全域路徑仍走 get_llm。
+
+    timeout / max_retries 顯式帶上（可經 settings 覆寫）：不設 timeout 時 httpx 端會無限
+    等待掛住的 LiteLLM，單一慢請求就能拖垮整個 invoke 逾時預算；max_retries 收斂重試次數，
+    避免故障時對閘道連環重打。
     """
     return ChatOpenAI(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         model=model,
         temperature=temperature,
+        timeout=settings.llm_timeout,
+        max_retries=settings.llm_max_retries,
     )
 
 

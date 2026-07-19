@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/http'
 import { createSkill, exportSkill, getSkill, updateSkill, validateSkill } from '../api/skills'
 import type { NodeInfo, Skill, SkillValidation } from '../types'
-import { CODE_LABEL, WARN_CODES } from '../skills/validationLabels'
+import { CODE_LABEL, WARN_CODES, blockingErrors } from '../skills/validationLabels'
 import NodeCatalog from './NodeCatalog'
 import YamlEditor from './YamlEditor'
+import ErrorText from './ErrorText'
 import { useToast } from './Toast'
 
 const DEBOUNCE_MS = 800
@@ -135,7 +136,7 @@ export default function AdvancedSkillEditor({ mode, initialDefinition, saved, on
     }
   }
 
-  const blocking = validation?.errors.filter((e) => !WARN_CODES.has(e.code)) ?? []
+  const blocking = validation ? blockingErrors(validation) : []
   const canSave = !readOnly && !busy && !validating && blocking.length === 0 && definition.trim().length > 0
   const name = mode.kind === 'create' ? null : mode.name
 
@@ -177,11 +178,7 @@ export default function AdvancedSkillEditor({ mode, initialDefinition, saved, on
         </div>
       </div>
 
-      {formError && (
-        <p className="error-text" role="alert">
-          {formError}
-        </p>
-      )}
+      <ErrorText msg={formError} />
 
       <div className="skill-editor__cols">
         {!readOnly && (

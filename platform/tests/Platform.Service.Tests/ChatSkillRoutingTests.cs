@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Platform.Service;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
@@ -81,7 +80,6 @@ public sealed class ChatSkillRoutingTests
 
         await svc.ChatAsync("問題", "u1", "c1"); // userCtx = null
 
-        Assert.Null(agent.LastTools);
         Assert.Empty(wf.CatalogContexts);   // 目錄一次都沒讀
         Assert.Empty(wf.SkillInvokes);
     }
@@ -97,7 +95,6 @@ public sealed class ChatSkillRoutingTests
         {
         }
 
-        Assert.Null(agent.LastTools);
         Assert.Empty(wf.CatalogContexts);
     }
 
@@ -459,8 +456,8 @@ public sealed class ChatSkillRoutingTests
 
         // recall 在(兜底)agent 呼叫「前」:recall 內容已組進 agent 看到的 system 前言。
         Assert.Contains(agent.LastMessages!, m => m.Role == "system" && m.Content.Contains("租戶 A"));
-        // remember 在「後」:記的是使用者原訊息 + 融合後最終答案(非中間 skill JSON)。
-        Assert.Equal(("u1", "問題", "最終答案"), Assert.Single(mem0.Remembered));
+        // remember 在「後」:記的是使用者原訊息 + 融合後最終答案(非中間 skill JSON);已登入 → uid 為 JWT 身分。
+        Assert.Equal(("demo-a:user-a", "問題", "最終答案"), Assert.Single(mem0.Remembered));
     }
 
     // ---- CSR-P1-030:無快取的 P1 邊界 — 每輪一次、兩輪合計兩次 ----
@@ -519,9 +516,9 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal("user", summaryUser.Role);
         Assert.Contains("毛利率 32.8%", summaryUser.Content);
 
-        // (c) 對外回覆是摘要輸出,不是工具原始字串;remember 記最終摘要。
+        // (c) 對外回覆是摘要輸出,不是工具原始字串;remember 記最終摘要;已登入 → uid 為 JWT 身分。
         Assert.Equal("本季毛利率是 32.8%。", reply.Reply);
-        Assert.Equal(("u1", "這季毛利率多少?", "本季毛利率是 32.8%。"), Assert.Single(mem0.Remembered));
+        Assert.Equal(("demo-a:user-a", "這季毛利率多少?", "本季毛利率是 32.8%。"), Assert.Single(mem0.Remembered));
     }
 
     // 路由回 NONE → 純聊天兜底:不執行任何 skill,兜底使用護欄 prompt。

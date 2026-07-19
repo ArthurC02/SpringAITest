@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { deleteSkill, getSkill, listSkillCatalog, listSkills } from '../api/skills'
 import type { Skill, SkillCatalogEntry, SkillInfo, SkillInputField } from '../types'
+import { useResource } from '../hooks/useResource'
 import AdvancedSkillEditor, { type AdvancedMode } from './AdvancedSkillEditor'
 import SimpleSkillEditor from './SimpleSkillEditor'
 import SkillHistory from './SkillHistory'
 import SkillRunPanel from './SkillRunPanel'
+import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useToast } from './Toast'
 
@@ -30,10 +32,6 @@ type Selected = { name: string; source: 'custom' | 'builtin'; schema: Row['schem
  */
 export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
   const toast = useToast()
-  const [rows, setRows] = useState<Row[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
   const [selected, setSelected] = useState<Selected>(null)
   const [sub, setSub] = useState<Sub>('edit')
   const [creating, setCreating] = useState(false)
@@ -41,44 +39,36 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
     null,
   )
 
-  const load = useCallback(async () => {
-    setError(null)
-    try {
-      const [customs, catalog] = await Promise.all([listSkills(), listSkillCatalog()])
-      const schemaOf = (name: string): Record<string, SkillInputField> | null =>
-        catalog.find((c) => c.name === name)?.input_schema ?? null
-      const customRows: Row[] = customs.map((s: SkillInfo) => ({
-        name: s.name,
-        description: s.description,
-        required_role: s.required_role,
-        source: 'custom',
-        revision: s.current_revision,
-        enabled: s.enabled,
-        schema: schemaOf(s.name),
+  const fetchRows = useCallback(async (): Promise<Row[]> => {
+    const [customs, catalog] = await Promise.all([listSkills(), listSkillCatalog()])
+    const schemaOf = (name: string): Record<string, SkillInputField> | null =>
+      catalog.find((c) => c.name === name)?.input_schema ?? null
+    const customRows: Row[] = customs.map((s: SkillInfo) => ({
+      name: s.name,
+      description: s.description,
+      required_role: s.required_role,
+      source: 'custom',
+      revision: s.current_revision,
+      enabled: s.enabled,
+      schema: schemaOf(s.name),
+    }))
+    // 內建：全部列出（唯讀）；template_* 骨架一律排除（縫④）——只在 compose 依 basedOn 精確取用。
+    const builtinRows: Row[] = catalog
+      .filter((c: SkillCatalogEntry) => c.source === 'builtin' && !c.name.startsWith('template_'))
+      .map((c) => ({
+        name: c.name,
+        description: c.description,
+        required_role: c.required_role,
+        source: 'builtin',
+        revision: c.revision,
+        enabled: true,
+        schema: c.input_schema ?? null,
       }))
-      // 內建：全部列出（唯讀）；template_* 骨架一律排除（縫④）——它們只在 compose 依 basedOn 精確取用。
-      const builtinRows: Row[] = catalog
-        .filter((c: SkillCatalogEntry) => c.source === 'builtin' && !c.name.startsWith('template_'))
-        .map((c) => ({
-          name: c.name,
-          description: c.description,
-          required_role: c.required_role,
-          source: 'builtin',
-          revision: c.revision,
-          enabled: true,
-          schema: c.input_schema ?? null,
-        }))
-      setRows([...customRows, ...builtinRows])
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setLoading(false)
-    }
+    return [...customRows, ...builtinRows]
   }, [])
 
-  useEffect(() => {
-    load()
-  }, [load])
+  const { data, loading, error, reload } = useResource(fetchRows)
+  const rows = data ?? []
 
   function open(row: Row, s: Sub) {
     setCreating(false)
@@ -100,7 +90,7 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
       await deleteSkill(name)
       toast('已停用', 'success')
       if (selected?.name === name) backToList()
-      await load()
+      await reload()
     } catch (e) {
       toast((e as Error).message, 'error')
     }
@@ -140,7 +130,7 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
         initialDefinition={advanced.def}
         saved={advanced.saved}
         onSaved={() => {
-          load()
+          reload()
           setAdvanced(null)
           if (selected) setSub('edit')
         }}
@@ -153,7 +143,7 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
   if (creating) {
     return (
       <SimpleSkillEditor
-        onSaved={() => load()}
+        onSaved={() => reload()}
         onAdvanced={(def) => setAdvanced({ mode: { kind: 'create' }, def })}
         onClose={backToList}
       />
@@ -207,7 +197,7 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
           </div>
         )}
         {sub === 'run' && <SkillRunPanel name={selected.name} inputSchema={selected.schema} />}
-        {sub === 'history' && <SkillHistory name={selected.name} canRevert={!isBuiltin} onReverted={load} />}
+        {sub === 'history' && <SkillHistory name={selected.name} canRevert={!isBuiltin} onReverted={reload} />}
       </div>
     )
   }
@@ -223,13 +213,9 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
         </div>
       )}
 
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
+      <ErrorText msg={error} />
 
-      {loading ? (
+      {loading && rows.length === 0 ? (
         <Skeleton rows={3} />
       ) : rows.length === 0 && !error ? (
         <p className="muted">尚無 Skill。</p>

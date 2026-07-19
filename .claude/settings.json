@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/turn-directive.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/subagent-directive.py",
+            "timeout": 15,
+            "statusMessage": "附加 subagent 標準指示…"
+          }
+        ]
+      }
+    ]
+  }
+}

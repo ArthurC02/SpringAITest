@@ -8,20 +8,7 @@ import asyncio
 from app import skills
 from app.engine import compiler
 from app.nodes.summarize_text import _SummarizeOutput, make_summarize_text_node
-from tests.kbquery_fakes import FakeStructuredLLM, make_deps
-
-
-class RecordingLLM:
-    version = "rec-llm-v1"
-
-    def __init__(self, output=None):
-        self.output = output
-        self.calls: list[dict] = []
-
-    async def structured(self, system, user, schema):
-        self.calls.append({"system": system, "user": user, "schema": schema})
-        return self.output
-
+from tests.kbquery_fakes import FakeStructuredLLM, RecordingLLM, make_deps
 
 # ---------------------------------------------------------------------------
 # 節點單元測試：prompt 逐字對照 workflows/summarize.py::summarize

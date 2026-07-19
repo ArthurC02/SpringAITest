@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -21,16 +20,12 @@ public sealed class ConversationStore : IConversationStore
 
     public async Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
     {
-        using var req = _backend.BuildRequest(HttpMethod.Post, "/api/conversations", ctx, body: new { prompt, reply });
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw new BackendCallException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
-        }
-
-        var created = await resp.Content.ReadFromJsonAsync<ConversationCreated>(_backend.Json, ct)
-            ?? throw new BackendCallException(FailurePrefix + "回應內容為空");
+        var created = await _backend.SendForJsonAsync<ConversationCreated>(
+            _backend.BuildRequest(HttpMethod.Post, "/api/conversations", ctx, body: new { prompt, reply }),
+            WrapTransport,
+            (r, _) => Task.FromResult<Exception>(new BackendCallException(FailurePrefix + "HTTP " + (int)r.StatusCode)),
+            () => new BackendCallException(FailurePrefix + "回應內容為空"),
+            ct);
 
         // reply 由呼叫端提供(backend 只回 id 與 createdAt);createdAt 正規化為 UTC 以保留結尾 Z。
         return new ChatResponse(created.Id, reply, DateTime.SpecifyKind(created.CreatedAt, DateTimeKind.Utc));
@@ -38,16 +33,11 @@ public sealed class ConversationStore : IConversationStore
 
     public async Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)
     {
-        using var req = _backend.BuildRequest(HttpMethod.Get, "/api/conversations", ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw new BackendCallException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
-        }
-
-        var items = await resp.Content.ReadFromJsonAsync<List<ConversationItem>>(_backend.Json, ct)
-            ?? new List<ConversationItem>();
+        var items = await _backend.SendForJsonListAsync<ConversationItem>(
+            _backend.BuildRequest(HttpMethod.Get, "/api/conversations", ctx),
+            WrapTransport,
+            (r, _) => Task.FromResult<Exception>(new BackendCallException(FailurePrefix + "HTTP " + (int)r.StatusCode)),
+            ct);
 
         return items
             .Select(i => new ChatResponse(i.Id, i.Reply, DateTime.SpecifyKind(i.CreatedAt, DateTimeKind.Utc)))

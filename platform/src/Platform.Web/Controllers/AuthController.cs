@@ -1,6 +1,5 @@
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
-using Platform.Web.Dtos;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -24,11 +23,11 @@ public sealed class AuthController : ControllerBase
         return StatusCode(StatusCodes.Status201Created, result);
     }
 
-    /// <summary>登入 — 200 OK,回 LoginResponse(含 backend 簽發的 token)。</summary>
+    /// <summary>登入 — 200 OK,回 LoginResult(含 backend 簽發的 token)。</summary>
     [HttpPost("login")]
-    public async Task<ActionResult<LoginResponse>> Login([FromBody] LoginRequest request, CancellationToken ct)
+    public async Task<IActionResult> Login([FromBody] LoginRequest request, CancellationToken ct)
     {
         var result = await _auth.LoginAsync(request, ct);
-        return Ok(new LoginResponse(result.Token, result.Username, result.Role, result.TenantCode));
+        return Ok(result);
     }
 }

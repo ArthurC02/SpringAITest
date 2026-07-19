@@ -1,3 +1,5 @@
+import type { SkillValidation } from '../types'
+
 /** 引擎錯誤碼 → 人話（規格 §3.4）。未知碼直接顯示原碼，不吞掉。 */
 export const CODE_LABEL: Record<string, string> = {
   unknown_node: '引用了不存在的節點或版本',
@@ -14,3 +16,6 @@ export const CODE_LABEL: Record<string, string> = {
 
 // dataflow_error 是警告級：不阻擋存檔（規格 §3.4）。其餘皆為阻擋級。
 export const WARN_CODES = new Set(['dataflow_error'])
+
+/** 阻擋級錯誤(排除警告碼);存檔判斷的單一事實來源。 */
+export const blockingErrors = (v: SkillValidation) => v.errors.filter((e) => !WARN_CODES.has(e.code))

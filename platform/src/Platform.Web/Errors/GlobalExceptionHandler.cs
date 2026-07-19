@@ -24,7 +24,11 @@ public sealed class GlobalExceptionHandler : IExceptionHandler
         var (status, message) = Map(exception);
         if (status >= 500)
         {
+            // 原始例外/下游細節只進 log,永不回給客戶端(避免洩漏內部拓撲/堆疊)。
             _logger.LogError(exception, "未預期的伺服器錯誤：{訊息}", exception.Message);
+            message = status == StatusCodes.Status502BadGateway
+                ? "上游服務暫時無法使用，請稍後再試"
+                : "伺服器發生錯誤，請稍後再試";
         }
 
         await ApiErrorWriter.WriteAsync(

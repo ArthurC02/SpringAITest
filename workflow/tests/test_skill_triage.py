@@ -20,22 +20,10 @@ from app.nodes.triage import (
     make_triage_deep_answer_node,
     make_triage_quick_answer_node,
 )
-from tests.conftest import auth_headers
-from tests.kbquery_fakes import FakeStructuredLLM, make_deps
+from tests.conftest import auth_headers, invoke_builtin
+from tests.kbquery_fakes import FakeStructuredLLM, RecordingLLM, make_deps
 
 client = TestClient(app)
-
-
-class RecordingLLM:
-    version = "rec-llm-v1"
-
-    def __init__(self, output=None):
-        self.output = output
-        self.calls: list[dict] = []
-
-    async def structured(self, system, user, schema):
-        self.calls.append({"system": system, "user": user, "schema": schema})
-        return self.output
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +90,7 @@ def test_triage_deep_answer_sends_expected_prompt():
 
 
 def _invoke(deps, **state) -> dict:
-    skill = skills.get("triage").skill
-    graph = compiler.compile(skill, deps)
-    out = asyncio.run(graph.ainvoke({"tenant_id": "t", **state}))
-    return compiler.public_output(out)
+    return invoke_builtin("triage", deps, **state)
 
 
 def test_triage_skill_cold_start_compiles():

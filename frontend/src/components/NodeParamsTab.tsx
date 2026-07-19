@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
   activateConfigurationSet,
   createConfigurationSet,
@@ -8,9 +8,10 @@ import {
   updateConfigurationSet,
 } from '../api/configurationSets'
 import { ApiError } from '../api/http'
-import type { ConfigurationSetInfo } from '../types'
 import { CONFIG_FIELDS, draftToValues, validateConfigValues } from '../nodeParams'
 import { fmtDate } from '../format'
+import { useResource } from '../hooks/useResource'
+import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useToast } from './Toast'
 
@@ -24,37 +25,22 @@ type Editing = { id: string | null; name: string; draft: Record<string, string> 
  */
 export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
   const toast = useToast()
-  const [sets, setSets] = useState<ConfigurationSetInfo[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const { data, loading, error: loadError, reload } = useResource(listConfigurationSets)
+  const sets = data ?? []
   const [editing, setEditing] = useState<Editing | null>(null)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const [formError, setFormError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-
-  const load = useCallback(async () => {
-    setError(null)
-    try {
-      setSets(await listConfigurationSets())
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    load()
-  }, [load])
 
   function startCreate() {
     setFieldErrors({})
-    setError(null)
+    setFormError(null)
     setEditing({ id: null, name: '', draft: {} })
   }
 
   async function startEdit(id: string) {
     setFieldErrors({})
-    setError(null)
+    setFormError(null)
     try {
       const full = await getConfigurationSet(id)
       const draft: Record<string, string> = {}
@@ -72,7 +58,7 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
     try {
       await activateConfigurationSet(id)
       toast('已啟用', 'success')
-      await load()
+      await reload()
     } catch (e) {
       toast((e as Error).message, 'error')
     }
@@ -84,7 +70,7 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
       await deleteConfigurationSet(id)
       toast('已刪除', 'success')
       if (editing?.id === id) setEditing(null)
-      await load()
+      await reload()
     } catch (e) {
       toast((e as Error).message, 'error')
     }
@@ -103,7 +89,7 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
     if (!editing) return
     const name = editing.name.trim()
     if (!name) {
-      setError('請先填參數組名稱。')
+      setFormError('請先填參數組名稱。')
       return
     }
     const values = draftToValues(editing.draft)
@@ -113,18 +99,18 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
       return
     }
     setBusy(true)
-    setError(null)
+    setFormError(null)
     setFieldErrors({})
     try {
       if (editing.id) await updateConfigurationSet(editing.id, name, values)
       else await createConfigurationSet(name, values)
       toast('已儲存', 'success')
       setEditing(null)
-      await load()
+      await reload()
     } catch (e) {
       // 後端越界 → 422 + fieldErrors（鍵為 config key）;逐鍵顯示，其餘走頂部錯誤。
       if (e instanceof ApiError && e.fieldErrors) setFieldErrors(e.fieldErrors)
-      setError((e as Error).message)
+      setFormError((e as Error).message)
     } finally {
       setBusy(false)
     }
@@ -198,11 +184,7 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
           </div>
         ))}
 
-        {error && (
-          <p className="error-text" role="alert">
-            {error}
-          </p>
-        )}
+        <ErrorText msg={formError} />
 
         <div className="skills__bar">
           <button className="btn btn--primary" type="button" onClick={onSave} disabled={busy}>
@@ -224,15 +206,11 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
         </div>
       )}
 
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
+      <ErrorText msg={loadError} />
 
-      {loading ? (
+      {loading && sets.length === 0 ? (
         <Skeleton rows={3} />
-      ) : sets.length === 0 && !error ? (
+      ) : sets.length === 0 && !loadError ? (
         <p className="muted">尚無參數組。新增一組並啟用，即可覆寫系統全域預設。</p>
       ) : (
         <div className="table-wrap">

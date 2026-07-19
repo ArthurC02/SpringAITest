@@ -93,6 +93,5 @@ public sealed class ConfigurationSetController : ControllerBase
     public async Task<ActionResult<ConfigurationSet>> Activate(Guid id, CancellationToken ct)
         => Ok(await _repo.ActivateAsync(Request.RequireTenant(), id, ct) ?? throw NotFound(id));
 
-    private static ApiException NotFound(Guid id)
-        => new(StatusCodes.Status404NotFound, "找不到 Configuration Set：" + id);
+    private static ApiException NotFound(Guid id) => ApiErrors.NotFound(" Configuration Set", id);
 }

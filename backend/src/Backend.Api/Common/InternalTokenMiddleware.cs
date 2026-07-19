@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace Backend.Api.Common;
 
 /// <summary>
@@ -26,8 +29,10 @@ public sealed class InternalTokenMiddleware
             return;
         }
 
+        // 常數時間比對 UTF-8 bytes,避免以逐字元短路洩漏 token(FixedTimeEquals 長度不符即回 false)。
         var provided = context.Request.Headers[HeaderName].ToString();
-        if (!string.Equals(provided, _token, StringComparison.Ordinal))
+        if (!CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(provided), Encoding.UTF8.GetBytes(_token)))
         {
             await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status401Unauthorized, "內部憑證無效");
             return;

@@ -13,7 +13,6 @@
 
 import asyncio
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -21,7 +20,7 @@ from app.engine import compiler
 from app.engine import skill as skill_mod
 from app.main import app
 from app.nodes.nl_extract import make_nl_extract_node
-from tests.conftest import FakeBackendResponse, auth_headers
+from tests.conftest import auth_headers, patch_retrieve
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
@@ -138,19 +137,17 @@ flow:
 
 
 def test_retrieve_nl_extract_script_compiles_and_computes(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse(
-            [
-                {
-                    "document_id": "d1",
-                    "title": "年報",
-                    "content": "2024 營收 5,200 萬、2025 營收 6,905 萬",
-                    "score": 0.9,
-                }
-            ]
-        )
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(
+        monkeypatch,
+        [
+            {
+                "document_id": "d1",
+                "title": "年報",
+                "content": "2024 營收 5,200 萬、2025 營收 6,905 萬",
+                "score": 0.9,
+            }
+        ],
+    )
 
     llm = RecordingExtractLLM(values={"revenue_2024": 5200, "revenue_2025": 6905})
     deps = make_deps({}, llm=llm)
@@ -189,8 +186,12 @@ flow:
 
 
 def test_final_revenue_qa_yaml_validates():
+    # REVENUE_QA_YAML 含 script 步驟 → 撰寫者角色 gate 要求 ADMIN 身分頭驗證
+    # （required_role 仍是 USER：ADMIN 作者撰寫、USER 呼叫，是新語意下的合法組合）。
     resp = client.post(
-        "/skills/validate", json={"definition": REVENUE_QA_YAML}, headers=auth_headers()
+        "/skills/validate",
+        json={"definition": REVENUE_QA_YAML},
+        headers=auth_headers(role="ADMIN"),
     )
     assert resp.status_code == 200
     body = resp.json()

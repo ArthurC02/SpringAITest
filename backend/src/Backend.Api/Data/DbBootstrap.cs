@@ -43,6 +43,10 @@ public static class DbBootstrap
           embedding vector(1536) NOT NULL);
         CREATE INDEX IF NOT EXISTS rag_documents_tenant_idx ON rag_documents (tenant_id);
         CREATE INDEX IF NOT EXISTS rag_chunks_tenant_idx ON rag_chunks (tenant_id);
+        -- ANN 索引:SearchAsync 以 cosine distance(<=>)排序,配 vector_cosine_ops 的 HNSW。
+        -- 需 pgvector >= 0.5(hnsw);extension 過舊時此 DDL 會明確報錯而中止啟動(fail fast)。
+        CREATE INDEX IF NOT EXISTS rag_chunks_embedding_hnsw_idx
+          ON rag_chunks USING hnsw (embedding vector_cosine_ops);
         CREATE TABLE IF NOT EXISTS app_config (
           key text PRIMARY KEY, value text NOT NULL,
           updated_at timestamptz NOT NULL DEFAULT now());

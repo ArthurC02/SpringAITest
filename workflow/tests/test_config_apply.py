@@ -23,10 +23,10 @@ from app.engine import skill as skill_mod
 from app.main import app
 from app.settings import settings
 from app.skills import config_apply, custom
+from tests.conftest import auth_headers as _headers, install_fake_get
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
-INTERNAL_TOKEN = "internal-dev-token"
 
 # 七個開放鍵一組完整覆寫（不含 retrieval.top_k 由 deps 套用——它走 retrieve params，縫⑦）。
 FULL_OVERRIDE = {
@@ -37,19 +37,6 @@ FULL_OVERRIDE = {
     "intent.confidence_threshold": 0.9,
     "llm.temperature": 0.2,
 }
-
-
-def _headers(tenant_id="demo-a", user_id="alice", role="USER", token=INTERNAL_TOKEN):
-    headers = {}
-    if token is not None:
-        headers["X-Internal-Token"] = token
-    if tenant_id is not None:
-        headers["X-Tenant-Id"] = tenant_id
-    if user_id is not None:
-        headers["X-User-Id"] = user_id
-    if role is not None:
-        headers["X-User-Role"] = role
-    return headers
 
 
 @pytest.fixture(autouse=True)
@@ -309,14 +296,6 @@ class FakeBackend:
             {"name": name, "definition": SCRIPT_SKILL.format(name=name), "revision": revision}
         )
 
-    def install(self, monkeypatch):
-        backend = self
-
-        async def fake_get(self, url, headers=None, **kwargs):  # noqa: ANN001
-            return backend.handle(url, headers or {})
-
-        monkeypatch.setattr("httpx.AsyncClient.get", fake_get)
-
     def handle(self, url: str, headers: dict):
         self.calls.append((url, dict(headers)))
         assert headers.get("X-Internal-Token") == settings.internal_api_token
@@ -363,7 +342,7 @@ def fake_base_deps(monkeypatch):
 @pytest.fixture
 def backend(monkeypatch):
     fake = FakeBackend()
-    fake.install(monkeypatch)
+    install_fake_get(monkeypatch, fake.handle)
     return fake
 
 

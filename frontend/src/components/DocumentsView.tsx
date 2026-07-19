@@ -1,6 +1,7 @@
 import { useState, type ChangeEvent, type FormEvent } from 'react'
 import type { useDocuments } from '../hooks/useDocuments'
 import { fmtDate } from '../format'
+import ErrorText from './ErrorText'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
 
@@ -181,18 +182,10 @@ export default function DocumentsView({ documents }: Props) {
         <button className="btn btn--info" type="submit" disabled={busy}>
           {busy ? '送出中…' : '新增文件'}
         </button>
-        {submitError && (
-          <p className="error-text" role="alert">
-            {submitError}
-          </p>
-        )}
+        <ErrorText msg={submitError} />
       </form>
 
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
+      <ErrorText msg={error} />
       {timedOut && (
         <p className="muted">仍在處理中，稍後重新整理頁面即可看到最新狀態。</p>
       )}

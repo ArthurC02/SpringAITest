@@ -28,5 +28,7 @@ def runnable_config() -> dict:
 
     try:
         return {"callbacks": [_handler()]}
-    except ImportError:
+    except Exception:
+        # 任何載入／初始化失敗（缺套件、Langfuse 金鑰未設、網路探測失敗…）一律靜默降級為
+        # {}：觀測性是附屬能力，絕不能讓它的故障連累主流程（對齊上方 docstring 的宣稱）。
         return {}

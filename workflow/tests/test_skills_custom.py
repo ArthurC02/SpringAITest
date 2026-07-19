@@ -14,24 +14,10 @@ from app.engine import compiler
 from app.main import app
 from app.settings import settings
 from app.skills import custom
+from tests.conftest import auth_headers as _headers, install_fake_get
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
-
-INTERNAL_TOKEN = "internal-dev-token"
-
-
-def _headers(tenant_id="demo-a", user_id="alice", role="USER", token=INTERNAL_TOKEN):
-    headers = {}
-    if token is not None:
-        headers["X-Internal-Token"] = token
-    if tenant_id is not None:
-        headers["X-Tenant-Id"] = tenant_id
-    if user_id is not None:
-        headers["X-User-Id"] = user_id
-    if role is not None:
-        headers["X-User-Role"] = role
-    return headers
 
 
 # 自訂 skill 的定義：刻意只用 script 步驟 —— 不打網路、不呼叫 LLM，
@@ -56,6 +42,16 @@ input_schema:
 flow:
   - script: |
       state["final_answer"] = "ok"
+"""
+
+# 無 script 步驟的合法定義：撰寫者角色 gate 不該擋 USER 作者提交這種定義。
+NODE_ONLY = """
+name: node_only_probe
+description: 無 script 步驟
+input_schema:
+  query: {type: str, required: true, min_length: 1}
+flow:
+  - node: query_intake@1.0
 """
 
 # 存檔時驗過、事後失效的定義（引用了不存在的節點）
@@ -94,14 +90,6 @@ class FakeSkillBackend:
         self.by_tenant = by_tenant or {}
         self.down = down
         self.calls: list[tuple[str, dict]] = []  # (url, headers)
-
-    def install(self, monkeypatch) -> None:
-        backend = self
-
-        async def fake_get(self, url, headers=None, **kwargs):  # noqa: ANN001
-            return backend.handle(url, headers or {})
-
-        monkeypatch.setattr("httpx.AsyncClient.get", fake_get)
 
     def handle(self, url: str, headers: dict):
         self.calls.append((url, headers))
@@ -160,7 +148,7 @@ def fake_deps(monkeypatch):
 def backend(monkeypatch):
     def install(by_tenant=None, down=False) -> FakeSkillBackend:
         fake = FakeSkillBackend(by_tenant, down=down)
-        fake.install(monkeypatch)
+        install_fake_get(monkeypatch, fake.handle)
         return fake
 
     return install
@@ -421,11 +409,17 @@ def test_custom_skill_compiles_once_per_revision(backend, fake_deps, monkeypatch
 
 
 def test_validate_returns_skill_metadata_when_valid(backend, fake_deps):
-    """【AT4-11】valid=true → 一併回 skill 中繼資料（backend 寫入 DB 的唯一資料來源）。"""
+    """【AT4-11】valid=true → 一併回 skill 中繼資料（backend 寫入 DB 的唯一資料來源）。
+
+    QUARTERLY_QA 含 script 步驟 → 撰寫者角色 gate 要求 ADMIN 身分頭（ADMIN 作者撰寫、
+    USER 呼叫，正是新語意下的合法組合；required_role 仍是 USER，不受影響）。
+    """
     backend({"demo-a": []})
 
     resp = client.post(
-        "/skills/validate", json={"definition": QUARTERLY_QA}, headers=_headers()
+        "/skills/validate",
+        json={"definition": QUARTERLY_QA},
+        headers=_headers(role="ADMIN"),
     )
 
     assert resp.status_code == 200
@@ -455,14 +449,74 @@ def test_validate_omits_skill_when_invalid(backend, fake_deps):
 
 
 def test_validate_admin_skill_metadata_carries_required_role(backend, fake_deps):
-    """required_role 直接來自 YAML：backend 靠這個欄位落 DB，不可預設成 USER。"""
+    """required_role 直接來自 YAML：backend 靠這個欄位落 DB，不可預設成 USER。
+
+    ADMIN_ONLY 含 script 步驟 → 以 ADMIN 身分頭驗證（撰寫者角色 gate）。
+    """
     backend({"demo-a": []})
 
     resp = client.post(
-        "/skills/validate", json={"definition": ADMIN_ONLY}, headers=_headers()
+        "/skills/validate",
+        json={"definition": ADMIN_ONLY},
+        headers=_headers(role="ADMIN"),
     )
 
     assert resp.json()["skill"]["required_role"] == "ADMIN"
+
+
+# ---------------------------------------------------------------------------
+# 撰寫者角色 gate（保守版）：script 撰寫限 ADMIN，只在 validate 端點生效
+# ---------------------------------------------------------------------------
+
+
+def test_validate_script_definition_rejected_for_user_author(backend, fake_deps):
+    """USER 身分提交含 script 的定義 → 驗證失敗，錯誤明確指向撰寫者角色限制。"""
+    backend({"demo-a": []})
+
+    resp = client.post(
+        "/skills/validate",
+        json={"definition": QUARTERLY_QA},
+        headers=_headers(role="USER"),
+    )
+
+    assert resp.status_code == 200  # 驗證結果在 body，不是 HTTP 錯誤碼
+    body = resp.json()
+    assert body["valid"] is False
+    codes = {e["code"] for e in body["errors"]}
+    assert "forbidden_script" in codes
+    msg = next(e["message"] for e in body["errors"] if e["code"] == "forbidden_script")
+    assert "ADMIN" in msg  # 訊息明確說得出「僅限 ADMIN 撰寫」
+    assert "skill" not in body  # valid=false → 不回中繼資料（backend 據此拒寫）
+
+
+def test_validate_script_definition_allowed_for_admin_author(backend, fake_deps):
+    """決策表另一半：同一份含 script 的定義，ADMIN 身分 → 通過。"""
+    backend({"demo-a": []})
+
+    resp = client.post(
+        "/skills/validate",
+        json={"definition": QUARTERLY_QA},
+        headers=_headers(role="ADMIN"),
+    )
+
+    body = resp.json()
+    assert body["valid"] is True
+    assert body["skill"]["required_role"] == "USER"  # gate 不改 required_role 語意
+
+
+def test_validate_non_script_definition_passes_for_user_author(backend, fake_deps):
+    """gate 只針對 script：USER 提交無 script 的合法定義照常通過。"""
+    backend({"demo-a": []})
+
+    resp = client.post(
+        "/skills/validate",
+        json={"definition": NODE_ONLY},
+        headers=_headers(role="USER"),
+    )
+
+    body = resp.json()
+    assert body["valid"] is True
+    assert body["skill"]["name"] == "node_only_probe"
 
 
 def test_validate_has_no_side_effects_on_custom_catalog(backend, fake_deps):

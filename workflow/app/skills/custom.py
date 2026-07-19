@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from app.backend_http import get_client
 from app.engine import compiler
 from app.engine import skill as skill_mod
 from app.engine.skill import InputField
@@ -67,16 +68,19 @@ def _headers(ctx: RequestContext) -> dict[str, str]:
 
 
 async def _fetch(path: str, ctx: RequestContext) -> Any | None:
-    """GET backend；404 → None（含跨租戶不可見），其餘失敗 → BackendUnavailable。"""
+    """GET backend；404 → None（含跨租戶不可見），其餘失敗 → BackendUnavailable。
+
+    走 backend_http 的共用 client（同一個 backend base_url）；skill 取回是輕請求，
+    以 10s timeout 覆寫共用 client 的 30s 預設。
+    """
     try:
-        async with httpx.AsyncClient(
-            base_url=settings.backend_base_url, timeout=httpx.Timeout(10.0)
-        ) as client:
-            resp = await client.get(path, headers=_headers(ctx))
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            return resp.json()
+        resp = await get_client().get(
+            path, headers=_headers(ctx), timeout=httpx.Timeout(10.0)
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
     except httpx.HTTPError as e:
         raise BackendUnavailable(f"backend 取 skill 失敗（{path}）: {e}") from e
 

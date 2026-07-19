@@ -26,7 +26,7 @@ public sealed class FakeLlmAgent : ILlmAgent
         CompleteCallCount = 0;
     }
 
-    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, CancellationToken ct)
+    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, CancellationToken ct)
     {
         CompleteCallCount++;
         if (messages.Count > 0 && messages[0].Role == "system"
@@ -39,14 +39,23 @@ public sealed class FakeLlmAgent : ILlmAgent
     }
 
     public async IAsyncEnumerable<string> StreamAsync(
-        IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, [EnumeratorCancellation] CancellationToken ct)
+        IReadOnlyList<LlmMessage> messages, [EnumeratorCancellation] CancellationToken ct)
     {
         await Task.Yield();
+        var last = messages.Count > 0 ? messages[^1].Content : "";
+
         // 訊息為「多行」時,吐一塊含換行的 chunk,驗 SSE 把單一 chunk 拆成多個 data: 行。
-        if (messages.Count > 0 && messages[^1].Content == "多行")
+        if (last == "多行")
         {
             yield return "甲\n乙";
             yield break;
+        }
+
+        // 訊息為「串流爆炸」時,先吐一個 token 再中途擲例外,驗 ChatController 補寫 event:error 終止 frame。
+        if (last == "串流爆炸")
+        {
+            yield return "半截";
+            throw new InvalidOperationException("串流中途失敗");
         }
 
         yield return "你好";

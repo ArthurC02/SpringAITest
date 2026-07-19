@@ -22,7 +22,7 @@ SpringAITest/
 │   ├── Dockerfile              選用：容器模式用到
 │   ├── src/
 │   │   └── Backend.Api/         單一專案（feature folders：Auth、Conversations、Files、Retrieval、Analysis、Skills、Config）
-│   └── tests/                  xUnit 測試專案 165 個（Backend.Api.Tests）
+│   └── tests/                  xUnit 測試專案 173 個（Backend.Api.Tests）
 ├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、分析、系統設定四視圖）
 │   ├── vite.config.ts          dev 時把 /api proxy 到 :8080（免 CORS）
 │   ├── Dockerfile / nginx.conf 正式：多階段 build → nginx 靜態檔 + /api 反代（SSE 關緩衝）
@@ -46,10 +46,10 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 262 個 + 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 165 個、手寫 fake repository（未引入 mocking 套件）。
-- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）。
-- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 434 個。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 279 個（Service 162 + Web 117）+ 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 173 個、手寫 fake repository（未引入 mocking 套件）。
+- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint（lint）+ vite build（type check + bundle）。
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 459 個。
 
 > .NET 後端需 .NET SDK 10 以上才能建置（`dotnet --version` 應顯示 `10.x`）。
 
@@ -114,7 +114,7 @@ npm install && npm run dev                # :5173（Vite proxy /api → :8080）
 
 ### 模式 B:備註
 
-`start-full` ＝ `docker compose --profile full up -d --build`。核心服務 `:8002` 與平台閘道 `:8080` 容器均發佈到主機，前端 nginx 經 `host.docker.internal:8080` 反代 `/api`（設定不必改,單一 nginx 設定通吃兩種模式）。改碼後重建:`docker compose --profile full up -d --build platform`（或 `backend` 或 `frontend`）。
+`start-full` ＝ `docker compose --profile full up -d --build`。全容器模式：核心服務 `:8002` 與平台閘道 `:8080` 容器均發佈到主機；**容器內前端 nginx 反代** `/api` **走 compose service DNS** `http://platform:8080` **（不經主機，於容器間直連）**，單一 nginx 配置同時支援兩種模式（模式 A 時 Vite dev proxy 連 host :8080，模式 B 時 nginx 連 service DNS）。改碼後重建:`docker compose --profile full up -d --build platform`（或 `backend` 或 `frontend`）。
 
 ### 各服務位置
 
@@ -179,7 +179,7 @@ workflow                                  Skill 引擎層
 | ---- | ----------- | --------------------- | --------------------------------------------------------------------------------------------- |
 | 平台 | Service     | `ChatServiceTests`    | xUnit + 手寫 fake HttpMessageHandler（BackendClient 代理行為）                                |
 | 平台 | Web         | `ChatControllerTests` | xUnit + WebApplicationFactory（整合測試）                                                     |
-| 核心 | Backend.Api | 36+ 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking 等單元測試 |
+| 核心 | Backend.Api | 173 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking 等單元測試 |
 
 ## 可觀測性架構（LiteLLM 閘道 + Langfuse）
 

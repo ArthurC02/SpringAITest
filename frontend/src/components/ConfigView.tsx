@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { listConfig, updateConfig } from '../api/config'
 import type { ConfigEntry } from '../types'
 import { fmtDate } from '../format'
+import { useResource } from '../hooks/useResource'
+import ErrorText from './ErrorText'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
 import SkillHome from './SkillHome'
@@ -20,40 +22,30 @@ const TABS: { id: Tab; label: string }[] = [
 /** 一般設定：GET 表格；ADMIN 可就地編輯 value + 儲存(PUT)。非 ADMIN 只讀。 */
 function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
   const toast = useToast()
+  const { data, loading, error } = useResource(listConfig)
   const [entries, setEntries] = useState<ConfigEntry[]>([])
   const [drafts, setDrafts] = useState<Record<string, string>>({})
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [savingKey, setSavingKey] = useState<string | null>(null)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const list = await listConfig()
-      setEntries(list)
-      setDrafts(Object.fromEntries(list.map((e) => [e.key, e.value])))
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    load()
-  }, [load])
+  // data 到齊後鏡射為可就地編輯的 entries + drafts。用 useLayoutEffect 在 paint 前寫入:
+  // 避免 loading 轉 false 與此衍生之間夾一格「尚無設定」/空輸入框的閃爍(載入不得渲染成無資料)。
+  useLayoutEffect(() => {
+    if (!data) return
+    setEntries(data)
+    setDrafts(Object.fromEntries(data.map((e) => [e.key, e.value])))
+  }, [data])
 
   async function save(key: string) {
     setSavingKey(key)
-    setError(null)
+    setSaveError(null)
     try {
       const updated = await updateConfig(key, drafts[key])
       setEntries((prev) => prev.map((e) => (e.key === key ? updated : e)))
       toast('已儲存', 'success')
     } catch (e) {
       // PUT 403(非 ADMIN)或其他錯誤在此顯示;真正授權以後端把關為準。
-      setError((e as Error).message)
+      setSaveError((e as Error).message)
     } finally {
       setSavingKey(null)
     }
@@ -61,11 +53,7 @@ function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <>
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
+      <ErrorText msg={error ?? saveError} />
 
       {loading && entries.length === 0 ? (
         <Skeleton rows={4} />

@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -22,39 +21,16 @@ public sealed class SkillService : ISkillService
     private Exception WrapTransport(Exception ex) => new WorkflowInvocationException(FailurePrefix + ex.Message, ex);
 
     public async Task<IReadOnlyList<SkillInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Get, "/api/skills", ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
+        => await _backend.SendForJsonListAsync<SkillInfo>(
+            _backend.BuildRequest(HttpMethod.Get, "/api/skills", ctx), WrapTransport, MapErrorAsync, ct);
 
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
-
-        return await resp.Content.ReadFromJsonAsync<List<SkillInfo>>(_backend.Json, ct)
-            ?? new List<SkillInfo>();
-    }
-
-    public async Task<Skill> GetAsync(string name, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}", ctx);
-        return await ReadSkillAsync(req, ct);
-    }
+    public Task<Skill> GetAsync(string name, UserContext ctx, CancellationToken ct = default)
+        => ReadSkillAsync(_backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}", ctx), ct);
 
     public async Task<IReadOnlyList<SkillRevisionInfo>> GetRevisionsAsync(
         string name, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}/revisions", ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
-
-        return await resp.Content.ReadFromJsonAsync<List<SkillRevisionInfo>>(_backend.Json, ct)
-            ?? new List<SkillRevisionInfo>();
-    }
+        => await _backend.SendForJsonListAsync<SkillRevisionInfo>(
+            _backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}/revisions", ctx), WrapTransport, MapErrorAsync, ct);
 
     public async Task<SkillExport> ExportAsync(string name, UserContext ctx, CancellationToken ct = default)
     {
@@ -72,42 +48,21 @@ public sealed class SkillService : ISkillService
         return new SkillExport(content, contentType, $"{name}.zip");
     }
 
-    public async Task<Skill> CreateAsync(SkillUpsert request, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Post, "/api/skills", ctx, request);
-        return await ReadSkillAsync(req, ct);
-    }
+    public Task<Skill> CreateAsync(SkillUpsert request, UserContext ctx, CancellationToken ct = default)
+        => ReadSkillAsync(_backend.BuildRequest(HttpMethod.Post, "/api/skills", ctx, request), ct);
 
-    public async Task<Skill> UpdateAsync(
+    public Task<Skill> UpdateAsync(
         string name, SkillUpsert request, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Put, $"/api/skills/{name}", ctx, request);
-        return await ReadSkillAsync(req, ct);
-    }
+        => ReadSkillAsync(_backend.BuildRequest(HttpMethod.Put, $"/api/skills/{name}", ctx, request), ct);
 
-    public async Task DeleteAsync(string name, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Delete, $"/api/skills/{name}", ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
+    public Task DeleteAsync(string name, UserContext ctx, CancellationToken ct = default)
+        => _backend.SendExpectSuccessAsync(
+            _backend.BuildRequest(HttpMethod.Delete, $"/api/skills/{name}", ctx), WrapTransport, MapErrorAsync, ct);
 
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
-    }
-
-    private async Task<Skill> ReadSkillAsync(HttpRequestMessage req, CancellationToken ct)
-    {
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
-
-        return await resp.Content.ReadFromJsonAsync<Skill>(_backend.Json, ct)
-            ?? throw new WorkflowInvocationException(FailurePrefix + "回應內容為空");
-    }
+    private Task<Skill> ReadSkillAsync(HttpRequestMessage req, CancellationToken ct)
+        => _backend.SendForJsonAsync<Skill>(
+            req, WrapTransport, MapErrorAsync,
+            () => new WorkflowInvocationException(FailurePrefix + "回應內容為空"), ct);
 
     private Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)
         => BackendErrorMapper.MapErrorAsync(resp, _backend, FailurePrefix, ct);

@@ -32,6 +32,6 @@ public sealed record AuthResult(string Username, string Role, string TenantCode)
 
 /// <summary>
 /// LoginAsync 的輸出:直接帶 backend 簽發的 token(platform 不再自行簽發)。
-/// controller 原樣組成 LoginResponse。JSON 對外 body:{ token, username, role, tenantCode }。
+/// controller 直接回傳(比照 Register 回 AuthResult)。JSON 對外 body:{ token, username, role, tenantCode }。
 /// </summary>
 public sealed record LoginResult(string Token, string Username, string Role, string TenantCode);

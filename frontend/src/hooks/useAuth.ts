@@ -7,6 +7,7 @@ import {
   type RegisterResult,
 } from '../api/auth'
 import { setLogoutHandler } from '../api/http'
+import { invalidateChatPersistence } from '../chatPersistence'
 import { CHAT_MESSAGES_KEY, CHAT_CONVERSATION_ID_KEY, CHAT_USER_ID_KEY } from '../storageKeys'
 import type { Session } from '../types'
 
@@ -19,6 +20,8 @@ export function useAuth() {
 
   const logout = useCallback(() => {
     clearSession()
+    // 先撤銷既有 useChat 的寫入資格；其 debounce/beforeunload/unmount 即使稍後執行也不會回寫。
+    invalidateChatPersistence()
     // 一併清掉聊天資料，避免共用瀏覽器時下一位使用者看到前一位的完整對話。
     localStorage.removeItem(CHAT_MESSAGES_KEY)
     localStorage.removeItem(CHAT_CONVERSATION_ID_KEY)

@@ -161,6 +161,16 @@ public sealed class FakeConfigRepository : IConfigRepository
     }
 }
 
+/// <summary>單調遞增假時鐘:每次 Now() 前進一秒,避開 Windows ~15ms 解析度撞值。
+/// 斷言只驗排序、不依賴具體時戳,故 Epoch 任選;每個 fake 各持一個實例(各自獨立序列)。</summary>
+internal sealed class MonotonicClock
+{
+    private static readonly DateTime Epoch = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private long _tick;
+
+    public DateTime Now() => Epoch.AddSeconds(Interlocked.Increment(ref _tick));
+}
+
 /// <summary>
 /// Skill 儲存庫 fake:行程記憶體,key = (租戶, 名稱) — 忠實模擬 DB 的 UNIQUE (tenant_id, name) 與租戶過濾。
 /// 時間戳用單調遞增的假時鐘(DateTime.UtcNow 在 Windows 只有 ~15ms 解析度,同一測試內兩次寫入可能撞到同值)。
@@ -169,16 +179,14 @@ public sealed class FakeConfigRepository : IConfigRepository
 /// </summary>
 public sealed class FakeSkillRepository : ISkillRepository
 {
-    private static readonly DateTime Epoch = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-
     private readonly ConcurrentDictionary<(string Tenant, string Name), Skill> _store = new();
 
     /// <summary>稽核表:只增不減(軟刪不動它)。</summary>
     private readonly List<(string Tenant, string Name, SkillRevisionInfo Row)> _revisions = new();
 
-    private long _tick;
+    private readonly MonotonicClock _clock = new();
 
-    private DateTime Now() => Epoch.AddSeconds(Interlocked.Increment(ref _tick));
+    private DateTime Now() => _clock.Now();
 
     public Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, CancellationToken ct)
         => Task.FromResult<IReadOnlyList<SkillInfo>>(
@@ -295,16 +303,15 @@ public sealed class FakeSkillRepository : ISkillRepository
 /// </summary>
 public sealed class FakeConfigurationSetRepository : IConfigurationSetRepository
 {
-    private static readonly DateTime Epoch = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-
     private sealed record Entry(
         Guid Id, string Tenant, string Name, bool IsActive,
         Dictionary<string, object> Values, string CreatedBy, DateTime CreatedAt, DateTime UpdatedAt);
 
     private readonly Dictionary<Guid, Entry> _store = new();
-    private long _tick;
 
-    private DateTime Now() => Epoch.AddSeconds(Interlocked.Increment(ref _tick));
+    private readonly MonotonicClock _clock = new();
+
+    private DateTime Now() => _clock.Now();
 
     private static ConfigurationSet ToDto(Entry e) => new(
         e.Id, e.Name, e.IsActive, new Dictionary<string, object>(e.Values), e.CreatedBy, e.CreatedAt, e.UpdatedAt);

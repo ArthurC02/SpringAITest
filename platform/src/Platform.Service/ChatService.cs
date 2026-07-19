@@ -70,8 +70,7 @@ public sealed class ChatService : IChatService
 
     public async Task<ChatResponse> ChatAsync(string message, string? userId, string? conversationId, UserContext? userCtx = null, CancellationToken ct = default)
     {
-        var uid = NormalizeUser(userId);
-        var cid = NormalizeConversation(conversationId, uid);
+        var (uid, cid) = DeriveMemoryKeys(userId, conversationId, userCtx);
 
         using var activity = StartSpan(message);
         try
@@ -80,8 +79,8 @@ public sealed class ChatService : IChatService
             var summaryMessages = await TryRouteAndExecuteAsync(message, userCtx, ct);
             var messages = summaryMessages ?? await BuildPromptAsync(uid, cid, message, ct);
 
-            // 一律不啟用原生 tool-calling(tools: null):路由/執行已由確定性管線完成。
-            var reply = await _agent.CompleteAsync(messages, null, ct);
+            // 路由/執行已由確定性管線完成,LLM 只做最後潤飾或純聊天(不掛原生 tool-calling)。
+            var reply = await _agent.CompleteAsync(messages, ct);
             activity?.SetTag("completion.length", reply.Length);
 
             // 匿名(userCtx null)不持久化:對話記錄以 (tenant_id, user_id) 隔離,匿名沒有身分可歸屬。
@@ -106,8 +105,7 @@ public sealed class ChatService : IChatService
     public async IAsyncEnumerable<string> StreamChatAsync(
         string message, string? userId, string? conversationId, UserContext? userCtx = null, [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var uid = NormalizeUser(userId);
-        var cid = NormalizeConversation(conversationId, uid);
+        var (uid, cid) = DeriveMemoryKeys(userId, conversationId, userCtx);
 
         // 刻意手動管理 span 生命週期(對應原 Java streamChat 不是 @Transactional、手動 start/stop):
         // 串流在訂閱時才執行,持久化發生在串流結束後、仍在本請求範圍內。
@@ -119,8 +117,8 @@ public sealed class ChatService : IChatService
             var summaryMessages = await TryRouteAndExecuteAsync(message, userCtx, ct);
             var messages = summaryMessages ?? await BuildPromptAsync(uid, cid, message, ct);
 
-            // 手動列舉以便在串流出錯時替 span 記 error(yield 不能放在 try/catch 內)。tools: null(不用原生 tool-calling)。
-            var enumerator = _agent.StreamAsync(messages, null, ct).GetAsyncEnumerator(ct);
+            // 手動列舉以便在串流出錯時替 span 記 error(yield 不能放在 try/catch 內)。
+            var enumerator = _agent.StreamAsync(messages, ct).GetAsyncEnumerator(ct);
             try
             {
                 while (true)
@@ -195,6 +193,24 @@ public sealed class ChatService : IChatService
 
     private static string NormalizeConversation(string? conversationId, string uid) =>
         string.IsNullOrWhiteSpace(conversationId) ? uid : conversationId;
+
+    /// <summary>
+    /// 推導記憶 key。已登入時「不信任」用戶端 body 的 userId(避免 IDOR:送 userId=&lt;他人&gt; 讀/投毒他人 mem0):
+    /// uid = 租戶碼:使用者 = JWT 身分;cid 空白退回 uid,非空白時前綴身分(同人可多對話視窗,跨租戶/跨使用者永不撞 key)。
+    /// 匿名(userCtx null)沒有 JWT 身分,維持既有 body fallback 語義。
+    /// </summary>
+    private static (string Uid, string Cid) DeriveMemoryKeys(string? userId, string? conversationId, UserContext? userCtx)
+    {
+        if (userCtx is null)
+        {
+            var anonUid = NormalizeUser(userId);
+            return (anonUid, NormalizeConversation(conversationId, anonUid));
+        }
+
+        var uid = $"{userCtx.TenantCode}:{userCtx.UserId}";
+        var cid = string.IsNullOrWhiteSpace(conversationId) ? uid : $"{uid}:{conversationId}";
+        return (uid, cid);
+    }
 
     /// <summary>組裝訊息序列:[system(若有)] + 短期記憶訊息 + 本輪 user 訊息。</summary>
     private async Task<IReadOnlyList<LlmMessage>> BuildPromptAsync(string uid, string cid, string message, CancellationToken ct)
@@ -289,7 +305,7 @@ public sealed class ChatService : IChatService
             new("user", message),
         };
 
-        var reply = (await _agent.CompleteAsync(routeMessages, null, ct)).Trim();
+        var reply = (await _agent.CompleteAsync(routeMessages, ct)).Trim();
         return (MatchTool(reply, tools), reply);
     }
 

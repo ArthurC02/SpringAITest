@@ -15,4 +15,8 @@
     <ProjectReference Include="..\Platform.Service\Platform.Service.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Platform.Web.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -84,7 +84,6 @@ public sealed class FakeLlmAgent : ILlmAgent
     public string Response { get; set; } = "測試回覆";
     public IReadOnlyList<string> Chunks { get; set; } = new[] { "你好", "世界" };
     public IReadOnlyList<LlmMessage>? LastMessages { get; private set; }
-    public IReadOnlyList<LlmTool>? LastTools { get; private set; }
 
     /// <summary>腳本化的連續 CompleteAsync 回覆(第 1 次=路由、第 2 次=摘要…);空或用盡後回退 Response。</summary>
     public Queue<string> Responses { get; } = new();
@@ -98,11 +97,10 @@ public sealed class FakeLlmAgent : ILlmAgent
     /// <summary>true 時:第一次 CompleteAsync(即路由呼叫)擲例外,用來驗路由失敗退純聊天不炸。</summary>
     public bool ThrowOnFirstComplete { get; set; }
 
-    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, CancellationToken ct)
+    public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, CancellationToken ct)
     {
         CompleteCalls.Add(messages);
         LastMessages = messages;
-        LastTools = tools;
 
         if (ThrowOnFirstComplete && CompleteCalls.Count == 1)
         {
@@ -114,10 +112,9 @@ public sealed class FakeLlmAgent : ILlmAgent
     }
 
     public async IAsyncEnumerable<string> StreamAsync(
-        IReadOnlyList<LlmMessage> messages, IReadOnlyList<LlmTool>? tools, [EnumeratorCancellation] CancellationToken ct)
+        IReadOnlyList<LlmMessage> messages, [EnumeratorCancellation] CancellationToken ct)
     {
         LastMessages = messages;
-        LastTools = tools;
         var emitted = 0;
         foreach (var chunk in Chunks)
         {

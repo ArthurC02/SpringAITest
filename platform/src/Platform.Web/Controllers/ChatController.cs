@@ -17,6 +17,9 @@ namespace Platform.Web.Controllers;
 [AllowAnonymous]
 public sealed class ChatController : ControllerBase
 {
+    // 串流中途失敗的終止 frame 訊息(通用文字,不含例外細節)。前端以 event:error frame 偵測異常收尾。
+    private const string StreamErrorMessage = "回覆過程發生錯誤，請稍後再試";
+
     private readonly IChatService _chat;
 
     public ChatController(IChatService chat) => _chat = chat;
@@ -46,14 +49,31 @@ public sealed class ChatController : ControllerBase
         var bodyFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
         bodyFeature?.DisableBuffering();
 
-        await foreach (var chunk in _chat.StreamChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct))
+        // 串流可能在已送出部分 token 後才由 LLM/下游拋錯;此時回應 body 已開始,GlobalExceptionHandler
+        // 無法再改寫(HasStarted),連線會無聲斷開。故就地 try/catch:失敗時補一個終止用的 error frame 再正常結束。
+        try
         {
-            foreach (var line in chunk.Split('\n'))
+            await foreach (var chunk in _chat.StreamChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct))
             {
-                await Response.WriteAsync($"data:{line}\n", ct);
-            }
+                foreach (var line in chunk.Split('\n'))
+                {
+                    await Response.WriteAsync($"data:{line}\n", ct);
+                }
 
-            await Response.WriteAsync("\n", ct);
+                await Response.WriteAsync("\n", ct);
+                await Response.Body.FlushAsync(ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 客戶端主動中斷:連線已無對象可寫,不是錯誤,不寫 error frame。
+        }
+        catch (Exception)
+        {
+            // 終止語意:已送出的 token 之後補一個 event:error frame(維持無空格 data: 風格),再正常結束回應。
+            // 例外細節不外洩,只給通用訊息(原始細節由 ChatService/下游各自 log)。
+            await Response.WriteAsync("event:error\n", ct);
+            await Response.WriteAsync($"data:{StreamErrorMessage}\n\n", ct);
             await Response.Body.FlushAsync(ct);
         }
     }

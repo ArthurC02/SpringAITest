@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { ApiError, consumeSessionExpired } from '../api/http'
 import type { Session } from '../types'
+import ErrorText from './ErrorText'
 
 interface Props {
   login: (username: string, password: string) => Promise<Session>
@@ -207,11 +208,7 @@ export default function AuthPage({ login, register }: Props) {
           </>
         )}
 
-        {error && (
-          <p className="error-text" role="alert">
-            {error}
-          </p>
-        )}
+        <ErrorText msg={error} />
         {notice && (
           <p className="notice-text" role="status">
             {notice}

@@ -100,22 +100,30 @@ export async function streamChat(
     while ((sep = buffer.indexOf('\n\n')) !== -1) {
       const rawEvent = buffer.slice(0, sep)
       buffer = buffer.slice(sep + 2)
-      const data = parseSseData(rawEvent)
+      const { event, data } = parseSseEvent(rawEvent)
+      // 串流中途失敗時 platform 送 `event:error` + `data:<通用錯誤訊息>` 後正常結束；
+      // 以該訊息拋出，走 useChat 既有的錯誤泡泡路徑。正常 data frame 行為不變。
+      if (event === 'error') {
+        await reader.cancel()
+        throw new Error(data || '串流過程發生錯誤')
+      }
       if (data) onToken(data)
     }
   }
 }
 
 /**
- * 從一個 SSE 事件文字取出 data 內容。
+ * 從一個 SSE 事件文字取出 event 名稱與 data 內容。
  * Spring 的 SSE writer 寫成 `data:<值>`（冒號後不加裝飾空格），多行值會拆成多個 data: 行，
  * 因此這裡取 `data:` 之後的全部字元（不去除前導空格，以保留 token 原本的空白），
- * 並把多個 data: 行以 \n 接回，還原原始 token。
+ * 並把多個 data: 行以 \n 接回，還原原始 token。event 行（同樣無空格風格）用來標示錯誤 frame。
  */
-function parseSseData(rawEvent: string): string {
+function parseSseEvent(rawEvent: string): { event: string; data: string } {
+  let event = ''
   const out: string[] = []
   for (const line of rawEvent.split('\n')) {
     if (line.startsWith('data:')) out.push(line.slice(5))
+    else if (line.startsWith('event:')) event = line.slice(6).trim()
   }
-  return out.join('\n')
+  return { event, data: out.join('\n') }
 }

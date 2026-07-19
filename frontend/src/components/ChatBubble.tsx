@@ -1,7 +1,8 @@
+import { memo } from 'react'
 import type { Message } from '../types'
 import Markdown from './Markdown'
 
-export default function ChatBubble({ message }: { message: Message }) {
+function ChatBubble({ message }: { message: Message }) {
   const isUser = message.role === 'user'
   // 使用者輸入與錯誤訊息以純文字呈現；AI 正常回覆才走 Markdown 渲染。
   const plain = isUser || message.error
@@ -28,3 +29,7 @@ export default function ChatBubble({ message }: { message: Message }) {
     </div>
   )
 }
+
+// 串流時 messages 每 token 重建陣列，但未變的舊泡泡由 useChat 的 map 回傳同一參考，
+// memo 得以跳過其重渲染（只重繪正在串流的那顆）。
+export default memo(ChatBubble)

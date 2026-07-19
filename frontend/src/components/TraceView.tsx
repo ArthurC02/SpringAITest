@@ -1,4 +1,5 @@
 import type { TraceEntry } from '../types'
+import { fmtDate } from '../format'
 
 /**
  * 節點軌跡：資料直接取自 invoke 回應的 output.trace，不另外呼叫 API（AT4-15）。
@@ -55,7 +56,7 @@ export default function TraceView({ output }: { output: Record<string, unknown> 
             )}
             <dt>時間</dt>
             <dd className="muted">
-              {e.start_time} → {e.end_time}
+              {fmtDate(e.start_time)} → {fmtDate(e.end_time)}
             </dd>
           </dl>
         </details>

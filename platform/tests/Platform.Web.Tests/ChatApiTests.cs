@@ -59,6 +59,20 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(expected, bytes);
     }
 
+    // 串流中途失敗:LLM 在已送出 token 後拋錯 → 補一個 event:error 終止 frame(無空格 data: 風格),回應仍正常結束(200)。
+    // 釘住終止語意:已送出的 token 在前、error frame 在後、通用訊息不含例外細節。
+    [Fact]
+    public async Task Stream_MidStreamFailure_EmitsErrorFrame_ThenEndsNormally()
+    {
+        var client = _factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "串流爆炸" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var raw = await resp.Content.ReadAsStringAsync();
+        Assert.Equal("data:半截\n\nevent:error\ndata:回覆過程發生錯誤，請稍後再試\n\n", raw);
+    }
+
     [Fact]
     public async Task Stream_ChunkWithNewline_SplitsIntoMultipleDataLines()
     {

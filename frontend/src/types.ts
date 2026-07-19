@@ -79,15 +79,6 @@ export interface SkillRevision {
   created_at: string
 }
 
-/**
- * 建立／更新 Skill 的 body：只有 YAML 原文。
- * name/description/required_role 都寫在 YAML 裡，前端不再解析一次
- * （第二份事實來源遲早會與引擎的解析結果不一致）。
- */
-export interface SkillUpsert {
-  definition: string
-}
-
 /** input_schema 的一個欄位（規格 §3.1：{query: {type: str, required: true, min_length: 1}}）。 */
 export interface SkillInputField {
   type: string

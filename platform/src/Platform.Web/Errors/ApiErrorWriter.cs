@@ -2,7 +2,10 @@ using System.Text.Json;
 
 namespace Platform.Web.Errors;
 
-/// <summary>把 ApiError 直接寫進 HttpResponse(給 JwtBearer 事件與全域例外處理共用)。</summary>
+/// <summary>
+/// 把 ApiError 直接寫進 HttpResponse(給 JwtBearer 事件與全域例外處理共用)。
+/// 與 backend/src/Backend.Api/Common/ 同名檔刻意保持一致,改任一邊須同步另一邊。
+/// </summary>
 public static class ApiErrorWriter
 {
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);

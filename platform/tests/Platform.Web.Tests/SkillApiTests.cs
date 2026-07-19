@@ -16,9 +16,6 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
     public SkillApiTests(TestWebAppFactory factory) => _factory = factory;
 
-    private HttpClient AdminClient()
-        => _factory.CreateClient().WithToken(_factory.IssueToken("admin-a", "ADMIN", "demo-a"));
-
     private static string Yaml(string name) => $"name: {name}\ndescription: 季報問答\nflow:\n  - node: query_intake\n";
 
     private static object Body(string name = "quarterly_qa") => new { definition = Yaml(name) };
@@ -69,7 +66,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task List_Returns200_SnakeCaseFields()
     {
-        var resp = await AdminClient().GetAsync("/api/skills");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var item = Assert.Single((await resp.ReadJsonAsync()).AsArray())!;
@@ -83,7 +80,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Get_Returns200_WithDefinition()
     {
-        var resp = await AdminClient().GetAsync("/api/skills/quarterly_qa");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly_qa");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -94,7 +91,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Revisions_Returns200_DescendingSnakeCase()
     {
-        var resp = await AdminClient().GetAsync("/api/skills/quarterly_qa/revisions");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly_qa/revisions");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var arr = (await resp.ReadJsonAsync()).AsArray();
@@ -107,7 +104,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Create_Returns201_WithSkill()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/skills", Body());
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body());
 
         Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -118,7 +115,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Update_Returns200_WithBumpedRevision()
     {
-        var resp = await AdminClient().PutAsJsonAsync("/api/skills/quarterly_qa", Body());
+        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/skills/quarterly_qa", Body());
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal(2, (await resp.ReadJsonAsync())["current_revision"]!.GetValue<int>());
@@ -127,7 +124,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Delete_Returns204()
     {
-        var resp = await AdminClient().DeleteAsync("/api/skills/quarterly_qa");
+        var resp = await _factory.AdminClient().DeleteAsync("/api/skills/quarterly_qa");
 
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
     }
@@ -135,7 +132,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // 匯出:200、application/zip、Content-Disposition filename=<name>.zip、body bytes 一致。
     public async Task Export_Returns200_ZipBytes_WithAttachmentFilename()
     {
-        var resp = await AdminClient().GetAsync("/api/skills/quarterly_qa/export");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly_qa/export");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("application/zip", resp.Content.Headers.ContentType!.MediaType);
@@ -149,7 +146,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Export_Returns404_WhenBackendNotFound()
     {
-        var resp = await AdminClient().GetAsync("/api/skills/ghost/export");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/ghost/export");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -162,7 +159,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // backend 422(定義未通過引擎驗證)→ 對外 422,fieldErrors 帶引擎錯誤碼(編輯器要指到規則與行號)。
     public async Task Create_BackendValidationFailed_Returns422_WithEngineCodes()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/skills", InvalidBody());
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", InvalidBody());
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -176,7 +173,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // PUT 也走同一條 422 路徑(不能只擋 POST)。
     public async Task Update_BackendValidationFailed_Returns422()
     {
-        var resp = await AdminClient().PutAsJsonAsync("/api/skills/quarterly_qa", InvalidBody());
+        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/skills/quarterly_qa", InvalidBody());
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         Assert.NotNull((await resp.ReadJsonAsync())["fieldErrors"]!["unbounded_loop"]);
@@ -185,7 +182,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Create_Returns409_WithBackendMessage_Unchanged()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/skills", Body("dup_skill"));
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body("dup_skill"));
 
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -196,7 +193,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Get_Returns404_WhenBackendNotFound()
     {
-        var resp = await AdminClient().GetAsync("/api/skills/ghost");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/ghost");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -208,7 +205,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // backend 400 的欄位級錯誤不得被代理層吞掉。
     public async Task Create_BackendBadInputWithFieldErrors_ForwardsFieldErrors()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/skills", Body("bad_field"));
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body("bad_field"));
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -225,7 +222,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     {
         var before = FakeSkillService.Calls.Count;
 
-        var resp = await AdminClient().PostAsJsonAsync("/api/skills", new { definition });
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", new { definition });
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         Assert.Equal("definition 不可為空",
@@ -238,7 +235,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Catalog_Returns200_MergedListWithSourceBadge()
     {
-        var resp = await AdminClient().GetAsync("/api/skills/catalog");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/catalog");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var arr = (await resp.ReadJsonAsync()).AsArray();
@@ -255,7 +252,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     {
         var beforeGet = FakeSkillService.Calls.Count(c => c == "get:catalog");
 
-        var resp = await AdminClient().GetAsync("/api/skills/catalog");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/catalog");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         // 回的是目錄(陣列且帶 source),不是單一 skill 物件。
@@ -272,7 +269,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     {
         var before = FakeSkillService.Calls.Count;
 
-        var resp = await AdminClient().PostAsJsonAsync("/api/skills/validate", InvalidBody());
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills/validate", InvalidBody());
 
         // 引擎契約:一律 200,valid/errors 在 body(不合法不是 HTTP 錯誤)。
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -288,7 +285,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Validate_Returns200_WithSkillMetadata_WhenValid()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/skills/validate", Body());
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills/validate", Body());
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -299,7 +296,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Invoke_Returns200_WithEngineOutput()
     {
-        var resp = await AdminClient().PostAsJsonAsync(
+        var resp = await _factory.AdminClient().PostAsJsonAsync(
             "/api/skills/quarterly_qa/invoke", new { input = new { query = "2025Q3" } });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -316,7 +313,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("boom", HttpStatusCode.BadGateway)]
     public async Task Invoke_DownstreamError_MapsToSameStatus(string name, HttpStatusCode expected)
     {
-        var resp = await AdminClient().PostAsJsonAsync(
+        var resp = await _factory.AdminClient().PostAsJsonAsync(
             $"/api/skills/{name}/invoke", new { input = new { query = "x" } });
 
         Assert.Equal(expected, resp.StatusCode);
@@ -329,7 +326,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Nodes_Returns200_WithNodeContracts()
     {
-        var resp = await AdminClient().GetAsync("/api/nodes");
+        var resp = await _factory.AdminClient().GetAsync("/api/nodes");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var node = Assert.Single((await resp.ReadJsonAsync()).AsArray())!;

@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -24,68 +23,31 @@ public sealed class ConfigurationSetService : IConfigurationSetService
     private Exception WrapTransport(Exception ex) => new WorkflowInvocationException(FailurePrefix + ex.Message, ex);
 
     public async Task<IReadOnlyList<ConfigurationSetInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Get, BasePath, ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
+        => await _backend.SendForJsonListAsync<ConfigurationSetInfo>(
+            _backend.BuildRequest(HttpMethod.Get, BasePath, ctx), WrapTransport, MapErrorAsync, ct);
 
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
+    public Task<ConfigurationSet> GetAsync(string id, UserContext ctx, CancellationToken ct = default)
+        => ReadSetAsync(_backend.BuildRequest(HttpMethod.Get, $"{BasePath}/{id}", ctx), ct);
 
-        return await resp.Content.ReadFromJsonAsync<List<ConfigurationSetInfo>>(_backend.Json, ct)
-            ?? new List<ConfigurationSetInfo>();
-    }
-
-    public async Task<ConfigurationSet> GetAsync(string id, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Get, $"{BasePath}/{id}", ctx);
-        return await ReadSetAsync(req, ct);
-    }
-
-    public async Task<ConfigurationSet> CreateAsync(
+    public Task<ConfigurationSet> CreateAsync(
         ConfigurationSetUpsert request, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Post, BasePath, ctx, request);
-        return await ReadSetAsync(req, ct);
-    }
+        => ReadSetAsync(_backend.BuildRequest(HttpMethod.Post, BasePath, ctx, request), ct);
 
-    public async Task<ConfigurationSet> UpdateAsync(
+    public Task<ConfigurationSet> UpdateAsync(
         string id, ConfigurationSetUpsert request, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Put, $"{BasePath}/{id}", ctx, request);
-        return await ReadSetAsync(req, ct);
-    }
+        => ReadSetAsync(_backend.BuildRequest(HttpMethod.Put, $"{BasePath}/{id}", ctx, request), ct);
 
-    public async Task DeleteAsync(string id, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Delete, $"{BasePath}/{id}", ctx);
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
+    public Task DeleteAsync(string id, UserContext ctx, CancellationToken ct = default)
+        => _backend.SendExpectSuccessAsync(
+            _backend.BuildRequest(HttpMethod.Delete, $"{BasePath}/{id}", ctx), WrapTransport, MapErrorAsync, ct);
 
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
-    }
+    public Task<ConfigurationSet> ActivateAsync(string id, UserContext ctx, CancellationToken ct = default)
+        => ReadSetAsync(_backend.BuildRequest(HttpMethod.Post, $"{BasePath}/{id}/activate", ctx), ct);
 
-    public async Task<ConfigurationSet> ActivateAsync(string id, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Post, $"{BasePath}/{id}/activate", ctx);
-        return await ReadSetAsync(req, ct);
-    }
-
-    private async Task<ConfigurationSet> ReadSetAsync(HttpRequestMessage req, CancellationToken ct)
-    {
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
-
-        return await resp.Content.ReadFromJsonAsync<ConfigurationSet>(_backend.Json, ct)
-            ?? throw new WorkflowInvocationException(FailurePrefix + "回應內容為空");
-    }
+    private Task<ConfigurationSet> ReadSetAsync(HttpRequestMessage req, CancellationToken ct)
+        => _backend.SendForJsonAsync<ConfigurationSet>(
+            req, WrapTransport, MapErrorAsync,
+            () => new WorkflowInvocationException(FailurePrefix + "回應內容為空"), ct);
 
     private Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)
         => BackendErrorMapper.MapErrorAsync(resp, _backend, FailurePrefix, ct);

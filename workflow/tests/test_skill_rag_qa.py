@@ -13,24 +13,15 @@ from app import skills
 from app.engine import compiler
 from app.main import app
 from app.nodes.rag_answer import _RagAnswerOutput, make_rag_answer_node
-from tests.conftest import FakeBackendResponse, auth_headers
-from tests.kbquery_fakes import FakeStructuredLLM, make_deps
+from tests.conftest import (
+    FakeBackendResponse,
+    auth_headers,
+    invoke_builtin,
+    patch_retrieve,
+)
+from tests.kbquery_fakes import FakeStructuredLLM, RecordingLLM, make_deps
 
 client = TestClient(app)
-
-
-class RecordingLLM:
-    """手寫 fake：記錄每次 structured 呼叫的 system/user，回傳固定 output。"""
-
-    version = "rec-llm-v1"
-
-    def __init__(self, output=None):
-        self.output = output
-        self.calls: list[dict] = []
-
-    async def structured(self, system, user, schema):
-        self.calls.append({"system": system, "user": user, "schema": schema})
-        return self.output
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +85,7 @@ def test_rag_answer_multiple_docs_build_citations_in_order():
 
 
 def _invoke(deps, **state) -> dict:
-    skill = skills.get("rag_qa").skill
-    graph = compiler.compile(skill, deps)
-    out = asyncio.run(graph.ainvoke({"tenant_id": "t", **state}))
-    return compiler.public_output(out)
+    return invoke_builtin("rag_qa", deps, **state)
 
 
 def test_rag_qa_skill_cold_start_compiles():
@@ -110,10 +98,7 @@ def test_rag_qa_skill_cold_start_compiles():
 
 
 def test_rag_qa_skill_no_docs_returns_fixed_answer(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse([])
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(monkeypatch, [])
 
     out = _invoke(make_deps({}), question="沒人上傳過的問題")
 
@@ -123,12 +108,10 @@ def test_rag_qa_skill_no_docs_returns_fixed_answer(monkeypatch):
 
 
 def test_rag_qa_skill_with_docs_returns_citations(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse(
-            [{"document_id": "doc-1", "title": "示例文件", "content": "內容" * 50, "score": 0.9}]
-        )
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(
+        monkeypatch,
+        [{"document_id": "doc-1", "title": "示例文件", "content": "內容" * 50, "score": 0.9}],
+    )
     llm = FakeStructuredLLM(outputs={_RagAnswerOutput: _RagAnswerOutput(answer="最終答案")})
 
     out = _invoke(make_deps({}, llm=llm), question="這是什麼？")
@@ -145,12 +128,10 @@ def test_rag_qa_skill_with_docs_returns_citations(monkeypatch):
 
 
 def test_rag_qa_invoke_api_level_with_docs(monkeypatch):
-    async def fake_post(self, url, json=None, headers=None, **kwargs):
-        return FakeBackendResponse(
-            [{"document_id": "doc-1", "title": "文件", "content": "內容片段", "score": 0.9}]
-        )
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    patch_retrieve(
+        monkeypatch,
+        [{"document_id": "doc-1", "title": "文件", "content": "內容片段", "score": 0.9}],
+    )
 
     original = skills.get("rag_qa")
     llm = FakeStructuredLLM(outputs={_RagAnswerOutput: _RagAnswerOutput(answer="API 答案")})

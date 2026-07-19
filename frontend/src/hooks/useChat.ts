@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { streamChat, newConversation } from '../api/chat'
+import { getChatPersistenceGeneration, persistChatMessages } from '../chatPersistence'
 import { CHAT_MESSAGES_KEY } from '../storageKeys'
 import type { Message } from '../types'
 
@@ -19,17 +20,36 @@ function loadMessages(): Message[] {
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>(loadMessages)
   const [loading, setLoading] = useState(false)
+  // 登出會使此實例的世代失效，杜絕任何較晚發生的 lifecycle flush 回寫舊訊息。
+  const persistenceGenerationRef = useRef(getChatPersistenceGeneration())
   // 串流中的 AbortController，供「停止產生」中止 fetch 用。
   const abortRef = useRef<AbortController | null>(null)
+  // 最新 messages 的鏡像，供 debounce timer 與卸載時的 flush 讀取。
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  // 每次 messages 變動就寫回 localStorage（容量滿等情況靜默忽略）。
+  // 串流時逐 token 寫 localStorage 太頻繁；改為 500ms debounce，只在停止變動後才落地。
+  // 錯誤/中止的最終狀態同樣是「一次 setMessages 後停止變動」，會經此持久化。
   useEffect(() => {
-    try {
-      localStorage.setItem(CHAT_MESSAGES_KEY, JSON.stringify(messages))
-    } catch {
-      /* ignore */
-    }
+    clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(
+      () => persistChatMessages(messagesRef.current, persistenceGenerationRef.current),
+      500,
+    )
   }, [messages])
+
+  // 卸載或關閉分頁時把最新狀態立即 flush，涵蓋 debounce 視窗內離開而尚未落地的情況。
+  useEffect(() => {
+    const flush = () =>
+      persistChatMessages(messagesRef.current, persistenceGenerationRef.current)
+    window.addEventListener('beforeunload', flush)
+    return () => {
+      clearTimeout(timerRef.current)
+      flush()
+      window.removeEventListener('beforeunload', flush)
+    }
+  }, [])
 
   const send = useCallback(async (text: string) => {
     const trimmed = text.trim()
@@ -67,14 +87,22 @@ export function useChat() {
           return msg && msg.content === '' ? m.filter((x) => x.id !== assistantId) : m
         })
       } else {
-        // 串流失敗：把該佔位泡泡改成錯誤訊息。
-        setMessages((m) =>
-          m.map((msg) =>
+        // 串流失敗：已收到的部分內容保留（platform 契約是 token 在前、error frame 在後），
+        // 另附一顆錯誤泡泡；一個字都沒收到才把空佔位泡泡改成錯誤訊息。
+        setMessages((m) => {
+          const partial = m.find((x) => x.id === assistantId)
+          if (partial && partial.content !== '') {
+            return [
+              ...m,
+              { id: crypto.randomUUID(), role: 'assistant' as const, content: (e as Error).message, error: true },
+            ]
+          }
+          return m.map((msg) =>
             msg.id === assistantId
               ? { ...msg, content: (e as Error).message, error: true }
               : msg,
-          ),
-        )
+          )
+        })
       }
     } finally {
       setLoading(false)

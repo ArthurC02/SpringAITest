@@ -8,6 +8,7 @@
 from pydantic import BaseModel
 
 from app.engine.node_registry import node
+from app.nodes._llm_input import structured_field
 
 
 class _SummarizeOutput(BaseModel):
@@ -29,11 +30,13 @@ def make_summarize_text_node(llm):
     """建立 summarize_text 節點函式（對齊 workflows/summarize.py::summarize 的語意）。"""
 
     async def summarize_text(state: dict) -> dict:
-        out = await llm.structured(
+        summary = await structured_field(
+            llm,
             system="你是摘要助手，將輸入濃縮成三句以內的繁體中文摘要。",
             user=state["text"],
             schema=_SummarizeOutput,
+            field="summary",
         )
-        return {"summary": out.summary if out is not None else ""}
+        return {"summary": summary}
 
     return summarize_text

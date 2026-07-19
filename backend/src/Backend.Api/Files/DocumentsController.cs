@@ -31,7 +31,7 @@ public sealed class DocumentsController : ControllerBase
         var deleted = await _rag.DeleteDocumentAsync(tenantId, id, ct);
         if (!deleted)
         {
-            throw new ApiException(StatusCodes.Status404NotFound, "找不到文件：" + id);
+            throw ApiErrors.NotFound("文件", id);
         }
 
         return NoContent();

@@ -12,12 +12,19 @@ docker compose up -d --wait postgres *> $null
 if ($LASTEXITCODE -ne 0) { Write-Error "✗ postgres 未就緒，放棄準備 mem0 資料庫" }
 
 # 先刷新 collation 版本（相同時無動作），否則沿用舊 volume 時下面的 CREATE DATABASE 會被擋。
-docker compose exec -T postgres psql -U postgres -q `
-    -c "ALTER DATABASE template1 REFRESH COLLATION VERSION;" `
-    -c "ALTER DATABASE postgres REFRESH COLLATION VERSION;" *> $null
+$refreshArgs = @(
+    'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-q',
+    '-c', 'ALTER DATABASE template1 REFRESH COLLATION VERSION;',
+    '-c', 'ALTER DATABASE postgres REFRESH COLLATION VERSION;'
+)
+& docker @refreshArgs *> $null
 
 # 建 mem0_app（已存在則略過）。
-$exists = docker compose exec -T postgres psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='mem0_app'" 2>$null
+$existsArgs = @(
+    'compose', 'exec', '-T', 'postgres', 'psql', '-U', 'postgres',
+    '-tAc', "SELECT 1 FROM pg_database WHERE datname='mem0_app'"
+)
+$exists = & docker @existsArgs 2>$null
 if ("$exists".Trim() -eq '1') {
     Write-Host "  ✓ 資料庫 mem0_app 已存在"
 } else {

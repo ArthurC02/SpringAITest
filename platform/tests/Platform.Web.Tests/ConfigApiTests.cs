@@ -9,10 +9,6 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
 
     public ConfigApiTests(TestWebAppFactory factory) => _factory = factory;
 
-    private HttpClient AdminClient() => _factory.CreateClient().WithToken(_factory.IssueToken("admin-a", "ADMIN", "demo-a"));
-
-    private HttpClient UserClient() => _factory.CreateClient().WithToken(_factory.IssueToken("user-a", "USER", "demo-a"));
-
     [Fact]
     public async Task List_Returns401_WithoutToken()
     {
@@ -24,7 +20,7 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task List_Returns200_WithToken()
     {
-        var resp = await UserClient().GetAsync("/api/config");
+        var resp = await _factory.UserClient().GetAsync("/api/config");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var arr = (await resp.ReadJsonAsync()).AsArray();
@@ -35,7 +31,7 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Update_Returns200_AsAdmin()
     {
-        var resp = await AdminClient().PutAsJsonAsync("/api/config/chat_model", new { value = "gpt-4o" });
+        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/config/chat_model", new { value = "gpt-4o" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -46,7 +42,7 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Update_Returns403_AsNonAdmin_WithMessage()
     {
-        var resp = await UserClient().PutAsJsonAsync("/api/config/chat_model", new { value = "gpt-4o" });
+        var resp = await _factory.UserClient().PutAsJsonAsync("/api/config/chat_model", new { value = "gpt-4o" });
 
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -56,7 +52,7 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Update_Returns400_WhenValueMissing()
     {
-        var resp = await AdminClient().PutAsJsonAsync("/api/config/chat_model", new { });
+        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/config/chat_model", new { });
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();

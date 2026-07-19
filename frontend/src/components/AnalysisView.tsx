@@ -1,31 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
 import { useCopilotReadable } from '@copilotkit/react-core'
 import { getSummary } from '../api/analysis'
-import type { AnalysisSummary } from '../types'
+import { useResource } from '../hooks/useResource'
+import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 
 /** 分析視圖:兩張數字卡 + 最近文件條列 + 重新整理。 */
 export default function AnalysisView() {
-  const [summary, setSummary] = useState<AnalysisSummary | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  // 初值 true:首次 render 直接進 skeleton,避免閃現無錯誤的「重試」鈕(與 Config/Workflows 一致)
-  const [loading, setLoading] = useState(true)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      setSummary(await getSummary())
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    load()
-  }, [load])
+  // loading 初值 true:首次 render 直接進 skeleton,避免閃現無錯誤的「重試」鈕(與 Config 一致)
+  const { data: summary, loading, error, reload } = useResource(getSummary)
 
   // 分析摘要餵給副駕:只在此視圖掛載期間有效(value 為 null 時 CopilotKit 會略過)。
   useCopilotReadable(
@@ -37,7 +19,7 @@ export default function AnalysisView() {
     <div className="view">
       <div className="view__head">
         <h2 className="view__title">分析</h2>
-        <button className="btn" onClick={load} disabled={loading}>
+        <button className="btn" onClick={reload} disabled={loading}>
           {loading ? '載入中…' : '重新整理'}
         </button>
       </div>
@@ -46,22 +28,14 @@ export default function AnalysisView() {
         <Skeleton rows={3} />
       ) : !summary ? (
         <div>
-          {error && (
-            <p className="error-text" role="alert">
-              {error}
-            </p>
-          )}
-          <button className="btn" onClick={load}>
+          <ErrorText msg={error} />
+          <button className="btn" onClick={reload}>
             重試
           </button>
         </div>
       ) : (
         <>
-          {error && (
-            <p className="error-text" role="alert">
-              {error}
-            </p>
-          )}
+          <ErrorText msg={error} />
           <div className="cards">
             <div className="card">
               <div className="card__num">{summary.document_count}</div>

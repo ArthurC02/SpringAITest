@@ -1,4 +1,5 @@
 using System.ClientModel;
+using System.Threading.RateLimiting;
 using Platform.Service;
 using Platform.Service.Abstractions;
 using Platform.Service.Options;
@@ -6,7 +7,7 @@ using Platform.Web.Auth;
 using Platform.Web.Errors;
 using Platform.Web.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.Agents.AI;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
 using Microsoft.Extensions.AI;
 using OpenAI;
@@ -91,7 +92,11 @@ builder.Services.AddSingleton<ILlmAgent>(_ => new AgentFrameworkLlmAgent(llmOpti
 builder.Services.AddSingleton<IChatClient>(_ =>
     new OpenAIClient(
         new ApiKeyCredential(llmOptions.ApiKey),
-        new OpenAIClientOptions { Endpoint = new Uri(llmOptions.BaseUrl) })
+        new OpenAIClientOptions
+        {
+            Endpoint = new Uri(llmOptions.BaseUrl),
+            NetworkTimeout = TimeSpan.FromSeconds(90),
+        })
     .GetChatClient(llmOptions.ChatModel)
     .AsIChatClient());
 builder.Services.AddAGUI();
@@ -137,11 +142,65 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 builder.Services.AddAuthorization();
 
+// nginx 只追加一個 forwarding hop；限制為單一 hop並要求 X-Forwarded-For / Proto 對稱。
+// 只信任明確設定的 frontend-platform 專用網段；主機模式未設定或 CIDR 無效時信任集合為空。
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    options.RequireHeaderSymmetry = true;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+    if (TrustedProxyNetwork.TryParse(cfg["TRUSTED_PROXY_CIDR"], out var network))
+    {
+        options.KnownIPNetworks.Add(network!.Value);
+    }
+});
+
 // ---------------------------------------------------------------------------
 // 全域例外處理
 // ---------------------------------------------------------------------------
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
+
+// ---------------------------------------------------------------------------
+// 匿名 LLM 端點的 per-IP 節流(修成本放大 / DoS):/api/chat、/api/chat/stream、/api/copilot/agui
+// 為 AllowAnonymous 且會打真模型,未授權可迴圈燒額度/壓連線。固定視窗每 IP 每分鐘 30 次,超限回 429。
+// GlobalLimiter 對非這三條路徑一律 NoLimiter 放行(不必逐端點掛 policy,MapAGUI 這種 minimal API 端點也涵蓋)。
+// Testing 環境不註冊/不套用；RateLimitingTesting 專供限流整合測試。
+// ---------------------------------------------------------------------------
+var rateLimitingEnabled = !builder.Environment.IsEnvironment("Testing");
+if (rateLimitingEnabled)
+{
+    builder.Services.AddRateLimiter(options =>
+    {
+        options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+        options.OnRejected = (context, ct) => new ValueTask(ApiErrorWriter.WriteAsync(
+            context.HttpContext.Response,
+            StatusCodes.Status429TooManyRequests,
+            "請求過於頻繁，請稍後再試",
+            ct));
+        options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        {
+            var path = context.Request.Path;
+            var limited = path == "/api/chat"
+                || path == "/api/chat/stream"
+                || path.StartsWithSegments("/api/copilot/agui");
+            if (!limited)
+            {
+                return RateLimitPartition.GetNoLimiter("__unlimited");
+            }
+
+            var ip = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            return RateLimitPartition.GetFixedWindowLimiter(ip, _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+            });
+        });
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Observability:OpenTelemetry Tracing(業務 span source「chat.service」+ AspNetCore + OTLP)。
@@ -156,7 +215,8 @@ builder.Services.AddOpenTelemetry()
         tracing.AddAspNetCoreInstrumentation(o =>
             o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/actuator/health"));
 
-        if (!builder.Environment.IsEnvironment("Testing"))
+        if (!builder.Environment.IsEnvironment("Testing")
+            && !builder.Environment.IsEnvironment("RateLimitingTesting"))
         {
             tracing.AddOtlpExporter(o =>
             {
@@ -176,11 +236,24 @@ var app = builder.Build();
 
 app.UseExceptionHandler();
 
+// 只讓 frontend-platform 專用 compose network 的 proxy forwarding headers 改寫 RemoteIpAddress；
+// 限流才能安全採用真實 client IP，主機直連時偽造 X-Forwarded-For 仍會被忽略。
+app.UseForwardedHeaders();
+
+// 匿名 LLM 端點節流(Testing 預設不套用,見上方註冊)。
+if (rateLimitingEnabled)
+{
+    app.UseRateLimiter();
+}
+
 // 刻意不用 UseHttpsRedirection:容器內對外是 http(:8080)。
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+// 健康檢查:供容器探針;AllowAnonymous、免 token。OTel filter 過濾的正是這條路徑。
+app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAnonymous();
 
 // ---------------------------------------------------------------------------
 // AG-UI 端點:CopilotKit 前端經此與「操作助理」對話(HTTP POST + SSE)。

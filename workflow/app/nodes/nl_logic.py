@@ -9,7 +9,7 @@
 from pydantic import BaseModel
 
 from app.engine.node_registry import node
-from app.nodes._llm_input import build_user_message
+from app.nodes._llm_input import build_user_message, structured_field
 
 
 class _NlLogicOutput(BaseModel):
@@ -39,10 +39,12 @@ def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="busi
 
     async def nl_logic(state: dict) -> dict:
         user = build_user_message(state, tuple(input_keys))
-        out = await llm.structured(system=instruction, user=user, schema=_NlLogicOutput)
+        result = await structured_field(
+            llm, system=instruction, user=user, schema=_NlLogicOutput, field="result"
+        )
         # ponytail: output_key 照傳、照寫,但 @node.writes 靜態鎖死 business_result →
         # Harness 剝除未宣告的鍵,等於 v1 output_key 只能落在 business_result。要真開放
         # 需引擎「動態 writes」(讓 writes 隨 params 變),YAGNI,之後有人要再談。
-        return {output_key: out.result if out is not None else ""}
+        return {output_key: result}
 
     return nl_logic

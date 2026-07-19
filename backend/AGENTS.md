@@ -4,7 +4,7 @@ Area-specific guidance. Cross-service contracts (X-Internal-Token + identity hea
 
 ## Layout
 
-Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config, Skills — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM. Tests in `tests/Backend.Api.Tests` (xUnit, 165 tests, hand-written fakes, in-memory Dapper fixtures).
+Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config, Skills — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM. `Common/ApiErrors.cs` is the centralized 404 message factory for consistency across endpoints. Tests in `tests/Backend.Api.Tests` (xUnit, 173 tests, hand-written fakes, in-memory Dapper fixtures).
 
 ## Commands (run from `backend/`)
 
@@ -18,7 +18,7 @@ Requires appdb running (default `DB_CONNECTION_STRING`: `Host=localhost;Port=543
 
 ## Gotchas
 
-- **appdb owns ALL persistent data** (users, tenants, conversations, documents, vectors, config, skills) — restarts do **not** clear history. Only platform's in-memory short-term window resets.
+- **appdb owns ALL persistent data** (users, tenants, conversations, documents, vectors, config, skills) — restarts do **not** clear history. Only platform's in-memory short-term window resets. **rag_chunks vector search:** `rag_chunks` table has an HNSW index on the embedding column (`rag_chunks_embedding_hnsw_idx` using `vector_cosine_ops`) for ANN; requires pgvector ≥ 0.5. **Chunk writes:** inserted as a single multi-line `INSERT ... VALUES (...), (...), ...` statement per batch (reprocessing is idempotent via DELETE-then-INSERT inside one transaction), avoiding N round-trips.
 - **Skills storage:** `skill` table (tenant_id, name, definition YAML, current_revision, `enabled`=soft-delete flag) + `skill_revision` audit table (one row per write, `definition_sha256`, never deleted) with atomic data-modifying CTEs on write. `DELETE` sets `enabled=false` (revisions retained for audit); re-`POST`ing a soft-deleted name revives it with a bumped revision (not a 409). Custom skills are user-managed; built-ins live in workflow.
 - **Skill validation at write time:** `PUT /api/skills/{name}` calls `POST /api/skills/validate` on workflow (`:8001`) as a request-time dependency — if workflow is unreachable, return `502`. This is deliberate: the engine is the only source of truth for syntax.
 - **Skill export:** `GET /api/skills/{name}/export` returns a zip (`application/zip`, `filename="<name>.zip"`) in Claude Skill format — `SKILL.md` (frontmatter `name`+`description`; body points at the definition) + `skill.yaml` (the `definition` column byte-for-byte, no re-serialization). `SkillExporter` is pure string assembly + `System.IO.Compression`, no code execution; role is USER (same data as `GET /api/skills/{name}`, just zipped), tenant-filtered so cross-tenant is 404.

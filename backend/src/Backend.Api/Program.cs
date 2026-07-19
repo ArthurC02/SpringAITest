@@ -17,7 +17,7 @@ var cfg = builder.Configuration;
 // ---------------------------------------------------------------------------
 var connString = cfg["DB_CONNECTION_STRING"]
     ?? "Host=localhost;Port=5433;Username=postgres;Password=postgres;Database=springaitest";
-var internalToken = cfg["INTERNAL_API_TOKEN"] ?? "internal-dev-token";
+var internalToken = InternalTokenResolver.Resolve(cfg["INTERNAL_API_TOKEN"]);
 var jwtSecret = cfg["JWT_SECRET"] ?? "dev-jwt-secret-change-me-0123456789abcdef";
 var embeddingsProvider = cfg["EMBEDDINGS_PROVIDER"] ?? "fake";
 var llmBaseUrl = cfg["LLM_BASE_URL"] ?? "http://localhost:4000";

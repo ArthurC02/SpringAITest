@@ -15,23 +15,9 @@ from app.engine.skill import Skill
 from app.main import app
 from app.settings import settings
 from app.skills import custom
+from tests.conftest import auth_headers as _headers
 
 client = TestClient(app)
-
-INTERNAL_TOKEN = "internal-dev-token"  # 對應 settings.internal_api_token 的預設值
-
-
-def _headers(tenant_id="demo-a", user_id="alice", role="USER", token=INTERNAL_TOKEN):
-    headers = {}
-    if token is not None:
-        headers["X-Internal-Token"] = token
-    if tenant_id is not None:
-        headers["X-Tenant-Id"] = tenant_id
-    if user_id is not None:
-        headers["X-User-Id"] = user_id
-    if role is not None:
-        headers["X-User-Role"] = role
-    return headers
 
 
 VALID_YAML = """
@@ -303,12 +289,15 @@ def test_invoke_reserved_input_keys_cannot_override_caller_tenant(monkeypatch):
         resp = client.post(
             "/skills/__capture_probe__/invoke",
             json={"input": {"query": "x", "tenant_id": "evil-tenant", "role": "ADMIN"}},
-            headers=_headers(tenant_id="demo-a"),
+            headers=_headers(tenant_id="demo-a", user_id="alice", role="USER"),
         )
 
         assert resp.status_code == 200
+        # 身分鍵一律以呼叫者真實 ctx seed；input 偽造的同名值一律無效（防偽保證等價，
+        # 只是從「role 不存在」改成「role/user_id 等於呼叫者真值」）。
         assert captured["tenant_id"] == "demo-a"
-        assert "role" not in captured
+        assert captured["role"] == "USER"  # 非 input 偽造的 "ADMIN"
+        assert captured["user_id"] == "alice"
         # 引擎內部鍵不外洩到 API 回應
         assert "__loop_0_count" not in resp.json()["output"]
     finally:
@@ -404,3 +393,55 @@ def test_invoke_kb_query_definition_happy_path_returns_output():
         assert not any(k.startswith("__") for k in body["output"])
     finally:
         skills._SKILLS.pop("__kb_probe__", None)
+
+
+def test_invoke_seeds_tool_context_with_caller_identity():
+    """正向：invoke 以呼叫者身分頭 seed state → tool 的 ToolContext 拿到真實 role/user_id。
+
+    註冊一個只記錄自己收到的 ToolContext 的臨時 tool，掛進 flow 的 tool 步驟，
+    以特定身分頭 invoke，斷言 tool 收到的 role/user_id/tenant_id 等於呼叫者真值。
+    """
+    from app.engine import compiler, tool_registry
+    from tests.kbquery_fakes import make_deps
+
+    captured: dict = {}
+
+    async def _probe(ctx, **args):
+        captured.update(role=ctx.role, user_id=ctx.user_id, tenant_id=ctx.tenant_id)
+        return "ok"
+
+    tool_registry._REGISTRY["__ctx_probe_tool__"] = tool_registry.ToolSpec(
+        name="__ctx_probe_tool__",
+        kind="local",
+        description="記錄 ToolContext",
+        args_schema={},
+        returns="str",
+        fn=_probe,
+    )
+    deps = make_deps({})
+    skill = Skill.model_validate(
+        {
+            "name": "ctx_probe",
+            "flow": [{"tool": "__ctx_probe_tool__", "save_as": "probe_result"}],
+        }
+    )
+    original = skills.get("kb_query")
+    skills._SKILLS["__ctx_probe__"] = original.__class__(
+        skill=skill,
+        graph=compiler.compile(skill, deps),
+        input_model=None,
+        deps=deps,
+        recursion_limit=compiler.recursion_limit(skill),
+    )
+    try:
+        resp = client.post(
+            "/skills/__ctx_probe__/invoke",
+            json={"input": {}},
+            headers=_headers(tenant_id="demo-a", user_id="alice", role="ADMIN"),
+        )
+
+        assert resp.status_code == 200
+        assert captured == {"role": "ADMIN", "user_id": "alice", "tenant_id": "demo-a"}
+    finally:
+        skills._SKILLS.pop("__ctx_probe__", None)
+        tool_registry._REGISTRY.pop("__ctx_probe_tool__", None)

@@ -25,7 +25,7 @@ from app.engine import skill as skill_mod
 from app.main import app
 from app.settings import settings
 from app.skills import config_apply, custom
-from tests.conftest import auth_headers
+from tests.conftest import auth_headers, install_fake_get
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
@@ -117,25 +117,20 @@ class _FakeActiveBackend:
             "updated_at": updated_at,
         }
 
-    def install(self, monkeypatch):
-        backend = self
-
-        async def fake_get(self, url, headers=None, **kwargs):  # noqa: ANN001
-            assert url == "/api/configuration-sets/active"
-            assert (headers or {}).get("X-Internal-Token") == settings.internal_api_token
-            tenant = (headers or {}).get("X-Tenant-Id", "")
-            active = backend.active_by_tenant.get(tenant)
-            if active is None:
-                return _ActiveResponse(404, None)
-            return _ActiveResponse(200, active)
-
-        monkeypatch.setattr("httpx.AsyncClient.get", fake_get)
+    def handle(self, url, headers):
+        assert url == "/api/configuration-sets/active"
+        assert headers.get("X-Internal-Token") == settings.internal_api_token
+        tenant = headers.get("X-Tenant-Id", "")
+        active = self.active_by_tenant.get(tenant)
+        if active is None:
+            return _ActiveResponse(404, None)
+        return _ActiveResponse(200, active)
 
 
 @pytest.fixture
 def active_backend(monkeypatch):
     fake = _FakeActiveBackend()
-    fake.install(monkeypatch)
+    install_fake_get(monkeypatch, fake.handle)
     return fake
 
 

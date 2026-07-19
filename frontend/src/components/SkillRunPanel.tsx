@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { invokeSkill } from '../api/skills'
 import type { SkillInputField, SkillResult } from '../types'
 import { answerOf, ANSWER_KEYS } from '../skills/answerOf'
+import ErrorText from './ErrorText'
 import Markdown from './Markdown'
 import TraceView from './TraceView'
 
@@ -108,11 +109,7 @@ export default function SkillRunPanel({ name, inputSchema }: Props) {
         <button className="btn btn--primary" type="submit" disabled={busy}>
           {busy ? '執行中…' : '執行'}
         </button>
-        {runError && (
-          <p className="error-text" role="alert">
-            {runError}
-          </p>
-        )}
+        <ErrorText msg={runError} />
       </form>
 
       {result && (

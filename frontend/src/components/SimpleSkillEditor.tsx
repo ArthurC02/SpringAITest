@@ -4,7 +4,8 @@ import { createSkill, listSkillCatalog, validateSkill } from '../api/skills'
 import type { SkillInputField, SkillValidation } from '../types'
 import { compose } from '../skills/compose'
 import { TEMPLATES, type SkillForm, type SkillTemplate } from '../skills/templates'
-import { CODE_LABEL, WARN_CODES } from '../skills/validationLabels'
+import { CODE_LABEL, blockingErrors } from '../skills/validationLabels'
+import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import SkillRunPanel from './SkillRunPanel'
 
@@ -33,7 +34,7 @@ const EXTRA_FIELDS: (keyof SkillForm)[] = ['topK', 'sortBy', 'metric', 'period']
 
 /** 驗證錯誤翻人話：只給 CODE_LABEL 人話，避開行號與 node/state 術語（SSR-P2B-007）。 */
 function humanErrors(v: SkillValidation): string[] {
-  const blocking = v.errors.filter((e) => !WARN_CODES.has(e.code))
+  const blocking = blockingErrors(v)
   const labels = blocking.map((e) => CODE_LABEL[e.code] ?? '設定有誤，請調整規則或欄位後再試。')
   return [...new Set(labels)]
 }
@@ -107,7 +108,7 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
     try {
       const def = compose(template, form, baseDefinition)
       const v = await validateSkill(def)
-      if (!v.valid && v.errors.some((e) => !WARN_CODES.has(e.code))) {
+      if (!v.valid && blockingErrors(v).length > 0) {
         setValidation(v)
         return
       }
@@ -239,11 +240,7 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
         </section>
       )}
 
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
+      <ErrorText msg={error} />
       {errorLabels.length > 0 && (
         <div className="simple-skill__errors" role="alert">
           <p>還不能儲存，請調整後再試：</p>

@@ -14,16 +14,11 @@ from app.main import app
 # import 觸發註冊：kb_query 十節點 + 共用 retrieve
 from app.nodes import retrieve as _retrieve_node  # noqa: F401
 from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from tests.conftest import auth_headers
 
 client = TestClient(app)
 
-INTERNAL_TOKEN = "internal-dev-token"  # 對應 settings.internal_api_token 的預設值
-HEADERS = {
-    "X-Internal-Token": INTERNAL_TOKEN,
-    "X-Tenant-Id": "demo-a",
-    "X-User-Id": "alice",
-    "X-User-Role": "USER",
-}
+HEADERS = auth_headers()
 
 KB_QUERY_NODES = [
     "query_intake",

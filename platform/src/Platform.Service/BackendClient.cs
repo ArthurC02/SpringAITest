@@ -1,4 +1,3 @@
-using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Platform.Service.Dtos;
@@ -7,9 +6,9 @@ using Platform.Service.Options;
 namespace Platform.Service;
 
 /// <summary>
-/// 呼叫核心 backend(:8002)的共用 HttpClient 包裝:組請求(X-Internal-Token + 需要時的身分 headers)、
-/// 強制 HTTP/1.1、把傳輸層錯誤(連線失敗/逾時)交由呼叫端指定的工廠轉成合適例外。
-/// 狀態碼→例外的映射由各服務自行處理(不同端點對外語意不同)。
+/// 呼叫核心 backend(:8002)的共用 HttpClient 包裝:組請求與傳輸層 catch 委由 <see cref="InternalRequest"/>
+/// (X-Internal-Token + 需要時的身分 headers、強制 HTTP/1.1),另提供「送出→驗狀態碼→反序列化」的泛型收斂。
+/// 狀態碼→例外的映射由各服務以 Func 傳入(不同端點對外語意不同)。
 /// </summary>
 public sealed class BackendClient
 {
@@ -30,48 +29,71 @@ public sealed class BackendClient
 
     /// <summary>組一個帶 X-Internal-Token 的 backend 請求;ctx 非 null 時再帶 3 個身分 header;可選 JSON body。</summary>
     public HttpRequestMessage BuildRequest(HttpMethod method, string path, UserContext? ctx = null, object? body = null)
-    {
-        var req = new HttpRequestMessage(method, _options.BaseUrl.TrimEnd('/') + path)
-        {
-            // 強制 HTTP/1.1(避免下游在 h2c 升級時掉 body;與 workflow 呼叫一致)。
-            Version = HttpVersion.Version11,
-            VersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
-        };
-
-        req.Headers.TryAddWithoutValidation("X-Internal-Token", _options.InternalToken);
-        if (ctx is not null)
-        {
-            req.Headers.TryAddWithoutValidation("X-Tenant-Id", ctx.TenantCode);
-            req.Headers.TryAddWithoutValidation("X-User-Id", ctx.UserId);
-            req.Headers.TryAddWithoutValidation("X-User-Role", ctx.Role);
-        }
-
-        if (body is not null)
-        {
-            req.Content = JsonContent.Create(body, options: JsonOpts);
-        }
-
-        return req;
-    }
+        => InternalRequest.Build(method, _options.BaseUrl.TrimEnd('/') + path, _options.InternalToken, ctx, body, JsonOpts);
 
     /// <summary>
     /// 送出請求;傳輸層錯誤與逾時經 <paramref name="wrapTransportError"/> 轉成呼叫端要的例外
     /// (不同端點的失敗對外狀態碼不同)。呼叫端主動取消則原樣拋出。
     /// </summary>
-    public async Task<HttpResponseMessage> SendAsync(
+    public Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage req, Func<Exception, Exception> wrapTransportError, CancellationToken ct)
+        => InternalRequest.SendAsync(_http, req, wrapTransportError, ct);
+
+    /// <summary>
+    /// 送出→若非 2xx 以 <paramref name="mapError"/> 轉例外拋出→反序列化 JSON body;body 為空則拋 <paramref name="onEmptyBody"/>。
+    /// req 與 response 皆由本方法負責釋放。
+    /// </summary>
+    public async Task<T> SendForJsonAsync<T>(
+        HttpRequestMessage req,
+        Func<Exception, Exception> wrap,
+        Func<HttpResponseMessage, CancellationToken, Task<Exception>> mapError,
+        Func<Exception> onEmptyBody,
+        CancellationToken ct)
     {
-        try
+        using var resp = await SendCheckedAsync(req, wrap, mapError, ct);
+        return await resp.Content.ReadFromJsonAsync<T>(JsonOpts, ct) ?? throw onEmptyBody();
+    }
+
+    /// <summary>同 <see cref="SendForJsonAsync{T}"/> 但反序列化為 List;body 為空回空 List(清單端點不視為錯誤)。</summary>
+    public async Task<List<T>> SendForJsonListAsync<T>(
+        HttpRequestMessage req,
+        Func<Exception, Exception> wrap,
+        Func<HttpResponseMessage, CancellationToken, Task<Exception>> mapError,
+        CancellationToken ct)
+    {
+        using var resp = await SendCheckedAsync(req, wrap, mapError, ct);
+        return await resp.Content.ReadFromJsonAsync<List<T>>(JsonOpts, ct) ?? new List<T>();
+    }
+
+    /// <summary>送出並只確認成功(不讀 body,如 DELETE);非 2xx 以 <paramref name="mapError"/> 轉例外拋出。</summary>
+    public async Task SendExpectSuccessAsync(
+        HttpRequestMessage req,
+        Func<Exception, Exception> wrap,
+        Func<HttpResponseMessage, CancellationToken, Task<Exception>> mapError,
+        CancellationToken ct)
+    {
+        using (await SendCheckedAsync(req, wrap, mapError, ct)) { }
+    }
+
+    /// <summary>組合 req 送出並驗狀態碼:成功回傳仍開啟的 response(呼叫端負責釋放),失敗則映射成例外拋出。</summary>
+    private async Task<HttpResponseMessage> SendCheckedAsync(
+        HttpRequestMessage req,
+        Func<Exception, Exception> wrap,
+        Func<HttpResponseMessage, CancellationToken, Task<Exception>> mapError,
+        CancellationToken ct)
+    {
+        using (req)
         {
-            return await _http.SendAsync(req, ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw wrapTransportError(ex);
+            var resp = await SendAsync(req, wrap, ct);
+            if (resp.IsSuccessStatusCode)
+            {
+                return resp;
+            }
+
+            using (resp)
+            {
+                throw await mapError(resp, ct);
+            }
         }
     }
 

@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { listNodes } from '../api/nodes'
 import type { NodeInfo } from '../types'
+import { useResource } from '../hooks/useResource'
+import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 
 /**
@@ -9,17 +11,9 @@ import Skeleton from './Skeleton'
  * - Skill 編輯器左欄：點擊插入 YAML 樣板（給 onInsert）。
  */
 export default function NodeCatalog({ onInsert }: { onInsert?: (n: NodeInfo) => void }) {
-  const [nodes, setNodes] = useState<NodeInfo[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const { data, loading, error } = useResource(listNodes)
+  const nodes = useMemo(() => data ?? [], [data])
   const [q, setQ] = useState('')
-
-  useEffect(() => {
-    listNodes()
-      .then(setNodes)
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false))
-  }, [])
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase()
@@ -42,11 +36,7 @@ export default function NodeCatalog({ onInsert }: { onInsert?: (n: NodeInfo) => 
         aria-label="搜尋節點"
       />
 
-      {error && (
-        <p className="error-text" role="alert">
-          {error}
-        </p>
-      )}
+      <ErrorText msg={error} />
 
       {loading ? (
         <Skeleton rows={4} />

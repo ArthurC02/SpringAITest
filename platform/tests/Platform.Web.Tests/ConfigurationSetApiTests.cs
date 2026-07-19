@@ -17,9 +17,6 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
 
     public ConfigurationSetApiTests(TestWebAppFactory factory) => _factory = factory;
 
-    private HttpClient AdminClient()
-        => _factory.CreateClient().WithToken(_factory.IssueToken("admin-a", "ADMIN", "demo-a"));
-
     private static readonly string Id = FakeConfigurationSetService.ExistingId;
     private static readonly string GhostId = FakeConfigurationSetService.GhostId;
 
@@ -65,7 +62,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task List_Returns200_SnakeCase_OmitsValues()
     {
-        var resp = await AdminClient().GetAsync("/api/configuration-sets");
+        var resp = await _factory.AdminClient().GetAsync("/api/configuration-sets");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var item = Assert.Single((await resp.ReadJsonAsync()).AsArray())!;
@@ -79,7 +76,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Get_Returns200_WithValues()
     {
-        var resp = await AdminClient().GetAsync($"/api/configuration-sets/{Id}");
+        var resp = await _factory.AdminClient().GetAsync($"/api/configuration-sets/{Id}");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -92,7 +89,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Create_Returns201_WithSet()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/configuration-sets", Body());
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/configuration-sets", Body());
 
         Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -103,7 +100,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Update_Returns200()
     {
-        var resp = await AdminClient().PutAsJsonAsync($"/api/configuration-sets/{Id}", Body("renamed"));
+        var resp = await _factory.AdminClient().PutAsJsonAsync($"/api/configuration-sets/{Id}", Body("renamed"));
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("renamed", (await resp.ReadJsonAsync())["name"]!.GetValue<string>());
@@ -112,7 +109,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Delete_Returns204()
     {
-        var resp = await AdminClient().DeleteAsync($"/api/configuration-sets/{Id}");
+        var resp = await _factory.AdminClient().DeleteAsync($"/api/configuration-sets/{Id}");
 
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
     }
@@ -120,7 +117,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Activate_Returns200_IsActiveTrue()
     {
-        var resp = await AdminClient().PostAsJsonAsync($"/api/configuration-sets/{Id}/activate", new { });
+        var resp = await _factory.AdminClient().PostAsJsonAsync($"/api/configuration-sets/{Id}/activate", new { });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.True((await resp.ReadJsonAsync())["is_active"]!.GetValue<bool>());
@@ -131,7 +128,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // 跨租戶 / 不存在 → backend 404,原樣轉發(租戶隔離也走此路徑)。
     public async Task Get_Returns404_WhenBackendNotFound()
     {
-        var resp = await AdminClient().GetAsync($"/api/configuration-sets/{GhostId}");
+        var resp = await _factory.AdminClient().GetAsync($"/api/configuration-sets/{GhostId}");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -143,7 +140,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Create_Returns409_WithBackendMessage_Unchanged()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/configuration-sets", Body("dup_set"));
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/configuration-sets", Body("dup_set"));
 
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -154,7 +151,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // values 越界 → backend 422,fieldErrors 帶越界鍵(前端才指得出哪個鍵)。
     public async Task Create_Returns422_WithValueRangeFieldErrors()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/configuration-sets", Body("bad_values"));
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/configuration-sets", Body("bad_values"));
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -166,7 +163,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // PUT 也走同一條 422 路徑(不能只擋 POST)。
     public async Task Update_Returns422_ForBadValues()
     {
-        var resp = await AdminClient().PutAsJsonAsync($"/api/configuration-sets/{Id}", Body("bad_values"));
+        var resp = await _factory.AdminClient().PutAsJsonAsync($"/api/configuration-sets/{Id}", Body("bad_values"));
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         Assert.NotNull((await resp.ReadJsonAsync())["fieldErrors"]!["retrieval.top_k"]);
@@ -181,7 +178,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     {
         var before = FakeConfigurationSetService.Calls.Count;
 
-        var resp = await AdminClient().GetAsync("/api/configuration-sets/active");
+        var resp = await _factory.AdminClient().GetAsync("/api/configuration-sets/active");
 
         // 沒有對應路由 → 404,且絕不觸及下游(不存在 get:active 的呼叫)。
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -193,7 +190,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task ActivateWithNonGuidSegment_HasNoRoute()
     {
-        var resp = await AdminClient().PostAsJsonAsync("/api/configuration-sets/active/activate", new { });
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/configuration-sets/active/activate", new { });
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }

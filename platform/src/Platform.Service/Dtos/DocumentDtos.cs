@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 using Platform.Service.Validation;
 
@@ -6,9 +7,11 @@ namespace Platform.Service.Dtos;
 /// <summary>建立文件的請求 body:{ "title", "text" }。</summary>
 public sealed record DocumentCreateRequest(
     [NotBlank(ErrorMessage = "title 不可為空")]
+    [StringLength(500, ErrorMessage = "title 長度不可超過 500 字")]
     string? Title,
 
     [NotBlank(ErrorMessage = "text 不可為空")]
+    [StringLength(1_000_000, ErrorMessage = "text 長度不可超過 1000000 字")]
     string? Text);
 
 /// <summary>建立文件已受理的回應(非同步處理)。JSON:{ id, title, status }(camelCase)。</summary>

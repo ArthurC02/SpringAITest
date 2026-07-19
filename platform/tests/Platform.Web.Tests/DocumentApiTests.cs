@@ -9,12 +9,10 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
 
     public DocumentApiTests(TestWebAppFactory factory) => _factory = factory;
 
-    private HttpClient AuthedClient() => _factory.CreateClient().WithToken(_factory.IssueToken());
-
     [Fact]
     public async Task Create_Returns202_WithStatusProcessing()
     {
-        var resp = await AuthedClient().PostAsJsonAsync("/api/documents",
+        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents",
             new { title = "標題", text = "內容" });
 
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
@@ -27,17 +25,43 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Create_Returns400_WhenTitleMissing()
     {
-        var resp = await AuthedClient().PostAsJsonAsync("/api/documents", new { text = "內容" });
+        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents", new { text = "內容" });
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
         Assert.Equal("title 不可為空", body["fieldErrors"]!["title"]!.GetValue<string>());
     }
 
+    // StringLength 邊界:on-point(上限剛好)受理,off-point(超一)回 400 fieldErrors。
+    [Theory]
+    [InlineData(500, 10)]         // title 上限剛好
+    [InlineData(10, 1_000_000)]   // text 上限剛好
+    public async Task Create_AtLengthLimit_Accepted(int titleLen, int textLen)
+    {
+        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents",
+            new { title = new string('a', titleLen), text = new string('b', textLen) });
+
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(501, 10, "title", "title 長度不可超過 500 字")]
+    [InlineData(10, 1_000_001, "text", "text 長度不可超過 1000000 字")]
+    public async Task Create_OverLengthLimit_Returns400_WithFieldError(
+        int titleLen, int textLen, string field, string message)
+    {
+        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents",
+            new { title = new string('a', titleLen), text = new string('b', textLen) });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(message, body["fieldErrors"]![field]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task List_Returns200()
     {
-        var resp = await AuthedClient().GetAsync("/api/documents");
+        var resp = await _factory.UserClient().GetAsync("/api/documents");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -51,7 +75,7 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Delete_Returns204()
     {
-        var resp = await AuthedClient().DeleteAsync("/api/documents/doc-1");
+        var resp = await _factory.UserClient().DeleteAsync("/api/documents/doc-1");
 
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
     }
@@ -59,7 +83,7 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Delete_Returns404_WhenMissing()
     {
-        var resp = await AuthedClient().DeleteAsync("/api/documents/ghost");
+        var resp = await _factory.UserClient().DeleteAsync("/api/documents/ghost");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();

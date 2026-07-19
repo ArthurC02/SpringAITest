@@ -8,6 +8,7 @@ get_context 內部相依 require_internal，因此只要路由掛上 `Depends(ge
 就能保證「先驗證內部密鑰、再解析 context」的順序，不需要在每個路由重複宣告兩個依賴。
 """
 
+import hmac
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException
@@ -18,8 +19,20 @@ from app.settings import settings
 async def require_internal(
     x_internal_token: str | None = Header(default=None),
 ) -> None:
-    """驗證共享密鑰；缺漏或不符一律視為未授權（401），不區分是哪種原因以避免洩漏細節。"""
-    if x_internal_token != settings.internal_api_token:
+    """驗證共享密鑰；缺漏或不符一律視為未授權（401），不區分是哪種原因以避免洩漏細節。
+
+    以 hmac.compare_digest 做定時比較：一般 == 會在第一個不符的字元短路返回，令
+    比對耗時隨相符前綴長度變化，可被拿來逐字元爆破 token。定時安全比較消掉這條側通道。
+    """
+    # 比較 bytes 而非 str：compare_digest 對含非 ASCII 的 str 會拋 TypeError，
+    # 惡意的畸形標頭本該收斂成 401，不能變成未捕捉例外的 500。
+    if (
+        x_internal_token is None
+        or not settings.internal_api_token.strip()
+        or not hmac.compare_digest(
+            x_internal_token.encode("utf-8"), settings.internal_api_token.encode("utf-8")
+        )
+    ):
         raise HTTPException(
             status_code=401,
             detail={

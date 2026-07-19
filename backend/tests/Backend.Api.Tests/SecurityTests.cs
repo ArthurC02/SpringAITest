@@ -30,6 +30,28 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull(body["fieldErrors"]);
     }
 
+    // INTERNAL_API_TOKEN 顯式設為空/空白 → fail-fast(避免信任邊界因 FixedTimeEquals("","")==true 而失效)。
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void InternalTokenResolver_EmptyOrWhitespace_Throws(string configuredValue)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => InternalTokenResolver.Resolve(configuredValue));
+        Assert.Contains("INTERNAL_API_TOKEN", ex.Message);
+    }
+
+    [Fact]
+    public void InternalTokenResolver_Unset_ReturnsDevDefault()
+    {
+        Assert.Equal(InternalTokenResolver.DevDefault, InternalTokenResolver.Resolve(null));
+    }
+
+    [Fact]
+    public void InternalTokenResolver_NonEmpty_ReturnsAsIs()
+    {
+        Assert.Equal("custom-token", InternalTokenResolver.Resolve("custom-token"));
+    }
+
     [Fact]
     public async Task Health_NoToken_Returns200()
     {

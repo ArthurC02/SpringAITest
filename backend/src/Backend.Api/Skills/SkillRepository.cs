@@ -18,6 +18,14 @@ public sealed class SkillRepository : ISkillRepository
         + " required_role AS RequiredRole, enabled AS Enabled,"
         + " current_revision AS CurrentRevision, created_at AS CreatedAt, updated_at AS UpdatedAt";
 
+    // skill_revision 稽核列插入片段(Create/Update 共用,逐字相同):{0}=主 CTE 名、{1}=寫入者參數名。
+    // 主 CTE 語意不同(INSERT ON CONFLICT vs UPDATE)刻意不抽整段,只共用這段稽核插入。
+    private const string RevisionCte =
+        "), rev AS ("
+        + " INSERT INTO skill_revision (skill_id, revision, definition, definition_sha256, created_by)"
+        + " SELECT id, current_revision, definition, @sha, @{1} FROM {0}"
+        + ")";
+
     private readonly NpgsqlDataSource _dataSource;
 
     public SkillRepository(NpgsqlDataSource dataSource) => _dataSource = dataSource;
@@ -65,10 +73,7 @@ public sealed class SkillRepository : ISkillRepository
             + "  current_revision = skill.current_revision + 1, updated_at = now()"
             + " WHERE NOT skill.enabled"
             + " RETURNING *"
-            + "), rev AS ("
-            + " INSERT INTO skill_revision (skill_id, revision, definition, definition_sha256, created_by)"
-            + " SELECT id, current_revision, definition, @sha, @createdBy FROM ins"
-            + ")"
+            + string.Format(RevisionCte, "ins", "createdBy")
             + $" SELECT {Cols} FROM ins",
             new
             {
@@ -95,10 +100,7 @@ public sealed class SkillRepository : ISkillRepository
             + "  required_role = @RequiredRole, current_revision = current_revision + 1, updated_at = now()"
             + " WHERE tenant_id = @tenantId AND name = @name AND enabled"
             + " RETURNING *"
-            + "), rev AS ("
-            + " INSERT INTO skill_revision (skill_id, revision, definition, definition_sha256, created_by)"
-            + " SELECT id, current_revision, definition, @sha, @updatedBy FROM upd"
-            + ")"
+            + string.Format(RevisionCte, "upd", "updatedBy")
             + $" SELECT {Cols} FROM upd",
             new
             {

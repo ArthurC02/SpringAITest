@@ -12,8 +12,7 @@ invalid_expression / forbidden_script / dataflow_error（**警告級**：有這�
 """
 
 import re
-from types import UnionType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
@@ -113,11 +112,20 @@ class ValidationResult(BaseModel):
 class _Validator:
     """一次驗證的狀態容器（錯誤清單 + 資料流可用鍵集合）。"""
 
-    def __init__(self, source: str | None, allowed_tools: set[str] | None = None):
+    def __init__(
+        self,
+        source: str | None,
+        allowed_tools: set[str] | None = None,
+        author_role: str | None = None,
+    ):
         self.source = source or ""
         self.errors: list[SkillError] = []
         # Skill 可呼叫的 tool 白名單：uses_tools + flow 內宣告的 tool 步驟
         self.allowed_tools: set[str] = allowed_tools or set()
+        # 撰寫者角色（保守版 script 撰寫 gate）：只有驗證端點會帶入呼叫者真實角色；
+        # None → 不做撰寫權限檢查（custom.load 事後驗證、內建 template 驗證皆走此路，
+        # 既有 USER+script 自訂 skill 不追溯失效）。
+        self.author_role: str | None = author_role
 
     def add(self, code: str, message: str, token: str | None = None) -> None:
         self.errors.append(SkillError(code=code, message=message, line=self._line(token)))
@@ -293,10 +301,20 @@ def _check_node(step: dict, ref: Any, v: _Validator, available: set[str]) -> Non
 
 
 def _check_script(step: dict, source: Any, v: _Validator, available: set[str]) -> None:
-    """script 步驟（規格 §3.2／§5）：AST 白名單 + timeout_ms 範圍 + 資料流。"""
+    """script 步驟（規格 §3.2／§5）：撰寫者角色 gate + AST 白名單 + timeout_ms 範圍 + 資料流。"""
     if not isinstance(source, str) or not source.strip():
         v.add(INVALID_FLOW, "script 必須是非空的 Python 原始碼字串", token="script")
         return
+
+    # 撰寫者角色 gate（保守版，只在驗證端點生效）：script 步驟的沙箱自陳「authoring 限
+    # ADMIN」，這裡在寫入前把它強制起來 —— 非 ADMIN 作者提交含 script 的定義即驗證失敗。
+    # 不改 required_role（管誰能呼叫）語意，也不影響 invoke／custom.load（author_role=None）。
+    if v.author_role is not None and v.author_role != "ADMIN":
+        v.add(
+            FORBIDDEN_SCRIPT,
+            "script 步驟僅限 ADMIN 撰寫",
+            token=source.strip().splitlines()[0],
+        )
 
     timeout_ms = step.get("timeout_ms", script_runner.DEFAULT_TIMEOUT_MS)
     if (
@@ -432,9 +450,15 @@ def allowed_tools(skill: Skill) -> set[str]:
     return set(skill.uses_tools) | collect_tools(skill.flow)
 
 
-def validate_definition(data: Any, source: str | None = None) -> ValidationResult:
-    """對已解析的 skill 定義跑全部靜態驗證（規格 §3.4）。"""
-    v = _Validator(source)
+def validate_definition(
+    data: Any, source: str | None = None, author_role: str | None = None
+) -> ValidationResult:
+    """對已解析的 skill 定義跑全部靜態驗證（規格 §3.4）。
+
+    author_role 帶入時（驗證端點）啟用 script 撰寫者角色 gate：非 ADMIN 提交含 script 的
+    定義即失敗。None（invoke／custom.load／內建載入）→ 不做撰寫權限檢查。
+    """
+    v = _Validator(source, author_role=author_role)
 
     if not isinstance(data, dict):
         v.add(INVALID_FLOW, "skill 定義必須是 YAML 對應（mapping）")
@@ -456,8 +480,11 @@ def validate_definition(data: Any, source: str | None = None) -> ValidationResul
     return _result(v, skill)
 
 
-def validate_source(source: str) -> ValidationResult:
-    """對 YAML 原文跑全部靜態驗證；解析失敗收斂成 invalid_flow，不拋未捕捉例外。"""
+def validate_source(source: str, author_role: str | None = None) -> ValidationResult:
+    """對 YAML 原文跑全部靜態驗證；解析失敗收斂成 invalid_flow，不拋未捕捉例外。
+
+    author_role 帶入時啟用 script 撰寫者角色 gate（見 validate_definition）；None → 不檢查。
+    """
     try:
         data = yaml.safe_load(source)
     except yaml.YAMLError as e:
@@ -472,7 +499,7 @@ def validate_source(source: str) -> ValidationResult:
                 )
             ],
         )
-    return validate_definition(data, source=source)
+    return validate_definition(data, source=source, author_role=author_role)
 
 
 def parse_source(source: str) -> Skill:
@@ -517,39 +544,3 @@ def build_input_model(skill: Skill) -> type[BaseModel] | None:
             fields[key] = (Optional[annotation], field.default)
     model_name = "".join(p.capitalize() for p in re.split(r"[^a-z0-9]+", skill.name))
     return create_model(f"{model_name}Input", **fields)
-
-
-def schema_from_model(model: type[BaseModel] | None) -> dict[str, InputField] | None:
-    """Pydantic model → input_schema（build_input_model 的反向；規格 §7.1「清單可標註」）。
-
-    為什麼需要反向轉：前端的執行表單改成依 input_schema 動態渲染後，`@register` 的舊工作流
-    因為清單沒有這個欄位，全部退成 JSON textarea。WorkflowSpec 本來就持有 input_model
-    （唯一事實來源），在清單端點轉成同一形狀即可 —— 不必在四個工作流模組各抄一份 schema，
-    也不會出現「schema 改了但表單沒改」的兩份事實。
-
-    對應不到 InputField 六種型別的欄位（巢狀 model、Literal…）→ 整份回 None：
-    寧可讓前端安全退回 JSON textarea，也不要渲染出一個型別是猜的表單。
-    """
-    if model is None:
-        return None
-
-    by_type = {t: n for n, t in _TYPES.items()}
-    schema: dict[str, InputField] = {}
-    for key, field in model.model_fields.items():
-        annotation = field.annotation
-        if get_origin(annotation) in (Union, UnionType):
-            args = [a for a in get_args(annotation) if a is not type(None)]
-            annotation = args[0] if len(args) == 1 else None
-        type_name = by_type.get(get_origin(annotation) or annotation)
-        if type_name is None:
-            return None
-        schema[key] = InputField(
-            type=type_name,
-            required=field.is_required(),
-            # min_length 由 annotated_types.MinLen 帶進 metadata（Field(min_length=1)）
-            min_length=next(
-                (m.min_length for m in field.metadata if hasattr(m, "min_length")), None
-            ),
-            default=None if field.is_required() else field.default,
-        )
-    return schema or None
