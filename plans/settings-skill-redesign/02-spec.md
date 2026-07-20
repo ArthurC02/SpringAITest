@@ -1,7 +1,7 @@
 # 實作規格 — 系統設定重構 × 雙門 Skill 編輯器 × Configuration Set
 
-> 狀態:**規格,尚未動碼**(承 01-plan「先規劃,不執行」)。
-> 本文把 [01-plan.md](01-plan.md) 已拍板的 D1–D8 / O1–O7 轉成可施作的規格,逐點對回真實程式碼(file:line)。
+> 狀態: **主要能力已交付。** 本文保留原始規格；目前實作與待驗證行為以 [plans README](../README.md) 為準。
+> 下文保留 [01-plan.md](01-plan.md) 的 D1–D8 / O1–O7 原始規格；與現行程式碼不一致時，以程式碼和測試為準。
 > 引擎(`workflow/app/engine/`)資料模型不動;唯一動到引擎的是新增一顆 `nl_logic` 節點與「執行時套用 Configuration Set」。
 
 ---
@@ -10,13 +10,13 @@
 
 計畫要求把 **Model / Skill / Tool / Hook / MCP** 五個維度各釘一個具體選擇並指出插點。彙整如下,細節見後續章節。
 
-| 維度 | 具體選擇 | 插點(file:line) |
-|---|---|---|
-| **Model** | 執行期商業邏輯:`nl_logic` 節點呼叫 LLM,模型取 `settings.llm_model`(預設 `gpt-4o-mini`,經 LiteLLM),溫度沿用 `llm.py` 的 0.7(v1 也促升為可調)。**授權/試跑時不另用模型** —— 試跑就是走同一條 invoke,沒有第二個模型。Configuration Set 以 `llm.model` / `llm.temperature` 鍵**per-tenant 覆寫**。 | `workflow/app/llm.py:15-20`、`workflow/app/settings.py:10`;新節點 `workflow/app/nodes/nl_logic.py` |
-| **Skill** | 資料模型**不變**:仍是單一 `definition`(YAML 原文),`skill`/`skill_revision` 表、`SkillUpsert{definition}`、revision/`current_revision`、`required_role`、`tenant_id`、builtin(repo `skills/*.yaml`)vs custom(DB)全部照舊。4 分頁(名稱/描述/工作流程/商業邏輯)只是**前端撰寫外殼**,存檔前於瀏覽器把「規則」patch 進一份既有骨架 YAML → 沿用既有 `POST/PUT /api/skills`。**範本拆兩半**:骨架(引用節點的 flow)= workflow 內建 skill `template_*`(與 `@node` 契約同源同 deploy);UI metadata(label/開放欄位/輸入元件)= 前端常數。compose **patch 既有內建骨架**,前端不生成 flow YAML、不寫死節點名/版本。 | `backend/.../Skills/SkillDtos.cs:22-38`、`SkillController.cs`;骨架 `workflow/app/skills/template_*.yaml`(§3.0);前端 metadata `frontend/src/skills/templates.ts` + patch `compose.ts` |
-| **Tool** | 沿用既有 `@tool` 註冊表與 `@node` 契約;`template_*` 骨架用的節點(檢索/驗證/`nl_logic`/`script`)全是引擎已驗證的既有節點,由 workflow curate、pytest 就地驗。compose 只 patch 骨架裡那顆商業邏輯 slot 與白名單開放欄位,**不新增節點/tool**。**slot 型別依原型分兩路**:`retrieval`/`infer`/`inspire` 的 slot 是 `nl_logic`(patch `instruction`);`compare`/`stats` 因需精確算術(相對排序 / 聚合算術),slot 預設是既有 `script` 步驟型別 → `RestrictedInProcessRunner` 沙箱(patch Python body),tool 面由 `uses_tools` 白名單約束(現制)。v1 不新增 tool。 | `workflow/app/engine/tool_registry.py`、`script_runner.py`、`compiler.py:309-337`;骨架 `workflow/app/skills/template_*.yaml` |
-| **Hook**(治理/生命週期攔截) | 本專案無 middleware 式「hook」概念;扮演該角色的是四道既有關卡,全部沿用不繞過:①**寫入期驗證** backend→workflow `POST /api/skills/validate`(引擎為唯一事實來源,502 若不可達);②**角色/租戶守衛** `[SkillAdminOnly]` + `RequireTenant()`(backend)+ 側欄過濾(前端,非安全邊界);③**試跑** = `POST /api/skills/{name}/invoke`(與正式執行同一路徑,無特權);④**Configuration Set apply-at-execution** = workflow invoke 時取 active set 疊上全域預設再建 deps。 | backend `SkillController.cs:80,107,138,155`;workflow `main.py:134-212` |
-| **MCP** | **執行/授權/試跑路徑上完全沒有 MCP server**。repo 內 `codebase-memory` / `playwright` 等 MCP 僅供開發代理,不在任何 runtime 上。明確記錄:本功能不引入、不依賴任何 MCP。 | 無 |
+| 維度                        | 具體選擇                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | 插點(file:line)                                                                                                                                                                      |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Model**                   | 執行期商業邏輯:`nl_logic` 節點呼叫 LLM,模型取 `settings.llm_model`(預設 `gpt-4o-mini`,經 LiteLLM),溫度沿用 `llm.py` 的 0.7(v1 也促升為可調)。**授權/試跑時不另用模型** —— 試跑就是走同一條 invoke,沒有第二個模型。Configuration Set 以 `llm.model` / `llm.temperature` 鍵**per-tenant 覆寫**。                                                                                                                                                                                                                                                                                                      | `workflow/app/llm.py:15-20`、`workflow/app/settings.py:10`;新節點 `workflow/app/nodes/nl_logic.py`                                                                                   |
+| **Skill**                   | 資料模型**不變**:仍是單一 `definition`(YAML 原文),`skill`/`skill_revision` 表、`SkillUpsert{definition}`、revision/`current_revision`、`required_role`、`tenant_id`、builtin(repo `skills/*.yaml`)vs custom(DB)全部照舊。4 分頁(名稱/描述/工作流程/商業邏輯)只是**前端撰寫外殼**,存檔前於瀏覽器把「規則」patch 進一份既有骨架 YAML → 沿用既有 `POST/PUT /api/skills`。**範本拆兩半**:骨架(引用節點的 flow)= workflow 內建 skill `template_*`(與 `@node` 契約同源同 deploy);UI metadata(label/開放欄位/輸入元件)= 前端常數。compose **patch 既有內建骨架**,前端不生成 flow YAML、不寫死節點名/版本。 | `backend/.../Skills/SkillDtos.cs:22-38`、`SkillController.cs`;骨架 `workflow/app/skills/template_*.yaml`(§3.0);前端 metadata `frontend/src/skills/templates.ts` + patch `compose.ts` |
+| **Tool**                    | 沿用既有 `@tool` 註冊表與 `@node` 契約;`template_*` 骨架用的節點(檢索/驗證/`nl_logic`/`script`)全是引擎已驗證的既有節點,由 workflow curate、pytest 就地驗。compose 只 patch 骨架裡那顆商業邏輯 slot 與白名單開放欄位,**不新增節點/tool**。**slot 型別依原型分兩路**:`retrieval`/`infer`/`inspire` 的 slot 是 `nl_logic`(patch `instruction`);`compare`/`stats` 因需精確算術(相對排序 / 聚合算術),slot 預設是既有 `script` 步驟型別 → `RestrictedInProcessRunner` 沙箱(patch Python body),tool 面由 `uses_tools` 白名單約束(現制)。v1 不新增 tool。                                                  | `workflow/app/engine/tool_registry.py`、`script_runner.py`、`compiler.py:309-337`;骨架 `workflow/app/skills/template_*.yaml`                                                         |
+| **Hook**(治理/生命週期攔截) | 本專案無 middleware 式「hook」概念;扮演該角色的是四道既有關卡,全部沿用不繞過:①**寫入期驗證** backend→workflow `POST /api/skills/validate`(引擎為唯一事實來源,502 若不可達);②**角色/租戶守衛** `[SkillAdminOnly]` + `RequireTenant()`(backend)+ 側欄過濾(前端,非安全邊界);③**試跑** = `POST /api/skills/{name}/invoke`(與正式執行同一路徑,無特權);④**Configuration Set apply-at-execution** = workflow invoke 時取 active set 疊上全域預設再建 deps。                                                                                                                                                | backend `SkillController.cs:80,107,138,155`;workflow `main.py:134-212`                                                                                                               |
+| **MCP**                     | **執行/授權/試跑路徑上完全沒有 MCP server**。repo 內 `codebase-memory` / `playwright` 等 MCP 僅供開發代理,不在任何 runtime 上。明確記錄:本功能不引入、不依賴任何 MCP。                                                                                                                                                                                                                                                                                                                                                                                                                              | 無                                                                                                                                                                                   |
 
 ---
 
@@ -193,13 +193,13 @@ xUnit 手寫 fake(無 mock 庫,現制):
 
 骨架住在引擎旁邊,不在瀏覽器。`workflow/app/skills/` 新增五支 curate 過的內建 skill,與 `kb_query.yaml` 同機制(啟動即解析→編譯,`skills/__init__.py:50-61`;內建不入 DB,這裡是唯一事實來源):
 
-| 骨架檔 | 對齊原型 | 骨架管線 | 注入槽型別 |
-|---|---|---|---|
-| `template_retrieval.yaml` | 檢索 | 複用 `kb_query.yaml` flow 形狀(檢索+證據驗證+附出處),尾端接注入槽 | `nl_logic`(NL 指令) |
-| `template_compare.yaml` | 比對 | 檢索多筆 → 注入槽(比較/排序規則) | `script`(精確排序) |
-| `template_stats.yaml` | 統計 | 檢索(較高 top_k,讓聚合看到全集)→ 注入槽(聚合算術) | `script`(精確聚合) |
-| `template_infer.yaml` | 推論 | 檢索 → 注入槽(LLM 推理) | `nl_logic`(NL 指令) |
-| `template_inspire.yaml` | 啟發 | 檢索 → 注入槽(LLM 綜合) | `nl_logic`(NL 指令) |
+| 骨架檔                    | 對齊原型 | 骨架管線                                                          | 注入槽型別          |
+| ------------------------- | -------- | ----------------------------------------------------------------- | ------------------- |
+| `template_retrieval.yaml` | 檢索     | 複用 `kb_query.yaml` flow 形狀(檢索+證據驗證+附出處),尾端接注入槽 | `nl_logic`(NL 指令) |
+| `template_compare.yaml`   | 比對     | 檢索多筆 → 注入槽(比較/排序規則)                                  | `script`(精確排序)  |
+| `template_stats.yaml`     | 統計     | 檢索(較高 top_k,讓聚合看到全集)→ 注入槽(聚合算術)                 | `script`(精確聚合)  |
+| `template_infer.yaml`     | 推論     | 檢索 → 注入槽(LLM 推理)                                           | `nl_logic`(NL 指令) |
+| `template_inspire.yaml`   | 啟發     | 檢索 → 注入槽(LLM 綜合)                                           | `nl_logic`(NL 指令) |
 
 - **注入槽約定**:每支骨架含**恰好一顆**商業邏輯步驟,slot 型別依原型分兩路(見上表末欄):
   - `retrieval`/`infer`/`inspire`:slot 是 `nl_logic@1.0` 步驟,其 `params.instruction` 為 sentinel `__RULE_SLOT__`(合法字串,骨架照樣載入/驗證);compose(§1.6)把 sentinel 換成使用者規則原文,或(Python 進階)把該步驟整顆換成 `script`。
@@ -270,15 +270,15 @@ def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="busi
 
 ### 4.1 v1 開放鍵(O3:5 既有 settings + 促升 2 個寫死值)
 
-| `values` 鍵 | 全域預設(來源) | 型別/範圍 | 執行套用點 |
-|---|---|---|---|
-| `retrieval.top_k` | 4(`settings.retrieval_top_k`) | int 1–50 | 範本顯式帶進 retrieve params(§3.3 縫 a) |
-| `kb_query.top_k` | 8(`settings.kb_query_top_k`) | int ≥1 | `KbQueryDeps.default_top_k` |
-| `kb_query.max_retrieval_attempts` | 2 | int ≥1 | `KbQueryDeps.max_retrieval_attempts` |
-| `workflow.timeout_seconds` | 120 | int ≥1 | `main.py:188` timeout(改讀有效設定) |
-| `llm.model` | `gpt-4o-mini`(`settings.llm_model`) | str(白名單 = LiteLLM 已配置模型) | per-config 建 LLM |
-| `intent.confidence_threshold`(促升) | 0.6(`intent_classification.py:91`) | float 0–1 | `KbQueryDeps` 新欄位 → factory |
-| `llm.temperature`(促升) | 0.7(`llm.py:19`) | float 0–2 | per-config 建 LLM |
+| `values` 鍵                         | 全域預設(來源)                      | 型別/範圍                        | 執行套用點                              |
+| ----------------------------------- | ----------------------------------- | -------------------------------- | --------------------------------------- |
+| `retrieval.top_k`                   | 4(`settings.retrieval_top_k`)       | int 1–50                         | 範本顯式帶進 retrieve params(§3.3 縫 a) |
+| `kb_query.top_k`                    | 8(`settings.kb_query_top_k`)        | int ≥1                           | `KbQueryDeps.default_top_k`             |
+| `kb_query.max_retrieval_attempts`   | 2                                   | int ≥1                           | `KbQueryDeps.max_retrieval_attempts`    |
+| `workflow.timeout_seconds`          | 120                                 | int ≥1                           | `main.py:188` timeout(改讀有效設定)     |
+| `llm.model`                         | `gpt-4o-mini`(`settings.llm_model`) | str(白名單 = LiteLLM 已配置模型) | per-config 建 LLM                       |
+| `intent.confidence_threshold`(促升) | 0.6(`intent_classification.py:91`)  | float 0–1                        | `KbQueryDeps` 新欄位 → factory          |
+| `llm.temperature`(促升)             | 0.7(`llm.py:19`)                    | float 0–2                        | per-config 建 LLM                       |
 
 - **只存覆寫值**;未覆寫鍵回落全域預設。`values` jsonb 存數值(model 除外為字串 —— DTO 的 `values` 型別需容納 string|number,以 `Dictionary<string, JsonElement>` 或分兩欄承載;ponytail:先 `Dictionary<string,object>` + 逐鍵型別驗證,一個 jsonb 欄不拆)。
 - **明確不做(§6.2 v2 / §9)**:rerank 加權、變體數上限、容差、locator 權重(v2);詞彙/口徑/意圖對照/公式等「規則資料」的 UI 化(另立計畫)。
@@ -297,13 +297,13 @@ def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="busi
 
 ## 5. 多租戶落實點(D8 貫穿)
 
-| 面向 | 隔離維度 | 落實 |
-|---|---|---|
-| Skill | `skill.tenant_id`(現況 ✓) | `RequireTenant()` 過濾,跨租戶 404(`SkillController.cs:44`) |
-| Configuration Set | `configuration_set.tenant_id`(新) | 同上;`uq_confset_active` per-tenant;controller 每條帶 tenant |
-| 執行取值 | invoke 時 ctx.tenant_id | workflow 向 backend 取 active set 帶 `X-Tenant-Id`(`custom._headers` 模式);per-config deps 快取鍵含 tenant_id |
-| 一般設定 `app_config` | **全域(無 tenant 欄)** | O6 定案**不動**;若日後要 per-tenant 另立小計畫加欄 |
-| Admin 分層 | 組織 Admin = ADMIN + tenant 隔離 | 系統 Admin 僅留位;不寫跨租戶捷徑 |
+| 面向                  | 隔離維度                          | 落實                                                                                                          |
+| --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Skill                 | `skill.tenant_id`(現況 ✓)         | `RequireTenant()` 過濾,跨租戶 404(`SkillController.cs:44`)                                                    |
+| Configuration Set     | `configuration_set.tenant_id`(新) | 同上;`uq_confset_active` per-tenant;controller 每條帶 tenant                                                  |
+| 執行取值              | invoke 時 ctx.tenant_id           | workflow 向 backend 取 active set 帶 `X-Tenant-Id`(`custom._headers` 模式);per-config deps 快取鍵含 tenant_id |
+| 一般設定 `app_config` | **全域(無 tenant 欄)**            | O6 定案**不動**;若日後要 per-tenant 另立小計畫加欄                                                            |
+| Admin 分層            | 組織 Admin = ADMIN + tenant 隔離  | 系統 Admin 僅留位;不寫跨租戶捷徑                                                                              |
 
 跨租戶零可見零可改:任何 config 讀寫都經 tenant 過濾;deps 快取以 tenant 分槽,杜絕「A 租戶設定污染 B 租戶執行」(比照 `custom.py:1-13` 對快取毒化的顧慮)。
 
@@ -311,14 +311,14 @@ def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="busi
 
 ## 6. 分階(映射 §8,標最小切片)
 
-| 階段 | 內容 | 服務 | 依賴 |
-|---|---|---|---|
-| **P1 前端 IA** | AppShell 移除 workflows 選單/View/action/文案;ConfigView 三分頁;Skill 功能樹(清單+進階模式=重用 SkillsTab)+ 試跑(TraceView)+ 版本(revisions)接為子功能 | frontend | 無 |
-| **P2a 範本** | **workflow**:curate 5 支 `template_*` 內建骨架(含 `__RULE_SLOT__` 注入槽;`retrieval`/`infer`/`inspire` = `nl_logic` slot,`compare`/`stats` = `script` slot)+ catalog 內建項帶 `definition`;**frontend**:5 支薄 metadata(`templates.ts`:basedOn/openFields/labels/inputWidgets)+ compose(patch)(`compose.ts`) | workflow + frontend | 引擎既有節點(檢索/驗證/`nl_logic`/`script`);`nl_logic` slot 那三支 → 依賴 P3,`compare`/`stats` 的 `script` slot 不依賴 P3 |
-| **P2b 簡單模式** | `SimpleSkillEditor` + 範本挑選 + 名稱/描述/我的規則(NL 預設)+ 組譯(`compose.ts` patch 骨架)+ validate 翻人話 + 存後試 | frontend | P2a、P3(NL 路徑) |
-| **P2c 進階模式** | 已由 P1 重用 SkillsTab 覆蓋;剩「簡單→進階」單向切換 + Python(CodeMirror,O5) | frontend | P2b |
-| **P3 nl_logic 節點** | `nodes/nl_logic.py` + 註冊 + pytest;NL 路徑打通 | workflow | 無 |
-| **P4 Configuration Set** | 新表 + backend CRUD/activate + platform 代理 + workflow invoke 取值/per-config deps + 促升 2 值 + `NodeParamsTab` 表單 | backend/platform/workflow/frontend | 獨立線 |
+| 階段                     | 內容                                                                                                                                                                                                                                                                                                         | 服務                               | 依賴                                                                                                                      |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **P1 前端 IA**           | AppShell 移除 workflows 選單/View/action/文案;ConfigView 三分頁;Skill 功能樹(清單+進階模式=重用 SkillsTab)+ 試跑(TraceView)+ 版本(revisions)接為子功能                                                                                                                                                       | frontend                           | 無                                                                                                                        |
+| **P2a 範本**             | **workflow**:curate 5 支 `template_*` 內建骨架(含 `__RULE_SLOT__` 注入槽;`retrieval`/`infer`/`inspire` = `nl_logic` slot,`compare`/`stats` = `script` slot)+ catalog 內建項帶 `definition`;**frontend**:5 支薄 metadata(`templates.ts`:basedOn/openFields/labels/inputWidgets)+ compose(patch)(`compose.ts`) | workflow + frontend                | 引擎既有節點(檢索/驗證/`nl_logic`/`script`);`nl_logic` slot 那三支 → 依賴 P3,`compare`/`stats` 的 `script` slot 不依賴 P3 |
+| **P2b 簡單模式**         | `SimpleSkillEditor` + 範本挑選 + 名稱/描述/我的規則(NL 預設)+ 組譯(`compose.ts` patch 骨架)+ validate 翻人話 + 存後試                                                                                                                                                                                        | frontend                           | P2a、P3(NL 路徑)                                                                                                          |
+| **P2c 進階模式**         | 已由 P1 重用 SkillsTab 覆蓋;剩「簡單→進階」單向切換 + Python(CodeMirror,O5)                                                                                                                                                                                                                                  | frontend                           | P2b                                                                                                                       |
+| **P3 nl_logic 節點**     | `nodes/nl_logic.py` + 註冊 + pytest;NL 路徑打通                                                                                                                                                                                                                                                              | workflow                           | 無                                                                                                                        |
+| **P4 Configuration Set** | 新表 + backend CRUD/activate + platform 代理 + workflow invoke 取值/per-config deps + 促升 2 值 + `NodeParamsTab` 表單                                                                                                                                                                                       | backend/platform/workflow/frontend | 獨立線                                                                                                                    |
 
 - **最小可用切片 = P1 + P2a + P2b + P3**:交付「非技術使用者靠範本建 Skill、寫中文規則、存後當場試跑」的完整價值。P2c(Python/進階切換)服務技術使用者,可延後;**P4(Configuration Set)是另一條較重的線,可獨立排期**(跨四服務、新表、tenant 隔離,§8 標高風險)。
 - 每階段跑既有測試門檻 + e2e 回歸:聊天 SSE / 文件 202 / 既有 skill invoke 契約不得破(§9)。
@@ -373,9 +373,9 @@ def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="busi
 
 ## 9. 測試策略總表
 
-| 服務 | 工具 | v1 重點 |
-|---|---|---|
-| frontend | oxlint + tsc/vite build;`compose.ts` 一支輕量 patch 形狀自我檢查 | patch 假骨架後 `__RULE_SLOT__` 被規則取代、白名單欄位覆寫、非白名單原樣;lint+build 綠(「組出的 YAML 可驗」移到 workflow 就地驗) |
-| backend | xUnit 手寫 fake | configuration_set CRUD/activate 唯一性/租戶隔離/values 型別範圍/ADMIN 守衛早於模型驗證 |
-| workflow | pytest | 五支 `template_*` 載入即編 + `__RULE_SLOT__` patch 後仍 validate=valid(`nl_logic` slot 填 NL、`compare`/`stats` 的 `script` slot 填 Python);nl_logic 單元 + NL skill e2e;config 套用(覆寫反映於 deps)+ 快取命中/換版重編 + 無 active 回落 + 租戶隔離 |
-| 跨鏈 | e2e-verifier(docker compose) | 聊天 SSE / 文件 202 / 既有 kb_query·rag_qa invoke 契約不破 |
+| 服務     | 工具                                                             | v1 重點                                                                                                                                                                                                                                              |
+| -------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| frontend | oxlint + tsc/vite build;`compose.ts` 一支輕量 patch 形狀自我檢查 | patch 假骨架後 `__RULE_SLOT__` 被規則取代、白名單欄位覆寫、非白名單原樣;lint+build 綠(「組出的 YAML 可驗」移到 workflow 就地驗)                                                                                                                      |
+| backend  | xUnit 手寫 fake                                                  | configuration_set CRUD/activate 唯一性/租戶隔離/values 型別範圍/ADMIN 守衛早於模型驗證                                                                                                                                                               |
+| workflow | pytest                                                           | 五支 `template_*` 載入即編 + `__RULE_SLOT__` patch 後仍 validate=valid(`nl_logic` slot 填 NL、`compare`/`stats` 的 `script` slot 填 Python);nl_logic 單元 + NL skill e2e;config 套用(覆寫反映於 deps)+ 快取命中/換版重編 + 無 active 回落 + 租戶隔離 |
+| 跨鏈     | e2e-verifier(docker compose)                                     | 聊天 SSE / 文件 202 / 既有 kb_query·rag_qa invoke 契約不破                                                                                                                                                                                           |

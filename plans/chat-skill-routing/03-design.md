@@ -1,6 +1,7 @@
 # 詳細設計 — 聊天 → Skill 路由(Chat-to-Skill Routing)
 
-> 狀態:**實作就緒(implementer-ready)**。承接 [01-plan.md](01-plan.md) 與 [02-spec.md](02-spec.md)。
+> 狀態: **已交付的設計記錄。** 承接 [01-plan.md](01-plan.md) 與 [02-spec.md](02-spec.md)；現行行為見 [plans README](../README.md)。
+> **歷史草稿警示:** 本文的 `LlmTool`、`AIFunction`、`ChatToolSpecs` 與 `/workflows` 描述都沒有成為現行路徑；保留僅供決策追溯。
 > 本文件是 **HOW**:02-spec 已定案「方案 A、把工具來源從寫死 `ChatToolSpecs` 換成動態 Skill 目錄」;此處給出確切簽章、映射邏輯、呼叫鏈、await 傳染面、測試個案與落地順序。**不重述** 02-spec 的結論,只在需要時引用其節次(如「見 02-spec §2.3」)。
 > **規劃任務,不動生產碼。** 唯一產出即本檔。
 
@@ -10,26 +11,26 @@
 
 以 MCP 逐一核對,**02-spec 的 file:line 全部準確,無漂移**。落地時以下錨點為準:
 
-| 錨點 | 現行位置(已核) | 用途 |
-|---|---|---|
-| `ILlmAgent.CompleteAsync/StreamAsync(…, IReadOnlyList<LlmTool>? tools, …)` | `ILlmAgent.cs:10,13` | function-calling 入口,tools 非空即啟用 |
-| `LlmTool` record(`Name, Description, Func<string,CancellationToken,Task<string>> InvokeAsync`) | `LlmTool.cs:8-11` | Service 層薄工具定義;ponytail 註解已在 `:6` 標明單字串參數升級路徑 |
-| `AgentFrameworkLlmAgent.ToRunOptions` → `AIFunctionFactory.Create((string question, ct)=>…, name, desc)` | `AgentFrameworkLlmAgent.cs:67-85`(param 名硬寫 `question` 於 `:79`) | LlmTool → AIFunction,掛 run-level `ChatOptions.Tools` |
-| `ChatService.BuildTools(UserContext?)` | `ChatService.cs:212-232` | **本次唯一實質改動點** |
-| 靜態工具表 `ChatToolSpecs` | `ChatService.cs:190-203` | 保留為「尚未 skill 化的 workflow」 |
-| 角色過濾 `spec.RequiredRole is not null && userCtx.Role != spec.RequiredRole` | `ChatService.cs:222-225` | 沿用同一 predicate 語義 |
-| `InvokeWorkflowToolAsync`(工具委派實作 + kb_query abstain 兜底 + catch 錯誤字串) | `ChatService.cs:234-263`(abstain `:245-254`、catch `:258-262`) | skill 版委派的參考範本 |
-| `ExtractAnswer`(依 `OutputKeys={answer,final_answer,report,summary}` 取字串) | `ChatService.cs:270-281`(keys `:206`) | skill 輸出 → 給模型的字串 |
-| `_workflows` 已注入 | `ChatService.cs:31,48` | 不需新增建構子依賴 |
-| `ChatAsync` 呼叫 `_agent.CompleteAsync(messages, BuildTools(userCtx), ct)` | `ChatService.cs:63` | await 傳染點 ① |
-| `StreamChatAsync` 呼叫 `_agent.StreamAsync(messages, BuildTools(userCtx), ct)` | `ChatService.cs:97` | await 傳染點 ② |
-| mem0 recall(prompt 前)/ remember(回覆後) | recall `:172`;remember 阻塞 `:70`、串流 `:140` | 順序天然正確,見 §5 |
-| 短期記憶 `GetRecent` | `ChatService.cs:169` | 多輪上下文來源 |
-| `WorkflowService.GetSkillCatalogAsync(ctx) → Task<JsonElement>`(GET `/skills`) | `WorkflowService.cs:82-83` → `GetCatalogAsync:89-100` | 目錄來源(原樣穿透 JSON) |
-| `WorkflowService.InvokeSkillAsync(name, Dictionary<string,JsonElement> input, ctx) → Task<JsonElement>`(POST `/skills/{name}/invoke`) | `WorkflowService.cs:53-65` | skill 執行,404/403/422/502 映射同 workflow invoke |
-| SkillInfo 目錄項形狀 `{name, description, required_role, source, revision, input_schema}` | `workflow/app/schemas.py:35-43`;端點 `main.py:96-114` | 解析對象 |
-| `InputField` `{type∈{str,int,float,bool,list,dict}, required, min_length, default}` | `workflow/app/engine/skill.py:57-63` | 挑輸入鍵的依據 |
-| 自訂 skill 目錄 N+1(清單 1 打 + 逐筆 `input_schema` N 打) | `custom.py:87`(gather)+ `_entry:100` | 效能天花板,見 §7 |
+| 錨點                                                                                                                                  | 現行位置(已核)                                                      | 用途                                                               |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `ILlmAgent.CompleteAsync/StreamAsync(…, IReadOnlyList<LlmTool>? tools, …)`                                                            | `ILlmAgent.cs:10,13`                                                | function-calling 入口,tools 非空即啟用                             |
+| `LlmTool` record(`Name, Description, Func<string,CancellationToken,Task<string>> InvokeAsync`)                                        | `LlmTool.cs:8-11`                                                   | Service 層薄工具定義;ponytail 註解已在 `:6` 標明單字串參數升級路徑 |
+| `AgentFrameworkLlmAgent.ToRunOptions` → `AIFunctionFactory.Create((string question, ct)=>…, name, desc)`                              | `AgentFrameworkLlmAgent.cs:67-85`(param 名硬寫 `question` 於 `:79`) | LlmTool → AIFunction,掛 run-level `ChatOptions.Tools`              |
+| `ChatService.BuildTools(UserContext?)`                                                                                                | `ChatService.cs:212-232`                                            | **本次唯一實質改動點**                                             |
+| 靜態工具表 `ChatToolSpecs`                                                                                                            | `ChatService.cs:190-203`                                            | 保留為「尚未 skill 化的 workflow」                                 |
+| 角色過濾 `spec.RequiredRole is not null && userCtx.Role != spec.RequiredRole`                                                         | `ChatService.cs:222-225`                                            | 沿用同一 predicate 語義                                            |
+| `InvokeWorkflowToolAsync`(工具委派實作 + kb_query abstain 兜底 + catch 錯誤字串)                                                      | `ChatService.cs:234-263`(abstain `:245-254`、catch `:258-262`)      | skill 版委派的參考範本                                             |
+| `ExtractAnswer`(依 `OutputKeys={answer,final_answer,report,summary}` 取字串)                                                          | `ChatService.cs:270-281`(keys `:206`)                               | skill 輸出 → 給模型的字串                                          |
+| `_workflows` 已注入                                                                                                                   | `ChatService.cs:31,48`                                              | 不需新增建構子依賴                                                 |
+| `ChatAsync` 呼叫 `_agent.CompleteAsync(messages, BuildTools(userCtx), ct)`                                                            | `ChatService.cs:63`                                                 | await 傳染點 ①                                                     |
+| `StreamChatAsync` 呼叫 `_agent.StreamAsync(messages, BuildTools(userCtx), ct)`                                                        | `ChatService.cs:97`                                                 | await 傳染點 ②                                                     |
+| mem0 recall(prompt 前)/ remember(回覆後)                                                                                              | recall `:172`;remember 阻塞 `:70`、串流 `:140`                      | 順序天然正確,見 §5                                                 |
+| 短期記憶 `GetRecent`                                                                                                                  | `ChatService.cs:169`                                                | 多輪上下文來源                                                     |
+| `WorkflowService.GetSkillCatalogAsync(ctx) → Task<JsonElement>`(GET `/skills`)                                                        | `WorkflowService.cs:82-83` → `GetCatalogAsync:89-100`               | 目錄來源(原樣穿透 JSON)                                            |
+| `WorkflowService.InvokeSkillAsync(name, Dictionary<string,JsonElement> input, ctx) → Task<JsonElement>`(POST `/skills/{name}/invoke`) | `WorkflowService.cs:53-65`                                          | skill 執行,404/403/422/502 映射同 workflow invoke                  |
+| SkillInfo 目錄項形狀 `{name, description, required_role, source, revision, input_schema}`                                             | `workflow/app/schemas.py:35-43`;端點 `main.py:96-114`               | 解析對象                                                           |
+| `InputField` `{type∈{str,int,float,bool,list,dict}, required, min_length, default}`                                                   | `workflow/app/engine/skill.py:57-63`                                | 挑輸入鍵的依據                                                     |
+| 自訂 skill 目錄 N+1(清單 1 打 + 逐筆 `input_schema` N 打)                                                                             | `custom.py:87`(gather)+ `_entry:100`                                | 效能天花板,見 §7                                                   |
 
 ---
 
@@ -299,28 +300,28 @@ recall 在 prompt 前、remember 在**完整(含工具融合後)回覆**之後 �
 
 ### `Platform.Service.Tests`(核心,貼近改動層)
 
-| # | 個案 | 斷言 |
-|---|---|---|
-| T1 | 目錄含 1 USER skill(`template_retrieval`,`input_schema:{question:{type:str,required:true}}`)+ 1 ADMIN skill;`userCtx.Role=USER` | `BuildToolsAsync` 只含 USER skill 工具;ADMIN skill 被剔除 |
-| T2 | 同 T1,`Role=ADMIN` | 兩個工具都在 |
-| T3 | `userCtx=null`(匿名) | 回 `null`(裸聊),**未呼叫** `GetSkillCatalogAsync` |
-| T4 | 目錄含 builtin + custom 各一(皆單必填字串) | 兩者平等成工具;`source` 不影響 |
-| T5 | 目錄某 skill `input_schema=null` 或 多必填 或 非字串 | 該 skill **被跳過**(P1 天花板) |
-| T6 | 目錄 skill 名與殘留 `ChatToolSpecs` 撞名 | skill 版留、靜態版被去重剔除;不撞名時兩者共存 |
-| T7 | 模型(fake `ILlmAgent`)選呼叫某 skill 工具 | `InvokeSkillAsync` 被以正確 `name` + `{inputKey: arg}` 呼叫(從 `FakeWorkflowService.Invokes` 斷言) |
-| T8 | skill invoke 回 `{skill,output:{answer:"…"}}` | `ExtractSkillAnswer` 取出 `answer` 字串回模型 |
-| T9 | `InvokeSkillAsync` 拋例外 | 工具回「Skill … 呼叫失敗」字串,聊天**不中斷**(對映 `:258-262`) |
-| T10 | `GetSkillCatalogAsync` 拋 `WorkflowInvocationException`(workflow 502) | 退回靜態工具或裸聊,聊天**不炸**(best-effort) |
-| T11 | fake `ILlmAgent` 不呼叫任何工具 | 純聊天回覆照常(無工具回退,零程式碼路徑) |
-| T12 | mem0 順序 | `RecallAsync` 在 `CompleteAsync` 前、`RememberAsync` 在後(`FakeMem0Client.Remembered` 記到融合後 reply) |
+| #   | 個案                                                                                                                            | 斷言                                                                                                    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| T1  | 目錄含 1 USER skill(`template_retrieval`,`input_schema:{question:{type:str,required:true}}`)+ 1 ADMIN skill;`userCtx.Role=USER` | `BuildToolsAsync` 只含 USER skill 工具;ADMIN skill 被剔除                                               |
+| T2  | 同 T1,`Role=ADMIN`                                                                                                              | 兩個工具都在                                                                                            |
+| T3  | `userCtx=null`(匿名)                                                                                                            | 回 `null`(裸聊),**未呼叫** `GetSkillCatalogAsync`                                                       |
+| T4  | 目錄含 builtin + custom 各一(皆單必填字串)                                                                                      | 兩者平等成工具;`source` 不影響                                                                          |
+| T5  | 目錄某 skill `input_schema=null` 或 多必填 或 非字串                                                                            | 該 skill **被跳過**(P1 天花板)                                                                          |
+| T6  | 目錄 skill 名與殘留 `ChatToolSpecs` 撞名                                                                                        | skill 版留、靜態版被去重剔除;不撞名時兩者共存                                                           |
+| T7  | 模型(fake `ILlmAgent`)選呼叫某 skill 工具                                                                                       | `InvokeSkillAsync` 被以正確 `name` + `{inputKey: arg}` 呼叫(從 `FakeWorkflowService.Invokes` 斷言)      |
+| T8  | skill invoke 回 `{skill,output:{answer:"…"}}`                                                                                   | `ExtractSkillAnswer` 取出 `answer` 字串回模型                                                           |
+| T9  | `InvokeSkillAsync` 拋例外                                                                                                       | 工具回「Skill … 呼叫失敗」字串,聊天**不中斷**(對映 `:258-262`)                                          |
+| T10 | `GetSkillCatalogAsync` 拋 `WorkflowInvocationException`(workflow 502)                                                           | 退回靜態工具或裸聊,聊天**不炸**(best-effort)                                                            |
+| T11 | fake `ILlmAgent` 不呼叫任何工具                                                                                                 | 純聊天回覆照常(無工具回退,零程式碼路徑)                                                                 |
+| T12 | mem0 順序                                                                                                                       | `RecallAsync` 在 `CompleteAsync` 前、`RememberAsync` 在後(`FakeMem0Client.Remembered` 記到融合後 reply) |
 
 ### `Platform.Web.Tests`(`WebApplicationFactory`)
 
-| # | 個案 | 斷言 |
-|---|---|---|
-| W1 | `/api/chat` 帶有效 JWT | 走含工具路徑(fake 目錄有料);回 `ChatResponse` |
-| W2 | `/api/chat` 匿名 | 裸聊,不掛工具 |
-| W3 | `/api/chat/stream` 帶 JWT | SSE `data:`(**無空格**)格式、每 event 空行結尾不變;工具融合後內容照常逐 chunk 出 |
+| #   | 個案                      | 斷言                                                                             |
+| --- | ------------------------- | -------------------------------------------------------------------------------- |
+| W1  | `/api/chat` 帶有效 JWT    | 走含工具路徑(fake 目錄有料);回 `ChatResponse`                                    |
+| W2  | `/api/chat` 匿名          | 裸聊,不掛工具                                                                    |
+| W3  | `/api/chat/stream` 帶 JWT | SSE `data:`(**無空格**)格式、每 event 空行結尾不變;工具融合後內容照常逐 chunk 出 |
 
 > `FakeWorkflowService` 已在 `Platform.Web.Tests/Fakes.cs:166` 有 `GetSkillCatalogAsync`,同樣需可注入目錄。跨服務真行為(打真 workflow/backend)交給 `e2e-verifier` 驗一次(記憶 fakes-hide-real-behavior:手寫 fake 會掩蓋真 JSON 形狀/序列化差異)。
 
@@ -328,16 +329,16 @@ recall 在 prompt 前、remember 在**完整(含工具融合後)回覆**之後 �
 
 ## 10. 落地順序(change-sequence,對映 01-plan / 02-spec §7 的 P1–P4)
 
-| 序 | 動作 | 檔案 | Phase |
-|---|---|---|---|
-| 1 | `FakeWorkflowService` 擴充:可注入目錄 `JsonElement` + 記錄 `InvokeSkillAsync` 參數 | `Platform.Service.Tests/Fakes.cs`、`Platform.Web.Tests/Fakes.cs` | P1(先鋪測試地基) |
-| 2 | 抽 `BuildStaticTools`(現行 `ChatToolSpecs` 迴圈原封搬出) | `ChatService.cs` | P1 |
-| 3 | 加 `SkillCatalogToTools` / `SingleRequiredStringKey` / `IsRoleAllowed` / `ExtractSkillAnswer` / `InvokeSkillToolAsync`(純邏輯,可先單測 T1–T9) | `ChatService.cs` | P1 |
-| 4 | `BuildTools` → `BuildToolsAsync`(取目錄 + best-effort catch + 去重);改兩處呼叫點 await(`:63`、`:97`) | `ChatService.cs` | P1 |
-| 5 | 跑 `dotnet build` + `dotnet test`,補 T10–T12 / W1–W3 | — | P1 |
-| — | **P2** skill 輸出附出處:讓 skill 的 answer 節點產可引用字串,模型融入正文;trace 預設隱藏(前端可選展開)。多數已由 function-calling 內建 | workflow skill 定義 + 前端(非本檔) | P2 |
-| — | **P3** 多參泛化 + 缺參補問(§8) | `LlmTool.cs` / `AgentFrameworkLlmAgent.cs` / `ChatService.cs` | P3 |
-| — | **P4** AG-UI 側掛同批 server-side skill 工具(**預設不做**,定位不同) | `Program.cs` | P4 / 非目標 |
+| 序  | 動作                                                                                                                                          | 檔案                                                             | Phase            |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ---------------- |
+| 1   | `FakeWorkflowService` 擴充:可注入目錄 `JsonElement` + 記錄 `InvokeSkillAsync` 參數                                                            | `Platform.Service.Tests/Fakes.cs`、`Platform.Web.Tests/Fakes.cs` | P1(先鋪測試地基) |
+| 2   | 抽 `BuildStaticTools`(現行 `ChatToolSpecs` 迴圈原封搬出)                                                                                      | `ChatService.cs`                                                 | P1               |
+| 3   | 加 `SkillCatalogToTools` / `SingleRequiredStringKey` / `IsRoleAllowed` / `ExtractSkillAnswer` / `InvokeSkillToolAsync`(純邏輯,可先單測 T1–T9) | `ChatService.cs`                                                 | P1               |
+| 4   | `BuildTools` → `BuildToolsAsync`(取目錄 + best-effort catch + 去重);改兩處呼叫點 await(`:63`、`:97`)                                          | `ChatService.cs`                                                 | P1               |
+| 5   | 跑 `dotnet build` + `dotnet test`,補 T10–T12 / W1–W3                                                                                          | —                                                                | P1               |
+| —   | **P2** skill 輸出附出處:讓 skill 的 answer 節點產可引用字串,模型融入正文;trace 預設隱藏(前端可選展開)。多數已由 function-calling 內建         | workflow skill 定義 + 前端(非本檔)                               | P2               |
+| —   | **P3** 多參泛化 + 缺參補問(§8)                                                                                                                | `LlmTool.cs` / `AgentFrameworkLlmAgent.cs` / `ChatService.cs`    | P3               |
+| —   | **P4** AG-UI 側掛同批 server-side skill 工具(**預設不做**,定位不同)                                                                           | `Program.cs`                                                     | P4 / 非目標      |
 
 **P1 最小 diff 界線**:只改 `ChatService.cs`(+ 兩份測試 Fakes)。不碰 controller、agent、SSE、mem0、`Program.cs`、`ILlmAgent`、`LlmTool`。
 
@@ -345,15 +346,15 @@ recall 在 prompt 前、remember 在**完整(含工具融合後)回覆**之後 �
 
 ## 11. 刻意簡化總表(ponytail,含天花板與升級路徑)
 
-| 簡化 | 天花板 | 何時升級 |
-|---|---|---|
-| 路由器 = 聊天 LLM 本身,不建分類器(方案 B) | 依賴 LLM 選工具正確率 | 量到誤選率高才考慮(02-spec §1 已論證 B 是重造) |
-| P1 只吃「單一必填字串」skill,其餘跳過 | 多參/非字串 skill 暫不可路由 | P3(§8) |
-| 工具參數名硬寫 `question`,不動 `ToRunOptions` | 單參上限 | P3 |
-| skill 版不移植 kb_query→rag_qa abstain 兜底 | skill 版棄答無自動兜底 | kb_query 真的遷成 skill 且量到需要時 |
-| 目錄每輪 fetch,不先加快取 | N+1(1+N 次 backend/輪,僅登入者付) | 量到痛 → IMemoryCache 30–60s(§7) |
-| `ExtractSkillAnswer` 只認 `output` 外層 + `OutputKeys` | 非標準輸出鍵回整包 JSON | 出現新標準鍵時擴 `OutputKeys` |
-| 殘留 `ChatToolSpecs` 不急砍 | 與 skill 目錄並存、去重兜底 | settings-skill-redesign 遷完自然歸零 |
-| AG-UI 路由不做 | copilot 側無 skill 路由 | P4(若真要) |
+| 簡化                                                   | 天花板                            | 何時升級                                       |
+| ------------------------------------------------------ | --------------------------------- | ---------------------------------------------- |
+| 路由器 = 聊天 LLM 本身,不建分類器(方案 B)              | 依賴 LLM 選工具正確率             | 量到誤選率高才考慮(02-spec §1 已論證 B 是重造) |
+| P1 只吃「單一必填字串」skill,其餘跳過                  | 多參/非字串 skill 暫不可路由      | P3(§8)                                         |
+| 工具參數名硬寫 `question`,不動 `ToRunOptions`          | 單參上限                          | P3                                             |
+| skill 版不移植 kb_query→rag_qa abstain 兜底            | skill 版棄答無自動兜底            | kb_query 真的遷成 skill 且量到需要時           |
+| 目錄每輪 fetch,不先加快取                              | N+1(1+N 次 backend/輪,僅登入者付) | 量到痛 → IMemoryCache 30–60s(§7)               |
+| `ExtractSkillAnswer` 只認 `output` 外層 + `OutputKeys` | 非標準輸出鍵回整包 JSON           | 出現新標準鍵時擴 `OutputKeys`                  |
+| 殘留 `ChatToolSpecs` 不急砍                            | 與 skill 目錄並存、去重兜底       | settings-skill-redesign 遷完自然歸零           |
+| AG-UI 路由不做                                         | copilot 側無 skill 路由           | P4(若真要)                                     |
 
 > `[改 BuildTools 工具來源:寫死 workflow → 動態 Skill 目錄,+ 一支 skill 版工具委派] → 跳過:分類器/多參/快取/abstain-兜底/AG-UI,當 [進入 P3 或量測到痛] 再加。`

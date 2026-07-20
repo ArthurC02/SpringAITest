@@ -1,7 +1,7 @@
 # 設計文件 — 系統設定重構 × 雙門 Skill 編輯器 × Configuration Set(HOW)
 
-> 狀態:**設計,尚未動碼**(承 01-plan/02-spec「先規劃,不執行」)。
-> 本文是 02-spec 的 **HOW**:給實作者可直接照抄的簽章/DDL/props/演算法與落地順序。**不重述 WHAT** —— 決策看 [01-plan.md](01-plan.md)、規格看 [02-spec.md](02-spec.md),本文以「02-spec §X」交叉引用,只補「怎麼寫」那一層。
+> 狀態: **已交付設計的記錄。** 本文的前瞻性步驟不得視為待辦；以 [plans README](../README.md) 所列程式碼與測試為準。
+> 下文保留原始的實作設計；與現行程式碼或測試不一致時，不得作為實作依據。
 > 範圍:完整設計 **P1 + P2a + P2b + P3**(最小可用切片),**P4** 較薄(獨立線)。
 > 所有觸點皆已對回真實程式碼(file:line);讀碼時發現的縫記在 §10「實作前必讀的落地縫」。
 
@@ -9,13 +9,13 @@
 
 ## 0. 五維釘定(承 02-spec §0,只補 HOW 插點)
 
-| 維度 | HOW(這次真正要寫/改的那一行) |
-|---|---|
+| 維度      | HOW(這次真正要寫/改的那一行)                                                                                                                                                                                                                  |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Model** | 新節點 `make_nl_logic_node` 內 `await llm.structured(system=instruction, user=…, schema=_NlLogicOutput)`;`llm` 由 `deps=["llm"]` 從 `KbQueryDeps.llm`(= `LangChainStructuredLLM`,`adapters.py:56-73`)取。溫度/模型 v1 促升為 per-config(§7)。 |
-| **Skill** | `SkillUpsert{definition}`(`SkillDtos.cs:36-38`)**不改**。前端 `compose()` 把使用者規則 patch 進 workflow 取回的骨架原文 → 沿用 `createSkill/updateSkill`(`api/skills.ts:44,52`)。 |
-| **Tool** | 不新增 tool/node(除 `nl_logic`)。`compare`/`stats` 用既有 `script` 步驟型別(`RestrictedInProcessRunner`);其餘用既有 `retrieve`/kb_query 節點族。 |
-| **Hook** | 四道既有關卡沿用:寫入期 `POST /api/skills/validate`(`SkillController.cs:155`)、`[SkillAdminOnly]`+`RequireTenant()`、試跑=`invoke`、P4 的 apply-at-execution(§7)。 |
-| **MCP** | runtime 無 MCP。不引入。 |
+| **Skill** | `SkillUpsert{definition}`(`SkillDtos.cs:36-38`)**不改**。前端 `compose()` 把使用者規則 patch 進 workflow 取回的骨架原文 → 沿用 `createSkill/updateSkill`(`api/skills.ts:44,52`)。                                                             |
+| **Tool**  | 不新增 tool/node(除 `nl_logic`)。`compare`/`stats` 用既有 `script` 步驟型別(`RestrictedInProcessRunner`);其餘用既有 `retrieve`/kb_query 節點族。                                                                                              |
+| **Hook**  | 四道既有關卡沿用:寫入期 `POST /api/skills/validate`(`SkillController.cs:155`)、`[SkillAdminOnly]`+`RequireTenant()`、試跑=`invoke`、P4 的 apply-at-execution(§7)。                                                                            |
+| **MCP**   | runtime 無 MCP。不引入。                                                                                                                                                                                                                      |
 
 ---
 
@@ -244,14 +244,14 @@ export interface SkillCatalogEntry {
 
 ### 3.4 用到的 apiFetch 呼叫(全既有,零新增端點)
 
-| 用途 | 呼叫 | 檔案 |
-|---|---|---|
+| 用途       | 呼叫                                                            | 檔案               |
+| ---------- | --------------------------------------------------------------- | ------------------ |
 | 取骨架原文 | `listSkillCatalog()` → `.find(e=>e.name===basedOn)?.definition` | `api/skills.ts:12` |
-| 存檔前驗證 | `validateSkill(def)` | `:79` |
-| 建立/更新 | `createSkill(def)` / `updateSkill(name, def)` | `:44,52` |
-| 試跑 | `invokeSkill(name, input)` | `:17` |
-| 版本 | `listSkillRevisions(name)` | `:37` |
-| 清單 | `listSkills()` | `:28` |
+| 存檔前驗證 | `validateSkill(def)`                                            | `:79`              |
+| 建立/更新  | `createSkill(def)` / `updateSkill(name, def)`                   | `:44,52`           |
+| 試跑       | `invokeSkill(name, input)`                                      | `:17`              |
+| 版本       | `listSkillRevisions(name)`                                      | `:37`              |
+| 清單       | `listSkills()`                                                  | `:28`              |
 
 ---
 
@@ -276,13 +276,13 @@ export interface SkillCatalogEntry {
 
 flow 形狀(對回 `kb_query.yaml` 與 `nodes/retrieve.py`):
 
-| 骨架 | flow 形狀(HOW) | 槽 |
-|---|---|---|
+| 骨架                 | flow 形狀(HOW)                                                                                                               | 槽         |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | `template_retrieval` | 複用 `kb_query.yaml:14-40` 的 intake→rewrite→intent→resolver→(retrieval loop)→answer_composer,尾端加一顆 `nl_logic@1.0` slot | `nl_logic` |
-| `template_compare` | `query_intake@1.0` → `retrieve@1.0`(`params:{query_key: normalized_query, top_k: …}`)→ `script`(排序) | `script` |
-| `template_stats` | 同上,`top_k` 預設較高(讓聚合看到全集)→ `script`(聚合) | `script` |
-| `template_infer` | 檢索族(可薄:intake→retrieve)→ `nl_logic@1.0`(推理) | `nl_logic` |
-| `template_inspire` | 同 infer,`nl_logic@1.0`(綜合) | `nl_logic` |
+| `template_compare`   | `query_intake@1.0` → `retrieve@1.0`(`params:{query_key: normalized_query, top_k: …}`)→ `script`(排序)                        | `script`   |
+| `template_stats`     | 同上,`top_k` 預設較高(讓聚合看到全集)→ `script`(聚合)                                                                        | `script`   |
+| `template_infer`     | 檢索族(可薄:intake→retrieve)→ `nl_logic@1.0`(推理)                                                                           | `nl_logic` |
+| `template_inspire`   | 同 infer,`nl_logic@1.0`(綜合)                                                                                                | `nl_logic` |
 
 - **注入槽約定**:每支恰一顆商業邏輯步驟,寫成 §3.2 的 block literal + `__RULE_SLOT__`;白名單欄位帶 `# __SLOT_<field>__` 尾註。骨架本身載入即 valid(sentinel 是合法字串/合法預設值)。
 - **retrieve top_k per-tenant 的縫**(§7 / 02-spec §3.3 縫 a):`template_retrieval` 用 kb_query 族(吃 `kb_query_top_k`,走 deps);`template_compare/stats` 用通用 `retrieve@1.0`,骨架的 `# __SLOT_topK__` 帶「compose 期預設值」。**執行期覆寫**(縫⑦):`retrieve` 執行期優先讀 per-config state seed `retrieval_top_k`(Configuration Set 的 `retrieval.top_k`,由 `main.py` invoke 期 seed),精度 per-config state ＞ SLOT ＞ 模組全域 —— 故已存的 compare/stats skill 免重 compose 即可靠 activate 生效。
@@ -434,15 +434,15 @@ Configuration Set 的 CRUD 表單:清單(多組 + active 標記)→ 選定/新�
 
 ## 9. Configuration Set v1 開放鍵(O3,對應 02-spec §4.1)
 
-| `values` 鍵 | 全域預設(來源) | 型別/範圍 | 執行套用點 |
-|---|---|---|---|
-| `retrieval.top_k` | 4(`settings.retrieval_top_k`,`settings.py:19`) | int 1–50 | 通用 `retrieve@1.0` 執行期讀 per-config state seed `retrieval_top_k`(§7.4／§10 縫⑦)。取值精度:per-config state seed ＞ compose 期 SLOT(`# __SLOT_topK__`,build 參數) ＞ 模組全域 |
-| `kb_query.top_k` | 8(`settings.py:25`) | int ≥1 | `KbQueryDeps.default_top_k` |
-| `kb_query.max_retrieval_attempts` | 2(`settings.py:26`) | int ≥1 | `KbQueryDeps.max_retrieval_attempts` |
-| `workflow.timeout_seconds` | 120(`settings.py:22`) | int ≥1 | `main.py:188` |
-| `llm.model` | gpt-4o-mini(`settings.py:10`) | str(白名單=LiteLLM 已配置模型) | per-config 建 LLM |
-| `intent.confidence_threshold`(促升) | 0.6(`intent_classification.py:91`) | float 0–1 | `KbQueryDeps` 新欄 → factory |
-| `llm.temperature`(促升) | 0.7(`llm.py:19`) | float 0–2 | per-config 建 LLM |
+| `values` 鍵                         | 全域預設(來源)                                 | 型別/範圍                      | 執行套用點                                                                                                                                                                       |
+| ----------------------------------- | ---------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retrieval.top_k`                   | 4(`settings.retrieval_top_k`,`settings.py:19`) | int 1–50                       | 通用 `retrieve@1.0` 執行期讀 per-config state seed `retrieval_top_k`(§7.4／§10 縫⑦)。取值精度:per-config state seed ＞ compose 期 SLOT(`# __SLOT_topK__`,build 參數) ＞ 模組全域 |
+| `kb_query.top_k`                    | 8(`settings.py:25`)                            | int ≥1                         | `KbQueryDeps.default_top_k`                                                                                                                                                      |
+| `kb_query.max_retrieval_attempts`   | 2(`settings.py:26`)                            | int ≥1                         | `KbQueryDeps.max_retrieval_attempts`                                                                                                                                             |
+| `workflow.timeout_seconds`          | 120(`settings.py:22`)                          | int ≥1                         | `main.py:188`                                                                                                                                                                    |
+| `llm.model`                         | gpt-4o-mini(`settings.py:10`)                  | str(白名單=LiteLLM 已配置模型) | per-config 建 LLM                                                                                                                                                                |
+| `intent.confidence_threshold`(促升) | 0.6(`intent_classification.py:91`)             | float 0–1                      | `KbQueryDeps` 新欄 → factory                                                                                                                                                     |
+| `llm.temperature`(促升)             | 0.7(`llm.py:19`)                               | float 0–2                      | per-config 建 LLM                                                                                                                                                                |
 
 只存覆寫值,未覆寫回落全域預設。明確不做(v2/另計畫):rerank 加權、變體數上限、容差、locator 權重、詞彙/口徑/意圖對照/公式規則。
 
@@ -450,15 +450,15 @@ Configuration Set 的 CRUD 表單:清單(多組 + active 標記)→ 選定/新�
 
 ## 10. 實作前必讀的落地縫(讀碼發現,02-spec 未點名)
 
-| # | 縫 | 影響 | 對策 |
-|---|---|---|---|
-| ① | **前端無 YAML 庫**(package.json 僅 highlight.js) | compose 不能 parse/emit YAML | §3.2 block-scalar + 尾註 sentinel 純字串 patch;不加依賴 |
-| ② | **`LoadedSkill` 不保留骨架原文**(`__init__.py:52` parse 後丟原文) | catalog 無 `definition` 可暴露,compose 取不到骨架 | §5.3:`LoadedSkill.definition=raw` + `SkillInfo.definition` |
-| ③ | **`_DEPS_BUILDERS` 只認 kb_query**(`__init__.py:32`) | 五支 template 啟動 glob 載入時 deps=None → nl_logic/kb 族編譯期崩,**整服務起不來** | §5.2:五名映射 `_kb_query_deps`,與 yaml 同次提交 |
-| ④ | **template_* 會混進 `GET /skills` 目錄** | 骨架出現在使用者可執行/可編輯清單 | §5.4:前端濾 `template_` 前綴;可選加進 ReservedNames |
-| ⑤ | **builtin 圖啟動即預編(全域 deps)**(`__init__.py:57`) | P4 per-config 覆寫對 builtin 無效(用的是啟動圖) | §7.4 步 5:有覆寫時 builtin 改走 `compile(skill, per_config)`,靠 `id(deps)` 快取 |
-| ⑥ | **`nl_logic` 走 `app.nodes` 非 kb_query 族** | `skills/__init__.py` 的 import 觸發不到它的 `@node` | §6.1:`main.py` 加 `from app.nodes import nl_logic` |
-| ⑦ | **`retrieve.py` 的 top_k 取值** | `retrieval.top_k` 覆寫要能對已存(不重 compose)的通用 retrieve skill 執行期生效 | retrieve 執行期讀 per-config state seed:精度 per-config state(`retrieval_top_k` seed)＞ compose 期 SLOT(build 參數)＞ 模組全域。`retrieval_top_k` 列為 `harness.CONFIG_SEED_KEYS` → 進 `skill.RESERVED_KEYS`(是 state 頻道、資料流視為可用、呼叫端不得夾帶、只讀不可寫);`config_apply.resolve` 於 invoke 期抽出租戶覆寫值,`main.py` seed 進初始 state;未覆寫則不 seed,retrieve 回落 SLOT/全域,零行為變更。範本仍保留 `# __SLOT_topK__`(compose 期預設值),SLOT 是「無 active 覆寫時的預設」而非唯一落點 |
+| #   | 縫                                                                | 影響                                                                               | 對策                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ①   | **前端無 YAML 庫**(package.json 僅 highlight.js)                  | compose 不能 parse/emit YAML                                                       | §3.2 block-scalar + 尾註 sentinel 純字串 patch;不加依賴                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ②   | **`LoadedSkill` 不保留骨架原文**(`__init__.py:52` parse 後丟原文) | catalog 無 `definition` 可暴露,compose 取不到骨架                                  | §5.3:`LoadedSkill.definition=raw` + `SkillInfo.definition`                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ③   | **`_DEPS_BUILDERS` 只認 kb_query**(`__init__.py:32`)              | 五支 template 啟動 glob 載入時 deps=None → nl_logic/kb 族編譯期崩,**整服務起不來** | §5.2:五名映射 `_kb_query_deps`,與 yaml 同次提交                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ④   | **template_* 會混進 `GET /skills` 目錄**                          | 骨架出現在使用者可執行/可編輯清單                                                  | §5.4:前端濾 `template_` 前綴;可選加進 ReservedNames                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ⑤   | **builtin 圖啟動即預編(全域 deps)**(`__init__.py:57`)             | P4 per-config 覆寫對 builtin 無效(用的是啟動圖)                                    | §7.4 步 5:有覆寫時 builtin 改走 `compile(skill, per_config)`,靠 `id(deps)` 快取                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ⑥   | **`nl_logic` 走 `app.nodes` 非 kb_query 族**                      | `skills/__init__.py` 的 import 觸發不到它的 `@node`                                | §6.1:`main.py` 加 `from app.nodes import nl_logic`                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ⑦   | **`retrieve.py` 的 top_k 取值**                                   | `retrieval.top_k` 覆寫要能對已存(不重 compose)的通用 retrieve skill 執行期生效     | retrieve 執行期讀 per-config state seed:精度 per-config state(`retrieval_top_k` seed)＞ compose 期 SLOT(build 參數)＞ 模組全域。`retrieval_top_k` 列為 `harness.CONFIG_SEED_KEYS` → 進 `skill.RESERVED_KEYS`(是 state 頻道、資料流視為可用、呼叫端不得夾帶、只讀不可寫);`config_apply.resolve` 於 invoke 期抽出租戶覆寫值,`main.py` seed 進初始 state;未覆寫則不 seed,retrieve 回落 SLOT/全域,零行為變更。範本仍保留 `# __SLOT_topK__`(compose 期預設值),SLOT 是「無 active 覆寫時的預設」而非唯一落點 |
 
 ---
 

@@ -1,32 +1,45 @@
 # 實作規格 — 聊天 → Skill 路由(Chat-to-Skill Routing)
 
-> 狀態:**P0 探查完成,方案定案,細節設計就緒**。承接 [01-plan.md](01-plan.md)。
-> 一句話結論:**方案 A(LLM function-calling)不只可用,已經整條接好並在跑** —— 現況是把「5 個固定 workflow」當工具掛給 LLM 自選;本計畫只是把工具來源從**寫死的 workflow 清單**換成**動態的 Skill 目錄**(內建 + 租戶自訂,租戶/角色過濾)。P1 是一個小 diff,不是新建管線。
+> **狀態: 已交付的規格記錄。** 目前限制與驗證入口見 [plans README](../README.md)。
+>
+> **一句話結論:**
+> 聊天會先載入動態 Skill 目錄，再要求 LLM 回傳 Skill 名稱或 `NONE`；平台驗證選擇後自行呼叫 Skill。這不是 Agent Framework function-calling。
+>
+> **實作位置:**
+> • 主邏輯: `platform/src/Platform.Service/ChatService.cs`
+>   - `BuildToolsAsync()`: 目錄取得與角色/schema 過濾
+>   - `TryRouteAndExecuteAsync()`: 最多兩次路由決策與 Skill 執行
+>   - `InvokeSkillToolAsync()`: Skill 呼叫委派
+> • 工作流整合: `WorkflowService.cs::GetSkillCatalogAsync()`、`InvokeSkillAsync()`
+>
+> **本文檔現況:**
+> 下述內容是設計背景；具體細節以程式碼與測試為準。
+> **歷史草稿警示:** 第 0 節起仍含交付前的 function-calling、固定 workflow 與 `/workflows` 端點假設；這些內容已被目前的手動名稱路由取代，不得作為實作需求。
 
 ---
 
-## 0. P0 探查結論(程式即事實,附 file:line)
+## 0. 歷史 P0 探查草稿(已被現況取代)
 
-| 探查項目 | 事實 | 出處 |
-|---|---|---|
-| Agent Framework tool/function-calling 是否可用 | **已可用且已接線**。`ILlmAgent.CompleteAsync/StreamAsync` 收 `IReadOnlyList<LlmTool>?`;非空即啟用 function calling,工具迴圈由框架處理 | `platform/src/Platform.Service/Abstractions/ILlmAgent.cs:10-13` |
-| 工具如何轉成 AIFunction | `LlmTool` → `AIFunctionFactory.Create((string question, ct) => …, name, description)`,掛進 run-level `ChatOptions.Tools`;`ChatClientAgent` 內建 function-calling 迴圈自動執行工具 | `platform/src/Platform.Web/Infrastructure/AgentFrameworkLlmAgent.cs:67-85` |
-| 聊天現在路由到什麼 | **5 個寫死的 workflow**(`rag_qa`/`kb_query`/`summarize`/`triage`/`analyze_report`),經 `ChatToolSpecs` 陣列 → `_workflows.InvokeAsync`(打 `/workflows/{name}/invoke`) | `ChatService.cs:190-203, 234-242` |
-| 已登入才掛工具 | `BuildTools(userCtx)`:`userCtx is null`(匿名)回 `null` 裸聊;登入才掛工具;`RequiredRole` 不符即跳過(analyze_report 僅 ADMIN) | `ChatService.cs:212-232` |
-| 兩條 REST 路徑都已路由 | `/api/chat`(阻塞)與 `/api/chat/stream`(SSE)共用 `ChatService` + `BuildTools(MaybeUserContext())`;JWT 有效即取身分,無效即匿名 | `ChatController.cs:28, 47, 60-61` |
-| AG-UI 是另一隻 agent | `/api/copilot/agui` 用 **獨立** 的 `copilotAgent = IChatClient.AsAIAgent(instructions,…)`,**不走** `ChatService`/`BuildTools`;工具是前端 client tools(操作 UI 用),與知識檢索無關 | `Program.cs:194-200` |
-| Skill 目錄怎麼取 | 已有 `WorkflowService.GetSkillCatalogAsync(ctx)` → workflow `GET /skills`;platform `GET /api/skills/catalog` 也是同一條 | `WorkflowService.cs:82-83`、`SkillController.cs:39-41`、`workflow/app/main.py:96-114` |
-| 目錄內容 | 內建(repo `skills/*.yaml`)+ 本租戶自訂(來自 backend),每筆 `{name, description, required_role, source, revision, input_schema}` | `workflow/app/schemas.py:35-43` |
-| 租戶隔離 | 自訂 skill 每次向 backend 依 `X-Tenant-Id` 取,跨租戶 backend 回 404 → 不可見;內建為全租戶共用 | `workflow/app/skills/custom.py:65-113` |
-| Skill invoke 的角色/schema 把關 | invoke 端點依序驗 存在(404)→ 角色(403)→ input_schema(422);identity 鍵由伺服器注入,呼叫端夾帶會被剝除 | `workflow/app/main.py:134-212, 40-54` |
-| Skill invoke 代理 | 已有 `WorkflowService.InvokeSkillAsync(name, input, ctx)` → `/skills/{name}/invoke`,錯誤碼映射與 workflow invoke 一致 | `WorkflowService.cs:53-65` |
-| intent_classification 是什麼層級 | 是 **kb_query skill 執行圖內部** 的一個節點(規則優先、UNKNOWN 才問 LLM 且 confidence ≥ 0.6),**不是** 聊天層的路由器 | `workflow/app/kbquery/nodes/intent_classification.py:65-103` |
+| 探查項目                                       | 事實                                                                                                                                                                              | 出處                                                                                  |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Agent Framework tool/function-calling 是否可用 | **已可用且已接線**。`ILlmAgent.CompleteAsync/StreamAsync` 收 `IReadOnlyList<LlmTool>?`;非空即啟用 function calling,工具迴圈由框架處理                                             | `platform/src/Platform.Service/Abstractions/ILlmAgent.cs:10-13`                       |
+| 工具如何轉成 AIFunction                        | `LlmTool` → `AIFunctionFactory.Create((string question, ct) => …, name, description)`,掛進 run-level `ChatOptions.Tools`;`ChatClientAgent` 內建 function-calling 迴圈自動執行工具 | `platform/src/Platform.Web/Infrastructure/AgentFrameworkLlmAgent.cs:67-85`            |
+| 聊天現在路由到什麼                             | **5 個寫死的 workflow**(`rag_qa`/`kb_query`/`summarize`/`triage`/`analyze_report`),經 `ChatToolSpecs` 陣列 → `_workflows.InvokeAsync`(打 `/workflows/{name}/invoke`)              | `ChatService.cs:190-203, 234-242`                                                     |
+| 已登入才掛工具                                 | `BuildTools(userCtx)`:`userCtx is null`(匿名)回 `null` 裸聊;登入才掛工具;`RequiredRole` 不符即跳過(analyze_report 僅 ADMIN)                                                       | `ChatService.cs:212-232`                                                              |
+| 兩條 REST 路徑都已路由                         | `/api/chat`(阻塞)與 `/api/chat/stream`(SSE)共用 `ChatService` + `BuildTools(MaybeUserContext())`;JWT 有效即取身分,無效即匿名                                                      | `ChatController.cs:28, 47, 60-61`                                                     |
+| AG-UI 是另一隻 agent                           | `/api/copilot/agui` 用 **獨立** 的 `copilotAgent = IChatClient.AsAIAgent(instructions,…)`,**不走** `ChatService`/`BuildTools`;工具是前端 client tools(操作 UI 用),與知識檢索無關  | `Program.cs:194-200`                                                                  |
+| Skill 目錄怎麼取                               | 已有 `WorkflowService.GetSkillCatalogAsync(ctx)` → workflow `GET /skills`;platform `GET /api/skills/catalog` 也是同一條                                                           | `WorkflowService.cs:82-83`、`SkillController.cs:39-41`、`workflow/app/main.py:96-114` |
+| 目錄內容                                       | 內建(repo `skills/*.yaml`)+ 本租戶自訂(來自 backend),每筆 `{name, description, required_role, source, revision, input_schema}`                                                    | `workflow/app/schemas.py:35-43`                                                       |
+| 租戶隔離                                       | 自訂 skill 每次向 backend 依 `X-Tenant-Id` 取,跨租戶 backend 回 404 → 不可見;內建為全租戶共用                                                                                     | `workflow/app/skills/custom.py:65-113`                                                |
+| Skill invoke 的角色/schema 把關                | invoke 端點依序驗 存在(404)→ 角色(403)→ input_schema(422);identity 鍵由伺服器注入,呼叫端夾帶會被剝除                                                                              | `workflow/app/main.py:134-212, 40-54`                                                 |
+| Skill invoke 代理                              | 已有 `WorkflowService.InvokeSkillAsync(name, input, ctx)` → `/skills/{name}/invoke`,錯誤碼映射與 workflow invoke 一致                                                             | `WorkflowService.cs:53-65`                                                            |
+| intent_classification 是什麼層級               | 是 **kb_query skill 執行圖內部** 的一個節點(規則優先、UNKNOWN 才問 LLM 且 confidence ≥ 0.6),**不是** 聊天層的路由器                                                               | `workflow/app/kbquery/nodes/intent_classification.py:65-103`                          |
 
 **推論**:方案 B(先分類再派工)所需的「意圖分類器」在架構上是 **skill 內部** 的執行步驟,不是聊天層路由。聊天層的路由器就是 **LLM 自己**(方案 A)。把 intent_classification 拉到聊天層會多一次 LLM 呼叫、多一份要維護的分類表,而 Agent Framework 的 function-calling 已經把「選哪個工具」這件事免費做掉了。
 
 ---
 
-## 1. 定案:路由方案 **A(LLM function-calling)**,以 D 的姿態收尾
+## 1. 歷史定案草稿:方案 **A(LLM function-calling)**
 
 - **選 A 不選 B**:tool-calling 已接線且已在生產路徑跑;B 要新增分類器模型 + 分類→skill 對照表 + 一次額外 LLM 呼叫,換來的「可控/可測」在 A 這邊由「工具清單本身就是白名單 + workflow invoke 的三道把關(404/403/422)」提供。B 是重造一個 A 已經給的東西。
 - **收尾成 D**:保留 01-plan 的 D 精神 —— A 為主 + 「無合適 skill → LLM 不呼叫任何工具 → 純聊天」的回退(這是 function-calling 的內建行為,零成本);C(明確選單)**不做**(YAGNI,非技術/聊天優先原則反對,且無人要求)。
@@ -113,12 +126,12 @@ Agent Framework 這條路徑**沒有通用 hook 框架**;扮演各 hook 角色�
 
 ## 7. 分階(對映 01-plan §7 P1–P4)
 
-| Phase | 內容 | 對映 |
-|---|---|---|
-| **P1 路由核心** | `BuildTools` 改抓 Skill 目錄(內建+自訂、角色過濾、單字串引數),同時生效於 `/api/chat` 與 `/api/chat/stream`;回退純聊天沿用內建行為 | plan P1(且一次覆蓋兩路徑,超出「單一路徑先做」) |
-| **P2 結果融合** | skill 輸出附出處(由 skill answer 節點產,融入模型正文);trace 預設隱藏。多數已由 function-calling 內建,P2 主要是「讓 skill 產出可引用的字串」+ 前端可選展開 | plan P2 |
-| **P3 多輪補參** | `LlmTool` 泛化多參 → `input_schema` 缺欄位時模型反問補齊 | plan P3 |
-| **P4 擴 AG-UI(視需要)** | 若要讓 CopilotKit 側也能路由 skill,替 `copilotAgent` 掛同一批 server-side skill 工具。**預設不做**(定位不同、非目標) | plan P4 |
+| Phase                   | 內容                                                                                                                                                      | 對映                                           |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **P1 路由核心**         | `BuildTools` 改抓 Skill 目錄(內建+自訂、角色過濾、單字串引數),同時生效於 `/api/chat` 與 `/api/chat/stream`;回退純聊天沿用內建行為                         | plan P1(且一次覆蓋兩路徑,超出「單一路徑先做」) |
+| **P2 結果融合**         | skill 輸出附出處(由 skill answer 節點產,融入模型正文);trace 預設隱藏。多數已由 function-calling 內建,P2 主要是「讓 skill 產出可引用的字串」+ 前端可選展開 | plan P2                                        |
+| **P3 多輪補參**         | `LlmTool` 泛化多參 → `input_schema` 缺欄位時模型反問補齊                                                                                                  | plan P3                                        |
+| **P4 擴 AG-UI(視需要)** | 若要讓 CopilotKit 側也能路由 skill,替 `copilotAgent` 掛同一批 server-side skill 工具。**預設不做**(定位不同、非目標)                                      | plan P4                                        |
 
 **P1 的最小 diff 界線**:只改 `ChatService`(工具來源)+ 對應 `ILlmAgent` 呼叫點的 await;不碰 controller、agent、SSE、mem0、Program.cs。
 

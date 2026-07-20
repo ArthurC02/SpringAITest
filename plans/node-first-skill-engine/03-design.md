@@ -1,6 +1,7 @@
 # 設計文稿 — Node-first 架構翻轉 × Skill 流程引擎
 
-> 相關文件:[計劃書](01-plan.md)、[規格書](02-spec.md)。
+> 狀態: **已交付的設計記錄。** 相關文件: [計劃書](01-plan.md)、[規格書](02-spec.md)；目前程式碼與測試入口見 [plans README](../README.md)。
+> **歷史草稿警示:** 本文的 `/api/workflows`、`workflows/` 相容層與 Workflows 視圖均屬遷移期設計，不是現行 API 或 UI 契約。
 > 內容:架構總覽、程式結構與遷移對照、DB Schema、前後端整合、UI/UX、關鍵資料流。
 
 ## 1. 架構總覽
@@ -50,13 +51,13 @@ workflow/app/
 
 遷移對照(P1):
 
-| 現況 | 去處 | 改動量 |
-|---|---|---|
-| `kbquery/runtime.py traced()` | `engine/harness.py` | 泛化:加 reads/writes 驗證與 Tool 注入,IMMUTABLE_KEYS 邏輯不變 |
-| `kbquery/nodes/*`(10 檔) | `nodes/kbquery/*` | 函式本體不改,factory 外補 `@node(...)` 宣告 |
-| `kbquery/graph.py` | P1 改為以 registry 查節點組圖;P2 被 `skills/kb_query.yaml` + compiler 取代 | 中 |
-| `kbquery/calculator.py` | 留原地;`engine/expressions.py` import 並擴充 | 小 |
-| `kbquery/adapters.py` | 留原地;P3 以 `@tool` 包裝註冊 | 小 |
+| 現況                          | 去處                                                                       | 改動量                                                        |
+| ----------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `kbquery/runtime.py traced()` | `engine/harness.py`                                                        | 泛化:加 reads/writes 驗證與 Tool 注入,IMMUTABLE_KEYS 邏輯不變 |
+| `kbquery/nodes/*`(10 檔)      | `nodes/kbquery/*`                                                          | 函式本體不改,factory 外補 `@node(...)` 宣告                   |
+| `kbquery/graph.py`            | P1 改為以 registry 查節點組圖;P2 被 `skills/kb_query.yaml` + compiler 取代 | 中                                                            |
+| `kbquery/calculator.py`       | 留原地;`engine/expressions.py` import 並擴充                               | 小                                                            |
+| `kbquery/adapters.py`         | 留原地;P3 以 `@tool` 包裝註冊                                              | 小                                                            |
 
 ## 3. DB Schema(appdb / PostgreSQL,Dapper)
 

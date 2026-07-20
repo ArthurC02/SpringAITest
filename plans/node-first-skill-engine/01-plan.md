@@ -1,13 +1,13 @@
 # 計劃書 — Node-first 架構翻轉 × Skill 流程引擎
 
-> 狀態:規劃中(尚未動碼)。
-> 相關文件:[規格書](02-spec.md)、[設計文稿](03-design.md)。
-> 關聯計畫:[skill-authoring](../skill-authoring/01-plan.md) — 該計畫只負責設定頁的 code workflow 唯讀檢視，以及本計畫 Skill 的管理 UX/匯出。Skill 的權威資料、執行 runtime 與 API 均由本計畫定義；匯出格式為 `SKILL.md` + `skill.yaml`。
+> 狀態: **核心能力已交付；以下是設計與驗收記錄。** Registry、harness、compiler、script runner、tool registry、Skill 驗證與執行都在現行程式碼中。
+> 現況與測試入口見 [plans README](../README.md)。設定頁與作者體驗的後續需求統一記錄在 [settings-skill-redesign](../settings-skill-redesign/01-plan.md)。
+> 相關文件: [規格書](02-spec.md)、[設計文稿](03-design.md)、[驗收案例](04-acceptance-tests.md)。
 
 ## 1. 背景與問題
 
-- **現況是 Workflow 為主體**:每個工作流([rag_qa.py](../../workflow/app/workflows/rag_qa.py) 等)自己手寫 LangGraph 圖、自己持有節點;節點是工作流的私有財產。新流程 = 寫 Python + 重新部署。
-- **kb_query 已把地基打好**:10 個節點全是 factory + 依賴注入([nodes/](../../workflow/app/kbquery/nodes/))、[runtime.traced()](../../workflow/app/kbquery/runtime.py) 已是節點執行殼雛形、[ports.py](../../workflow/app/kbquery/ports.py) 已隔離外部服務、[calculator.py](../../workflow/app/kbquery/calculator.py) 已有 AST 白名單求值器。翻轉成本低。
+- **當時現況是 Workflow 為主體**:每個工作流自己手寫 LangGraph 圖、自己持有節點；新流程等同寫 Python 後重新部署。
+- **當時 kb_query 已把地基打好**:節點、執行殼與外部服務介面已存在，翻轉成本低。
 - **目標型態**:Node 是一等公民(具名、帶 I/O 契約、可獨立測試),Workflow 只是組合結果;由使用者的 **Skill** 決定流程,Skill 可內嵌小段 Python Script,Script 有安全的執行處;Node 與 Script 可呼叫 Tool(backend API 或工作流容器內安裝的工具)。
 
 ## 2. 目標 / 非目標

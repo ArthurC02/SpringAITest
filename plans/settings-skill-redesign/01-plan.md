@@ -1,7 +1,20 @@
-# 計畫書 — 系統設定重構 × 4 分頁 Skill 編輯器 × 節點參數設定
+# 計畫書 — 系統設定重構 × Skill 編輯器 × 節點參數設定
 
-> 狀態:**規劃中,尚未動碼**(使用者指示「先規劃,不要執行」)。
-> 前置脈絡:現行後端已是 node-first Skill 引擎(Skill = 單一 YAML `definition`,引擎驗證/編譯/沙箱/revision,已 e2e 全綠)。本計畫**只重設計前端資訊架構與撰寫體驗,並最小幅度擴充引擎**,不退回舊 flow/logic/script 三欄位模型。
+> **狀態: 已交付主要體驗；以下保留決策與驗收記錄。**
+> 已實作: 三分頁設定頁、簡易與進階 Skill 編輯、範本組合、試跑、版本檢視，以及 Configuration Set 的執行期套用基礎。後續工作必須由可重現的行為或測試缺口提出。
+> 程式碼與測試入口見 [plans README](../README.md)。
+>
+> **前置脈絡:**
+> 後端引擎 (node-first-skill-engine) 已交付完整 ✓。本計畫專注**前端資訊架構與撰寫體驗**。
+>
+> **實裝位置:**
+> • 前端分頁: `frontend/src/components/ConfigView.tsx` (P1)
+> • 雙門編輯: `SkillHome.tsx`、`SimpleSkillEditor.tsx`、`AdvancedSkillEditor.tsx` (P2)
+> • 參數設定: `NodeParamsTab.tsx` (P4)
+> • 後端支撐: `backend/src/Backend.Api/Skills/` (CRUD已有,Validation 由 workflow 提供)
+>
+> **併入的計畫:**
+> 原 [skill-authoring](../skill-authoring/) 計畫的內容已分解至本計畫 P1–P4,統籌於此。
 
 ## 1. 使用者需求(逐條)
 
@@ -12,7 +25,7 @@
 5. 「系統設定」的**兩大核心** = Skill + **部分工作流節點的參數調整設定**。
 
 ### 已拍板決策
-- **D1**(可編輯範圍):系統設定的 Skill 清單只列**可編輯的 Skill**(自訂 Skill + 內建 kb_query);純 code 工作流不進此清單。
+- **D1**(可編輯範圍):系統設定列出所有非 `template_*` 的內建 Skill 與自訂 Skill；內建 Skill 唯讀，自訂 Skill 可編輯。純 code 工作流不進此清單。
 - **D2**(NL 商業邏輯語意):自然語言商業邏輯**接一個新的 LLM 節點在執行時解讀執行**(功能完整,需擴充引擎)。
 - **D3**(節點參數推進方式):由本規劃**先讀節點契約、提可調參數清單**(見第 6 節)供選定。
 - **D4**(架構取捨):4 分頁只是**撰寫外殼**,存檔時組合成現有 node-first YAML `definition`;引擎資料模型不動。
@@ -43,10 +56,10 @@
 - **既有 `app_config` 是全域(無 tenant 欄)**——「一般設定」目前所有租戶共用。若組織級一般設定也要 per-tenant,需 schema 變更;**標記為待評估**(§7 O6),本計畫不強制改動一般設定的租戶模型。
 
 **Admin 分兩層**(現在只做第一層,第二層留位):
-| 層級 | 現況 | 管轄 |
-|---|---|---|
+| 層級           | 現況                                  | 管轄                                          |
+| -------------- | ------------------------------------- | --------------------------------------------- |
 | **組織 Admin** | = 現行 `ADMIN` 角色(X-Tenant-Id 隔離) | 自己租戶的 Skill、Configuration Set、組織設定 |
-| **系統 Admin** | **未規劃、不建置**(未來) | 跨租戶、全系統**預設值**、所有組織治理 |
+| **系統 Admin** | **未規劃、不建置**(未來)              | 跨租戶、全系統**預設值**、所有組織治理        |
 
 設計留位(不實作,但不擋路):
 - 值分兩層 —— **全域預設值**(未來系統 Admin 管)← **租戶覆寫值**(組織 Admin 管);執行時「租戶覆寫疊在全域預設上」。節點參數的內建預設即全域預設,Configuration Set 即租戶覆寫。
@@ -57,11 +70,11 @@
 ### 3.1 側欄
 - 目前 `NAV`(AppShell.tsx:19):chat / documents / **workflows** / analysis / config。
 - 變更:**移除 `workflows` 項**。`WorkflowsView` 目前承載三件事,各自去處:
-  | 現有(workflows 視圖) | 去處 |
-  |---|---|
-  | Tab2 Skill 管理(SkillsTab) | → 系統設定 › Skill(改成 4 分頁) |
-  | Tab3 節點目錄(NodeCatalog 唯讀) | → 併入 Skill 編輯的「工作流程」分頁左欄(插入節點用);唯讀瀏覽亦可留在系統設定 |
-  | Tab1 執行工作流 + skill invoke + Trace | → **收進 Skill 功能樹的「執行/試跑」子功能**(D5,§4.0);重用 `TraceView` |
+  | 現有(workflows 視圖)                   | 去處                                                                         |
+  | -------------------------------------- | ---------------------------------------------------------------------------- |
+  | Tab2 Skill 管理(SkillsTab)             | → 系統設定 › Skill(改成 4 分頁)                                              |
+  | Tab3 節點目錄(NodeCatalog 唯讀)        | → 併入 Skill 編輯的「工作流程」分頁左欄(插入節點用);唯讀瀏覽亦可留在系統設定 |
+  | Tab1 執行工作流 + skill invoke + Trace | → **收進 Skill 功能樹的「執行/試跑」子功能**(D5,§4.0);重用 `TraceView`       |
 
 > D5 定案:試跑不再是獨立入口,而是「Skill 編輯」功能樹的子功能。純 code 工作流(summarize 等 4 個)的執行入口不在本計畫範圍(它們仍可經聊天/agent 觸發)。
 
@@ -90,8 +103,8 @@
 - 版本控管接**現有** `skill_revision`(每次 PUT 一筆、帶 `definition_sha256`),前端只需清單 + 唯讀 diff;回溯 = 取某版 definition 重新 PUT(產生新版,不改寫歷史)。
 
 ### 4.1 清單 → 選定
-- 清單只列可編輯 Skill(D1):欄位 名稱 / 描述 / 角色 / 來源徽章(builtin·custom)/ rev / 狀態 / 操作。
-- 點一列 → 進該 Skill 的功能樹(預設「編輯」子功能);內建 kb_query 以唯讀檢視呈現(其定義是 repo 檔案,非 DB,CRUD 不可改)。
+- 清單列出 D1 定義的所有非範本 Skill:欄位 名稱 / 描述 / 角色 / 來源徽章(builtin·custom)/ rev / 狀態 / 操作。
+- 點一列 → 進該 Skill 的功能樹(預設「編輯」子功能);所有內建 Skill 以唯讀檢視呈現(其定義是 repo 檔案,非 DB,CRUD 不可改)。
 
 ### 4.2 設計前提:使用者多為非技術人員(決定 UX 走向)
 
@@ -144,17 +157,17 @@ flow:
 
 **範本對齊使用者在聊天中真正會問的五類問題原型**(複雜度遞增;見專案記憶 non-technical-users-chat-first):
 
-| 範本 | 使用者問句樣態 | 管線(隱藏) | 開放給使用者填 | 對應形狀 |
-|---|---|---|---|---|
-| **檢索** | 「X 出現在哪份文件 / 查一下 X」 | 檢索 + 證據驗證 + 附出處回答(kb_query 形狀) | 名稱 / 說明 / (選)我的規則 / (選)檢索筆數 | 檢索管線 + 選用邏輯 slot(`nl_logic`) |
-| **比對** | 「比較/排序 A、B、C(YoY、績效排名)」 | 檢索多筆 + 比較/排序(具名項的相對次序) | 名稱 / 說明 / **比較規則** / (選)排序依據 | 檢索 + `script`(比較排序需精確,預設 Python) |
-| **統計** | 「全年總額 / 平均 / 某指標的計數・分佈」 | 檢索(較高 top_k,拉全集)+ script 聚合 | 名稱 / 說明 / **統計規則(聚合)** / (選)統計指標 / (選)統計期間 | 檢索 + `script`(聚合算術需精確,預設 Python) |
-| **推論** | 「假設 X,後續會怎樣」 | 檢索 + LLM 推理 | 名稱 / 說明 / **推論規則** | 檢索 + `nl_logic`(推理) |
-| **啟發** | 「這個場景,給我 insight」 | 檢索 + LLM 綜合 | 名稱 / 說明 / **啟發角度** | 檢索 + `nl_logic`(綜合) |
+| 範本     | 使用者問句樣態                           | 管線(隱藏)                                  | 開放給使用者填                                                 | 對應形狀                                    |
+| -------- | ---------------------------------------- | ------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------- |
+| **檢索** | 「X 出現在哪份文件 / 查一下 X」          | 檢索 + 證據驗證 + 附出處回答(kb_query 形狀) | 名稱 / 說明 / (選)我的規則 / (選)檢索筆數                      | 檢索管線 + 選用邏輯 slot(`nl_logic`)        |
+| **比對** | 「比較/排序 A、B、C(YoY、績效排名)」     | 檢索多筆 + 比較/排序(具名項的相對次序)      | 名稱 / 說明 / **比較規則** / (選)排序依據                      | 檢索 + `script`(比較排序需精確,預設 Python) |
+| **統計** | 「全年總額 / 平均 / 某指標的計數・分佈」 | 檢索(較高 top_k,拉全集)+ script 聚合        | 名稱 / 說明 / **統計規則(聚合)** / (選)統計指標 / (選)統計期間 | 檢索 + `script`(聚合算術需精確,預設 Python) |
+| **推論** | 「假設 X,後續會怎樣」                    | 檢索 + LLM 推理                             | 名稱 / 說明 / **推論規則**                                     | 檢索 + `nl_logic`(推理)                     |
+| **啟發** | 「這個場景,給我 insight」                | 檢索 + LLM 綜合                             | 名稱 / 說明 / **啟發角度**                                     | 檢索 + `nl_logic`(綜合)                     |
 
 - **比對 vs 統計是兩件事**:比對 = 具名項之間的相對次序/排名(YoY、績效排名),輸出是「排序」;統計 = 對整個集合/期間做聚合(總額/平均/計數/分佈),輸出是「聚合數字」,通常不指名項目相互比較。
 - 檢索最接近純管線(自訂邏輯選用);推論/啟發本質是 LLM 推理,重度依賴 `nl_logic`(印證 D2)。**比對與統計因輸出是精確數字,預設走 Python(`script`)** —— LLM 對多列資料做排序/算術不可靠;兩者共用同一條「精確→Python」機理,統計只是第二支 `script`-leaning 範本。
-- 五個原型同時也是「聊天 → skill 路由」(見 [chat-skill-routing 計畫](../chat-skill-routing/01-plan.md))要分辨的意圖類別 —— 撰寫端與路由端共用同一套分類,不各自發明。
+- 五個原型是作者體驗的範本分類；聊天路由不依固定分類，而是根據非範本 Skill 的名稱與描述選擇候選項目。
 
 範本規格 = **兩個天然歸屬**(骨架 = 引擎契約,metadata = 授權期呈現):
 - **骨架**(flow + input_schema + 一顆明確的「規則注入 slot」;`nl_logic` slot 或 `compare`/`stats` 的 `script` slot)= 節點名/版本就是 `@node` 契約 → **放 workflow**:`workflow/app/skills/template_*.yaml` 五支 curate 過的內建 skill(比照 `skills/kb_query.yaml`,與節點契約同源同 deploy、pytest 就地驗)。
@@ -184,24 +197,24 @@ flow:
 讀 `settings.py` 與 kb_query 十節點後的結論:
 
 **已是 env/settings 可調(開放成本低)**
-| 參數 | settings 欄位 | 預設 | 影響 |
-|---|---|---|---|
-| 共用檢索取回數 | `retrieval_top_k` (`RETRIEVAL_TOP_K`, 1–50) | 4 | `retrieve` 節點未指定 top_k 時 |
-| kb_query 檢索基準數 | `kb_query_top_k` (`KB_QUERY_TOP_K`) | 8 | retrieval_planner 基準 |
-| kb_query 最大檢索次數 | `kb_query_max_retrieval_attempts` | 2 | RETRY 迴圈收斂點(input 亦可覆寫) |
-| 工作流逾時 | `workflow_timeout_seconds` | 120 | 全域執行逾時 |
-| LLM 模型 | `llm_model` (`LLM_MODEL`) | gpt-4o-mini | 所有 LLM 節點 |
+| 參數                  | settings 欄位                               | 預設        | 影響                             |
+| --------------------- | ------------------------------------------- | ----------- | -------------------------------- |
+| 共用檢索取回數        | `retrieval_top_k` (`RETRIEVAL_TOP_K`, 1–50) | 4           | `retrieve` 節點未指定 top_k 時   |
+| kb_query 檢索基準數   | `kb_query_top_k` (`KB_QUERY_TOP_K`)         | 8           | retrieval_planner 基準           |
+| kb_query 最大檢索次數 | `kb_query_max_retrieval_attempts`           | 2           | RETRY 迴圈收斂點(input 亦可覆寫) |
+| 工作流逾時            | `workflow_timeout_seconds`                  | 120         | 全域執行逾時                     |
+| LLM 模型              | `llm_model` (`LLM_MODEL`)                   | gpt-4o-mini | 所有 LLM 節點                    |
 
 **高價值但寫死在節點(開放成本中,需改碼 + 加 settings + 經 `KbQueryDeps` 注入)**
-| 參數 | 位置 | 現值 |
-|---|---|---|
-| 意圖分類 LLM 採用信心門檻 | intent_classification.py:91 | 0.6 |
-| LLM 溫度 | llm.py:19(單例寫死,全節點共用) | 0.7 |
-| query_rewrite 變體數上限 | query_rewrite.py:74 | 5 |
-| retrieval_planner top_k 加倍倍率 | retrieval_planner.py:55,93 | ×2 |
-| ScoreReranker 加權(period/metric/excluded) | adapters.py:145-151 | +0.2/+0.2/−0.5 |
-| evidence_verification 數值容差 | evidence_verification.py:8,10 | 1e-6 / 5e-5 |
-| locator 分數權重 | locators.py:64-68,112-114,171 | 多個 |
+| 參數                                       | 位置                           | 現值           |
+| ------------------------------------------ | ------------------------------ | -------------- |
+| 意圖分類 LLM 採用信心門檻                  | intent_classification.py:91    | 0.6            |
+| LLM 溫度                                   | llm.py:19(單例寫死,全節點共用) | 0.7            |
+| query_rewrite 變體數上限                   | query_rewrite.py:74            | 5              |
+| retrieval_planner top_k 加倍倍率           | retrieval_planner.py:55,93     | ×2             |
+| ScoreReranker 加權(period/metric/excluded) | adapters.py:145-151            | +0.2/+0.2/−0.5 |
+| evidence_verification 數值容差             | evidence_verification.py:8,10  | 1e-6 / 5e-5    |
+| locator 分數權重                           | locators.py:64-68,112-114,171  | 多個           |
 
 **視為「設定資料」但目前寫死**:詞彙字典 `DEFAULT_GLOSSARY`、口徑詞 `VERSION_TERMS`/`OPPOSITE_TERMS`、意圖→方法對照 `_INTENT_METHODS`、公式規則 `_FORMULA_RULES`。開放這些是「規則管理」等級,範圍大,**本計畫不含**。
 
@@ -247,28 +260,28 @@ CREATE UNIQUE INDEX uq_confset_active ON configuration_set(tenant_id) WHERE is_a
 
 O1(D5)、O4(D6)前已定案。本輪一次定調其餘全部:
 
-| # | 決策 | **定調** | 備註 / 代價 |
-|---|---|---|---|
-| **O2** | 簡單模式「我的規則」預設格式 | **自然語言(→ `nl_logic`)為預設;Python 為進階選項** | 直觀優先。代價:每次執行多一次 LLM 呼叫、行為不完全確定;非技術情境划算 |
-| **O2b** | v1 範本清單 | **對齊五類問題原型:檢索 / 比對 / 統計 / 推論 / 啟發**(§4.4) | 與聊天路由共用同一套意圖分類;比對與統計預設走 `script`;組織自訂範本延後 |
-| **O3** | 節點參數 v1 範圍 | **5 個既有 settings + 促升 2 個寫死值(意圖信心門檻 0.6、LLM 溫度 0.7)為 settings** | 立即有感、成本可控;其餘寫死值 v2 再議,規則資料類不做 |
-| **O4b** | Configuration Set 執行取值路徑 | **(i) workflow 於 invoke 向 backend 取 + 依租戶/版本快取** | 與「skill 定義也向 backend 取」一致,事實來源集中 |
-| **O5** | 線上 Python 編輯器 | **CodeMirror 6(視為已授權)** | 使用者已明示要線上寫 Python;新增依賴,僅用於進階/Python 規則 |
-| **O6** | 「一般設定」`app_config` per-tenant 化 | **本計畫不動(維持全域)** | 若日後組織級一般設定需隔離,另立小計畫加 tenant 欄 |
-| **O7** | Configuration Set 每租戶組數 | **多組 + 一 active**(schema 已按此設計) | 支援「高召回/保守」等多套切換;租戶內 name 唯一、至多一 active |
+| #       | 決策                                   | **定調**                                                                           | 備註 / 代價                                                             |
+| ------- | -------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **O2**  | 簡單模式「我的規則」預設格式           | **自然語言(→ `nl_logic`)為預設;Python 為進階選項**                                 | 直觀優先。代價:每次執行多一次 LLM 呼叫、行為不完全確定;非技術情境划算   |
+| **O2b** | v1 範本清單                            | **對齊五類問題原型:檢索 / 比對 / 統計 / 推論 / 啟發**(§4.4)                        | 與聊天路由共用同一套意圖分類;比對與統計預設走 `script`;組織自訂範本延後 |
+| **O3**  | 節點參數 v1 範圍                       | **5 個既有 settings + 促升 2 個寫死值(意圖信心門檻 0.6、LLM 溫度 0.7)為 settings** | 立即有感、成本可控;其餘寫死值 v2 再議,規則資料類不做                    |
+| **O4b** | Configuration Set 執行取值路徑         | **(i) workflow 於 invoke 向 backend 取 + 依租戶/版本快取**                         | 與「skill 定義也向 backend 取」一致,事實來源集中                        |
+| **O5**  | 線上 Python 編輯器                     | **CodeMirror 6(視為已授權)**                                                       | 使用者已明示要線上寫 Python;新增依賴,僅用於進階/Python 規則             |
+| **O6**  | 「一般設定」`app_config` per-tenant 化 | **本計畫不動(維持全域)**                                                           | 若日後組織級一般設定需隔離,另立小計畫加 tenant 欄                       |
+| **O7**  | Configuration Set 每租戶組數           | **多組 + 一 active**(schema 已按此設計)                                            | 支援「高召回/保守」等多套切換;租戶內 name 唯一、至多一 active           |
 
 > 定調後無阻塞項;下一步可將 P1–P4 各自展開為實作 spec(仍待「開始實作」指令)。
 
 ## 8. 交付分階(規劃,待核准後才動工)
 
-| 階段 | 內容 | 服務 | 風險 |
-|---|---|---|---|
-| **P1 前端 IA** | 移除 workflows 選單;Skill 功能樹搬進系統設定;系統設定改三分頁;試跑(TraceView)+版本控管(revisions)接為子功能 | frontend | 低 |
-| **P2a 範本** | workflow:curate 5 支 `template_*` 內建骨架(骨架 flow + input_schema + 注入槽;三支 `nl_logic` slot、比對/統計為 `script` slot)、catalog 內建項帶 definition;frontend:薄 UI metadata(basedOn/開放欄位/標籤/元件)+ compose(patch 骨架)(§4.4) | workflow + frontend | 低—中 |
-| **P2b 簡單模式** | 範本挑選 + 名稱/說明/我的規則(NL 預設、Python 進階 CodeMirror)+ 內建試跑 + 組譯 YAML + validate 翻人話 | frontend | 中 |
-| **P2c 進階模式** | 單一 flow 步驟編輯器 + YAML 無損切換(技術使用者;可延後) | frontend | 中 |
-| **P3 nl_logic 節點** | 新增 LLM 節點 + 註冊 + pytest;「我的規則」NL 路徑打通(P2b 依賴此) | workflow | 中 |
-| **P4 Configuration Set** | 新 schema + backend CRUD + platform 代理 + invoke 讀取串接(O4b)+ 系統設定表單;settings 促升(O3)| workflow/backend/platform/frontend | **高**(跨服務讀設定 + 新資料表 + tenant 隔離) |
+| 階段                     | 內容                                                                                                                                                                                                                                      | 服務                               | 風險                                          |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------- |
+| **P1 前端 IA**           | 移除 workflows 選單;Skill 功能樹搬進系統設定;系統設定改三分頁;試跑(TraceView)+版本控管(revisions)接為子功能                                                                                                                               | frontend                           | 低                                            |
+| **P2a 範本**             | workflow:curate 5 支 `template_*` 內建骨架(骨架 flow + input_schema + 注入槽;三支 `nl_logic` slot、比對/統計為 `script` slot)、catalog 內建項帶 definition;frontend:薄 UI metadata(basedOn/開放欄位/標籤/元件)+ compose(patch 骨架)(§4.4) | workflow + frontend                | 低—中                                         |
+| **P2b 簡單模式**         | 範本挑選 + 名稱/說明/我的規則(NL 預設、Python 進階 CodeMirror)+ 內建試跑 + 組譯 YAML + validate 翻人話                                                                                                                                    | frontend                           | 中                                            |
+| **P2c 進階模式**         | 單一 flow 步驟編輯器 + YAML 無損切換(技術使用者;可延後)                                                                                                                                                                                   | frontend                           | 中                                            |
+| **P3 nl_logic 節點**     | 新增 LLM 節點 + 註冊 + pytest;「我的規則」NL 路徑打通(P2b 依賴此)                                                                                                                                                                         | workflow                           | 中                                            |
+| **P4 Configuration Set** | 新 schema + backend CRUD + platform 代理 + invoke 讀取串接(O4b)+ 系統設定表單;settings 促升(O3)                                                                                                                                           | workflow/backend/platform/frontend | **高**(跨服務讀設定 + 新資料表 + tenant 隔離) |
 
 - **最小可用切片**:P1 + P2a + P2b + P3 即可交付「非技術使用者靠範本建 Skill、寫中文規則、當場試跑」的完整價值。P2c(進階模式)服務技術使用者,可延後;P4(Configuration Set)是另一條較重的線,可獨立排期。
 - **多租戶(D8)貫穿每階段**:Skill 已 tenant-scoped;Configuration Set 新表帶 tenant_id;系統 Admin 僅留位不建。

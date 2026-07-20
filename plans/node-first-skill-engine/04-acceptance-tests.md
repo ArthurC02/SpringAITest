@@ -1,19 +1,20 @@
 # 驗收準則與測試案例 — Node-first 架構翻轉 × Skill 流程引擎
 
-> 相關文件:[計劃書](01-plan.md)、[規格書](02-spec.md)、[設計文稿](03-design.md)。
+> 狀態: **已交付能力的驗收記錄。** 相關文件: [計劃書](01-plan.md)、[規格書](02-spec.md)、[設計文稿](03-design.md)；實際測試入口見 [plans README](../README.md)。
+> **歷史草稿警示:** 涉及 `/workflows` 或 `@register` 相容性的案例是遷移期驗收草稿；不適用於目前的 Skill API。
 > 本文件把 [01-plan.md 第 5 節](01-plan.md)的每條驗收標準拆成可執行的測試案例。欄位、錯誤碼、API 形狀一律以 [02-spec.md](02-spec.md) 為準,程式落點以 [03-design.md](03-design.md) 為準;本文件不發明任何未在前三份文件出現的欄位或行為。案例分 Phase 陳列,對應 [01-plan.md 第 5 節](01-plan.md)表格的四個 Phase。
 
 ## 1. 測試層級對照表
 
-| 層級 | 範圍 | 位置(建議) | 執行方式 |
-|---|---|---|---|
-| workflow 服務 pytest — 元件單元測試 | `engine/node_registry.py`、`engine/harness.py`、`engine/skill.py`(靜態驗證)、`engine/compiler.py`、`engine/expressions.py`、`engine/script_runner.py`、`engine/tool_registry.py` | `workflow/tests/test_engine_*.py`(比照現有 `test_registry.py`/`test_retrieve.py` 命名慣例) | `uv run pytest` |
-| workflow 服務 pytest — parity e2e | `skills/kb_query.yaml` 編譯圖 vs 手寫 `kbquery/graph.py` | `workflow/tests/test_skill_kbquery_parity_e2e.py`(對照現有 `test_kbquery_e2e.py` 7 案例逐一複製) | `uv run pytest` |
-| workflow 服務 pytest — 沙箱逃逸 | `engine/script_runner.py` 攻擊樣本集 | `workflow/tests/test_script_runner_sandbox.py` | `uv run pytest`(納入 CI) |
-| backend xUnit | `Features/Skills/`(CRUD、驗證轉發、revision、軟刪、租戶隔離、角色) | `backend/Backend.Tests/Features/Skills/SkillsControllerTests.cs` 等(比照現有 feature folder 測試慣例) | `dotnet test` |
-| platform xUnit | `/api/skills*` 代理、identity headers 轉發、401 行為 | `platform/Platform.Tests/SkillsProxyTests.cs` | `dotnet test` |
-| 前端 lint + build | Skills 視圖(Tab 1/2/3)、角色可見性、驗證 debounce | `frontend/` | `npm run lint && npm run build`(元件測試如有既有慣例則比照補充) |
-| e2e curl | 跨服務契約(建立 → invoke → trace → 稽核) | 手動或 CI 腳本 | `curl`(見各案例) |
+| 層級                                | 範圍                                                                                                                                                                             | 位置(建議)                                                                                            | 執行方式                                                        |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| workflow 服務 pytest — 元件單元測試 | `engine/node_registry.py`、`engine/harness.py`、`engine/skill.py`(靜態驗證)、`engine/compiler.py`、`engine/expressions.py`、`engine/script_runner.py`、`engine/tool_registry.py` | `workflow/tests/test_engine_*.py`(比照現有 `test_registry.py`/`test_retrieve.py` 命名慣例)            | `uv run pytest`                                                 |
+| workflow 服務 pytest — parity e2e   | `skills/kb_query.yaml` 編譯圖 vs 手寫 `kbquery/graph.py`                                                                                                                         | `workflow/tests/test_skill_kbquery_parity_e2e.py`(對照現有 `test_kbquery_e2e.py` 7 案例逐一複製)      | `uv run pytest`                                                 |
+| workflow 服務 pytest — 沙箱逃逸     | `engine/script_runner.py` 攻擊樣本集                                                                                                                                             | `workflow/tests/test_script_runner_sandbox.py`                                                        | `uv run pytest`(納入 CI)                                        |
+| backend xUnit                       | `Features/Skills/`(CRUD、驗證轉發、revision、軟刪、租戶隔離、角色)                                                                                                               | `backend/Backend.Tests/Features/Skills/SkillsControllerTests.cs` 等(比照現有 feature folder 測試慣例) | `dotnet test`                                                   |
+| platform xUnit                      | `/api/skills*` 代理、identity headers 轉發、401 行為                                                                                                                             | `platform/Platform.Tests/SkillsProxyTests.cs`                                                         | `dotnet test`                                                   |
+| 前端 lint + build                   | Skills 視圖(Tab 1/2/3)、角色可見性、驗證 debounce                                                                                                                                | `frontend/`                                                                                           | `npm run lint && npm run build`(元件測試如有既有慣例則比照補充) |
+| e2e curl                            | 跨服務契約(建立 → invoke → trace → 稽核)                                                                                                                                         | 手動或 CI 腳本                                                                                        | `curl`(見各案例)                                                |
 
 ## 2. Phase 1 — Node Registry + Harness
 
@@ -140,18 +141,18 @@
 
 比照 [02-spec.md §5.2](02-spec.md) 白名單規則,每個樣本各為一個 `test_script_runner_sandbox.py` 內的 parametrize case:
 
-| # | 攻擊樣本(script 原始碼片段) | 擋下時機 |
-|---|---|---|
-| AT3-01 | `import os` | 存檔靜態掃描(`forbidden_script`) |
-| AT3-02 | `from os import system` | 存檔靜態掃描(`forbidden_script`) |
-| AT3-03 | `exec("state['x']=1")` | 存檔靜態掃描 |
-| AT3-04 | `eval("1+1")` | 存檔靜態掃描 |
-| AT3-05 | `compile("1+1", "<s>", "eval")` | 存檔靜態掃描 |
-| AT3-06 | `open("/etc/passwd")` | 存檔靜態掃描 |
-| AT3-07 | `__import__("os")` | 存檔靜態掃描 |
-| AT3-08 | `state.__class__.__bases__` (雙底線屬性存取) | 存檔靜態掃描 |
-| AT3-09 | `global x` / `nonlocal x` | 存檔靜態掃描 |
-| AT3-10 | `while True: pass` | 存檔靜態掃描(僅允許 `for` 於有限 iterable) |
+| #      | 攻擊樣本(script 原始碼片段)                      | 擋下時機                                                                                      |
+| ------ | ------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| AT3-01 | `import os`                                      | 存檔靜態掃描(`forbidden_script`)                                                              |
+| AT3-02 | `from os import system`                          | 存檔靜態掃描(`forbidden_script`)                                                              |
+| AT3-03 | `exec("state['x']=1")`                           | 存檔靜態掃描                                                                                  |
+| AT3-04 | `eval("1+1")`                                    | 存檔靜態掃描                                                                                  |
+| AT3-05 | `compile("1+1", "<s>", "eval")`                  | 存檔靜態掃描                                                                                  |
+| AT3-06 | `open("/etc/passwd")`                            | 存檔靜態掃描                                                                                  |
+| AT3-07 | `__import__("os")`                               | 存檔靜態掃描                                                                                  |
+| AT3-08 | `state.__class__.__bases__` (雙底線屬性存取)     | 存檔靜態掃描                                                                                  |
+| AT3-09 | `global x` / `nonlocal x`                        | 存檔靜態掃描                                                                                  |
+| AT3-10 | `while True: pass`                               | 存檔靜態掃描(僅允許 `for` 於有限 iterable)                                                    |
 | AT3-11 | `for i in range(10001): pass`(超過 10000 次迭代) | 執行期計數中止(存檔時無法靜態算出動態上界的情形,如 `range(n)` 其中 `n` 來自 state,需執行期擋) |
 
 - 前置(共用):`POST /skills/validate` 或直接呼叫 `engine/script_runner.py` 的 AST 掃描函式。
@@ -317,12 +318,12 @@
 
 ## 附錄:各 Phase 案例數統計
 
-| Phase | 案例數 | 編號範圍 |
-|---|---|---|
-| P1 — Node Registry + Harness | 7 | AT1-01 ~ AT1-07 |
-| P2 — Skill 引擎 | 28 | AT2-01 ~ AT2-28(含 kb_query parity 7 案:AT2-21~AT2-27) |
-| P3 — Script Runner + Tool Registry | 17 | AT3-01 ~ AT3-17(含沙箱逃逸樣本 11 個:AT3-01~AT3-11) |
-| P4 — 對外化 | 17 | AT4-01 ~ AT4-17 |
-| 治理硬規則驗證清單 | 4 | AT-GOV-01 ~ AT-GOV-04 |
-| 回歸檢查清單 | 3 | AT-REG-01 ~ AT-REG-03 |
-| **合計** | **76** | — |
+| Phase                              | 案例數 | 編號範圍                                               |
+| ---------------------------------- | ------ | ------------------------------------------------------ |
+| P1 — Node Registry + Harness       | 7      | AT1-01 ~ AT1-07                                        |
+| P2 — Skill 引擎                    | 28     | AT2-01 ~ AT2-28(含 kb_query parity 7 案:AT2-21~AT2-27) |
+| P3 — Script Runner + Tool Registry | 17     | AT3-01 ~ AT3-17(含沙箱逃逸樣本 11 個:AT3-01~AT3-11)    |
+| P4 — 對外化                        | 17     | AT4-01 ~ AT4-17                                        |
+| 治理硬規則驗證清單                 | 4      | AT-GOV-01 ~ AT-GOV-04                                  |
+| 回歸檢查清單                       | 3      | AT-REG-01 ~ AT-REG-03                                  |
+| **合計**                           | **76** | —                                                      |

@@ -1,20 +1,9 @@
 # 設計文稿 — Skill 撰寫 × 系統設定
 
-> 相關文件:[計劃書](01-plan.md)、[規格書](02-spec.md)。
-> 內容:架構總覽、DB Schema、後端整合、前端整合、UI/UX、執行 runtime 與沙箱、匯出設計、資料流。
+> 狀態: **已封存的設計記錄。** 現行 Skill 作者體驗以 [settings-skill-redesign](../settings-skill-redesign/01-plan.md) 與 [plans README](../README.md) 為準。
+> 下文均為封存時的歷史設計，不是現行實作或驗收依據。
 
-## 0. 2026-07 對齊裁決(本節優先於下方歷史草稿)
-
-本文件的初稿早於 node-first 的完整引擎設計；下方與本節衝突的段落僅保留供決策追溯，**不得作為實作或驗收依據**。現行設計如下:
-
-- **唯一資料模型**:backend 的 `skill.definition` YAML 與 `skill_revision`；name、description、role、input 和 flow 由 workflow validate 解析，backend 不另裝 YAML parser。
-- **唯一管理入口**:Workflows & Skills 的 ADMIN「Skill 管理」Tab；ConfigView 只有一般設定與 code workflow 唯讀分頁，不建立第二個 Skill 編輯器。
-- **唯一匯出格式**:`SKILL.md` + `skill.yaml`。後者逐 byte 保留 `definition`；流程型 Skill 不可被偽裝成 standalone `scripts/main.py`。
-- **唯一 runtime**:node-first 的 `/skills/{name}/invoke`、Script Runner、Tool Registry 和 revision cache；本計畫不另建 sandbox 或把 Skill 併入 `/workflows`。
-
-實作時以本節、[01-plan.md](01-plan.md)、[02-spec.md](02-spec.md) 與 [node-first 設計](../node-first-skill-engine/03-design.md) 為準。
-
-## 1. 歷史架構草稿(已由第 0 節取代)
+## 1. 歷史架構草稿
 
 沿用既有信任邊界,不新增對外面向:
 

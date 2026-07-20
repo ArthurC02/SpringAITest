@@ -1,7 +1,7 @@
 # 驗收測試 — 聊天 → Skill 路由（Chat-to-Skill Routing）
 
-> 狀態：**P1 驗收基準**。承接 [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)、[03-design.md](03-design.md)。
-> 範圍：驗證動態 Skill 目錄接入既有 function-calling 管線，且不破壞聊天、權限、記憶及 SSE 契約；P2–P4 僅記錄未來門檻，不視為 P1 失敗。
+> 狀態：**已交付功能的驗收基準。** 承接 [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)、[03-design.md](03-design.md)；實際測試入口見 [plans README](../README.md)。
+> 範圍：驗證動態 Skill 目錄與手動 LLM 名稱選擇路由，且不破壞聊天、權限、記憶及 SSE 契約；P2–P4 僅記錄未來門檻，不視為 P1 失敗。
 
 ## 1. 驗收原則與層級
 
@@ -17,12 +17,12 @@ P1 必須同時滿足：
 
 ### 1.2 驗證層級
 
-| 層級 | 用途 | 自動化位置 |
-|---|---|---|
-| Service unit | 候選工具映射、角色、schema、去重、invoke、fallback、mem0 順序 | `platform/tests/Platform.Service.Tests/`（沿用手寫 fake） |
-| Web integration | JWT/匿名分流、阻塞回應、SSE bytes 與空行 | `platform/tests/Platform.Web.Tests/`（`WebApplicationFactory`） |
-| Cross-service E2E | 真 `/skills` 與 `/skills/{name}/invoke` JSON、租戶隔離、identity 注入與錯誤碼 | full compose；建議 `e2e-verifier` 腳本/測試集合 |
-| LLM quality evaluation | 自然語言到具體 Skill 的選擇品質與無工具率 | 非 blocking CI 的固定資料集評估，見 §7 |
+| 層級                   | 用途                                                                          | 自動化位置                                                      |
+| ---------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Service unit           | 候選工具映射、角色、schema、去重、invoke、fallback、mem0 順序                 | `platform/tests/Platform.Service.Tests/`（沿用手寫 fake）       |
+| Web integration        | JWT/匿名分流、阻塞回應、SSE bytes 與空行                                      | `platform/tests/Platform.Web.Tests/`（`WebApplicationFactory`） |
+| Cross-service E2E      | 真 `/skills` 與 `/skills/{name}/invoke` JSON、租戶隔離、identity 注入與錯誤碼 | full compose；建議 `e2e-verifier` 腳本/測試集合                 |
+| LLM quality evaluation | 自然語言到具體 Skill 的選擇品質與無工具率                                     | 非 blocking CI 的固定資料集評估，見 §7                          |
 
 > 測試可依實際 solution 目錄調整檔名，但不得降低驗證層級。所有 .NET 測試使用既有手寫 fake，不引入 mocking library。
 
@@ -417,25 +417,25 @@ P1 必須同時滿足：
 
 ## 6. 需求追溯矩陣
 
-| 來源需求／決策 | 驗收案例 | 覆蓋結果 |
-|---|---|---|
-| 01-plan 目標 1：自然語言自動選具體 Skill 或純聊天 | CSR-P1-004、008、015、019；§7 | 候選與 invoke deterministic；選擇品質另評估 |
-| 01-plan 目標 2：五類與撰寫端共用錨點 | CSR-P1-004、008；CSR-EVAL-001 | `template_*` 與 custom 同池，不建第二分類器 |
-| 01-plan 目標 3：結果融回 blocking/SSE | CSR-P1-016–018、025–027；CSR-P2-001 | P1 最終答案與 wire contract；出處列 P2 |
-| 01-plan 目標 4：多租戶與角色 | CSR-P1-001、002、005–007、018 | 預過濾、真租戶隔離、403、identity 防竄改 |
-| 01-plan 非目標：公開 API/SSE/AG-UI 不變 | CSR-P1-025、026；CSR-P4-001；§5 | blocking DTO、兩種 SSE 空格契約明確分離 |
-| 02-spec §1：方案 A，以純聊天收尾 | CSR-P1-019；§5；CSR-EVAL-001 | 無第二分類器，允許 no-tool |
-| 02-spec §2.2：builtin/custom、角色及租戶候選 | CSR-P1-001–007 | 完整覆蓋 |
-| 02-spec §2.3 / design §1.3：單一必填 str 天花板 | CSR-P1-008–012、014 | 0/1/2 邊界與 mixed-type on/off-point |
-| design §1.4：Skill 優先、Ordinal 去重 | CSR-P1-013 | 精確數量及優先來源 |
-| design §2：`question` → inputKey → `{skill,output}` | CSR-P1-008、015–018 | fake 與真 JSON 雙層覆蓋 |
-| design §4：fallback 四層 | CSR-P1-019–024 | no-tool、catalog、invoke、既有 abstain 全覆蓋 |
-| design §5：mem0 recall-before / remember-after | CSR-P1-028、029 | blocking 與 stream 各一 |
-| design §3/§6：兩 REST 路徑與 API 零變更 | CSR-P1-025–027 | Web 層覆蓋 |
-| design §7：每輪 fetch、N+1/快取延後 | CSR-P1-030；§5 | 釘死 P1 頻率與非目標 |
-| design §8：多參/slot filling 延後 | CSR-P1-009、010；CSR-P3-001 | P1 跳過，P3 升級門檻 |
-| design §11：skill 版無 abstain、AG-UI 不做 | CSR-P1-024；CSR-P4-001；§5 | 反向驗收 |
-| backend trust / schema /錯誤碼真契約 | CSR-P1-005–007、018、023 | E2E 避免 fake 掩蓋序列化與安全問題 |
+| 來源需求／決策                                      | 驗收案例                            | 覆蓋結果                                      |
+| --------------------------------------------------- | ----------------------------------- | --------------------------------------------- |
+| 01-plan 目標 1：自然語言自動選具體 Skill 或純聊天   | CSR-P1-004、008、015、019；§7       | 候選與 invoke deterministic；選擇品質另評估   |
+| 01-plan 目標 2：五類與撰寫端共用錨點                | CSR-P1-004、008；CSR-EVAL-001       | `template_*` 與 custom 同池，不建第二分類器   |
+| 01-plan 目標 3：結果融回 blocking/SSE               | CSR-P1-016–018、025–027；CSR-P2-001 | P1 最終答案與 wire contract；出處列 P2        |
+| 01-plan 目標 4：多租戶與角色                        | CSR-P1-001、002、005–007、018       | 預過濾、真租戶隔離、403、identity 防竄改      |
+| 01-plan 非目標：公開 API/SSE/AG-UI 不變             | CSR-P1-025、026；CSR-P4-001；§5     | blocking DTO、兩種 SSE 空格契約明確分離       |
+| 02-spec §1：方案 A，以純聊天收尾                    | CSR-P1-019；§5；CSR-EVAL-001        | 無第二分類器，允許 no-tool                    |
+| 02-spec §2.2：builtin/custom、角色及租戶候選        | CSR-P1-001–007                      | 完整覆蓋                                      |
+| 02-spec §2.3 / design §1.3：單一必填 str 天花板     | CSR-P1-008–012、014                 | 0/1/2 邊界與 mixed-type on/off-point          |
+| design §1.4：Skill 優先、Ordinal 去重               | CSR-P1-013                          | 精確數量及優先來源                            |
+| design §2：`question` → inputKey → `{skill,output}` | CSR-P1-008、015–018                 | fake 與真 JSON 雙層覆蓋                       |
+| design §4：fallback 四層                            | CSR-P1-019–024                      | no-tool、catalog、invoke、既有 abstain 全覆蓋 |
+| design §5：mem0 recall-before / remember-after      | CSR-P1-028、029                     | blocking 與 stream 各一                       |
+| design §3/§6：兩 REST 路徑與 API 零變更             | CSR-P1-025–027                      | Web 層覆蓋                                    |
+| design §7：每輪 fetch、N+1/快取延後                 | CSR-P1-030；§5                      | 釘死 P1 頻率與非目標                          |
+| design §8：多參/slot filling 延後                   | CSR-P1-009、010；CSR-P3-001         | P1 跳過，P3 升級門檻                          |
+| design §11：skill 版無 abstain、AG-UI 不做          | CSR-P1-024；CSR-P4-001；§5          | 反向驗收                                      |
+| backend trust / schema /錯誤碼真契約                | CSR-P1-005–007、018、023            | E2E 避免 fake 掩蓋序列化與安全問題            |
 
 ## 7. 真 LLM 路由品質評估（不得作為 deterministic CI）
 

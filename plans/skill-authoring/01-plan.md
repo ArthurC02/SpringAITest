@@ -1,12 +1,14 @@
 # 計劃書 — Skill 撰寫 × 系統設定
 
-> 狀態:已與 [node-first-skill-engine](../node-first-skill-engine/01-plan.md) 對齊。本文只定義該引擎的管理 UI 與可攜匯出；Skill 資料模型、驗證與執行語意以 node-first 為唯一事實來源。
-> 相關文件:[規格書](02-spec.md)、[設計文稿](03-design.md)。
+> **狀態: 已封存並併入 settings-skill-redesign。**
+>
+> 新維護者應優先參考 [settings-skill-redesign/01-plan.md](../settings-skill-redesign/01-plan.md) 與 [plans README](../README.md) 了解現況。本資料夾保留為歷史記錄，不再主動維護。
+> 下文均為封存時的歷史內容，不是現行設計、實作或驗收依據。
 
 ## 1. 背景與問題
 
-- **系統設定頁太空**:[ConfigView.tsx](../../frontend/src/components/ConfigView.tsx) 原本只有一張 key/value 表(Key / Value / 更新時間),需要補上工作流唯讀檢視。
-- **工作流的 Tool Description 是設定性質的資產,卻藏在 code 裡**:五個工作流的描述字串寫死在 Python 模組(例 [rag_qa.py:73](../../workflow/app/workflows/rag_qa.py#L73)),經 [registry.py](../../workflow/app/workflows/registry.py) 的 decorator 註冊,前端只看得到 `name/description/required_role`,無法在設定裡檢視或管理。
+- **當時的系統設定頁太空**:原本只有一張 key/value 表，需要補上工作流唯讀檢視。
+- **當時工作流的 Tool Description 是設定性質的資產，卻藏在程式碼裡**:前端只看得到 `name/description/required_role`，無法在設定裡檢視或管理。
 - **缺少讓使用者自訂能力的機制**:所有工作流都要改 Python code、重新部署。目標是讓 ADMIN 在「工作流與 Skill」視圖撰寫宣告式 Skill,並匯出可攜定義。
 
 ## 2. 目標 / 非目標

@@ -1,0 +1,29 @@
+# Skill Plans Index
+
+This directory records the evolution of the Skill platform. Source code and executable tests are the authority for current behavior; plan documents retain the decisions, acceptance criteria, and historical rationale that led here.
+
+## Current Delivery Map
+
+| Area                         | Current status                                                                                                                                                       | Code authority                                                                                                                                                                                                         | Plan record                                                   |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Chat-to-Skill routing        | Delivered. Signed-in chat dynamically obtains the Skill catalog, filters it by role and a single required string input, routes up to twice, then falls back to chat. | `platform/src/Platform.Service/ChatService.cs`, `platform/src/Platform.Service/WorkflowService.cs`                                                                                                                     | [chat-skill-routing](chat-skill-routing/01-plan.md)           |
+| Node-first Skill engine      | Delivered for the registry, compiler, harness, script runner, tools, validation, catalog, and invocation.                                                            | `workflow/app/engine/`, `workflow/app/nodes/`, `workflow/app/skills/`                                                                                                                                                  | [node-first-skill-engine](node-first-skill-engine/01-plan.md) |
+| Skill persistence and API    | Delivered. Custom Skills and revisions are persisted by backend; platform proxies the public API.                                                                    | `backend/src/Backend.Api/Skills/`, `platform/src/Platform.Service/WorkflowService.cs`                                                                                                                                  | [node-first-skill-engine](node-first-skill-engine/01-plan.md) |
+| Settings and Skill authoring | Delivered for the three settings tabs, simple and advanced authoring, trial runs, revision history, and the Configuration Set execution-time foundation.             | `frontend/src/components/ConfigView.tsx`, `frontend/src/components/SkillHome.tsx`, `frontend/src/components/SimpleSkillEditor.tsx`, `frontend/src/components/NodeParamsTab.tsx`, `workflow/app/skills/config_apply.py` | [settings-skill-redesign](settings-skill-redesign/01-plan.md) |
+| Copilot shared core          | **Planned, not implemented.** The two chat surfaces do not share a brain: the AG-UI copilot has no server-side memory, identity, persistence, skill routing, or numeric guardrails.                                  | `platform/src/Platform.Web/Program.cs`, `platform/src/Platform.Service/ChatService.cs`, `frontend/src/App.tsx`                                                                                                          | [copilot-shared-core](copilot-shared-core/01-plan.md)         |
+
+## How To Read The Records
+
+- `chat-skill-routing` and `node-first-skill-engine` are delivered design records. Their proposed implementation steps are historical; use the code locations above for current contracts.
+- `settings-skill-redesign` is the current product-design record for the settings experience. Its initial phases have been delivered; remaining work must be derived from an observed code or test gap.
+- `skill-authoring` is archived. Its UI scope was folded into `settings-skill-redesign`; it must not be used to create a second editor, schema, or runtime.
+- `copilot-shared-core` is the only forward-looking record here: nothing in it has shipped. It supersedes the `P4 / 非目標` row in [chat-skill-routing/03-design.md](chat-skill-routing/03-design.md) §10, which deferred wiring server-side Skill tools into the AG-UI copilot. Its findings correct two claims in that record — the copilot has no server-side memory at all, and native function calling is reliable for UI-action tools even though it was disabled for numeric Skills.
+
+## Verification Entry Points
+
+- Workflow tests: `workflow/tests/`
+- Backend tests: `backend/tests/Backend.Api.Tests/`
+- Platform tests: `platform/tests/`
+- Frontend checks: `frontend/package.json`
+
+When a plan and the implementation disagree, update this index and the relevant plan header in the same change. Do not change an API contract based only on a historical plan.

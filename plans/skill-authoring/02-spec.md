@@ -1,7 +1,8 @@
 # 規格書 — Skill 撰寫 × 系統設定
 
-> 相關文件:[計劃書](01-plan.md)、[設計文稿](03-design.md)。
+> 狀態: **已封存的規格記錄。** 現行 Skill 作者體驗以 [settings-skill-redesign](../settings-skill-redesign/01-plan.md) 與 [plans README](../README.md) 為準。
 > 契約以現有服務實際回應為準,不憑空發明欄位(見 [repo AGENTS.md](../../AGENTS.md) 跨服務契約段)。
+> 下文均為封存時的原始規格，不是現行實作或驗收依據。
 
 ## 1. 名詞定義
 

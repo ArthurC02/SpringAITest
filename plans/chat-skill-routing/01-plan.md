@@ -1,10 +1,11 @@
 # 計畫書 — 聊天 → Skill 路由(Chat-to-Skill Routing)
 
-> 狀態:**框架級起始計畫,尚未動碼,細節設計待探查現有 chat pipeline**。
+> 狀態: **已交付；以下是設計與驗收記錄，不是待辦清單。** 現行行為以 [plans README](../README.md) 與 `platform/src/Platform.Service/ChatService.cs` 為準。
+> **歷史草稿警示:** 第 1–7 節描述交付前的候選方案，包含已否決的 function-calling 與固定意圖分類；不得當成現行契約或後續實作需求。
 > 關聯:[settings-skill-redesign](../settings-skill-redesign/01-plan.md)(撰寫端);本計畫是**執行端**——讓撰寫好的 Skill 真正被用到。
 > 前提知識:使用者多為非技術人員、以自然語言在聊天中提問(專案記憶 non-technical-users-chat-first)。
 
-## 1. 背景與問題
+## 1. 歷史背景與問題
 
 - 使用者在**聊天**用自然語言問四類問題:**檢索 / 比對 / 推論 / 啟發**(複雜度遞增)。
 - 使用者**不會**、也不該去按 skill 名字手動 invoke —— 那太工程導向。
@@ -24,7 +25,7 @@
 - 不做撰寫端(那是 settings-skill-redesign)。
 - 不做跨租戶 skill 分享。
 
-## 3. 待探查(動工前必做,P0)
+## 3. 已完成的歷史探查(P0)
 
 本計畫的細節設計**依賴**先讀清楚現有聊天內部,尚未進行:
 - `platform` `ChatService` 如何組 LLM 呼叫、Microsoft Agent Framework 的 **tool / function-calling** 機制是否已可用、在哪注入。
@@ -32,14 +33,14 @@
 - 短期記憶(sliding window)/ mem0 recall 在路由前後的介入點。
 - skill 目錄(`/api/skills/catalog`,含 builtin/custom + input_schema)如何供路由端取得。
 
-## 4. 路由方案(候選,待 P0 後定案)
+## 4. 已否決的路由候選方案
 
-| 方案 | 作法 | 優點 | 代價 |
-|---|---|---|---|
-| **A. LLM tool/function-calling** | 把該租戶可見的 skill 目錄當成 LLM 的 tools,由 Agent Framework 讓 LLM 自己選並呼叫 | 與現有 Agent Framework 天然契合;最自然;支援多輪釐清 | 依賴 LLM 判斷正確率;需把 skill 目錄 → tool schema |
-| **B. 意圖分類 → 派工** | 先把問句分類到 檢索/比對/推論/啟發(或具體 skill),再 invoke | 可控、可測、可稽核 | 多一次分類呼叫;分類粒度到「類」還是「具體 skill」需定 |
-| **C. 明確選單** | 使用者在聊天 UI 手動選 skill/模式 | 零誤判 | 最不直覺,違反非技術/聊天優先原則(僅作退路) |
-| **D. 混合** | A/B 為主 + C 作為覆寫/兜底 + 無適配時回退純聊天 | 兼顧直覺與可控 | 實作面較大 |
+| 方案                             | 作法                                                                              | 優點                                                | 代價                                                  |
+| -------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------- |
+| **A. LLM tool/function-calling** | 把該租戶可見的 skill 目錄當成 LLM 的 tools,由 Agent Framework 讓 LLM 自己選並呼叫 | 與現有 Agent Framework 天然契合;最自然;支援多輪釐清 | 依賴 LLM 判斷正確率;需把 skill 目錄 → tool schema     |
+| **B. 意圖分類 → 派工**           | 先把問句分類到 檢索/比對/推論/啟發(或具體 skill),再 invoke                        | 可控、可測、可稽核                                  | 多一次分類呼叫;分類粒度到「類」還是「具體 skill」需定 |
+| **C. 明確選單**                  | 使用者在聊天 UI 手動選 skill/模式                                                 | 零誤判                                              | 最不直覺,違反非技術/聊天優先原則(僅作退路)            |
+| **D. 混合**                      | A/B 為主 + C 作為覆寫/兜底 + 無適配時回退純聊天                                   | 兼顧直覺與可控                                      | 實作面較大                                            |
 
 **初步傾向 D(以 A 或 B 為主)**:與 Agent Framework 契合,且保留「無合適 skill → 純聊天」的回退。A vs B 的取捨(讓 LLM 自選 vs 先分類再派)待 P0 讀完 Agent Framework 能力後定。
 
@@ -60,12 +61,12 @@
 
 ## 7. 分階(暫擬,待 P0)
 
-| Phase | 內容 |
-|---|---|
-| **P0 探查** | 讀 ChatService / Agent Framework tools / 三條聊天路徑 / skill catalog 取用;產出細節設計(02-spec) |
-| **P1 路由核心** | 意圖/skill 選擇 + 回退純聊天(單一聊天路徑先做) |
-| **P2 結果融合** | skill 輸出融回 SSE + 出處/trace 呈現 |
-| **P3 多輪與補參數** | input_schema 缺參數時的反問 |
-| **P4 擴至其餘路徑** | 視需要擴到 stream / AG-UI |
+| Phase               | 內容                                                                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------ |
+| **P0 探查**         | 讀 ChatService / Agent Framework tools / 三條聊天路徑 / skill catalog 取用;產出細節設計(02-spec) |
+| **P1 路由核心**     | 意圖/skill 選擇 + 回退純聊天(單一聊天路徑先做)                                                   |
+| **P2 結果融合**     | skill 輸出融回 SSE + 出處/trace 呈現                                                             |
+| **P3 多輪與補參數** | input_schema 缺參數時的反問                                                                      |
+| **P4 擴至其餘路徑** | 視需要擴到 stream / AG-UI                                                                        |
 
 > 下一步:P0 探查(仍待「開始」指令)。本計畫刻意停在框架級,避免在未讀 chat 內部前臆測細節。

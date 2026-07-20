@@ -1,19 +1,20 @@
 # 規格書 — Node-first 架構翻轉 × Skill 流程引擎
 
-> 相關文件:[計劃書](01-plan.md)、[設計文稿](03-design.md)。
-> 契約以現有服務實際行為為準;引擎沿用 [kb_query 的治理原則](../../workflow/app/kbquery/__init__.py)(驗證閘門、重試上限、稽核、無 CoT)。
+> 狀態: **已交付能力的規格記錄。** 相關文件: [計劃書](01-plan.md)、[設計文稿](03-design.md)；目前程式碼與測試入口見 [plans README](../README.md)。
+> 契約以現有服務實際行為為準；引擎沿用 [kb_query 的治理原則](../../workflow/app/nodes/kbquery/__init__.py)(驗證閘門、重試上限、稽核、無 CoT)。
+> **歷史草稿警示:** 下方提及 `@register`、`/workflows` 或 Workflows 視圖的段落，記錄的是遷移期假設；現行合約只以 workflow 的 Skill 端點與程式碼為準。
 
 ## 1. 名詞定義
 
-| 名詞                  | 定義                                                                                                                                                                        |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Node**              | 一等公民:具名、版本化、宣告 I/O 契約(`reads/writes`)與工具依賴(`requires_tools`)的節點 factory。經 `@node` 註冊進 Node Registry。                                           |
-| **Harness**           | 節點標準執行殼。所有節點一律經 Harness 包裝執行,提供 trace、逾時、I/O 契約驗證、fatal 短路、Tool 注入。[runtime.traced()](../../workflow/app/kbquery/runtime.py) 的泛化版。 |
-| **Skill**             | 使用者定義的流程描述(YAML 權威格式):要跑哪些 Node、順序、條件分支、迴圈、內嵌 Script 與 Tool 呼叫。                                                                         |
-| **Engine / Compiler** | 把 Skill 定義靜態驗證後編譯成 LangGraph `StateGraph` 的元件。                                                                                                               |
-| **Script Runner**     | Skill 內嵌 Python 片段的沙箱執行處。                                                                                                                                        |
-| **Tool**              | Node 或 Script 可呼叫的能力:`http`(backend API)或 `local`(容器內安裝的函式庫/程式)。經 `@tool` 註冊進 Tool Registry。                                                       |
-| **Workflow(舊)**      | 現有 `@register` 手寫圖工作流,保留為相容層。                                                                                                                                |
+| 名詞                  | 定義                                                                                                                              |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| **Node**              | 一等公民:具名、版本化、宣告 I/O 契約(`reads/writes`)與工具依賴(`requires_tools`)的節點 factory。經 `@node` 註冊進 Node Registry。 |
+| **Harness**           | 節點標準執行殼。所有節點一律經 Harness 包裝執行，提供 trace、逾時、I/O 契約驗證、fatal 短路與 Tool 注入。                         |
+| **Skill**             | 使用者定義的流程描述(YAML 權威格式):要跑哪些 Node、順序、條件分支、迴圈、內嵌 Script 與 Tool 呼叫。                               |
+| **Engine / Compiler** | 把 Skill 定義靜態驗證後編譯成 LangGraph `StateGraph` 的元件。                                                                     |
+| **Script Runner**     | Skill 內嵌 Python 片段的沙箱執行處。                                                                                              |
+| **Tool**              | Node 或 Script 可呼叫的能力:`http`(backend API)或 `local`(容器內安裝的函式庫/程式)。經 `@tool` 註冊進 Tool Registry。             |
+| **Workflow(舊)**      | 遷移期的手寫圖工作流概念；現行服務不以它作為公開相容層。                                                                          |
 
 ## 2. Node Registry
 
@@ -96,7 +97,7 @@ flow:                          # 步驟清單(sequence 為隱含容器)
 
 ### 3.3 條件式語言(`when` / `until`)
 
-擴充 [calculator.py](../../workflow/app/kbquery/calculator.py) 的 AST 白名單求值器,**不是 `eval`**:
+以 AST 白名單求值條件式，**不是 `eval`**:
 
 - 允許:`state.<key>` 讀取、字串/數字/布林/None 常數、比較(`== != < <= > >=`)、`and/or/not`、`in`、括號。
 - 禁止:函式呼叫、屬性鏈(僅 `state.` 一層)、下標以外的任何節點型別 → 存檔時拒絕。
