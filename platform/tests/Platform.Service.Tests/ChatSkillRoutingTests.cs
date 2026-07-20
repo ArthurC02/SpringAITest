@@ -2,6 +2,9 @@ using System.Text.Json;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Hosting;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Platform.Service.Tests;
@@ -11,15 +14,41 @@ namespace Platform.Service.Tests;
 /// 註:新流程下 LLM 不再拿到原生 tools 引數;路由表(BuildToolsAsync 產出)改由測試直接驗證,
 /// 端到端的「路由 → 執行 → 摘要」編排另見本檔末的 orchestration 區。
 /// template_* 內建骨架是空殼、不可路由;可路由範例用非 template 名(builtin kb_query、custom tenant_a_private_search)。
+///
+/// P2(copilot-shared-core)記憶收斂後:路由/摘要(HIT 路徑)仍走「裸」<c>ILlmAgent</c>
+/// (<see cref="FakeLlmAgent"/>,斷言面不變);未命中(MISS)/純聊天那一輪改跑共用的 hosted agent,
+/// 斷言面從 <c>agent.CompleteCalls</c> 換成 <see cref="FakeChatClient"/> 收到的 messages/Instructions
+/// ——這是接縫遷移,不是行為語意變更(見各案內註解)。
 /// </summary>
 public sealed class ChatSkillRoutingTests
 {
     private static readonly UserContext UserA = new("user-a", "demo-a", "USER");
     private static readonly UserContext AdminA = new("admin-a", "demo-a", "ADMIN");
 
-    private static ChatService Build(FakeLlmAgent agent, FakeWorkflowService workflows)
-        => new(agent, new InMemoryChatMemoryStore(), new FakeMem0Client(), new FakeConversationStore(),
-            workflows, new LlmOptions(), NullLogger<ChatService>.Instance);
+    private static ChatService Build(FakeLlmAgent agent, FakeWorkflowService workflows, FakeChatClient? chatClient = null)
+    {
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore();
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0, convos, identity, agent, workflows);
+        return new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
+    }
+
+    /// <summary>
+    /// P4:路由(BuildToolsAsync/tool.InvokeAsync)搬進 SkillRoutingAgent,測試斷言面不變,只搬構造——
+    /// 這批既有測試直接呼叫 BuildToolsAsync/InvokeAsync(不經 ChatAsync/StreamChatAsync),
+    /// 因此需要 SkillRoutingAgent 實例而非只有 ChatService。
+    /// </summary>
+    private static (ChatService Service, SkillRoutingAgent Routing) BuildRouting(
+        FakeLlmAgent agent, FakeWorkflowService workflows, FakeChatClient? chatClient = null)
+    {
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore();
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, _, routing) = TestChatAgent.Build(chatClient, mem0, convos, identity, agent, workflows);
+        var svc = new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
+        return (svc, routing);
+    }
 
     private static JsonElement Cat(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
@@ -40,9 +69,9 @@ public sealed class ChatSkillRoutingTests
     public async Task User_GetsUserSkills_NotAdminSkill_AndCatalogCalledOnceWithIdentity()
     {
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
         Assert.Contains("kb_query", names);
@@ -60,9 +89,9 @@ public sealed class ChatSkillRoutingTests
     public async Task Admin_GetsUserAndAdminSkills()
     {
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(AdminA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
         Assert.Contains("kb_query", names);
@@ -113,9 +142,9 @@ public sealed class ChatSkillRoutingTests
             ]
             """),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
         Assert.Contains("kb_query", names);
@@ -138,9 +167,9 @@ public sealed class ChatSkillRoutingTests
             [ { "name":"weird_skill", "description":"x", "required_role":"USER", "source":"custom", "input_schema": {{schema}} } ]
             """),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         Assert.DoesNotContain(tools!, t => t.Name == "weird_skill");
     }
@@ -160,9 +189,9 @@ public sealed class ChatSkillRoutingTests
                 } } ]
             """),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "has_optionals");
         await tool.InvokeAsync("原文問句", CancellationToken.None);
 
@@ -181,9 +210,9 @@ public sealed class ChatSkillRoutingTests
     public async Task NonArrayCatalog_ProducesNoTools_DoesNotThrow(string catalogJson)
     {
         var wf = new FakeWorkflowService { Catalog = Cat(catalogJson) };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         Assert.Empty(tools!);
     }
@@ -205,9 +234,9 @@ public sealed class ChatSkillRoutingTests
             ]
             """),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
         Assert.DoesNotContain("template_retrieval", names);
@@ -226,9 +255,9 @@ public sealed class ChatSkillRoutingTests
                 "input_schema": { "query": { "type":"str", "required":true } } } ]
             """),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         Assert.Contains(tools!, t => t.Name == "template_custom_thing");
     }
@@ -238,9 +267,9 @@ public sealed class ChatSkillRoutingTests
     public async Task SelectedTool_InvokesCorrectSkill_WithInputKeyAndIdentity()
     {
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "tenant_a_private_search");
 
         await tool.InvokeAsync("比較 Q1 與 Q2", CancellationToken.None);
@@ -266,9 +295,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat($$"""{ "skill":"s", "output": { "{{key}}": "{{value}}" } }"""),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "s");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
@@ -285,9 +314,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"s", "output": { "final_answer":"套規則前", "business_result":"套規則後" } }"""),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "s");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
@@ -304,9 +333,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"s", "output": { "business_result":"答案" } }"""),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "s");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
@@ -323,9 +352,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"s", "output": { "rows":[1,2], "count":2 } }"""),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "s");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
@@ -343,9 +372,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "foo":"bar" }"""),   // 沒有 output 外層、也無標準 key
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "s");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
@@ -374,9 +403,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             ThrowOnSkillInvoke = error,
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "s");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
@@ -398,14 +427,15 @@ public sealed class ChatSkillRoutingTests
     {
         var agent = new FakeLlmAgent();
         var wf = new FakeWorkflowService { ThrowOnCatalog = error };
-        var svc = Build(agent, wf);
+        var (svc, routing) = BuildRouting(agent, wf);
 
-        // 聊天不炸(路由表為空 → 純聊天兜底)。
+        // 聊天不炸(路由表為空 → 純聊天兜底,由共用 hosted agent 回覆——FakeChatClient 預設回覆
+        // 與 FakeLlmAgent 舊預設同為「測試回覆」,巧合但不需要額外設定)。
         var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
         Assert.Equal("測試回覆", reply.Reply);
 
         // 沒有靜態工具可退了:目錄失敗這輪就是空清單。
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         Assert.Empty(tools!);
     }
 
@@ -413,9 +443,11 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task NoToolSelected_PlainChatReply_ZeroSkillInvokes()
     {
-        var agent = new FakeLlmAgent { Response = "純聊天回覆" };  // 路由回覆 = 此字串 → 不匹配任何工具 → NONE
+        // 路由回覆 = 此字串 → 不匹配任何工具 → NONE;純聊天兜底改由共用 hosted agent 回覆(chatClient.Response)。
+        var agent = new FakeLlmAgent { Response = "純聊天回覆" };
+        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
+        var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("寒暄", "u1", "c1", UserA);
 
@@ -431,9 +463,9 @@ public sealed class ChatSkillRoutingTests
         {
             Catalog = Cat("""[ { "name":"tenant_a_private_search", "description":"租戶 A 的專用檢索", "required_role":"USER", "source":"custom", "input_schema": { "question_text": { "type":"str", "required":true } } } ]"""),
         };
-        var svc = Build(new FakeLlmAgent(), wf);
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
-        var tools = await svc.BuildToolsAsync(UserA, CancellationToken.None);
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         var tool = tools!.Single(t => t.Name == "tenant_a_private_search");
 
         Assert.Contains("租戶 A 的專用檢索", tool.Description);
@@ -442,20 +474,23 @@ public sealed class ChatSkillRoutingTests
     }
 
     // ---- T12 / CSR-P1-028:mem0 順序與記憶內容(recall 前、remember 後、記融合後 reply) ----
-    // 註:此輪路由回 "最終答案" → 不匹配任何工具 → 走純聊天兜底(BuildPromptAsync 注入 recall)。
+    // 註:此輪路由回 "最終答案" → 不匹配任何工具 → 走純聊天兜底,recall 前言改注入 Instructions(P2)。
     [Fact]
     public async Task Mem0_RecallBefore_RememberAfter_WithFusedReply()
     {
         var agent = new FakeLlmAgent { Response = "最終答案" };
+        var chatClient = new FakeChatClient { Response = "最終答案" };
         var mem0 = new FakeMem0Client { RecallResult = "- 使用者是租戶 A\n" };
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = new ChatService(agent, new InMemoryChatMemoryStore(), mem0, new FakeConversationStore(),
-            wf, new LlmOptions(), NullLogger<ChatService>.Instance);
+        var convos = new FakeConversationStore();
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0, convos, identity, agent, wf);
+        var svc = new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
 
         await svc.ChatAsync("問題", "u1", "c1", UserA);
 
-        // recall 在(兜底)agent 呼叫「前」:recall 內容已組進 agent 看到的 system 前言。
-        Assert.Contains(agent.LastMessages!, m => m.Role == "system" && m.Content.Contains("租戶 A"));
+        // recall 在(兜底)agent 呼叫「前」:recall 內容已組進共用 hosted agent 看到的 Instructions。
+        Assert.Contains("租戶 A", chatClient.LastOptions!.Instructions);
         // remember 在「後」:記的是使用者原訊息 + 融合後最終答案(非中間 skill JSON);已登入 → uid 為 JWT 身分。
         Assert.Equal(("demo-a:user-a", "問題", "最終答案"), Assert.Single(mem0.Remembered));
     }
@@ -478,11 +513,12 @@ public sealed class ChatSkillRoutingTests
     // 路由 → 執行 → 摘要 orchestration(新流程:LLM 只 ROUTE + SUMMARIZE,不心算)
     // ============================================================================
 
-    // 護欄逐字(僅純聊天兜底路徑使用;與 ChatService.ChatGuardPrompt 同步)。
+    // 護欄逐字(僅純聊天兜底路徑使用;與 ChatService.ChatGuardPrompt 同步)。P2:護欄改走
+    // ChatOptions.Instructions,不再是訊息列裡的 system 訊息。
     private const string GuardPrompt =
         "回答前先判斷問題類型，不要急著搶答。若問題涉及任何數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，你「必須」先呼叫對應的 skill 工具，並只依工具回傳的結果作答。嚴禁在未呼叫工具的情況下自行給出數字；嚴禁自己做任何算術（加減乘除、百分比、成長率）——這類計算一律交給工具，因為你自行心算常常算錯。若沒有合適的工具、文件未提供該數據、或你無法確定，請直接說「查無此數據」，不要編造或估算。只有純聊天或不涉及數字的問題，才可直接回答。";
 
-    // 路由命中 skill → 確定性執行 → LLM 只潤飾;數字原封帶入摘要輸入,回覆是摘要輸出。
+    // 路由命中 skill → 確定性執行 → LLM 只潤飾;數字原封帶入摘要輸入,回覆是摘要輸出(HIT 路徑,不受 P2 影響)。
     [Fact]
     public async Task RoutedPath_SelectsSkill_ExecutesDeterministically_SummarizesResult()
     {
@@ -496,8 +532,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat(SampleCatalog),
             SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"毛利率 32.8%" } }"""),
         };
-        var svc = new ChatService(agent, new InMemoryChatMemoryStore(), mem0, convos,
-            wf, new LlmOptions(), NullLogger<ChatService>.Instance);
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, _, _) = TestChatAgent.Build(mem0: mem0, convos: convos, identity: identity, llmAgent: agent, workflows: wf);
+        var svc = new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
 
         var reply = await svc.ChatAsync("這季毛利率多少?", "u1", "c1", UserA);
 
@@ -521,22 +558,22 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal(("demo-a:user-a", "這季毛利率多少?", "本季毛利率是 32.8%。"), Assert.Single(mem0.Remembered));
     }
 
-    // 路由回 NONE → 純聊天兜底:不執行任何 skill,兜底使用護欄 prompt。
+    // 路由回 NONE → 純聊天兜底:不執行任何 skill,兜底使用護欄 Instructions(P2:改走 Instructions,非訊息列)。
     [Fact]
     public async Task RoutedPath_NoneReply_FallsBackToGuardedPlainChat()
     {
-        var agent = new FakeLlmAgent { Response = "純聊天回覆" };
+        var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("NONE");   // 路由 = NONE
+        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
+        var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("你好呀", "u1", "c1", UserA);
 
         Assert.Equal("純聊天回覆", reply.Reply);
         Assert.Empty(wf.SkillInvokes);
-        // 兜底走 BuildPromptAsync:最後一次呼叫第一則是護欄。
-        Assert.Equal("system", agent.CompleteCalls[^1][0].Role);
-        Assert.Equal(GuardPrompt, agent.CompleteCalls[^1][0].Content);
+        // 兜底走共用 hosted agent:護欄以 Instructions 傳遞,不是訊息列裡的 system 訊息。
+        Assert.Equal(GuardPrompt, chatClient.LastOptions!.Instructions);
     }
 
     // 路由指令必須把「數字/YoY/比較」意圖導向工具(與 ChatGuardPrompt 同一組語義):
@@ -557,37 +594,41 @@ public sealed class ChatSkillRoutingTests
         Assert.Contains("不要因為題目像在算數學就輸出 NONE", routingSystem);
     }
 
-    // 匿名:不路由、不讀目錄、不執行 skill,只有一次純聊天呼叫。
+    // 匿名:不路由、不讀目錄、不執行 skill,ILlmAgent(路由)完全不被呼叫,純聊天改由共用 hosted agent 回覆。
     [Fact]
     public async Task AnonymousPath_NoRouting_PlainChat_NoSkillInvoked()
     {
-        var agent = new FakeLlmAgent { Response = "匿名回覆" };
+        var agent = new FakeLlmAgent();
+        var chatClient = new FakeChatClient { Response = "匿名回覆" };
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
+        var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("嗨", "u1", "c1");  // userCtx = null
 
         Assert.Equal("匿名回覆", reply.Reply);
         Assert.Empty(wf.SkillInvokes);
         Assert.Empty(wf.CatalogContexts);       // 沒讀目錄 = 沒路由
-        Assert.Single(agent.CompleteCalls);     // 只有純聊天一次
+        // P2:匿名不路由 → TryRouteAndExecuteAsync 立即回 null,ILlmAgent(路由專用)完全不被呼叫
+        // (純聊天改由共用 hosted agent 處理,不再共用同一顆 ILlmAgent)。
+        Assert.Empty(agent.CompleteCalls);
     }
 
-    // 路由呼叫拋例外 → 退純聊天,整輪不炸。
+    // 路由呼叫拋例外 → 退純聊天,整輪不炸;純聊天兜底改由共用 hosted agent 回覆。
     [Fact]
     public async Task RoutingCallThrows_FallsBackToPlainChat_ChatDoesNotThrow()
     {
-        var agent = new FakeLlmAgent { Response = "兜底純聊天", ThrowOnFirstComplete = true };
+        var agent = new FakeLlmAgent { ThrowOnFirstComplete = true };
+        var chatClient = new FakeChatClient { Response = "兜底純聊天" };
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
+        var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
 
-        Assert.Equal("兜底純聊天", reply.Reply);   // 第二次 CompleteAsync(純聊天)成功
+        Assert.Equal("兜底純聊天", reply.Reply);   // 路由拋例外被吞成 null,退純聊天(共用 hosted agent)成功
         Assert.Empty(wf.SkillInvokes);
     }
 
-    // 串流版路由路徑:路由 + 執行在串流「前」完成,串流吐出的是摘要 chunks;摘要輸入帶工具結果。
+    // 串流版路由路徑:路由 + 執行在串流「前」完成,串流吐出的是摘要 chunks;摘要輸入帶工具結果(HIT 路徑,不受 P2 影響)。
     [Fact]
     public async Task RoutedPath_Streaming_SummaryStreamedFromToolResult()
     {
@@ -599,8 +640,9 @@ public sealed class ChatSkillRoutingTests
             Catalog = Cat(SampleCatalog),
             SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"毛利率 32.8%" } }"""),
         };
-        var svc = new ChatService(agent, new InMemoryChatMemoryStore(), new FakeMem0Client(), convos,
-            wf, new LlmOptions(), NullLogger<ChatService>.Instance);
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, _, _) = TestChatAgent.Build(convos: convos, identity: identity, llmAgent: agent, workflows: wf);
+        var svc = new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
 
         var collected = new List<string>();
         await foreach (var c in svc.StreamChatAsync("這季毛利率?", "u1", "c1", UserA))
@@ -618,7 +660,7 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal("本季毛利率32.8%", Assert.Single(convos.Saved).Reply);
     }
 
-    // 寬鬆比對:路由回覆含工具名稱 token(非全等)仍能命中。
+    // 寬鬆比對:路由回覆含工具名稱 token(非全等)仍能命中(HIT 路徑,不受 P2 影響)。
     [Fact]
     public async Task RoutedPath_LenientMatch_ReplyContainsToolName_StillRoutes()
     {
@@ -640,7 +682,7 @@ public sealed class ChatSkillRoutingTests
 
     // ---- 路由重試(NONE/無命中一次後再試一次;最多兩次) ----
 
-    // 第一次路由回 NONE、第二次選中 skill → 重試命中,回覆是摘要。
+    // 第一次路由回 NONE、第二次選中 skill → 重試命中,回覆是摘要(HIT 路徑,不受 P2 影響)。
     [Fact]
     public async Task Routing_RetriesOnce_SecondAttemptHitsSkill_SummarizesResult()
     {
@@ -663,27 +705,27 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal(3, agent.CompleteCalls.Count);
     }
 
-    // 兩次路由皆 NONE → 退純聊天兜底,不執行任何 skill。
+    // 兩次路由皆 NONE → 退純聊天兜底,不執行任何 skill;純聊天兜底改由共用 hosted agent(不再計入 agent.CompleteCalls)。
     [Fact]
     public async Task Routing_RetryExhausted_BothNone_FallsBackToPlainChat()
     {
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("NONE");        // 第一次路由
         agent.Responses.Enqueue("NONE");        // 第二次路由(重試)
-        agent.Responses.Enqueue("純聊天回覆");  // 純聊天兜底
+        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
         var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
+        var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("你好呀", "u1", "c1", UserA);
 
         Assert.Equal("純聊天回覆", reply.Reply);
         Assert.Empty(wf.SkillInvokes);
-        // 兩次路由 + 一次純聊天 = 三次;兜底走護欄 prompt。
-        Assert.Equal(3, agent.CompleteCalls.Count);
-        Assert.Equal(GuardPrompt, agent.CompleteCalls[^1][0].Content);
+        // 兩次路由 = 兩次 CompleteAsync(純聊天兜底改由共用 hosted agent,不再是第三次 CompleteAsync)。
+        Assert.Equal(2, agent.CompleteCalls.Count);
+        Assert.Equal(GuardPrompt, chatClient.LastOptions!.Instructions);
     }
 
-    // 第一次路由就命中 → 不浪費重試(兩次呼叫:路由 + 摘要)。
+    // 第一次路由就命中 → 不浪費重試(兩次呼叫:路由 + 摘要,HIT 路徑不受 P2 影響)。
     [Fact]
     public async Task Routing_FirstAttemptHits_NoWastedRetry()
     {

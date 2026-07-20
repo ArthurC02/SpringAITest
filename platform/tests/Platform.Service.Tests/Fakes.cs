@@ -6,6 +6,14 @@ using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
+using Microsoft.Agents.AI.Hosting;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+// Microsoft.Extensions.AI 也定義 ChatResponse;此檔的 ChatResponse 一律指 Dtos 版(對外 DTO / fake store)。
+using ChatResponse = Platform.Service.Dtos.ChatResponse;
 
 namespace Platform.Service.Tests;
 
@@ -197,19 +205,175 @@ public sealed class FakeWorkflowService : IWorkflowService
         => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
 }
 
-/// <summary>mem0 client fake:可設定 recall 回傳、記錄 remember 呼叫。</summary>
+/// <summary>
+/// mem0 client fake:可設定 recall 回傳、記錄 remember 呼叫。
+/// 補 G1:ThrowOnRecall / ThrowOnRememberAsync 各自可設定擲例外,用來驗「mem0 best-effort,錯誤吞掉聊天不中斷」
+/// 這條安全語義(A-14)——production 的 IMem0Client 實作(Mem0Client)本身把例外吞掉回空字串/no-op,
+/// 但 ChatService 對 IMem0Client 的呼叫並未再包一層 try/catch,故此 fake 直接擲出以驗證呼叫端行為。
+/// </summary>
 public sealed class FakeMem0Client : IMem0Client
 {
     public string RecallResult { get; set; } = string.Empty;
     public List<(string UserId, string UserMessage, string AiReply)> Remembered { get; } = new();
 
+    /// <summary>非 null 時 RecallAsync 擲此例外。</summary>
+    public Exception? ThrowOnRecall { get; set; }
+
+    /// <summary>非 null 時 RememberAsync 擲此例外。</summary>
+    public Exception? ThrowOnRemember { get; set; }
+
     public Task<string> RecallAsync(string userId, string query, CancellationToken ct = default)
-        => Task.FromResult(RecallResult);
+    {
+        if (ThrowOnRecall is not null)
+        {
+            throw ThrowOnRecall;
+        }
+
+        return Task.FromResult(RecallResult);
+    }
 
     public Task RememberAsync(string userId, string userMessage, string aiReply, CancellationToken ct = default)
     {
+        if (ThrowOnRemember is not null)
+        {
+            throw ThrowOnRemember;
+        }
+
         Remembered.Add((userId, userMessage, aiReply));
         return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// P2:「未命中」純聊天改跑共用的 hosted agent(框架管理短期歷史);此 fake 取代該路徑上的真實
+/// <see cref="IChatClient"/>(LiteLLM/OpenAI)。可控回應(阻塞)/串流塊,並記錄每次呼叫收到的
+/// messages + <see cref="ChatOptions"/>(供斷言 Instructions 與訊息內容,例如護欄/mem0/租戶隔離)。
+/// </summary>
+public sealed class FakeChatClient : IChatClient
+{
+    public string Response { get; set; } = "測試回覆";
+    public IReadOnlyList<string> Chunks { get; set; } = new[] { "你好", "世界" };
+
+    /// <summary>非 null 時:串流吐出第 N 塊後擲例外(模擬串流中途失敗)。</summary>
+    public int? ThrowAfterChunks { get; set; }
+
+    /// <summary>每一次呼叫收到的 messages + options(索引 0 = 第一次呼叫)。</summary>
+    public List<(IReadOnlyList<ChatMessage> Messages, ChatOptions? Options)> Calls { get; } = new();
+
+    public IReadOnlyList<ChatMessage>? LastMessages => Calls.Count > 0 ? Calls[^1].Messages : null;
+
+    public ChatOptions? LastOptions => Calls.Count > 0 ? Calls[^1].Options : null;
+
+    public Task<Microsoft.Extensions.AI.ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        Calls.Add((messages.ToList(), options));
+        return Task.FromResult(new Microsoft.Extensions.AI.ChatResponse(new ChatMessage(ChatRole.Assistant, Response)));
+    }
+
+    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        Calls.Add((messages.ToList(), options));
+        var emitted = 0;
+        foreach (var chunk in Chunks)
+        {
+            await Task.Yield();
+            yield return new ChatResponseUpdate(ChatRole.Assistant, chunk);
+            emitted++;
+            if (ThrowAfterChunks is int n && emitted >= n)
+            {
+                throw new InvalidOperationException("串流中途失敗");
+            }
+        }
+    }
+
+    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+    public void Dispose()
+    {
+    }
+}
+
+/// <summary>
+/// IChatIdentityAccessor fake:沒有真實 HttpContext 可讀,CurrentUser 由呼叫端經
+/// <see cref="SetRequestKeys"/> 傳入的 userCtx 決定(模擬單一 fake 實例跨多輪呼叫時的身分切換,
+/// 例如 A20/LoggedIn_MemoryKeys 這類同一個 ChatService 實例、不同 userCtx 連續呼叫的既有測試)。
+/// DeriveMemoryKeys() 邏輯與 Web 層 HttpChatIdentityAccessor 共用同一個純函式(<see cref="ChatMemoryKeyDerivation"/>),
+/// 不重複維護。
+/// </summary>
+public sealed class FakeChatIdentityAccessor : IChatIdentityAccessor
+{
+    private string? _userId;
+    private string? _conversationId;
+
+    public UserContext? CurrentUser { get; private set; }
+    public Exception? PersistFailure { get; set; }
+    public ChatResponse? PersistedResponse { get; set; }
+
+    public void SetRequestKeys(string? userId, string? conversationId, UserContext? userCtx)
+    {
+        _userId = userId;
+        _conversationId = conversationId;
+        CurrentUser = userCtx;
+        PersistFailure = null;
+        PersistedResponse = null;
+    }
+
+    public (string Uid, string Cid) DeriveMemoryKeys()
+        => ChatMemoryKeyDerivation.Derive(_userId, _conversationId, CurrentUser);
+}
+
+/// <summary>
+/// 組出 P4 的共用「ChatAssistant」hosted agent(無 copilotInstructions,見 ChatContextProvider 拓樸注記):
+/// 一顆 <see cref="InMemoryChatHistoryProvider"/>(20 則視窗,MessagesExceed(20) 觸發,
+/// minimumPreservedTurns=1)+ 一顆 <see cref="InMemoryAgentSessionStore"/>(service 層單元測試直接以
+/// 顯式 UserContext 驅動不同 cid,不需要 IsolationKeyScopedAgentSessionStore 這層——租戶/使用者隔離
+/// 已经在 DeriveMemoryKeys 產生的 cid 字串裡)。
+/// pipeline(外→內):ChatTurnRecorder → SkillRoutingAgent → ChatClientAgent(掛 ChatContextProvider)。
+/// 三者皆需要 IServiceScopeFactory 解析 per-call 的 IMem0Client/IConversationStore/IChatIdentityAccessor/
+/// IWorkflowService(生產環境兩顆 hosted agent 是啟動期 Singleton,不可在建構時捕捉 Scoped 服務);
+/// 測試以最小 ServiceCollection 組一個真正的 scope factory,讓傳入的 mem0/convos/identity/workflows
+/// fake 實例可被解析到。llmAgent 是 SkillRoutingAgent 路由/摘要用的「裸」<see cref="ILlmAgent"/>
+/// (P4 前由 ChatService 持有,P4 後搬進 SkillRoutingAgent 建構時直接傳入——它是 Singleton,不需經 scope)。
+/// </summary>
+internal static class TestChatAgent
+{
+    public static (AIHostAgent HostAgent, InMemoryChatHistoryProvider HistoryProvider, SkillRoutingAgent Routing) Build(
+        FakeChatClient? chatClient = null,
+        FakeMem0Client? mem0 = null,
+        FakeConversationStore? convos = null,
+        FakeChatIdentityAccessor? identity = null,
+        FakeLlmAgent? llmAgent = null,
+        FakeWorkflowService? workflows = null)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<IMem0Client>(mem0 ?? new FakeMem0Client());
+        services.AddSingleton<IConversationStore>(convos ?? new FakeConversationStore());
+        services.AddSingleton<IChatIdentityAccessor>(identity ?? new FakeChatIdentityAccessor());
+        services.AddSingleton<IWorkflowService>(workflows ?? new FakeWorkflowService());
+        var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+
+        var historyProvider = new InMemoryChatHistoryProvider(new InMemoryChatHistoryProviderOptions
+        {
+            ChatReducer = new SlidingWindowCompactionStrategy(
+                    trigger: CompactionTriggers.MessagesExceed(20),
+                    minimumPreservedTurns: 1)
+                .AsChatReducer(),
+        });
+        var chatClientAgent = (chatClient ?? new FakeChatClient()).AsAIAgent(new ChatClientAgentOptions
+        {
+            Name = "ChatAssistant",
+            ChatHistoryProvider = historyProvider,
+            AIContextProviders = new AIContextProvider[] { new ChatContextProvider(scopeFactory) },
+        });
+        var routing = new SkillRoutingAgent(
+            chatClientAgent, llmAgent ?? new FakeLlmAgent(), historyProvider, scopeFactory,
+            NullLogger<SkillRoutingAgent>.Instance);
+        var recorder = new ChatTurnRecorder(routing, scopeFactory, NullLogger<ChatTurnRecorder>.Instance);
+        var hostAgent = new AIHostAgent(recorder, new InMemoryAgentSessionStore());
+        return (hostAgent, historyProvider, routing);
     }
 }
 

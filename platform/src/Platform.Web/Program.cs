@@ -8,6 +8,9 @@ using Platform.Web.Errors;
 using Platform.Web.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
+using Microsoft.Agents.AI.Hosting;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
 using Microsoft.Extensions.AI;
 using OpenAI;
@@ -80,7 +83,10 @@ builder.Services.AddScoped<IAnalysisService, AnalysisService>();
 builder.Services.AddScoped<IConfigService, ConfigService>();
 builder.Services.AddScoped<ISkillService, SkillService>();
 builder.Services.AddScoped<IConfigurationSetService, ConfigurationSetService>();
-builder.Services.AddSingleton<IChatMemoryStore, InMemoryChatMemoryStore>();
+
+// 供 agent pipeline(P1+)取得本次請求的登入身分與記憶 key;Platform.Service 不能引用 ASP.NET Core。
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<IChatIdentityAccessor, HttpChatIdentityAccessor>();
 
 // LLM 代理:Agent Framework 實作,無狀態、單例即可。
 builder.Services.AddSingleton<ILlmAgent>(_ => new AgentFrameworkLlmAgent(llmOptions));
@@ -88,7 +94,15 @@ builder.Services.AddSingleton<ILlmAgent>(_ => new AgentFrameworkLlmAgent(llmOpti
 // ---------------------------------------------------------------------------
 // AG-UI(CopilotKit 操作助理):同一套 LiteLLM 佈線。IChatClient 註冊為單例,
 // 讓 AG-UI 端點的 AIAgent 由它建立;測試可替換為 fake IChatClient 免打真 LLM。
+// 系統提示定位為操作本平台的助理;實際操作工具由前端以 AG-UI client tools 提供,
+// 助理只需正常回答並在需要時呼叫收到的工具。
 // ---------------------------------------------------------------------------
+const string copilotInstructions =
+    "你是本系統的操作助理,協助使用者操作這個 AI 資料檢索與分析平台:" +
+    "查詢與管理文件、執行工作流(例如檢索式問答)、查看分析摘要、切換視圖。" +
+    "請一律以繁體中文回答,簡潔專業。當使用者的請求需要實際操作時," +
+    "呼叫前端提供的工具(client tools)來完成;你只需正常回答並在需要時呼叫收到的工具。";
+
 builder.Services.AddSingleton<IChatClient>(_ =>
     new OpenAIClient(
         new ApiKeyCredential(llmOptions.ApiKey),
@@ -100,6 +114,94 @@ builder.Services.AddSingleton<IChatClient>(_ =>
     .GetChatClient(llmOptions.ChatModel)
     .AsIChatClient());
 builder.Services.AddAGUI();
+
+// 租戶隔離:isolation key 取自 JWT 身分(租戶:使用者),不得取自 threadId/body 任何欄位;
+// Strict=true(框架預設)fail-closed——取不到身分時 session store 直接拋例外,不退回全域命名空間。
+builder.Services.AddSingleton<SessionIsolationKeyProvider, JwtTenantIsolationKeyProvider>();
+
+// P2(copilot-shared-core §3.3):兩條鏈路共用同一份短期記憶語意——20 則視窗,MessagesExceed(20) 觸發,
+// minimumPreservedTurns 設 1(硬下限,設 20 時 26 則完全不觸發,spike 實測)。此物件本身無狀態
+// (視窗內容存在 AgentSession.StateBag),兩顆 hosted agent 安全共用同一份設定。
+var chatHistoryProvider = new InMemoryChatHistoryProvider(new InMemoryChatHistoryProviderOptions
+{
+    ChatReducer = new SlidingWindowCompactionStrategy(
+            trigger: CompactionTriggers.MessagesExceed(20),
+            minimumPreservedTurns: 1)
+        .AsChatReducer(),
+});
+builder.Services.AddSingleton(chatHistoryProvider);
+
+// hosted agent:AG-UI 端點經此解析,由框架管理 session(GetOrCreateSession/SaveSession)。
+// Singleton:MapAGUI 在啟動期從 root provider 一次性解析 agent(反編譯實證),宣告 Scoped 會讓
+// Development(ValidateScopes=true)的 dotnet run 啟動即炸;per-request 身分不靠 agent 生命週期,
+// 而是經 IChatIdentityAccessor 接線(底層 IHttpContextAccessor 是 AsyncLocal,單例持有仍每次讀到本請求
+// 身分)。ChatContextProvider(護欄+mem0 recall→Instructions)與 ChatTurnRecorder(mem0 remember+持久化)
+// 都只持 IServiceScopeFactory,每次呼叫時開新 scope 解析 Scoped 服務(IMem0Client/IConversationStore/
+// IChatIdentityAccessor),不在建構時捕捉——避免兩顆 Singleton hosted agent 產生 captive dependency
+// (copilot-shared-core P3 §11 步驟 11.5)。
+// AguiWireDedupAgent(P2,B-P2-04):真實 @ag-ui/client 每輪重送完整 messages 陣列,疊上
+// ChatHistoryProvider 的預設合併語意(session 歷史 + wire 訊息整段串接,框架不去重)會讓訊息數
+// 隨輪次複合暴增。只包這顆 agent(鏈路 A 的 ChatAssistant 不受影響),見該類別 XML doc。
+// pipeline(外→內):AguiWireDedupAgent → ChatTurnRecorder → SkillRoutingAgent → ChatClientAgent
+// (掛 ChatContextProvider)。recorder 掛在 dedup 之內、routing 之外——dedup 先把 wire 重送的完整
+// 陣列濾成「真正新訊息」,recorder 才看得到本輪唯一的新使用者訊息與完整回覆(而非累積的整段歷史);
+// routing 掛在 recorder 之內、ChatClientAgent 之外,讓路由命中而短路的那一輪同樣會被 recorder 記住
+// (P4,copilot-shared-core 03-design.md §3.3/§4.2)。
+var copilotAgent = builder.Services.AddAIAgent(
+        "OperationsAssistant",
+        (IServiceProvider sp, string name) =>
+        {
+            var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+            var chatClientAgent = sp.GetRequiredService<IChatClient>().AsAIAgent(new ChatClientAgentOptions
+            {
+                Name = name,
+                ChatOptions = new ChatOptions { Instructions = copilotInstructions },
+                ChatHistoryProvider = chatHistoryProvider,
+                AIContextProviders = new AIContextProvider[] { new ChatContextProvider(scopeFactory) },
+            });
+            var routing = new SkillRoutingAgent(
+                chatClientAgent, sp.GetRequiredService<ILlmAgent>(), chatHistoryProvider, scopeFactory,
+                sp.GetRequiredService<ILoggerFactory>().CreateLogger<SkillRoutingAgent>());
+            var recorder = new ChatTurnRecorder(
+                routing, scopeFactory, sp.GetRequiredService<ILoggerFactory>().CreateLogger<ChatTurnRecorder>());
+            return new AguiWireDedupAgent(recorder, chatHistoryProvider);
+        },
+        ServiceLifetime.Singleton)
+    .WithInMemorySessionStore(withIsolation: true);
+
+// 鏈路 A(ChatController → ChatService)共用同一套 session store 類型/compaction 語意,但 persona 不同
+// ——不得吃到副駕的 copilotInstructions(僅副駕,02-spec §3.1 拓樸注記),故另注一顆無 instructions 的
+// named agent。AddAIAgent 只把 (AIAgent, AgentSessionStore) 註冊成 keyed service,並不會自動組成
+// AIHostAgent——手動組裝一顆供 ChatService 使用(反編譯實證)。
+// withIsolation:false(刻意與 AG-UI 不同)——ChatService 傳入的 conversationId(cid)已由
+// DeriveMemoryKeys 保證跨租戶/跨使用者不撞(登入時含租戶:使用者前綴),不像 AG-UI 的 wire threadId
+// 完全不帶身分安全語意。疊上 IsolationKeyScopedAgentSessionStore(Strict=true)只會讓匿名對談
+// fail-closed,是對現行「匿名短期記憶仍可延續」行為的回歸(ChatServiceTests.
+// Chat_ShortTermMemory_CarriesPriorExchange 等既有測試皆假設匿名也有連續性)。
+// pipeline:ChatTurnRecorder → SkillRoutingAgent → ChatClientAgent(掛 ChatContextProvider)——鏈路 A
+// 沒有 AguiWireDedupAgent 那一層(ChatService 每輪只送本輪新訊息,不會重送完整陣列)。
+builder.Services.AddAIAgent(
+        "ChatAssistant",
+        (IServiceProvider sp, string name) =>
+        {
+            var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+            var chatClientAgent = sp.GetRequiredService<IChatClient>().AsAIAgent(new ChatClientAgentOptions
+            {
+                Name = name,
+                ChatHistoryProvider = chatHistoryProvider,
+                AIContextProviders = new AIContextProvider[] { new ChatContextProvider(scopeFactory) },
+            });
+            var routing = new SkillRoutingAgent(
+                chatClientAgent, sp.GetRequiredService<ILlmAgent>(), chatHistoryProvider, scopeFactory,
+                sp.GetRequiredService<ILoggerFactory>().CreateLogger<SkillRoutingAgent>());
+            return new ChatTurnRecorder(
+                routing, scopeFactory, sp.GetRequiredService<ILoggerFactory>().CreateLogger<ChatTurnRecorder>());
+        },
+        ServiceLifetime.Singleton)
+    .WithInMemorySessionStore(withIsolation: false);
+builder.Services.AddSingleton(sp => new AIHostAgent(
+    sp.GetRequiredKeyedService<AIAgent>("ChatAssistant"),
+    sp.GetRequiredKeyedService<AgentSessionStore>("ChatAssistant")));
 
 // mem0:預設逾時即可(記憶best-effort)。
 builder.Services.AddHttpClient<IMem0Client, Mem0Client>();
@@ -164,8 +266,9 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
 // ---------------------------------------------------------------------------
-// 匿名 LLM 端點的 per-IP 節流(修成本放大 / DoS):/api/chat、/api/chat/stream、/api/copilot/agui
-// 為 AllowAnonymous 且會打真模型,未授權可迴圈燒額度/壓連線。固定視窗每 IP 每分鐘 30 次,超限回 429。
+// LLM 端點的 per-IP 節流(修成本放大 / DoS):/api/chat、/api/chat/stream 為 AllowAnonymous,
+// /api/copilot/agui 為 P1 後要求認證但仍會打真模型,三者皆未授權/授權後仍可迴圈燒額度、壓連線。
+// 固定視窗每 IP 每分鐘 30 次,超限回 429。
 // GlobalLimiter 對非這三條路徑一律 NoLimiter 放行(不必逐端點掛 policy,MapAGUI 這種 minimal API 端點也涵蓋)。
 // Testing 環境不註冊/不套用；RateLimitingTesting 專供限流整合測試。
 // ---------------------------------------------------------------------------
@@ -257,22 +360,10 @@ app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAno
 
 // ---------------------------------------------------------------------------
 // AG-UI 端點:CopilotKit 前端經此與「操作助理」對話(HTTP POST + SSE)。
-// 系統提示定位為操作本平台的助理;實際操作工具由前端以 AG-UI client tools 提供,
-// 助理只需正常回答並在需要時呼叫收到的工具。
+// 與 /api/chat 的 AllowAnonymous 姿態刻意不同:副駕是操作應用程式/查租戶資料,
+// 匿名副駕沒有有意義的行為,故要求認證——未帶/帶無效 JWT 一律 401。
 // ---------------------------------------------------------------------------
-const string copilotInstructions =
-    "你是本系統的操作助理,協助使用者操作這個 AI 資料檢索與分析平台:" +
-    "查詢與管理文件、執行工作流(例如檢索式問答)、查看分析摘要、切換視圖。" +
-    "請一律以繁體中文回答,簡潔專業。當使用者的請求需要實際操作時," +
-    "呼叫前端提供的工具(client tools)來完成;你只需正常回答並在需要時呼叫收到的工具。";
-
-var copilotAgent = app.Services.GetRequiredService<IChatClient>().AsAIAgent(
-    instructions: copilotInstructions,
-    name: "OperationsAssistant");
-
-// ponytail: AllowAnonymous 開發姿態,與 /api/chat 一致(無 RequireAuthorization)。
-// 升級路徑:改 .RequireAuthorization() 並讓瀏覽器端 HttpAgent/runtime 轉發 Authorization header。
-app.MapAGUI("/api/copilot/agui", copilotAgent).AllowAnonymous();
+app.MapAGUI(copilotAgent, "/api/copilot/agui").RequireAuthorization();
 
 app.Run();
 

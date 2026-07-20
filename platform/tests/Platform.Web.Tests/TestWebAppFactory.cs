@@ -1,4 +1,5 @@
 using Platform.Service.Abstractions;
+using Microsoft.Agents.AI.Hosting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -15,27 +16,56 @@ namespace Platform.Web.Tests;
 public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 {
     private readonly bool _enableRateLimiting;
+    private readonly bool _removeSessionIsolationProvider;
+    private readonly bool _useDevelopmentEnvironment;
+    private readonly IMem0Client? _mem0Override;
 
     public TestWebAppFactory()
     {
     }
 
-    internal TestWebAppFactory(bool enableRateLimiting)
+    internal TestWebAppFactory(
+        bool enableRateLimiting = false, bool removeSessionIsolationProvider = false,
+        bool useDevelopmentEnvironment = false, IMem0Client? mem0Override = null)
     {
         _enableRateLimiting = enableRateLimiting;
+        _removeSessionIsolationProvider = removeSessionIsolationProvider;
+        _useDevelopmentEnvironment = useDevelopmentEnvironment;
+        _mem0Override = mem0Override;
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.UseEnvironment(_enableRateLimiting ? "RateLimitingTesting" : "Testing");
+        // P1 審查建議的釘子:AddAIAgent 的 hosted agent 若誤宣告 Scoped,Development 環境的
+        // ValidateScopes=true 會在啟動期就炸——用真正的 "Development" 環境跑一次冒煙測試釘住
+        // 「這個崩潰不會再發生」(見 DevelopmentEnvironmentSmokeTests)。
+        builder.UseEnvironment(_useDevelopmentEnvironment
+            ? "Development"
+            : _enableRateLimiting ? "RateLimitingTesting" : "Testing");
         builder.ConfigureTestServices(services =>
         {
+            // B-P1-06:移除 SessionIsolationKeyProvider 註冊,證明 Strict=true 的 fail-closed 真的開著——
+            // 即使帶有效 JWT,AG-UI 端點仍應在存取 session store 時拋例外(對外 500),不得默默共用全域命名空間。
+            if (_removeSessionIsolationProvider)
+            {
+                services.RemoveAll<SessionIsolationKeyProvider>();
+            }
+
             // 對外相依:LLM 與 mem0(真實 ChatService 仍會用到)。
             services.RemoveAll<ILlmAgent>();
             services.AddSingleton<ILlmAgent, FakeLlmAgent>();
 
             services.RemoveAll<IMem0Client>();
-            services.AddSingleton<IMem0Client, FakeMem0Client>();
+            if (_mem0Override is not null)
+            {
+                // B-P3-01(順序斷言)需要專屬、非共用靜態狀態的 mem0 fake,避免與其他測試共用
+                // FakeMem0Client.Remembered 造成跨測試污染或平行執行的順序不確定性。
+                services.AddSingleton(_mem0Override);
+            }
+            else
+            {
+                services.AddSingleton<IMem0Client, FakeMem0Client>();
+            }
 
             // AG-UI 操作助理的底層 IChatClient → fake(避免打真 LiteLLM)。
             services.RemoveAll<Microsoft.Extensions.AI.IChatClient>();

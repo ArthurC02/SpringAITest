@@ -20,10 +20,18 @@ public sealed class FakeLlmAgent : ILlmAgent
     /// <summary>本輪 CompleteAsync 的次數(匿名純聊天=1;路由+兜底/摘要=2)。</summary>
     public int CompleteCallCount { get; private set; }
 
+    /// <summary>
+    /// P4:CompleteAsync 的回覆(路由呼叫回這個值)。預設維持既有行為(不匹配任何 skill 名 → 路由 NONE);
+    /// 需要驗證「路由命中」的測試(T-P4-2/T-P4-3/B-P4-12/13)可設成目標 skill 名。用畢應還原預設值,
+    /// 避免污染共用 Singleton fake 實例的後續測試(此 fake 跨同一測試類的方法共用)。
+    /// </summary>
+    public string Response { get; set; } = "測試回覆";
+
     public void Reset()
     {
         LastRoutingCatalog = null;
         CompleteCallCount = 0;
+        Response = "測試回覆";
     }
 
     public Task<string> CompleteAsync(IReadOnlyList<LlmMessage> messages, CancellationToken ct)
@@ -35,7 +43,7 @@ public sealed class FakeLlmAgent : ILlmAgent
             LastRoutingCatalog = messages[0].Content;
         }
 
-        return Task.FromResult("測試回覆");
+        return Task.FromResult(Response);
     }
 
     public async IAsyncEnumerable<string> StreamAsync(
@@ -63,26 +71,59 @@ public sealed class FakeLlmAgent : ILlmAgent
     }
 }
 
-/// <summary>不做事的 mem0 fake(記憶最佳努力,不影響聊天)。</summary>
+/// <summary>
+/// mem0 fake(記憶最佳努力,不影響聊天):RecallAsync 一律回空字串(無前言注入);
+/// RememberAsync 記錄呼叫供 A-16 等測試斷言「串流持久化失敗仍照常 remember」。Remembered 是靜態的,
+/// 因為 IMem0Client 在 DI 是 singleton(整個 factory 生命週期共用同一顆實例),用靜態欄位單純是明確表態。
+/// </summary>
 public sealed class FakeMem0Client : IMem0Client
 {
+    public static readonly List<(string UserId, string UserMessage, string AiReply)> Remembered = new();
+
     public Task<string> RecallAsync(string userId, string query, CancellationToken ct = default)
         => Task.FromResult(string.Empty);
 
     public Task RememberAsync(string userId, string userMessage, string aiReply, CancellationToken ct = default)
-        => Task.CompletedTask;
+    {
+        Remembered.Add((userId, userMessage, aiReply));
+        return Task.CompletedTask;
+    }
 }
 
-/// <summary>聊天歷史 store fake:AddAsync 回遞增 id;歷史空清單。</summary>
+/// <summary>
+/// 聊天歷史 store fake(代表 backend /api/conversations,以 (tenant_id, user_id) 隔離)。
+/// AddAsync 回遞增 id 並依 ctx 的租戶/使用者記進 Saved;ListDescAsync 依 ctx 過濾只回同租戶同使用者的紀錄
+/// (鏡射真正 ConversationStore 的隔離語意,供 A-21 的租戶隔離斷言使用)。
+/// ThrowOnAdd 讓 A-15/A-16 腳本化持久化失敗(阻塞 500 vs 串流 best-effort 的決策表兩半)。
+/// 靜態:controller 端以 AddScoped 註冊,每次請求都是新實例,狀態要跨請求可見必須是靜態。
+/// </summary>
 public sealed class FakeConversationStore : IConversationStore
 {
-    private long _nextId = 1;
+    private static long _nextId = 1;
+
+    /// <summary>測試腳本開關:true 時 AddAsync 擲例外,模擬持久化層失敗。用畢務必在 finally 還原為 false。</summary>
+    public static bool ThrowOnAdd { get; set; }
+
+    public static readonly List<(string TenantCode, string UserId, ChatResponse Response)> Saved = new();
 
     public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult(new ChatResponse(_nextId++, reply, DateTime.UtcNow));
+    {
+        if (ThrowOnAdd)
+        {
+            throw new InvalidOperationException("持久化失敗（測試腳本）");
+        }
+
+        var response = new ChatResponse(_nextId++, reply, DateTime.UtcNow);
+        Saved.Add((ctx.TenantCode, ctx.UserId, response));
+        return Task.FromResult(response);
+    }
 
     public Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult<IReadOnlyList<ChatResponse>>(new List<ChatResponse>());
+        => Task.FromResult<IReadOnlyList<ChatResponse>>(Saved
+            .Where(s => s.TenantCode == ctx.TenantCode && s.UserId == ctx.UserId)
+            .Select(s => s.Response)
+            .Reverse()
+            .ToList());
 }
 
 /// <summary>
@@ -133,10 +174,20 @@ public sealed class FakeWorkflowService : IWorkflowService
     /// <summary>記錄引擎端的呼叫,用來斷言「catalog 走引擎、不走 backend CRUD」。</summary>
     public static readonly List<string> EngineCalls = new();
 
+    /// <summary>
+    /// 補 G5(copilot-shared-core 04-acceptance-test.md §4.4):IWorkflowService 在 DI 是 Scoped,
+    /// SkillRoutingAgent 每次呼叫各自開一個新 scope,跨請求(HTTP request)拿到的是不同實例,無法用實例
+    /// 欄位收集 (Name, Input) 供 B-P4-12(ChatView 與副駕的 SkillInvokes 應完全相同)這類跨請求斷言。
+    /// 靜態集合擇簡繞過:不必改動 DI 生命週期,天然跨 scope/跨請求可見(與 EngineCalls/Calls 等既有靜態
+    /// 收集器同一慣例)。測試須自行在案例開頭/結尾清空,避免跨測試污染。
+    /// </summary>
+    public static readonly List<(string Name, Dictionary<string, JsonElement> Input)> SkillInvokes = new();
+
     public Task<JsonElement> InvokeSkillAsync(
         string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default)
     {
         EngineCalls.Add("invoke:" + name);
+        SkillInvokes.Add((name, input));
 
         // skill invoke 的錯誤碼與 /workflows/{name}/invoke 逐一相同(同一組觸發名稱)。
         switch (name)

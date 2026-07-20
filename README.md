@@ -46,7 +46,7 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 279 個（Service 162 + Web 117）+ 手寫 fake（未引入 mocking 套件）。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 362 個（Service 216 + Web 146）+ 手寫 fake（未引入 mocking 套件）。
 - **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 173 個、手寫 fake repository（未引入 mocking 套件）。
 - **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint（lint）+ vite build（type check + bundle）。
 - **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 459 個。
@@ -208,13 +208,13 @@ OpenAI / ...（未來可加 Claude 等）
 使用者訊息（帶 userId）
    │
    ▼  ① 呼叫 LLM 前：POST mem0 /search → 取回相關記憶,塞進 system prompt
-ChatServiceImpl ──────────────────────────────────────────► LLM 回覆
+共用 pipeline（ChatContextProvider）─────────────────────────► LLM 回覆
    │  ② 回覆後：POST mem0 /memories → mem0 用 LLM 自行抽取事實並存入
    ▼
 mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量存進 postgres/pgvector
 ```
 
-- **接點只在 `ChatServiceImpl`**:`Mem0Client`（`RestClient`,零新依賴）在呼叫 LLM 前 `recall`、回覆後 `remember`;blocking 與 stream 兩條路徑共用。mem0 掛掉時 `recall` 回空、`remember` 無動作,**聊天主流程不受影響**。
+- **接點是共用的 pipeline，不是單一 controller**:`ChatContextProvider`（呼叫 LLM 前 `recall`，記憶注入 prompt）與 `ChatTurnRecorder`（回覆後 `remember`）掛在兩條聊天鏈路共用的 Agent Framework pipeline 上，`ChatView`（`/api/chat*`）與 CopilotKit 副駕（`/api/copilot/agui`）都會用到，不再只服務前者。mem0 掛掉時 `recall` 回空、`remember` 無動作（`Mem0Client` 內部吞錯），**聊天主流程不受影響**。
 - **記憶按 `userId` 分群**:前端每個瀏覽器自帶一組 `userId`(見 [API](#api));查無記憶時行為與未整合前完全相同。
 - **不另接 OpenAI / 不另加向量庫**:mem0 的 LLM 與 embedder 都指向現有 LiteLLM,向量存進現有 postgres 的 pgvector(故 `postgres` 映像用 `pgvector/pgvector:pg17`)。embedding 模型需在 `litellm-config.yaml` 註冊(`text-embedding-3-small`)。
 
@@ -224,10 +224,10 @@ mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量�
 
 ## 短期記憶（對話脈絡）
 
-同一次對話的近期來回，由自製的 **in-memory 滑動視窗** 提供（在 `ChatService` 中），和 mem0 互補:
+同一次對話的近期來回，由 **Microsoft Agent Framework 的 session store**（`InMemoryChatHistoryProvider` + `SlidingWindowCompactionStrategy`）提供，和 mem0 互補:
 
 - **兩種記憶各司其職**:mem0 存「跨 session 的長期事實」(走 system prompt 注入);短期記憶存「這一串對話的近期訊息」(直接把前幾輪對話補回 prompt),讓 LLM 認得「上一句」。
-- **內建實作**:短期記憶在 `ChatService` 中實作，per-`conversationId` 保留最近 20 則訊息(見 [API](#api))。
+- **框架實作、兩條聊天鏈路共用**:per-conversation 保留最近 20 則訊息、以「輪」為單位裁切（不會拆散工具呼叫/結果配對），`ChatView`（`/api/chat*`）與 CopilotKit 副駕都吃同一份設定（見 [API](#api)）。
 - **記憶體儲存、重啟即清**:短期記憶在應用程序記憶體中，重啟平台閘道後對話脈絡歸零屬預期。若要跨重啟保留完整對話，須改為在資料庫（如 backend appdb）持久化。
 
 ## 認證與多租戶

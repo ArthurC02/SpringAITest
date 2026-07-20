@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Platform.Web.Tests;
@@ -59,20 +60,83 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(expected, bytes);
     }
 
-    // 串流中途失敗:LLM 在已送出 token 後拋錯 → 補一個 event:error 終止 frame(無空格 data: 風格),回應仍正常結束(200)。
-    // 釘住終止語意:已送出的 token 在前、error frame 在後、通用訊息不含例外細節。
+    // A-17/T-P4-4:串流中途失敗:LLM 在已送出 token 後拋錯 → 補一個 event:error 終止 frame(無空格 data: 風格),
+    // 回應仍正常結束(200)。釘住終止語意:已送出的 token 在前、error frame 在後、通用訊息不含例外細節;
+    // 且半截回覆不得持久化(AddAsync 與 mem0 RememberAsync 皆零呼叫)——用已登入身分跑(持久化「本該」
+    // 會被嘗試),證明例外在抵達 ChatTurnRecorder 的持久化/remember 之前就已經中止了整個方法
+    // (§9.3 鐵律:SkillRoutingAgent/ChatTurnRecorder 皆不得吞掉導致此幀的例外,見兩者類別 XML doc)。
     [Fact]
     public async Task Stream_MidStreamFailure_EmitsErrorFrame_ThenEndsNormally()
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        var savedBefore = FakeConversationStore.Saved.Count;
+        var rememberedBefore = FakeMem0Client.Remembered.Count;
 
         var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "串流爆炸" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var raw = await resp.Content.ReadAsStringAsync();
         Assert.Equal("data:半截\n\nevent:error\ndata:回覆過程發生錯誤，請稍後再試\n\n", raw);
+        // 半截回覆不得持久化:中途失敗的例外在抵達持久化程式碼之前就已經中止整個 StreamChatAsync。
+        Assert.Equal(savedBefore, FakeConversationStore.Saved.Count);
+        Assert.Equal(rememberedBefore, FakeMem0Client.Remembered.Count);
     }
 
+    // ---- A-15 / A-16:持久化失敗的決策表兩半 —— 阻塞 500 vs 串流 best-effort,刻意不同,必須成對驗 ----
+
+    // A-15:阻塞式 /api/chat 的持久化失敗往上拋 → 500 + ApiError 四鍵齊全,通用中文訊息不洩漏例外細節。
+    [Fact]
+    public async Task Chat_Returns500_WithGenericApiError_WhenPersistenceFails()
+    {
+        FakeConversationStore.ThrowOnAdd = true;
+        try
+        {
+            var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+            var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
+
+            Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+            var body = await resp.ReadJsonAsync();
+            Assert.Equal(4, body.AsObject().Count);
+            Assert.NotNull(body["timestamp"]);
+            Assert.Equal(500, body["status"]!.GetValue<int>());
+            Assert.Equal("伺服器發生錯誤，請稍後再試", body["message"]!.GetValue<string>());
+            Assert.NotNull(body["fieldErrors"]);
+            // 通用泛化訊息:例外細節（測試腳本用的字樣）不得外洩。
+            Assert.DoesNotContain("持久化失敗", body.ToJsonString());
+        }
+        finally
+        {
+            FakeConversationStore.ThrowOnAdd = false;
+        }
+    }
+
+    // A-16:串流式持久化失敗只記 warning——chunks 照常全數送達、無 event:error 幀、mem0 remember 仍執行。
+    // 與 A-15 合為決策表兩半:同一種下游失敗,阻塞/串流故意給出不同的對外行為。
+    [Fact]
+    public async Task Stream_DeliversChunksNormally_NoErrorFrame_WhenPersistenceFails()
+    {
+        FakeConversationStore.ThrowOnAdd = true;
+        var rememberedBefore = FakeMem0Client.Remembered.Count;
+        try
+        {
+            var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+            var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
+
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var raw = await resp.Content.ReadAsStringAsync();
+            Assert.Equal("data:你好\n\ndata:世界\n\n", raw);
+            Assert.DoesNotContain("event:error", raw);
+            Assert.Equal(rememberedBefore + 1, FakeMem0Client.Remembered.Count);
+        }
+        finally
+        {
+            FakeConversationStore.ThrowOnAdd = false;
+        }
+    }
+
+    // A-22:串流 chunk 含換行 → raw bytes 逐一驗每項契約(冒號後無空格、空行結尾、單一 chunk 拆多行 data:)。
     [Fact]
     public async Task Stream_ChunkWithNewline_SplitsIntoMultipleDataLines()
     {
@@ -81,9 +145,10 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "多行" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var raw = await resp.Content.ReadAsStringAsync();
-        // 含 \n 的單一 chunk 拆成同一 event 內兩個 data: 行,event 以空行結尾。
-        Assert.Contains("data:甲\ndata:乙\n\n", raw);
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        // 含 \n 的單一 chunk 拆成同一 event 內兩個 data: 行(冒號後無空格),event 以空行結尾;逐 byte 全等,不留其他 frame。
+        var expected = System.Text.Encoding.UTF8.GetBytes("data:甲\ndata:乙\n\n");
+        Assert.Equal(expected, bytes);
     }
 
     // M5:空字串與全空白都是 NotBlank 該擋的等價類(全空白正是 NotBlank 存在的唯一理由)。
@@ -214,9 +279,11 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        // 匿名不路由:沒有路由目錄,只有一次純聊天呼叫。
+        // 匿名不路由:沒有路由目錄。P2:純聊天改跑共用的 hosted agent(不再共用 ILlmAgent),
+        // 故匿名這輪路由專用的 ILlmAgent 完全不會被呼叫(比舊斷言「恰一次純聊天呼叫」更直接地
+        // 證明「匿名不路由」——ILlmAgent 現在只服務路由/摘要,呼叫次數為 0 才是正確語意)。
         Assert.Null(agent.LastRoutingCatalog);
-        Assert.Equal(1, agent.CompleteCallCount);
+        Assert.Equal(0, agent.CompleteCallCount);
     }
 
     [Fact]
@@ -293,5 +360,57 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("1", resp.Headers.GetValues("X-Auth-Invalid").Single());
+    }
+
+    // A-21(b):兩個租戶各有歷史時,租戶 A 的 JWT 只讀得到租戶 A 自己的紀錄,讀不到租戶 B 的——
+    // 驗內容(id 是否出現),不是驗 nullity(見 04-acceptance-test.md §1.2 的隔離斷言原則)。
+    [Fact]
+    public async Task History_JwtTenant_ReturnsOwnRecords_NotOtherTenants()
+    {
+        var tenantAClient = _factory.CreateClient()
+            .WithToken(_factory.IssueToken(username: "hist-a", role: "USER", tenantCode: "demo-a"));
+        var tenantBClient = _factory.CreateClient()
+            .WithToken(_factory.IssueToken(username: "hist-b", role: "USER", tenantCode: "demo-b"));
+
+        var postA = await tenantAClient.PostAsJsonAsync("/api/chat", new { message = "租戶 A 的訊息" });
+        var idA = (await postA.ReadJsonAsync())["id"]!.GetValue<long>();
+
+        var postB = await tenantBClient.PostAsJsonAsync("/api/chat", new { message = "租戶 B 的訊息" });
+        var idB = (await postB.ReadJsonAsync())["id"]!.GetValue<long>();
+
+        var historyResp = await tenantAClient.GetAsync("/api/chat/history");
+
+        Assert.Equal(HttpStatusCode.OK, historyResp.StatusCode);
+        var ids = (await historyResp.ReadJsonAsync()).AsArray()
+            .Select(n => n!["id"]!.GetValue<long>())
+            .ToList();
+
+        Assert.Contains(idA, ids);
+        Assert.DoesNotContain(idB, ids);
+    }
+
+    // A-24:空白 message 在阻塞與串流兩條路徑皆 400,且 ApiError 四鍵({timestamp,status,message,fieldErrors})齊全
+    // (不只 fieldErrors 這一項),camelCase 鍵名。
+    [Fact]
+    public async Task Chat_And_Stream_Return400_WithFullApiErrorShape_WhenMessageBlank()
+    {
+        var client = _factory.CreateClient();
+
+        var chatResp = await client.PostAsJsonAsync("/api/chat", new { message = "" });
+        Assert.Equal(HttpStatusCode.BadRequest, chatResp.StatusCode);
+        AssertFullBlankMessageApiError(await chatResp.ReadJsonAsync());
+
+        var streamResp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "" });
+        Assert.Equal(HttpStatusCode.BadRequest, streamResp.StatusCode);
+        AssertFullBlankMessageApiError(await streamResp.ReadJsonAsync());
+    }
+
+    private static void AssertFullBlankMessageApiError(JsonNode body)
+    {
+        Assert.Equal(4, body.AsObject().Count);
+        Assert.NotNull(body["timestamp"]);
+        Assert.Equal(400, body["status"]!.GetValue<int>());
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
     }
 }

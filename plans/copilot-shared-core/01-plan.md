@@ -1,6 +1,6 @@
 # 計畫書 — 副駕共用核心層(Copilot Shared Core)
 
-> 狀態: **規劃中。** 尚未實作,本檔為框架級決策記錄。
+> 狀態: **已實作(2026-07-21)。** P0–P4 全部完成,通過 code review 與 e2e 驗證;platform 362 測試(Service 216 + Web 146)。與本計畫主要偏離點:isolation key 為 `{tenant}:{user}`(非單純租戶);鏈路 A(`ChatAssistant`)刻意 `withIsolation:false` 以保留匿名連續性;新增計畫外的 `AguiWireDedupAgent`(AG-UI 每輪重送完整 messages 陣列的去重層);mem0 best-effort 語意精確化為「吞錯在 `Mem0Client` 內部,`IMem0Client` 契約擲例外則傳播」。以下內容為原始框架級決策記錄,未逐項回填實作細節。
 > 關聯:[chat-skill-routing](../chat-skill-routing/01-plan.md) —— 本計畫實質上是該計畫 03-design §10 標為「P4 / 非目標」的那一列(AG-UI 側掛同批能力),外加兩條鏈路的共用層抽取。
 > 前提知識:使用者多為非技術人員、以自然語言在聊天中提問(專案記憶 non-technical-users-chat-first)。
 
