@@ -107,14 +107,24 @@
 
 ## 7. 分階
 
+> **逐步的落地順序以 [03-design.md](03-design.md) §11 為準**(14 步,含每步動哪個檔)。本表只給階段輪廓。
+
 | Phase | 內容 | 可獨立出貨 |
 | --- | --- | --- |
-| **P1 認證與隔離** | AG-UI 上認證、前端 HttpAgent 帶 JWT、`SessionIsolationKeyProvider` | 是 |
-| **P2 記憶收斂** | 框架 session store 取代 `InMemoryChatMemoryStore`;兩鏈路共用 | 是(依賴 P1) |
-| **P3 共用 context** | `AIContextProvider` 承接 mem0 recall + 對話持久化 + 護欄 prompt | 是 |
-| **P4 路由共用** | skill 路由抽成 `AIAgentBuilder.Use` middleware,副駕取得同批 skill 能力 | 是 |
+| **P0 前置** | 補行為基線測試(證明重構前後等價)、兩個 csproj 加 `Microsoft.Agents.AI` `PackageReference`、`IChatIdentityAccessor` 承接 `DeriveMemoryKeys` | 否,是其餘一切的前提 |
+| **P1 認證與隔離** | AG-UI 上認證、前端 HttpAgent 帶 JWT、`JwtTenantIsolationKeyProvider`、`MapAGUI` 換 DI overload | 是 |
+| **P2 記憶收斂** | 框架 session store + `SlidingWindowCompactionStrategy` 取代 `InMemoryChatMemoryStore`;兩鏈路共用 | 是(依賴 P1) |
+| **P3 共用 context** | `ChatContextProvider`(護欄 + mem0 recall → `Instructions`)+ `ChatTurnRecorder`(mem0 remember + 持久化) | 是 |
+| **P4 路由共用** | skill 路由抽成 `SkillRoutingAgent`,掛 `.Use` 第二層;副駕取得同批 skill 能力 | 是 |
 
-P1 與 P2 之間的順序**不可對調**(§5.1)。P3、P4 之間無強制順序。
+**順序硬約束**
+
+- P0 是所有東西的前提;其中「補行為基線測試」必須**早於任何實作**,否則無從證明等價(§8)。
+- **P1 不可與 P2 對調** —— 認證與隔離必須與記憶同一批落地(§5.1)。
+- P3、P4 之間無強制順序,但 `ChatTurnRecorder` 必須早於 `SkillRoutingAgent`:recorder 要在 routing 外側,先建外層再插內層。
+- 每個 phase 收尾派 `e2e-verifier` 打真鏈路一次(§8)。
+
+> P3 為何是**兩個**元件而非原本規劃的一個 `AIContextProvider`:路由短路發生在 `ChatClientAgent` 之外,`StoreAIContextAsync` 在短路輪不會執行 → 命中 skill 的那一輪不會被 mem0 記住也不會持久化。詳見 [02-spec.md](02-spec.md) §4.0。
 
 ## 8. 風險
 
