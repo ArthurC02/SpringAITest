@@ -44,6 +44,16 @@ export function consumeSessionExpired(): boolean {
 }
 
 /**
+ * 從錯誤回應 body 解析出訊息：body 是 ApiError JSON 且有字串 message 就用它，
+ * 否則用呼叫端給的 fallback 文案。`request()`（apiFetch/apiFetchBlob 共用）與
+ * chat.ts 的 streamChat()（不走 apiFetch，SSE 需要原始 ReadableStream）共用這個解析。
+ */
+export async function parseErrorMessage(res: Response, fallback: string): Promise<string> {
+  const data = await res.json().catch(() => null)
+  return data && typeof data.message === 'string' ? data.message : fallback
+}
+
+/**
  * 共用請求核心：自動帶 Authorization、對 JSON body 補 Content-Type、
  * 錯誤一律轉成 ApiError（401 觸發全域登出）。成功時回傳原始 Response，
  * 由呼叫端決定解析成 JSON（apiFetch）或 blob（apiFetchBlob）。
@@ -59,12 +69,10 @@ async function request(path: string, options: RequestInit): Promise<Response> {
   const res = await fetch(path, { ...options, headers })
 
   if (!res.ok) {
-    // 錯誤 body 一律是 ApiError JSON（blob 端點也不例外）。
+    // 錯誤 body 一律是 ApiError JSON（blob 端點也不例外）。body 只能消費一次，
+    // clone 一份給 parseErrorMessage 取 message，原始 res 留著再讀一次取 fieldErrors。
+    const message = await parseErrorMessage(res.clone(), `請求失敗（HTTP ${res.status}）`)
     const data = await res.json().catch(() => null)
-    const message =
-      data && typeof data.message === 'string'
-        ? data.message
-        : `請求失敗（HTTP ${res.status}）`
     const fieldErrors =
       data && data.fieldErrors && typeof data.fieldErrors === 'object'
         ? (data.fieldErrors as Record<string, string>)

@@ -11,6 +11,6 @@ if ($LASTEXITCODE -ne 0) { Write-Error "docker compose up 失敗（離開碼 $LA
 Write-Host ""
 docker compose ps
 Write-Host ""
-Write-Host "✓ 完成。接著在主機啟動後端與前端："
-Write-Host "    後端： cd platform  ; dotnet run --project src/Platform.Web             # :8080"
-Write-Host "    前端： cd frontend ; npm install ; npm run dev                        # :5173"
+Write-Host "✓ 完成。接著在主機啟動平台閘道與前端："
+Write-Host "    平台閘道： cd platform  ; dotnet run --project src/Platform.Web        # :8080"
+Write-Host "    前端：     cd frontend ; npm install ; npm run dev                    # :5173"

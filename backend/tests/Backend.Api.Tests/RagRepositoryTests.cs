@@ -60,7 +60,7 @@ public sealed class RagRepositoryTests : IClassFixture<PostgresFixture>, IAsyncL
 
     // ---- (a) 租戶隔離:A 的 chunk 不會出現在 B 的搜尋(WHERE c.tenant_id = @tenantId) ----
 
-    [Fact]
+    [SkippableFact]
     public async Task SearchAsync_ExcludesOtherTenantsChunks()
     {
         _fx.SkipIfUnavailable();
@@ -88,7 +88,7 @@ public sealed class RagRepositoryTests : IClassFixture<PostgresFixture>, IAsyncL
 
     // ---- (b) 重跑冪等:重複投遞同一份不得讓 chunk 累積(先 DELETE 再批次 INSERT) ----
 
-    [Fact]
+    [SkippableFact]
     public async Task CompleteDocumentAsync_Rerun_IsIdempotent_NoChunkAccumulation()
     {
         _fx.SkipIfUnavailable();
@@ -113,7 +113,7 @@ public sealed class RagRepositoryTests : IClassFixture<PostgresFixture>, IAsyncL
 
     // ---- (b) 交易回滾:批次 INSERT 中途失敗,DELETE 也一併回滾,既有 chunk/狀態不得被破壞 ----
 
-    [Fact]
+    [SkippableFact]
     public async Task CompleteDocumentAsync_FailedRerun_RollsBack_KeepsPreviousChunks()
     {
         _fx.SkipIfUnavailable();
@@ -144,7 +144,7 @@ public sealed class RagRepositoryTests : IClassFixture<PostgresFixture>, IAsyncL
 
     // ---- 邊界:空 chunk 清單(批次 INSERT 的 count>0 守門的 off-point)→ ready + 0 chunk,不炸 ----
 
-    [Fact]
+    [SkippableFact]
     public async Task CompleteDocumentAsync_EmptyChunks_MarksReadyWithZeroChunks()
     {
         _fx.SkipIfUnavailable();

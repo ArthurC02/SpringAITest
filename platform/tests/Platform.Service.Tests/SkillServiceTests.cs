@@ -23,20 +23,23 @@ public sealed class SkillServiceTests
 
     private static SkillUpsert Upsert() => new(Yaml);
 
+    // A1:List 原樣穿透 backend JSON(snake_case),backend 新增欄位不被 DTO 靜默吃掉。
     [Fact]
-    public async Task List_MapsSnakeCaseResponse_ForwardsIdentityHeaders()
+    public async Task List_PassesThroughSnakeCase_ForwardsIdentityHeaders()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            """[{"name":"quarterly_qa","description":"季報問答","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
+            """[{"name":"quarterly_qa","description":"季報問答","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","extra_new_field":"kept"}]"""));
 
-        var list = await Build(stub).ListAsync(AdminCtx);
+        var json = await Build(stub).ListAsync(AdminCtx);
 
-        var item = Assert.Single(list);
-        Assert.Equal("quarterly_qa", item.Name);
-        Assert.Equal("USER", item.RequiredRole);
-        Assert.True(item.Enabled);
-        Assert.Equal(3, item.CurrentRevision);
-        Assert.Equal("2026-07-14T00:00:00Z", item.UpdatedAt);
+        var item = json.EnumerateArray().Single();
+        Assert.Equal("quarterly_qa", item.GetProperty("name").GetString());
+        Assert.Equal("USER", item.GetProperty("required_role").GetString());
+        Assert.True(item.GetProperty("enabled").GetBoolean());
+        Assert.Equal(3, item.GetProperty("current_revision").GetInt32());
+        Assert.Equal("2026-07-14T00:00:00Z", item.GetProperty("updated_at").GetString());
+        // 穿透:backend 之後新增的欄位原樣保留。
+        Assert.Equal("kept", item.GetProperty("extra_new_field").GetString());
 
         // AT4-12:4 個 header 皆取自 UserContext(由已驗證 JWT claims 組成)。
         Assert.Equal("http://backend/api/skills", stub.LastRequest!.RequestUri!.ToString());
@@ -48,32 +51,32 @@ public sealed class SkillServiceTests
     }
 
     [Fact]
-    public async Task Get_ForwardsNameInPath_MapsFullSkill()
+    public async Task Get_ForwardsNameInPath_PassesThroughFullSkill()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SkillJson));
 
         var skill = await Build(stub).GetAsync("quarterly_qa", AdminCtx);
 
         Assert.Equal("http://backend/api/skills/quarterly_qa", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal("name: quarterly_qa", skill.Definition);
-        Assert.Equal("USER", skill.RequiredRole);
-        Assert.Equal(3, skill.CurrentRevision);
-        Assert.Equal("2026-07-13T00:00:00Z", skill.CreatedAt);
+        Assert.Equal("name: quarterly_qa", skill.GetProperty("definition").GetString());
+        Assert.Equal("USER", skill.GetProperty("required_role").GetString());
+        Assert.Equal(3, skill.GetProperty("current_revision").GetInt32());
+        Assert.Equal("2026-07-13T00:00:00Z", skill.GetProperty("created_at").GetString());
     }
 
     [Fact]
-    public async Task GetRevisions_ForwardsPath_MapsSnakeCaseRows()
+    public async Task GetRevisions_ForwardsPath_PassesThroughSnakeCaseRows()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             """[{"revision":2,"definition":"name: q","definition_sha256":"abc","created_by":"admin-a","created_at":"2026-07-14T00:00:00Z"}]"""));
 
-        var revisions = await Build(stub).GetRevisionsAsync("quarterly_qa", AdminCtx);
+        var json = await Build(stub).GetRevisionsAsync("quarterly_qa", AdminCtx);
 
         Assert.Equal("http://backend/api/skills/quarterly_qa/revisions", stub.LastRequest!.RequestUri!.ToString());
-        var row = Assert.Single(revisions);
-        Assert.Equal(2, row.Revision);
-        Assert.Equal("abc", row.DefinitionSha256);
-        Assert.Equal("admin-a", row.CreatedBy);
+        var row = json.EnumerateArray().Single();
+        Assert.Equal(2, row.GetProperty("revision").GetInt32());
+        Assert.Equal("abc", row.GetProperty("definition_sha256").GetString());
+        Assert.Equal("admin-a", row.GetProperty("created_by").GetString());
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
     }
 

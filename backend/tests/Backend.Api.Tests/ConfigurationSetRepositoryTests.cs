@@ -4,7 +4,6 @@ using Backend.Api.Data;
 using Dapper;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
-using Xunit.Sdk;
 
 namespace Backend.Api.Tests;
 
@@ -42,14 +41,14 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     /// <summary>
     /// DB 不可達時把「宣稱驗 DB 不變量」的案標記為 **skipped**(非 passed)—— 讓無 DB 環境的「綠」
-    /// 對這幾條保持誠實,不假綠(SkipException.ForSkip 走 xUnit v2 動態 skip)。
+    /// 對這幾條保持誠實,不假綠。呼叫端測試方法須標 [SkippableFact](而非 [Fact]):xUnit
+    /// 2.9.3 + runner.visualstudio 3.1.4 不認得舊版 SkipException.ForSkip 的 $XunitDynamicSkip$ 動態
+    /// skip magic string(顯示為 Failed 而非 Skipped),改用 Xunit.SkippableFact 套件的
+    /// Skip.If/SkipException,由其專屬 discoverer 攔截、正確回報 Skipped。
     /// </summary>
     public void SkipIfUnavailable()
     {
-        if (!Available)
-        {
-            throw SkipException.ForSkip($"appdb 不可達,略過真 DB 不變量案:{Unavailable}");
-        }
+        Skip.If(!Available, $"appdb 不可達,略過真 DB 不變量案:{Unavailable}");
     }
 
     public async Task<int> ActiveCountAsync(string tenantId)
@@ -104,7 +103,7 @@ public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixt
 
     // ---- SSR-P4-001:DbBootstrap 冪等 + 兩個唯一約束/索引存在 ----
 
-    [Fact]
+    [SkippableFact]
     public async Task Bootstrap_Idempotent_AndUniqueIndexesExist()
     {
         _fx.SkipIfUnavailable();
@@ -128,7 +127,7 @@ public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixt
 
     // ---- SSR-P4-003:同租戶同名 DB 級拒收;不同租戶可同名 ----
 
-    [Fact]
+    [SkippableFact]
     public async Task Create_DuplicateName_SameTenant_ReturnsNull_DbEnforced()
     {
         _fx.SkipIfUnavailable();
@@ -147,7 +146,7 @@ public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixt
 
     // ---- SSR-P4-004:並發 activate 後至多一 active(部分索引兜底) ----
 
-    [Fact]
+    [SkippableFact]
     public async Task ConcurrentActivate_LeavesExactlyOneActive_NoError_OtherTenantUnaffected()
     {
         _fx.SkipIfUnavailable();
@@ -185,7 +184,7 @@ public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixt
 
     // ---- 回歸(HIGH):activate 不存在的 id 不得清空該租戶現有 active(靜默資料損毀) ----
 
-    [Fact]
+    [SkippableFact]
     public async Task Activate_NonexistentId_ReturnsNull_AndLeavesExistingActiveUntouched()
     {
         _fx.SkipIfUnavailable();
@@ -205,7 +204,7 @@ public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixt
 
     // ---- SSR-P4-005:刪 active 後該租戶變無 active、不自動選另一組 ----
 
-    [Fact]
+    [SkippableFact]
     public async Task DeleteActive_TenantHasNoActive_DoesNotAutoSelect()
     {
         _fx.SkipIfUnavailable();
@@ -224,7 +223,7 @@ public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixt
 
     // ---- SSR-P4-007:跨租戶查詢全部過濾;tenant-b 不受影響 ----
 
-    [Fact]
+    [SkippableFact]
     public async Task CrossTenant_AllOperations_Filtered_OtherTenantIntact()
     {
         _fx.SkipIfUnavailable();
@@ -253,7 +252,7 @@ public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixt
 
     // ---- jsonb 往返:values 存進去取回來型別/內容不失真(fake 掩蓋不了的真序列化) ----
 
-    [Fact]
+    [SkippableFact]
     public async Task Values_RoundTrip_ThroughJsonb_PreservesTypes()
     {
         _fx.SkipIfUnavailable();

@@ -21,7 +21,7 @@ public static class ChatMemoryKeyDerivation
             return (anonUid, NormalizeConversation(conversationId, anonUid));
         }
 
-        var uid = $"{userCtx.TenantCode}:{userCtx.UserId}";
+        var uid = userCtx.IsolationKey;
         var cid = string.IsNullOrWhiteSpace(conversationId) ? uid : $"{uid}:{conversationId}";
         return (uid, cid);
     }

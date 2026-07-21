@@ -8,7 +8,7 @@ import SkillHistory from './SkillHistory'
 import SkillRunPanel from './SkillRunPanel'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
-import { useToast } from './Toast'
+import { runWithToast, useToast } from './Toast'
 
 const SOURCE_LABEL: Record<'custom' | 'builtin', string> = { custom: '自訂', builtin: '內建' }
 
@@ -86,27 +86,25 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
   async function onDisable(name: string) {
     if (!window.confirm(`停用 Skill「${name}」？停用後不再出現在執行清單，歷史 revision 仍保留。`))
       return
-    try {
-      await deleteSkill(name)
-      toast('已停用', 'success')
-      if (selected?.name === name) backToList()
-      await reload()
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    }
+    await runWithToast(toast, () => deleteSkill(name), {
+      success: '已停用',
+      onSuccess: () => {
+        if (selected?.name === name) backToList()
+        return reload()
+      },
+    })
   }
 
   // 內建 kb_query「檢視」需要骨架原文：從 catalog 取（縫②）。
   async function openBuiltinView(name: string, schema: Row['schema']) {
     setSelected({ name, source: 'builtin', schema })
     setSub('edit')
-    try {
-      const catalog = await listSkillCatalog()
-      const def = catalog.find((c) => c.name === name)?.definition ?? ''
-      setAdvanced({ mode: { kind: 'view', name }, def })
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    }
+    await runWithToast(toast, () => listSkillCatalog(), {
+      onSuccess: (catalog) => {
+        const def = catalog.find((c) => c.name === name)?.definition ?? ''
+        setAdvanced({ mode: { kind: 'view', name }, def })
+      },
+    })
   }
 
   // ponytail: custom「編輯」走進階保真（載原始 YAML → updateSkill 產新版），
@@ -114,12 +112,9 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
   async function openCustomEdit(name: string, schema: Row['schema']) {
     setSelected({ name, source: 'custom', schema })
     setSub('edit')
-    try {
-      const s = await getSkill(name)
-      setAdvanced({ mode: { kind: 'edit', name }, def: s.definition ?? '', saved: s })
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    }
+    await runWithToast(toast, () => getSkill(name), {
+      onSuccess: (s) => setAdvanced({ mode: { kind: 'edit', name }, def: s.definition ?? '', saved: s }),
+    })
   }
 
   // ---- 進階編輯器覆蓋層（簡單→進階交棒、內建檢視） ----

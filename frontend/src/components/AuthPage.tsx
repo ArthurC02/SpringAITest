@@ -13,6 +13,58 @@ interface Props {
   ) => Promise<unknown>
 }
 
+interface FormFieldProps {
+  id: string
+  testId: string
+  label: string
+  value: string
+  onChange: (val: string) => void
+  onBlur: (val: string) => void
+  error?: string
+  type?: string
+  autoComplete?: string
+  minLength?: number
+}
+
+/** 登入/註冊表單共用的單一欄位（label + input + field-error），四欄各自差異走 props。 */
+function FormField({
+  id,
+  testId,
+  label,
+  value,
+  onChange,
+  onBlur,
+  error,
+  type = 'text',
+  autoComplete,
+  minLength,
+}: FormFieldProps) {
+  return (
+    <div className="field">
+      <label htmlFor={id}>{label}</label>
+      <input
+        id={id}
+        type={type}
+        data-testid={testId}
+        className="input"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={(e) => onBlur(e.target.value)}
+        autoComplete={autoComplete}
+        required
+        minLength={minLength}
+        aria-invalid={!!error}
+        aria-describedby={error ? `${id}-err` : undefined}
+      />
+      {error && (
+        <span className="field-error" id={`${id}-err`} role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  )
+}
+
 /** 未登入入口：登入 / 註冊切換。成功登入後 App 因 session 改變自動切到 AppShell。 */
 export default function AuthPage({ login, register }: Props) {
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -125,90 +177,50 @@ export default function AuthPage({ login, register }: Props) {
         <h1 className="auth__title">{isRegister ? '註冊' : '登入'}</h1>
         <p className="muted" style={{ marginTop: 0 }}>資料分析平台</p>
 
-        <div className="field">
-          <label htmlFor="username">帳號</label>
-          <input
-            id="username"
-            data-testid="auth-username"
-            className="input"
-            value={username}
-            onChange={(e) => onChange('username', e.target.value, setUsername)}
-            onBlur={(e) => onBlur('username', e.target.value)}
-            autoComplete="username"
-            required
-            aria-invalid={!!usernameErr}
-            aria-describedby={usernameErr ? 'username-err' : undefined}
-          />
-          {usernameErr && (
-            <span className="field-error" id="username-err" role="alert">
-              {usernameErr}
-            </span>
-          )}
-        </div>
+        <FormField
+          id="username"
+          testId="auth-username"
+          label="帳號"
+          value={username}
+          onChange={(v) => onChange('username', v, setUsername)}
+          onBlur={(v) => onBlur('username', v)}
+          autoComplete="username"
+          error={usernameErr}
+        />
 
-        <div className="field">
-          <label htmlFor="password">密碼{isRegister ? '（至少 8 碼）' : ''}</label>
-          <input
-            id="password"
-            type="password"
-            data-testid="auth-password"
-            className="input"
-            value={password}
-            onChange={(e) => onChange('password', e.target.value, setPassword)}
-            onBlur={(e) => onBlur('password', e.target.value)}
-            autoComplete={isRegister ? 'new-password' : 'current-password'}
-            required
-            minLength={isRegister ? 8 : undefined}
-            aria-invalid={!!passwordErr}
-            aria-describedby={passwordErr ? 'password-err' : undefined}
-          />
-          {passwordErr && (
-            <span className="field-error" id="password-err" role="alert">
-              {passwordErr}
-            </span>
-          )}
-        </div>
+        <FormField
+          id="password"
+          testId="auth-password"
+          type="password"
+          label={`密碼${isRegister ? '（至少 8 碼）' : ''}`}
+          value={password}
+          onChange={(v) => onChange('password', v, setPassword)}
+          onBlur={(v) => onBlur('password', v)}
+          autoComplete={isRegister ? 'new-password' : 'current-password'}
+          minLength={isRegister ? 8 : undefined}
+          error={passwordErr}
+        />
 
         {isRegister && (
           <>
-            <div className="field">
-              <label htmlFor="tenantCode">租戶代碼</label>
-              <input
-                id="tenantCode"
-                data-testid="auth-tenant-code"
-                className="input"
-                value={tenantCode}
-                onChange={(e) => onChange('tenantCode', e.target.value, setTenantCode)}
-                onBlur={(e) => onBlur('tenantCode', e.target.value)}
-                required
-                aria-invalid={!!tenantErr}
-                aria-describedby={tenantErr ? 'tenantCode-err' : undefined}
-              />
-              {tenantErr && (
-                <span className="field-error" id="tenantCode-err" role="alert">
-                  {tenantErr}
-                </span>
-              )}
-            </div>
-            <div className="field">
-              <label htmlFor="inviteCode">邀請碼</label>
-              <input
-                id="inviteCode"
-                data-testid="auth-invite-code"
-                className="input"
-                value={inviteCode}
-                onChange={(e) => onChange('inviteCode', e.target.value, setInviteCode)}
-                onBlur={(e) => onBlur('inviteCode', e.target.value)}
-                required
-                aria-invalid={!!inviteErr}
-                aria-describedby={inviteErr ? 'inviteCode-err' : undefined}
-              />
-              {inviteErr && (
-                <span className="field-error" id="inviteCode-err" role="alert">
-                  {inviteErr}
-                </span>
-              )}
-            </div>
+            <FormField
+              id="tenantCode"
+              testId="auth-tenant-code"
+              label="租戶代碼"
+              value={tenantCode}
+              onChange={(v) => onChange('tenantCode', v, setTenantCode)}
+              onBlur={(v) => onBlur('tenantCode', v)}
+              error={tenantErr}
+            />
+            <FormField
+              id="inviteCode"
+              testId="auth-invite-code"
+              label="邀請碼"
+              value={inviteCode}
+              onChange={(v) => onChange('inviteCode', v, setInviteCode)}
+              onBlur={(v) => onBlur('inviteCode', v)}
+              error={inviteErr}
+            />
           </>
         )}
 

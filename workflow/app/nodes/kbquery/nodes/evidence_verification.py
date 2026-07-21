@@ -1,8 +1,15 @@
 """Evidence Verification：全部確定性檢查的驗證閘門，不用 LLM；未通過不放行任何答案。"""
 
+from collections.abc import Iterable
+
 from app.engine.node_registry import node
 from app.nodes.kbquery import calculator, textutils
-from app.nodes.kbquery.models import Evidence, FailureCode, VerificationResult
+from app.nodes.kbquery.models import (
+    CalculationTrace,
+    Evidence,
+    FailureCode,
+    VerificationResult,
+)
 from app.nodes.kbquery.nodes.context_resolver import VERSION_TERMS
 
 _EPS = 1e-6
@@ -15,6 +22,124 @@ def _safe_parse(value: str) -> float | None:
         return textutils.parse_number(value)
     except ValueError:
         return None
+
+
+def _check_evidence_row(
+    e: Evidence,
+    targets: list[str],
+    canonical: str,
+    metric_terms: list[str],
+    excluded_terms: list[str],
+) -> Iterable[FailureCode]:
+    """單筆證據的期間／指標／排除詞／表格對位／可追溯性檢查（規則 1–5）。"""
+    codes: list[FailureCode] = []
+    # 1 期間：證據必須「證明」期間，不可含糊放行
+    if targets and (
+        not e.period or textutils.normalize_period(e.period) not in targets
+    ):
+        codes.append(FailureCode.PERIOD_MISMATCH)
+    # 2 指標
+    if canonical and (not e.metric or e.metric != canonical):
+        codes.append(FailureCode.METRIC_MISMATCH)
+    # 3 排除詞：口徑詞 → VERSION_MISMATCH，其餘 → METRIC_MISMATCH
+    haystack = " ".join(
+        (
+            e.row_identifier,
+            e.column_identifier,
+            e.exact_excerpt,
+            e.metric,
+            e.document_title,
+        )
+    )
+    for term in excluded_terms:
+        if term and term in haystack:
+            codes.append(
+                FailureCode.VERSION_MISMATCH
+                if term in VERSION_TERMS
+                else FailureCode.METRIC_MISMATCH
+            )
+    # 4 表格證據：列名須含指標詞、欄名期間須為目標期間
+    if e.source_type == "table":
+        if metric_terms and not any(t in e.row_identifier for t in metric_terms):
+            codes.append(FailureCode.TABLE_CELL_MISMATCH)
+        if targets and textutils.normalize_period(e.column_identifier) not in targets:
+            codes.append(FailureCode.TABLE_CELL_MISMATCH)
+    # 5 可追溯性
+    if not e.document_id or (
+        e.page_number is None
+        and not e.exact_excerpt
+        and not (e.row_identifier and e.column_identifier)
+        and e.source_type != "structured"
+    ):
+        codes.append(FailureCode.SOURCE_NOT_TRACEABLE)
+    return codes
+
+
+def _check_value_consistency(
+    candidate_answer: str,
+    calculation_result: float | None,
+    evidences: list[Evidence],
+) -> Iterable[FailureCode]:
+    """數值一致性：candidate_answer 的數字必須有出處。"""
+    codes: list[FailureCode] = []
+    pairs = textutils.extract_value_unit(candidate_answer)
+    if pairs:
+        cand_val = _safe_parse(pairs[0][0])
+        if cand_val is not None:
+            if calculation_result is not None:
+                if abs(cand_val - calculation_result) > _DISPLAY_EPS:
+                    codes.append(FailureCode.VALUE_MISMATCH)
+            else:
+                values = [
+                    v
+                    for e in evidences
+                    if e.exact_value
+                    if (v := _safe_parse(e.exact_value)) is not None
+                ]
+                if not any(abs(v - cand_val) <= _EPS for v in values):
+                    codes.append(FailureCode.VALUE_MISMATCH)
+    return codes
+
+
+def _check_conflicts(evidences: list[Evidence]) -> Iterable[FailureCode]:
+    """衝突：同 (指標, 期間) 的證據數值不一致。"""
+    codes: list[FailureCode] = []
+    for i, a in enumerate(evidences):
+        for b in evidences[i + 1 :]:
+            if a.metric == b.metric and textutils.normalize_period(
+                a.period
+            ) == textutils.normalize_period(b.period):
+                va, vb = _safe_parse(a.exact_value), _safe_parse(b.exact_value)
+                if va is not None and vb is not None and abs(va - vb) > _EPS:
+                    codes.append(FailureCode.CONFLICTING_EVIDENCE)
+    return codes
+
+
+def _check_calculation(
+    trace: CalculationTrace | None,
+    evidences: list[Evidence],
+) -> Iterable[FailureCode]:
+    """計算複驗：公式重算 + 每個輸入值必須能對回證據。"""
+    codes: list[FailureCode] = []
+    if trace is None:
+        codes.append(FailureCode.INSUFFICIENT_EVIDENCE)
+        return codes
+    try:
+        if abs(calculator.evaluate(trace.formula, trace.inputs) - trace.result) > _EPS:
+            codes.append(FailureCode.CALCULATION_ERROR)
+    except Exception:
+        codes.append(FailureCode.CALCULATION_ERROR)
+    evidence_values = [
+        v
+        for e in evidences
+        if e.exact_value
+        if (v := _safe_parse(e.exact_value)) is not None
+    ]
+    for value in trace.inputs.values():
+        if not any(abs(value - v) <= _EPS for v in evidence_values):
+            codes.append(FailureCode.CALCULATION_ERROR)
+            break
+    return codes
 
 
 @node(
@@ -63,107 +188,22 @@ def make_evidence_verification_node():
         excluded_terms = state.get("excluded_terms") or []
 
         for e in evidences:
-            # 1 期間：證據必須「證明」期間，不可含糊放行
-            if targets and (
-                not e.period or textutils.normalize_period(e.period) not in targets
-            ):
-                codes.append(FailureCode.PERIOD_MISMATCH)
-            # 2 指標
-            if canonical and (not e.metric or e.metric != canonical):
-                codes.append(FailureCode.METRIC_MISMATCH)
-            # 3 排除詞：口徑詞 → VERSION_MISMATCH，其餘 → METRIC_MISMATCH
-            haystack = " ".join(
-                (
-                    e.row_identifier,
-                    e.column_identifier,
-                    e.exact_excerpt,
-                    e.metric,
-                    e.document_title,
-                )
+            codes.extend(
+                _check_evidence_row(e, targets, canonical, metric_terms, excluded_terms)
             )
-            for term in excluded_terms:
-                if term and term in haystack:
-                    codes.append(
-                        FailureCode.VERSION_MISMATCH
-                        if term in VERSION_TERMS
-                        else FailureCode.METRIC_MISMATCH
-                    )
-            # 4 表格證據：列名須含指標詞、欄名期間須為目標期間
-            if e.source_type == "table":
-                if metric_terms and not any(
-                    t in e.row_identifier for t in metric_terms
-                ):
-                    codes.append(FailureCode.TABLE_CELL_MISMATCH)
-                if (
-                    targets
-                    and textutils.normalize_period(e.column_identifier) not in targets
-                ):
-                    codes.append(FailureCode.TABLE_CELL_MISMATCH)
-            # 5 可追溯性
-            if not e.document_id or (
-                e.page_number is None
-                and not e.exact_excerpt
-                and not (e.row_identifier and e.column_identifier)
-                and e.source_type != "structured"
-            ):
-                codes.append(FailureCode.SOURCE_NOT_TRACEABLE)
 
-        # 數值一致性：candidate_answer 的數字必須有出處
-        pairs = textutils.extract_value_unit(state.get("candidate_answer", ""))
-        if pairs:
-            cand_val = _safe_parse(pairs[0][0])
-            calc_result = state.get("calculation_result")
-            if cand_val is not None:
-                if calc_result is not None:
-                    if abs(cand_val - calc_result) > _DISPLAY_EPS:
-                        codes.append(FailureCode.VALUE_MISMATCH)
-                else:
-                    values = [
-                        v
-                        for e in evidences
-                        if e.exact_value
-                        if (v := _safe_parse(e.exact_value)) is not None
-                    ]
-                    if not any(abs(v - cand_val) <= _EPS for v in values):
-                        codes.append(FailureCode.VALUE_MISMATCH)
+        codes.extend(
+            _check_value_consistency(
+                state.get("candidate_answer", ""),
+                state.get("calculation_result"),
+                evidences,
+            )
+        )
 
-        # 衝突：同 (指標, 期間) 的證據數值不一致
-        for i, a in enumerate(evidences):
-            for b in evidences[i + 1 :]:
-                if a.metric == b.metric and textutils.normalize_period(
-                    a.period
-                ) == textutils.normalize_period(b.period):
-                    va, vb = _safe_parse(a.exact_value), _safe_parse(b.exact_value)
-                    if va is not None and vb is not None and abs(va - vb) > _EPS:
-                        codes.append(FailureCode.CONFLICTING_EVIDENCE)
+        codes.extend(_check_conflicts(evidences))
 
-        # 計算複驗：公式重算 + 每個輸入值必須能對回證據
         if state.get("requires_calculation"):
-            trace = state.get("calculation_trace")
-            if trace is None:
-                codes.append(FailureCode.INSUFFICIENT_EVIDENCE)
-            else:
-                try:
-                    if (
-                        abs(
-                            calculator.evaluate(trace.formula, trace.inputs)
-                            - trace.result
-                        )
-                        > _EPS
-                    ):
-                        codes.append(FailureCode.CALCULATION_ERROR)
-                except Exception:
-                    codes.append(FailureCode.CALCULATION_ERROR)
-                evidence_values = [
-                    v
-                    for e in evidences
-                    if e.exact_value
-                    if (v := _safe_parse(e.exact_value)) is not None
-                ]
-                for value in trace.inputs.values():
-                    if not any(abs(value - v) <= _EPS for v in evidence_values):
-                        codes.append(FailureCode.CALCULATION_ERROR)
-                        break
+            codes.extend(_check_calculation(state.get("calculation_trace"), evidences))
 
         codes = list(dict.fromkeys(codes))
         if not codes:

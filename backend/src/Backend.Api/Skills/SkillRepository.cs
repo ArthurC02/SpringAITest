@@ -62,19 +62,16 @@ public sealed class SkillRepository : ISkillRepository
         //   - 名字還活著 → WHERE 不成立 → 0 列 → 回 null → controller 409(且不多寫 revision);
         //   - 名字已軟刪 → 復活,current_revision 接著加(稽核鏈不斷號),enabled 回 true。
         // revision 取 RETURNING 回來的真值(不是寫死的 1)—— 復活時是 N+1,新建時就是 1。
-        return await conn.QuerySingleOrDefaultAsync<Skill>(new CommandDefinition(
-            "WITH ins AS ("
-            + " INSERT INTO skill (tenant_id, name, description, definition, required_role, enabled,"
+        return await ExecuteWriteCteAsync(conn, "ins",
+            "INSERT INTO skill (tenant_id, name, description, definition, required_role, enabled,"
             + "  created_by, current_revision)"
             + " VALUES (@tenantId, @Name, @Description, @Definition, @RequiredRole, true, @createdBy, 1)"
             + " ON CONFLICT (tenant_id, name) DO UPDATE SET"
             + "  description = EXCLUDED.description, definition = EXCLUDED.definition,"
             + "  required_role = EXCLUDED.required_role, enabled = true,"
             + "  current_revision = skill.current_revision + 1, updated_at = now()"
-            + " WHERE NOT skill.enabled"
-            + " RETURNING *"
-            + string.Format(RevisionCte, "ins", "createdBy")
-            + $" SELECT {Cols} FROM ins",
+            + " WHERE NOT skill.enabled",
+            "createdBy",
             new
             {
                 tenantId,
@@ -84,7 +81,7 @@ public sealed class SkillRepository : ISkillRepository
                 skill.RequiredRole,
                 createdBy,
                 sha = SkillHash.Sha256(skill.Definition),
-            }, cancellationToken: ct));
+            }, ct);
     }
 
     public async Task<Skill?> UpdateAsync(
@@ -94,14 +91,11 @@ public sealed class SkillRepository : ISkillRepository
 
         // current_revision +1 後,把「新的 revision 值」與新定義一起落一筆稽核列。
         // AND enabled:已軟刪的 skill 不可經 PUT 復活(規格沒有復用/復活端點)。
-        return await conn.QuerySingleOrDefaultAsync<Skill>(new CommandDefinition(
-            "WITH upd AS ("
-            + " UPDATE skill SET description = @Description, definition = @Definition,"
+        return await ExecuteWriteCteAsync(conn, "upd",
+            "UPDATE skill SET description = @Description, definition = @Definition,"
             + "  required_role = @RequiredRole, current_revision = current_revision + 1, updated_at = now()"
-            + " WHERE tenant_id = @tenantId AND name = @name AND enabled"
-            + " RETURNING *"
-            + string.Format(RevisionCte, "upd", "updatedBy")
-            + $" SELECT {Cols} FROM upd",
+            + " WHERE tenant_id = @tenantId AND name = @name AND enabled",
+            "updatedBy",
             new
             {
                 tenantId,
@@ -111,7 +105,22 @@ public sealed class SkillRepository : ISkillRepository
                 skill.RequiredRole,
                 updatedBy,
                 sha = SkillHash.Sha256(skill.Definition),
-            }, cancellationToken: ct));
+            }, ct);
+    }
+
+    /// <summary>
+    /// Create/Update 共用的寫入骨架:把主 CTE(INSERT ... ON CONFLICT 或 UPDATE,不含 RETURNING)
+    /// 接上 RETURNING * 與 skill_revision 稽核 CTE、最後投影出 Cols。主 CTE 語意由呼叫端決定,
+    /// 這裡只收斂「組 SQL + 執行」這段逐字相同的樣板。
+    /// </summary>
+    private static Task<Skill?> ExecuteWriteCteAsync(
+        NpgsqlConnection conn, string cteName, string mainCteBody, string writerParam, object parameters,
+        CancellationToken ct)
+    {
+        var sql = $"WITH {cteName} AS (" + mainCteBody + " RETURNING *"
+            + string.Format(RevisionCte, cteName, writerParam)
+            + $" SELECT {Cols} FROM {cteName}";
+        return conn.QuerySingleOrDefaultAsync<Skill>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
     /// <summary>軟刪:enabled=false。skill_revision 一列都不動(金融稽核:歷史永不消失)。</summary>

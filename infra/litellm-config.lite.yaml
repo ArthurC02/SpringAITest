@@ -3,7 +3,7 @@
 # 保留 callback 會讓每次 LLM 呼叫都對 :3000 連線失敗並噴錯誤日誌（見 04-acceptance-test C-10）。
 # 其餘（mock-gpt 路由、drop_params、master_key）與正式版一致。
 model_list:
-  - model_name: gpt-4o-mini            # ← Spring application.yml 的 spring.ai.openai.chat.options.model
+  - model_name: gpt-4o-mini            # ← platform 的 CHAT_MODEL env 預設值（docker-compose.yml / AGENTS.md）
     litellm_params:
       model: openai/gpt-4o-mini        # 真正路由目標（之後要加 Claude 就在這裡多一筆）
       api_key: os.environ/OPENAI_API_KEY
@@ -22,4 +22,4 @@ litellm_settings:
   drop_params: true                    # 自動丟掉供應商不支援的參數，避免相容性錯誤
 
 general_settings:
-  master_key: sk-1234                  # ← Spring application.yml 的 spring.ai.openai.api-key（虛擬金鑰）
+  master_key: os.environ/LITELLM_MASTER_KEY   # 虛擬金鑰；platform 端經 LITELLM_KEY env 讀取（預設 sk-1234）

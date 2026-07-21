@@ -1,5 +1,4 @@
 using System.ComponentModel.DataAnnotations;
-using System.Text.Json.Serialization;
 using Platform.Service.Validation;
 
 namespace Platform.Service.Dtos;
@@ -17,14 +16,8 @@ public sealed record DocumentCreateRequest(
 /// <summary>建立文件已受理的回應(非同步處理)。JSON:{ id, title, status }(camelCase)。</summary>
 public sealed record DocumentAccepted(string Id, string Title, string Status);
 
-/// <summary>文件清單項目。JSON:{ id, title, chunk_count, created_at, status }(snake_case);
-/// created_at 是字串,status 由 backend GET 回傳,皆原樣轉發下游值。</summary>
-public sealed record DocumentInfo(
-    [property: JsonPropertyName("id")] string Id,
-    [property: JsonPropertyName("title")] string Title,
-    [property: JsonPropertyName("chunk_count")] int ChunkCount,
-    [property: JsonPropertyName("created_at")] string CreatedAt,
-    [property: JsonPropertyName("status")] string Status);
+// 文件清單(GET /api/documents)改為原樣穿透 backend JSON(snake_case),不再套 DocumentInfo DTO
+// (見 DocumentService.ListAsync / IDocumentService)——避免 backend 新增欄位被靜默吃掉。
 
 /// <summary>
 /// 發佈到 RabbitMQ 的文件處理訊息。JSON camelCase:

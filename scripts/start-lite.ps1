@@ -64,6 +64,10 @@ if (-not $SkipLiteLlm) {
         "--from", "litellm[proxy]", "litellm", `
         "--config", "infra/litellm-config.lite.yaml", "--port", "4000" `
         -WorkingDirectory $repoRoot -PassThru `
+        -Environment @{
+            # config 的 master_key 讀 os.environ/LITELLM_MASTER_KEY；不設就靜默視為無 master key（免驗證），故給預設值
+            "LITELLM_MASTER_KEY" = "sk-1234"
+        } `
         -RedirectStandardOutput (LogPath 'litellm.log') `
         -RedirectStandardError  (LogPath 'litellm-err.log')
     $jobs[-1].Id | Add-Content -Path $pidsFile

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -9,6 +10,7 @@ namespace Platform.Service;
 /// backend 的錯誤原樣轉發:400/403/404/409/422 各自映射到對外同狀態碼的例外並沿用 backend 的 message;
 /// 其餘(5xx、傳輸失敗)→ WorkflowInvocationException(對外 502)。
 /// 400 與 422 的 fieldErrors 都要帶上來 — 前者是欄位驗證、後者是引擎錯誤碼,吞掉任一邊前端就顯示不了原因。
+/// 讀取端點(list/get/revisions)原樣穿透 backend JSON(不套 DTO),避免 backend 新增欄位被靜默吃掉。
 /// </summary>
 public sealed class SkillService : ISkillService
 {
@@ -20,16 +22,16 @@ public sealed class SkillService : ISkillService
 
     private Exception WrapTransport(Exception ex) => new WorkflowInvocationException(FailurePrefix + ex.Message, ex);
 
-    public async Task<IReadOnlyList<SkillInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-        => await _backend.SendForJsonListAsync<SkillInfo>(
+    public Task<JsonElement> ListAsync(UserContext ctx, CancellationToken ct = default)
+        => _backend.SendForJsonElementAsync(
             _backend.BuildRequest(HttpMethod.Get, "/api/skills", ctx), WrapTransport, MapErrorAsync, ct);
 
-    public Task<Skill> GetAsync(string name, UserContext ctx, CancellationToken ct = default)
-        => ReadSkillAsync(_backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}", ctx), ct);
+    public Task<JsonElement> GetAsync(string name, UserContext ctx, CancellationToken ct = default)
+        => _backend.SendForJsonElementAsync(
+            _backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}", ctx), WrapTransport, MapErrorAsync, ct);
 
-    public async Task<IReadOnlyList<SkillRevisionInfo>> GetRevisionsAsync(
-        string name, UserContext ctx, CancellationToken ct = default)
-        => await _backend.SendForJsonListAsync<SkillRevisionInfo>(
+    public Task<JsonElement> GetRevisionsAsync(string name, UserContext ctx, CancellationToken ct = default)
+        => _backend.SendForJsonElementAsync(
             _backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}/revisions", ctx), WrapTransport, MapErrorAsync, ct);
 
     public async Task<SkillExport> ExportAsync(string name, UserContext ctx, CancellationToken ct = default)

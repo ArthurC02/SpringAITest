@@ -54,6 +54,8 @@ echo "✓ 前置檢查通過（dotnet 10 / uv / node / python 3.12+）"
 if [ "$SKIP_LITELLM" -eq 0 ]; then
   echo "  起 LiteLLM  :4000 …"
   ( cd "$REPO_ROOT"
+    # config 的 master_key 讀 os.environ/LITELLM_MASTER_KEY；不設就靜默視為無 master key（免驗證），故給預設值
+    LITELLM_MASTER_KEY=sk-1234 \
     nohup uvx --from 'litellm[proxy]' litellm --config infra/litellm-config.lite.yaml --port 4000 \
       > "$RUN_DIR/litellm.log" 2>&1 &
     echo $! >> "$PIDS_FILE" )

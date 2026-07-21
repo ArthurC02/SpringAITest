@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Web.Auth;
@@ -25,9 +26,9 @@ public sealed class DocumentController : ControllerBase
         return StatusCode(StatusCodes.Status202Accepted, accepted);
     }
 
-    /// <summary>列出文件。</summary>
+    /// <summary>列出文件 —— 原樣穿透 backend JSON。</summary>
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<DocumentInfo>>> List(CancellationToken ct)
+    public async Task<ActionResult<JsonElement>> List(CancellationToken ct)
     {
         var ctx = User.ToUserContext();
         var documents = await _documents.ListAsync(ctx, ct);

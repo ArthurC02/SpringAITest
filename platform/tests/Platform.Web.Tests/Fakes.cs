@@ -7,6 +7,12 @@ using Platform.Service.Exceptions;
 
 namespace Platform.Web.Tests;
 
+/// <summary>測試 fake 共用:把原始 JSON 字串解析成獨立的 JsonElement(比照 backend 讀取端點的穿透回應)。</summary>
+internal static class FakeJson
+{
+    public static JsonElement Of(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
+}
+
 /// <summary>
 /// Web 整合測試用的 LLM 代理 fake:一律回固定字串 → 路由回覆不匹配任何工具 → 走純聊天兜底(reply 仍是「測試回覆」)。
 /// 新流程下工具改以「路由目錄」文字經路由呼叫傳入(非原生 tools 引數);測試改斷言 LastRoutingCatalog。
@@ -252,11 +258,9 @@ public sealed class FakeDocumentService : IDocumentService
     public Task<DocumentAccepted> CreateAsync(DocumentCreateRequest request, UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(new DocumentAccepted("doc-1", request.Title ?? string.Empty, "processing"));
 
-    public Task<IReadOnlyList<DocumentInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult<IReadOnlyList<DocumentInfo>>(new List<DocumentInfo>
-        {
-            new("doc-1", "標題", 3, "2026-07-11T00:00:00Z", "ready"),
-        });
+    public Task<JsonElement> ListAsync(UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(FakeJson.Of(
+            """[{"id":"doc-1","title":"標題","chunk_count":3,"created_at":"2026-07-11T00:00:00Z","status":"ready"}]"""));
 
     public Task DeleteAsync(string id, UserContext ctx, CancellationToken ct = default)
     {
@@ -312,16 +316,14 @@ public sealed class FakeSkillService : ISkillService
         }
     }
 
-    public Task<IReadOnlyList<SkillInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
+    public Task<JsonElement> ListAsync(UserContext ctx, CancellationToken ct = default)
     {
         Calls.Add("list");
-        return Task.FromResult<IReadOnlyList<SkillInfo>>(new List<SkillInfo>
-        {
-            new("echo_skill", "季報問答", "USER", true, 1, "2026-07-14T00:00:00Z", "2026-07-14T00:00:00Z"),
-        });
+        return Task.FromResult(FakeJson.Of(
+            """[{"name":"echo_skill","description":"季報問答","required_role":"USER","enabled":true,"current_revision":1,"created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
     }
 
-    public Task<Skill> GetAsync(string name, UserContext ctx, CancellationToken ct = default)
+    public Task<JsonElement> GetAsync(string name, UserContext ctx, CancellationToken ct = default)
     {
         Calls.Add("get:" + name);
         if (name == "ghost")
@@ -329,11 +331,12 @@ public sealed class FakeSkillService : ISkillService
             throw new WorkflowNotFoundException("找不到 Skill：" + name);
         }
 
-        return Task.FromResult(Make(name, $"name: {name}\nflow:\n  - node: query_intake\n"));
+        // 穿透:直接把 backend 形狀(含 JsonPropertyName snake_case)序列化成 JsonElement 回傳。
+        return Task.FromResult(JsonSerializer.SerializeToElement(
+            Make(name, $"name: {name}\nflow:\n  - node: query_intake\n")));
     }
 
-    public Task<IReadOnlyList<SkillRevisionInfo>> GetRevisionsAsync(
-        string name, UserContext ctx, CancellationToken ct = default)
+    public Task<JsonElement> GetRevisionsAsync(string name, UserContext ctx, CancellationToken ct = default)
     {
         Calls.Add("revisions:" + name);
         if (name == "ghost")
@@ -341,11 +344,8 @@ public sealed class FakeSkillService : ISkillService
             throw new WorkflowNotFoundException("找不到 Skill：" + name);
         }
 
-        return Task.FromResult<IReadOnlyList<SkillRevisionInfo>>(new List<SkillRevisionInfo>
-        {
-            new(2, "name: " + name + "\n# r2\n", "sha2", "admin-a", "2026-07-14T00:00:00Z"),
-            new(1, "name: " + name + "\n# r1\n", "sha1", "admin-a", "2026-07-13T00:00:00Z"),
-        });
+        return Task.FromResult(FakeJson.Of(
+            """[{"revision":2,"definition":"# r2","definition_sha256":"sha2","created_by":"admin-a","created_at":"2026-07-14T00:00:00Z"},{"revision":1,"definition":"# r1","definition_sha256":"sha1","created_by":"admin-a","created_at":"2026-07-13T00:00:00Z"}]"""));
     }
 
     /// <summary>匯出用的假 zip bytes(內容不必是真 zip — 這層只驗代理原封轉發)。</summary>
@@ -425,16 +425,15 @@ public sealed class FakeConfigurationSetService : IConfigurationSetService
             new Dictionary<string, JsonElement> { ["retrieval.top_k"] = El(8), ["llm.model"] = El("gpt-4o-mini") },
             "admin-a", "2026-07-14T00:00:00Z", "2026-07-14T00:00:00Z");
 
-    public Task<IReadOnlyList<ConfigurationSetInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
+    public Task<JsonElement> ListAsync(UserContext ctx, CancellationToken ct = default)
     {
         Calls.Add("list");
-        return Task.FromResult<IReadOnlyList<ConfigurationSetInfo>>(new List<ConfigurationSetInfo>
-        {
-            new(ExistingId, "prod", true, "2026-07-14T00:00:00Z"),
-        });
+        // 穿透:含 created_at(舊 ConfigurationSetInfo DTO 會丟掉此欄位),不含 values(清單省略)。
+        return Task.FromResult(FakeJson.Of(
+            $$"""[{"id":"{{ExistingId}}","name":"prod","is_active":true,"created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
     }
 
-    public Task<ConfigurationSet> GetAsync(string id, UserContext ctx, CancellationToken ct = default)
+    public Task<JsonElement> GetAsync(string id, UserContext ctx, CancellationToken ct = default)
     {
         Calls.Add("get:" + id);
         if (id == GhostId)
@@ -442,7 +441,8 @@ public sealed class FakeConfigurationSetService : IConfigurationSetService
             throw new WorkflowNotFoundException("找不到 Configuration Set");
         }
 
-        return Task.FromResult(Make(id, "prod", true));
+        // 穿透:直接把 backend 形狀(含 JsonPropertyName snake_case、values jsonb)序列化成 JsonElement。
+        return Task.FromResult(JsonSerializer.SerializeToElement(Make(id, "prod", true)));
     }
 
     public Task<ConfigurationSet> CreateAsync(ConfigurationSetUpsert request, UserContext ctx, CancellationToken ct = default)

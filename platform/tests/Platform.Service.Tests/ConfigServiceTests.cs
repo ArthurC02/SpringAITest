@@ -68,4 +68,14 @@ public sealed class ConfigServiceTests
         await Assert.ThrowsAsync<WorkflowInvocationException>(() =>
             svc.UpdateAsync("a", new ConfigUpdateRequest("2"), AdminCtx));
     }
+
+    // B2:List 改走 BackendErrorMapper —— backend 4xx 不再被一律壓成 502,403 對外仍是 403。
+    [Fact]
+    public async Task List_Backend403_ThrowsWorkflowForbidden()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足")));
+
+        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(() => svc.ListAsync(UserCtx));
+        Assert.Equal("權限不足", ex.Message);
+    }
 }

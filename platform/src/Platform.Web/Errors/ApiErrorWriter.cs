@@ -18,6 +18,7 @@ public static class ApiErrorWriter
         CancellationToken ct = default,
         IReadOnlyDictionary<string, string>? fieldErrors = null)
     {
+        // 契約鏡像:與 backend/src/Backend.Api/Common/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。修改 422/ApiError 格式化邏輯時務必同步另一邊。
         var error = new ApiError(
             DateTime.UtcNow, status, message,
             fieldErrors is null ? new Dictionary<string, string>() : new Dictionary<string, string>(fieldErrors));

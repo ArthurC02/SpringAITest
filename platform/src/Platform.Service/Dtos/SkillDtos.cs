@@ -3,17 +3,12 @@ using Platform.Service.Validation;
 
 namespace Platform.Service.Dtos;
 
-/// <summary>Skill 清單項目(不含 definition 內文)。JSON snake_case,原樣轉發 backend。</summary>
-public sealed record SkillInfo(
-    [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("description")] string Description,
-    [property: JsonPropertyName("required_role")] string RequiredRole,
-    [property: JsonPropertyName("enabled")] bool Enabled,
-    [property: JsonPropertyName("current_revision")] int CurrentRevision,
-    [property: JsonPropertyName("created_at")] string CreatedAt,
-    [property: JsonPropertyName("updated_at")] string UpdatedAt);
+// Skill 清單(GET /api/skills)與 revision 歷史(GET /api/skills/{name}/revisions)改為原樣穿透
+// backend JSON(snake_case),不再套 SkillInfo/SkillRevisionInfo DTO(見 SkillService / ISkillService)
+// ——避免 backend 新增欄位被靜默吃掉。單筆 GET 亦穿透;唯 Create/Update 的回應仍用下面的 Skill 型別。
 
-/// <summary>完整 Skill(含 definition 原文)。JSON snake_case;時間為字串,原樣轉發 backend 的值。</summary>
+/// <summary>完整 Skill(含 definition 原文)。JSON snake_case;時間為字串,原樣轉發 backend 的值。
+/// 供 Create/Update 的回應型別使用(讀取端點已改穿透)。</summary>
 public sealed record Skill(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("description")] string Description,
@@ -39,11 +34,3 @@ public sealed record SkillUpsert(
 /// ContentType 取 backend 回應的 content-type,缺則 application/zip;FileName = "&lt;name&gt;.zip"。
 /// </summary>
 public sealed record SkillExport(byte[] Content, string ContentType, string FileName);
-
-/// <summary>Skill 的一筆 revision 歷史(唯讀)。JSON snake_case,原樣轉發 backend。</summary>
-public sealed record SkillRevisionInfo(
-    [property: JsonPropertyName("revision")] int Revision,
-    [property: JsonPropertyName("definition")] string Definition,
-    [property: JsonPropertyName("definition_sha256")] string DefinitionSha256,
-    [property: JsonPropertyName("created_by")] string CreatedBy,
-    [property: JsonPropertyName("created_at")] string CreatedAt);

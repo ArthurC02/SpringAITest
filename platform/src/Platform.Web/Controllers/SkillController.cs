@@ -30,9 +30,9 @@ public sealed class SkillController : ControllerBase
         _engine = engine;
     }
 
-    /// <summary>列出本租戶的自訂 Skill(CRUD 用清單,不含 definition)。</summary>
+    /// <summary>列出本租戶的自訂 Skill(CRUD 用清單,backend 不含 definition);原樣穿透 backend JSON。</summary>
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<SkillInfo>>> List(CancellationToken ct)
+    public async Task<ActionResult<JsonElement>> List(CancellationToken ct)
         => Ok(await _skills.ListAsync(User.ToUserContext(), ct));
 
     /// <summary>可執行 Skill 目錄:引擎合併內建 + 自訂,每筆帶 source 徽章(builtin/custom)。</summary>
@@ -40,9 +40,9 @@ public sealed class SkillController : ControllerBase
     public async Task<ActionResult<JsonElement>> Catalog(CancellationToken ct)
         => Ok(await _engine.GetSkillCatalogAsync(User.ToUserContext(), ct));
 
-    /// <summary>取單一 Skill(含 definition 原文)。</summary>
+    /// <summary>取單一 Skill(含 definition 原文);原樣穿透 backend JSON。</summary>
     [HttpGet("{name}")]
-    public async Task<ActionResult<Skill>> Get(string name, CancellationToken ct)
+    public async Task<ActionResult<JsonElement>> Get(string name, CancellationToken ct)
         => Ok(await _skills.GetAsync(name, User.ToUserContext(), ct));
 
     /// <summary>匯出 Skill 為 Claude Skill 格式 zip(代理 backend,不是引擎)。</summary>
@@ -53,9 +53,9 @@ public sealed class SkillController : ControllerBase
         return File(e.Content, e.ContentType, e.FileName);
     }
 
-    /// <summary>唯讀 revision 歷史(依 revision 遞減)。</summary>
+    /// <summary>唯讀 revision 歷史(依 revision 遞減);原樣穿透 backend JSON。</summary>
     [HttpGet("{name}/revisions")]
-    public async Task<ActionResult<IReadOnlyList<SkillRevisionInfo>>> Revisions(string name, CancellationToken ct)
+    public async Task<ActionResult<JsonElement>> Revisions(string name, CancellationToken ct)
         => Ok(await _skills.GetRevisionsAsync(name, User.ToUserContext(), ct));
 
     /// <summary>建立 Skill — 201 Created;定義未通過引擎驗證 → 422(fieldErrors 帶引擎錯誤碼)。</summary>

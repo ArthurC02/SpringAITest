@@ -120,7 +120,7 @@ app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict:
-    """健康檢查端點，供 compose / Spring 端探活使用；刻意不掛任何驗證，避免探活受認證設定影響。"""
+    """健康檢查端點，供 compose / platform 端（.NET）探活使用；刻意不掛任何驗證，避免探活受認證設定影響。"""
     return {"status": "ok"}
 
 

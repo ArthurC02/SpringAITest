@@ -59,6 +59,7 @@ SpringAITest/
 - **Docker**（跑 LiteLLM + Langfuse + mem0）
 - **.NET SDK 10**（任一發行版）— 安裝:`winget install Microsoft.DotNet.SDK.10`（Windows）、`brew install dotnet@10`（macOS）或官網（Linux）
 - **Node.js 20+**（跑前端 Vite dev server）
+- **Python 3.12+**、**uv**（僅模式 C／Lite 需要:本機起 workflow 服務與其依賴；安裝 uv 見 https://astral.sh/uv）
 
 ## 設定金鑰
 

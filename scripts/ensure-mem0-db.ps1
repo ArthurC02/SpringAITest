@@ -9,7 +9,7 @@ Set-Location (Join-Path $PSScriptRoot '..' 'infra')
 
 # 等 postgres 就緒（compose healthcheck 即 pg_isready，--wait 原生等它轉 healthy）
 docker compose up -d --wait postgres *> $null
-if ($LASTEXITCODE -ne 0) { Write-Error "✗ postgres 未就緒，放棄準備 mem0 資料庫" }
+if ($LASTEXITCODE -ne 0) { Write-Error "✗ postgres 未就緒，放棄準備 mem0 資料庫"; exit 1 }
 
 # 先刷新 collation 版本（相同時無動作），否則沿用舊 volume 時下面的 CREATE DATABASE 會被擋。
 $refreshArgs = @(

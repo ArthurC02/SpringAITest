@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Web.Auth;
@@ -25,14 +26,14 @@ public sealed class ConfigurationSetController : ControllerBase
 
     public ConfigurationSetController(IConfigurationSetService sets) => _sets = sets;
 
-    /// <summary>列出本租戶的 Configuration Set(不含 values 內容)。</summary>
+    /// <summary>列出本租戶的 Configuration Set(backend 清單不含 values 內容);原樣穿透 backend JSON。</summary>
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<ConfigurationSetInfo>>> List(CancellationToken ct)
+    public async Task<ActionResult<JsonElement>> List(CancellationToken ct)
         => Ok(await _sets.ListAsync(User.ToUserContext(), ct));
 
-    /// <summary>取單一 Configuration Set(含 values)。</summary>
+    /// <summary>取單一 Configuration Set(含 values);原樣穿透 backend JSON。</summary>
     [HttpGet("{id:guid}")]
-    public async Task<ActionResult<ConfigurationSet>> Get(string id, CancellationToken ct)
+    public async Task<ActionResult<JsonElement>> Get(string id, CancellationToken ct)
         => Ok(await _sets.GetAsync(id, User.ToUserContext(), ct));
 
     /// <summary>建立 Configuration Set — 201 Created。</summary>

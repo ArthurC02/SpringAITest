@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     llm_max_retries: int = 2                      # LLM 呼叫重試次數；預設全靠 langchain 內建重試上限，顯式收斂
     langfuse_enabled: bool = False
 
-    # 服務間認證：Spring 端呼叫本服務時必須帶上相同的 X-Internal-Token 標頭；
+    # 服務間認證：platform 端（.NET，env 驅動）呼叫本服務時必須帶上相同的 X-Internal-Token 標頭；
     # 本服務呼叫 backend 的資料檢索 API 時，同一組 token 也當成出站憑證使用。
     internal_api_token: str = "internal-dev-token"
 

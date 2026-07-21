@@ -1,10 +1,8 @@
-using System.ClientModel;
 using System.Runtime.CompilerServices;
 using Platform.Service.Abstractions;
 using Platform.Service.Options;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
-using OpenAI;
 using OpenAI.Chat;
 // 同時引入 OpenAI.Chat(為了 AsAIAgent 擴充方法)與 Microsoft.Extensions.AI 時,
 // ChatMessage 名稱會衝突;明確指定用 Agent Framework 用的 Microsoft.Extensions.AI 版本。
@@ -24,18 +22,9 @@ public sealed class AgentFrameworkLlmAgent : ILlmAgent
 
     public AgentFrameworkLlmAgent(LlmOptions options)
     {
-        // OpenAI 相容 client,Endpoint 指向 LiteLLM 閘道(信任 http)。
-        // NetworkTimeout 明確設 90s,與其他下游(backend 讀取逾時)一致,避免預設 100s 掛住連線。
-        var openAiClient = new OpenAIClient(
-            new ApiKeyCredential(options.ApiKey),
-            new OpenAIClientOptions
-            {
-                Endpoint = new Uri(options.BaseUrl),
-                NetworkTimeout = TimeSpan.FromSeconds(90),
-            });
-
-        // 經 Microsoft.Agents.AI 的 AIAgent 抽象呼叫;溫度固定 0.7(由 options 帶入)。
-        _agent = openAiClient.GetChatClient(options.ChatModel).AsAIAgent(
+        // OpenAI 相容 client(Endpoint→LiteLLM、90s NetworkTimeout)由 LlmClientFactory 建;
+        // 經 Microsoft.Agents.AI 的 AIAgent 抽象呼叫,溫度由 options 帶入。
+        _agent = LlmClientFactory.Create(options).AsAIAgent(
             new ChatClientAgentOptions
             {
                 ChatOptions = new ChatOptions { Temperature = options.Temperature },

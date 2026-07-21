@@ -1,5 +1,4 @@
 using System.Net;
-using Platform.Service;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 
@@ -46,20 +45,23 @@ public sealed class DocumentServiceTests
         Assert.StartsWith("文件佇列服務呼叫失敗：", ex.Message);
     }
 
+    // A1:List 原樣穿透 backend JSON(snake_case),backend 新增欄位不被 DTO 靜默吃掉。
     [Fact]
-    public async Task List_MapsResponse()
+    public async Task List_PassesThroughBackendJson_IncludingUnknownFields()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            "[{\"id\":\"d1\",\"title\":\"T\",\"chunk_count\":2,\"created_at\":\"2026-07-11T00:00:00Z\",\"status\":\"ready\"}]"));
+            "[{\"id\":\"d1\",\"title\":\"T\",\"chunk_count\":2,\"created_at\":\"2026-07-11T00:00:00Z\",\"status\":\"ready\",\"extra_new_field\":\"kept\"}]"));
         var svc = Build(stub);
 
-        var list = await svc.ListAsync(Ctx);
+        var json = await svc.ListAsync(Ctx);
 
-        var item = Assert.Single(list);
-        Assert.Equal("d1", item.Id);
-        Assert.Equal(2, item.ChunkCount);
-        Assert.Equal("2026-07-11T00:00:00Z", item.CreatedAt);
-        Assert.Equal("ready", item.Status);
+        var item = json.EnumerateArray().Single();
+        Assert.Equal("d1", item.GetProperty("id").GetString());
+        Assert.Equal(2, item.GetProperty("chunk_count").GetInt32());
+        Assert.Equal("2026-07-11T00:00:00Z", item.GetProperty("created_at").GetString());
+        Assert.Equal("ready", item.GetProperty("status").GetString());
+        // 穿透:backend 之後新增的欄位原樣保留(舊 DocumentInfo round-trip 會丟掉)。
+        Assert.Equal("kept", item.GetProperty("extra_new_field").GetString());
         Assert.Equal("http://backend/api/documents", stub.LastRequest!.RequestUri!.ToString());
     }
 
@@ -82,5 +84,33 @@ public sealed class DocumentServiceTests
 
         var ex = await Assert.ThrowsAsync<DocumentNotFoundException>(() => svc.DeleteAsync("d1", Ctx));
         Assert.Equal("找不到文件：d1", ex.Message);
+    }
+
+    // B2:List 改走 BackendErrorMapper —— backend 4xx 不再被一律壓成 502,403 對外仍是 403。
+    [Fact]
+    public async Task List_Backend403_ThrowsWorkflowForbidden()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足")));
+
+        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(() => svc.ListAsync(Ctx));
+        Assert.Equal("權限不足", ex.Message);
+    }
+
+    // 非預期狀態(5xx)統一包成 502(backend 是上游)。
+    [Fact]
+    public async Task List_Backend500_ThrowsWorkflowInvocation()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.ListAsync(Ctx));
+    }
+
+    // Delete 的「非 404」分支也走共用映射(不是被吞成 502 就是各自對應)——5xx → 502。
+    [Fact]
+    public async Task Delete_Backend500_ThrowsWorkflowInvocation()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.DeleteAsync("d1", Ctx));
     }
 }

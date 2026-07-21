@@ -2,7 +2,7 @@
 
 「AI 數據檢索和分析平台」的資料面：以 **FastAPI + LangGraph** 承載向量檢索（RAG）與分析類工作流，
 並負責服務間認證、角色權限邊界、多租戶資料隔離；透過內建的註冊表機制可隨時擴充工作流，
-對外開放 HTTP 端點，供 Spring 後端（`backend/`）同步觸發並取回結果。
+對外開放 HTTP 端點，供 platform 端（.NET，env 驅動）同步觸發並取回結果。
 
 LLM 呼叫一律經由既有的 LiteLLM 閘道，觀測性沿用 LiteLLM → Langfuse，額外支援以環境變數開關的
 Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfuse 上形成 trace。
@@ -12,7 +12,7 @@ Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfus
 - **向量檢索（RAG）**：`/documents` 負責文件的切塊、嵌入、儲存；`app/nodes/retrieve.py` 提供共用的
   LangGraph 檢索節點，各工作流可直接掛用。
 - **分析工作流**：`rag_qa`（檢索增強問答）、`analyze_report`（主題分析報告，管理員限定）。
-- **服務間認證**：所有 `/skills*`、`/nodes`、`/documents*` 端點都要求 `X-Internal-Token` 與 Spring 端共享的密鑰吻合。
+- **服務間認證**：所有 `/skills*`、`/nodes`、`/documents*` 端點都要求 `X-Internal-Token` 與 platform 端（.NET）共享的密鑰吻合。
 - **角色權限邊界**：每個工作流宣告 `required_role`（`USER` 或 `ADMIN`），由 `X-User-Role` 標頭核對。
 - **多租戶隔離**：所有文件與檢索操作皆以 `X-Tenant-Id` 為第一層邊界，租戶之間資料互不可見。
 
@@ -24,7 +24,7 @@ Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfus
 
 | Header | 說明 | 缺失／不符時的行為 |
 | --- | --- | --- |
-| `X-Internal-Token` | 與 Spring 端共享的內部密鑰（`INTERNAL_API_TOKEN`） | **401** `{"detail": {"error": "unauthorized", "message": "..."}}` |
+| `X-Internal-Token` | 與 platform 端（.NET）共享的內部密鑰（`INTERNAL_API_TOKEN`） | **401** `{"detail": {"error": "unauthorized", "message": "..."}}` |
 | `X-Tenant-Id` | 呼叫者所屬的租戶代碼（如 `demo-a`） | 缺少 → **400** `{"detail": {"error": "missing_context", "message": "..."}}` |
 | `X-User-Id` | 呼叫者的使用者名稱 | 可省略，僅供追蹤用途，不影響授權判斷 |
 | `X-User-Role` | `USER` 或 `ADMIN` | 缺少 → **400**（同上） |

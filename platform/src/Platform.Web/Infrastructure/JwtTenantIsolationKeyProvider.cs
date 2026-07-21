@@ -20,6 +20,6 @@ public sealed class JwtTenantIsolationKeyProvider : SessionIsolationKeyProvider
     public override ValueTask<string?> GetSessionIsolationKeyAsync(CancellationToken cancellationToken = default)
     {
         var user = _http.HttpContext?.User.ToUsableChatUserContext();
-        return new ValueTask<string?>(user is null ? null : $"{user.TenantCode}:{user.UserId}");
+        return new ValueTask<string?>(user?.IsolationKey);
     }
 }

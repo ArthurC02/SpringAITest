@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -6,9 +7,11 @@ namespace Platform.Service;
 
 /// <summary>
 /// 文件服務:建立走 RabbitMQ 非同步(生成 id、發佈訊息、立即回 processing),
-/// 讀取/刪除仍代理 backend /api/documents(HTTP)。失敗一律包成 WorkflowInvocationException
-/// (List/Delete 前綴「文件服務呼叫失敗：」;發佈前綴「文件佇列服務呼叫失敗：」,對外皆 502),
-/// 但 delete 的 backend 404 特別映射成 DocumentNotFoundException。
+/// 讀取/刪除仍代理 backend /api/documents(HTTP)。傳輸層失敗 → WorkflowInvocationException
+/// (List/Delete 前綴「文件服務呼叫失敗：」;發佈前綴「文件佇列服務呼叫失敗：」,對外皆 502)。
+/// backend 的錯誤狀態碼走 <see cref="BackendErrorMapper"/>(與 Skill/ConfigurationSet 一致):
+/// 4xx 各自對應同狀態碼、非預期狀態 → 502,不再一律壓成 502;delete 的 backend 404 另外映射成
+/// DocumentNotFoundException(文件專屬訊息,對外仍 404)。
 /// </summary>
 public sealed class DocumentService : IDocumentService
 {
@@ -43,20 +46,20 @@ public sealed class DocumentService : IDocumentService
         return new DocumentAccepted(documentId, request.Title!, "processing");
     }
 
-    public async Task<IReadOnlyList<DocumentInfo>> ListAsync(UserContext ctx, CancellationToken ct = default)
-        => await _backend.SendForJsonListAsync<DocumentInfo>(
-            _backend.BuildRequest(HttpMethod.Get, "/api/documents", ctx),
-            WrapTransport,
-            (r, _) => Task.FromResult<Exception>(new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)r.StatusCode)),
-            ct);
+    public Task<JsonElement> ListAsync(UserContext ctx, CancellationToken ct = default)
+        => _backend.SendForJsonElementAsync(
+            _backend.BuildRequest(HttpMethod.Get, "/api/documents", ctx), WrapTransport, MapErrorAsync, ct);
 
     public Task DeleteAsync(string id, UserContext ctx, CancellationToken ct = default)
         => _backend.SendExpectSuccessAsync(
             _backend.BuildRequest(HttpMethod.Delete, $"/api/documents/{id}", ctx),
             WrapTransport,
-            // backend 404 特別映射成 DocumentNotFoundException;其餘 → 502。
-            (r, _) => Task.FromResult<Exception>((int)r.StatusCode == 404
-                ? new DocumentNotFoundException("找不到文件：" + id)
-                : new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)r.StatusCode)),
+            // backend 404 特別映射成 DocumentNotFoundException(文件專屬訊息);其餘走共用映射。
+            (r, c) => (int)r.StatusCode == 404
+                ? Task.FromResult<Exception>(new DocumentNotFoundException("找不到文件：" + id))
+                : MapErrorAsync(r, c),
             ct);
+
+    private Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)
+        => BackendErrorMapper.MapErrorAsync(resp, _backend, FailurePrefix, ct);
 }

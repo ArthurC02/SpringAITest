@@ -65,6 +65,29 @@ public sealed class BackendClient
         return await resp.Content.ReadFromJsonAsync<List<T>>(JsonOpts, ct) ?? new List<T>();
     }
 
+    /// <summary>
+    /// 送出→驗狀態碼→原樣穿透 backend JSON(不套 DTO,避免靜默吃掉 backend 新增欄位;比照 <see cref="WorkflowService"/> 的讀取路徑)。
+    /// 供純代理 backend 的 GET/list/detail 讀取端點使用;body 解析失敗 → 以 <paramref name="wrap"/> 包成呼叫端的失敗例外(對外 502)。
+    /// </summary>
+    public async Task<JsonElement> SendForJsonElementAsync(
+        HttpRequestMessage req,
+        Func<Exception, Exception> wrap,
+        Func<HttpResponseMessage, CancellationToken, Task<Exception>> mapError,
+        CancellationToken ct)
+    {
+        using var resp = await SendCheckedAsync(req, wrap, mapError, ct);
+        try
+        {
+            // JsonDocument 一旦 Dispose,其 RootElement 即失效 → Clone 出獨立副本再回傳。
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            return doc.RootElement.Clone();
+        }
+        catch (JsonException ex)
+        {
+            throw wrap(ex);
+        }
+    }
+
     /// <summary>送出並只確認成功(不讀 body,如 DELETE);非 2xx 以 <paramref name="mapError"/> 轉例外拋出。</summary>
     public async Task SendExpectSuccessAsync(
         HttpRequestMessage req,

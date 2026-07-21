@@ -38,19 +38,24 @@ public sealed class ConfigurationSetServiceTests
         Assert.Equal("ADMIN", stub.Header("X-User-Role"));
     }
 
+    // A1:List 原樣穿透 backend JSON(snake_case)。清單省略 values;backend 的 created_at 不再被舊 DTO 丟掉。
     [Fact]
-    public async Task List_MapsSnakeCase_OmitsValues_ForwardsIdentityHeaders()
+    public async Task List_PassesThroughSnakeCase_KeepsCreatedAt_OmitsValues_ForwardsIdentityHeaders()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            """[{"id":"11111111-1111-1111-1111-111111111111","name":"prod","is_active":true,"updated_at":"2026-07-14T00:00:00Z"}]"""));
+            """[{"id":"11111111-1111-1111-1111-111111111111","name":"prod","is_active":true,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
 
-        var list = await Build(stub).ListAsync(AdminCtx);
+        var json = await Build(stub).ListAsync(AdminCtx);
 
-        var item = Assert.Single(list);
-        Assert.Equal(SetId, item.Id);
-        Assert.Equal("prod", item.Name);
-        Assert.True(item.IsActive);
-        Assert.Equal("2026-07-14T00:00:00Z", item.UpdatedAt);
+        var item = json.EnumerateArray().Single();
+        Assert.Equal(SetId, item.GetProperty("id").GetString());
+        Assert.Equal("prod", item.GetProperty("name").GetString());
+        Assert.True(item.GetProperty("is_active").GetBoolean());
+        Assert.Equal("2026-07-14T00:00:00Z", item.GetProperty("updated_at").GetString());
+        // 穿透修正:舊 ConfigurationSetInfo DTO 會丟掉 created_at,穿透後補回。
+        Assert.Equal("2026-07-13T00:00:00Z", item.GetProperty("created_at").GetString());
+        // 清單仍省略 values(backend 清單本就不含)。
+        Assert.False(item.TryGetProperty("values", out _));
 
         Assert.Equal("http://backend/api/configuration-sets", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Get, stub.LastRequest!.Method);
@@ -58,7 +63,7 @@ public sealed class ConfigurationSetServiceTests
     }
 
     [Fact]
-    public async Task Get_ForwardsIdInPath_MapsValues()
+    public async Task Get_ForwardsIdInPath_PassesThroughValues()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SetJson));
 
@@ -66,12 +71,12 @@ public sealed class ConfigurationSetServiceTests
 
         Assert.Equal($"http://backend/api/configuration-sets/{SetId}", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Get, stub.LastRequest!.Method);
-        Assert.Equal("prod", set.Name);
-        Assert.True(set.IsActive);
-        Assert.Equal("admin-a", set.CreatedBy);
+        Assert.Equal("prod", set.GetProperty("name").GetString());
+        Assert.True(set.GetProperty("is_active").GetBoolean());
+        Assert.Equal("admin-a", set.GetProperty("created_by").GetString());
         // values jsonb 原封保留:數字仍是數字,字串仍是字串。
-        Assert.Equal(8, set.Values["retrieval.top_k"].GetInt32());
-        Assert.Equal("gpt-4o-mini", set.Values["llm.model"].GetString());
+        Assert.Equal(8, set.GetProperty("values").GetProperty("retrieval.top_k").GetInt32());
+        Assert.Equal("gpt-4o-mini", set.GetProperty("values").GetProperty("llm.model").GetString());
         AssertIdentityHeaders(stub);
     }
 

@@ -3,15 +3,10 @@ using System.Text.Json.Serialization;
 
 namespace Platform.Service.Dtos;
 
-/// <summary>
-/// Configuration Set 清單項目(不含 values 內容)。JSON snake_case,原樣轉發 backend。
-/// 時間為字串,原樣轉發 backend 的值(與 SkillDtos 一致,不重新格式化)。
-/// </summary>
-public sealed record ConfigurationSetInfo(
-    [property: JsonPropertyName("id")] string Id,
-    [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("is_active")] bool IsActive,
-    [property: JsonPropertyName("updated_at")] string UpdatedAt);
+// Configuration Set 清單(GET /api/configuration-sets)與單筆(GET /{id})改為原樣穿透 backend JSON
+// (snake_case),不再套 ConfigurationSetInfo DTO(見 ConfigurationSetService / IConfigurationSetService)
+// ——舊 ConfigurationSetInfo 會丟掉 backend 回的 created_at,穿透後補回。唯 Create/Update/Activate 的回應
+// 仍用下面的 ConfigurationSet 型別。
 
 /// <summary>
 /// 完整 Configuration Set(含 values jsonb 物件)。JSON snake_case,原樣轉發 backend。

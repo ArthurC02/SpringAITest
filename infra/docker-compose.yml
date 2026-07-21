@@ -29,7 +29,10 @@ name: springaitest
 services:
   # ---------------- LiteLLM 閘道 ----------------
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable
+    # 釘版本：原為浮動 main-stable（會解析到不可預期的最新版）。此為 2026-07-22 當下 ghcr.io 上最新的
+    # -stable release tag，對應 digest sha256:f12d528d4a05add56cb09e54c5126088f2edc6bdf3a2f943bcd3a32b08769da2。
+    # 升級：到 https://github.com/BerriAI/litellm/pkgs/container/litellm 找新的 *-stable tag 手動改此處。
+    image: ghcr.io/berriai/litellm:main-v1.83.14-stable.patch.3
     restart: always
     # 刻意不 depends_on langfuse-web：Langfuse 只是 runtime best-effort callback，
     # 若放進啟動依賴，clickhouse/minio 一抖會沿 langfuse-web→litellm→backend 拖垮整條 chat。
@@ -38,8 +41,17 @@ services:
     volumes:
       - ./litellm-config.yaml:/app/config.yaml
     command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      # 探測 /health/liveliness 而非 /health：後者掛了 user_api_key_auth 依賴（無 key 會 401），
+      # 前者是官方文件標示給存活探測用的無認證端點。映像 runtime stage 是 Wolfi-based、無 curl/wget，
+      # 只留 python，故比照 workflow 的 healthcheck 用 python urllib 探測。
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-1234}   # 供 config.yaml 的 os.environ/LITELLM_MASTER_KEY 解析；未設時 litellm 會靜默視為無 master key（不驗證任何請求），故給預設值
       # LiteLLM 內建 callback：把每次呼叫送進 Langfuse（容器內走服務名）
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-1234567890}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-1234567890}
@@ -72,7 +84,7 @@ services:
       # 向量庫 = 現有 postgres 的 pgvector（預設值即 postgres/postgres，這裡顯式標明）
       POSTGRES_HOST: postgres
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: postgres
     volumes:
       - mem0_history:/app/history   # image 沒建這個資料夾，mem0 的 sqlite 變更紀錄開不了；掛上即建立且持久化
@@ -181,7 +193,7 @@ services:
       timeout: 3s
       retries: 20
     environment:
-      DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=postgres;Database=springaitest
+      DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres};Database=springaitest
       RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672   # 檔案處理佇列（消費端）
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}   # backend 簽發 JWT，platform 用同一把驗證
@@ -228,7 +240,7 @@ services:
     restart: always
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: springaitest
     ports:
       - "127.0.0.1:5433:5432"   # 避開 langfuse postgres 佔用的 5432
@@ -256,7 +268,7 @@ services:
     ports:
       - "127.0.0.1:3030:3030"
     environment: &langfuse-env
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/postgres   # 密碼與下面 postgres 服務自身的 POSTGRES_PASSWORD 同源，見 infra/AGENTS.md
       SALT: ${SALT:-mysalt}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
@@ -314,7 +326,7 @@ services:
     restart: always
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: postgres
     ports:
       - "127.0.0.1:5432:5432"

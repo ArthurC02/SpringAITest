@@ -1,4 +1,3 @@
-using System.ClientModel;
 using System.Threading.RateLimiting;
 using Platform.Service;
 using Platform.Service.Abstractions;
@@ -14,7 +13,6 @@ using Microsoft.Agents.AI.Compaction;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
 using Microsoft.Extensions.AI;
-using OpenAI;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Trace;
@@ -106,15 +104,7 @@ const string copilotInstructions =
     "呼叫前端提供的工具(client tools)來完成;你只需正常回答並在需要時呼叫收到的工具。";
 
 builder.Services.AddSingleton<IChatClient>(_ =>
-    new OpenAIClient(
-        new ApiKeyCredential(llmOptions.ApiKey),
-        new OpenAIClientOptions
-        {
-            Endpoint = new Uri(llmOptions.BaseUrl),
-            NetworkTimeout = TimeSpan.FromSeconds(90),
-        })
-    .GetChatClient(llmOptions.ChatModel)
-    .AsIChatClient());
+    LlmClientFactory.Create(llmOptions).AsIChatClient());
 builder.Services.AddAGUI();
 
 // ---------------------------------------------------------------------------

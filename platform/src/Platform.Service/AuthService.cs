@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -16,45 +15,35 @@ public sealed class AuthService : IAuthService
 
     public AuthService(BackendClient backend) => _backend = backend;
 
-    public async Task<AuthResult> RegisterAsync(RegisterRequest request, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Post, "/api/auth/register", body: new
-        {
-            username = request.Username,
-            password = request.Password,
-            tenantCode = request.TenantCode,
-            inviteCode = request.InviteCode,
-        });
-        using var resp = await _backend.SendAsync(
-            req, ex => new BackendCallException("認證服務呼叫失敗：" + ex.Message, ex), ct);
+    public Task<AuthResult> RegisterAsync(RegisterRequest request, CancellationToken ct = default)
+        => _backend.SendForJsonAsync<AuthResult>(
+            _backend.BuildRequest(HttpMethod.Post, "/api/auth/register", body: new
+            {
+                username = request.Username,
+                password = request.Password,
+                tenantCode = request.TenantCode,
+                inviteCode = request.InviteCode,
+            }),
+            WrapTransport,
+            MapErrorAsync,
+            () => new BackendCallException("認證服務呼叫失敗：回應內容為空"),
+            ct);
 
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
+    public Task<LoginResult> LoginAsync(LoginRequest request, CancellationToken ct = default)
+        => _backend.SendForJsonAsync<LoginResult>(
+            _backend.BuildRequest(HttpMethod.Post, "/api/auth/login", body: new
+            {
+                username = request.Username,
+                password = request.Password,
+            }),
+            WrapTransport,
+            MapErrorAsync,
+            () => new BackendCallException("認證服務呼叫失敗：回應內容為空"),
+            ct);
 
-        return await resp.Content.ReadFromJsonAsync<AuthResult>(_backend.Json, ct)
-            ?? throw new BackendCallException("認證服務呼叫失敗：回應內容為空");
-    }
-
-    public async Task<LoginResult> LoginAsync(LoginRequest request, CancellationToken ct = default)
-    {
-        using var req = _backend.BuildRequest(HttpMethod.Post, "/api/auth/login", body: new
-        {
-            username = request.Username,
-            password = request.Password,
-        });
-        using var resp = await _backend.SendAsync(
-            req, ex => new BackendCallException("認證服務呼叫失敗：" + ex.Message, ex), ct);
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw await MapErrorAsync(resp, ct);
-        }
-
-        return await resp.Content.ReadFromJsonAsync<LoginResult>(_backend.Json, ct)
-            ?? throw new BackendCallException("認證服務呼叫失敗：回應內容為空");
-    }
+    /// <summary>傳輸層錯誤/逾時 → BackendCallException(對外 500,與本地 DB 失敗一致,不引入 502)。</summary>
+    private static Exception WrapTransport(Exception ex)
+        => new BackendCallException("認證服務呼叫失敗：" + ex.Message, ex);
 
     /// <summary>backend 錯誤狀態碼 → 既有例外;訊息用 backend 的 message。非預期狀態碼 → 500。</summary>
     private async Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)

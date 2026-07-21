@@ -16,7 +16,7 @@ public sealed class AuthRepositoryTests : IClassFixture<PostgresFixture>
 
     public AuthRepositoryTests(PostgresFixture fx) => _fx = fx;
 
-    [Fact]
+    [SkippableFact]
     public async Task AddUserAsync_DuplicateUsername_Throws409_NotUnhandled500()
     {
         _fx.SkipIfUnavailable();

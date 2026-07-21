@@ -12,6 +12,6 @@ docker compose up -d
 echo
 docker compose ps
 echo
-echo "✓ 完成。接著在主機啟動後端與前端："
-echo "    後端： cd platform  && dotnet run --project src/Platform.Web         # :8080"
-echo "    前端： cd frontend && npm install && npm run dev                   # :5173"
+echo "✓ 完成。接著在主機啟動平台閘道與前端："
+echo "    平台閘道： cd platform  && dotnet run --project src/Platform.Web     # :8080"
+echo "    前端：     cd frontend && npm install && npm run dev               # :5173"

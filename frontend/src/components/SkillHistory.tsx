@@ -5,7 +5,7 @@ import { fmtDate } from '../format'
 import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
-import { useToast } from './Toast'
+import { runWithToast, useToast } from './Toast'
 
 interface Props {
   name: string
@@ -28,16 +28,14 @@ export default function SkillHistory({ name, canRevert = true, onReverted }: Pro
     if (!window.confirm(`回溯到 r${r.revision}？將以該版內容產生一個新的 revision，歷史不會被改寫。`))
       return
     setBusy(true)
-    try {
-      await updateSkill(name, r.definition)
-      toast(`已回溯 r${r.revision}（產生新版）`, 'success')
-      await reload()
-      onReverted?.()
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    } finally {
-      setBusy(false)
-    }
+    await runWithToast(toast, () => updateSkill(name, r.definition), {
+      success: `已回溯 r${r.revision}（產生新版）`,
+      onSuccess: async () => {
+        await reload()
+        onReverted?.()
+      },
+    })
+    setBusy(false)
   }
 
   return (

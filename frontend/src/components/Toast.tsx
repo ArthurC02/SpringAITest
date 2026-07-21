@@ -24,6 +24,26 @@ export function useToast(): ToastFn {
 }
 
 /**
+ * 收斂「呼叫 API → 成功 toast(可選) → 錯誤 toast」樣板。成功後續的 state 轉移
+ * （例如 setEditing/setAdvanced）透過 onSuccess 回呼帶入，呼叫端保留完整控制；
+ * onSuccess 若拋錯也會被同一個 catch 吃下並轉成錯誤 toast（等同原本把後續步驟
+ * 一起包在 try 裡的行為）。
+ */
+export async function runWithToast<T>(
+  toast: ToastFn,
+  fn: () => Promise<T>,
+  opts: { success?: string; onSuccess?: (result: T) => void | Promise<void> } = {},
+): Promise<void> {
+  try {
+    const result = await fn()
+    if (opts.success) toast(opts.success, 'success')
+    await opts.onSuccess?.(result)
+  } catch (e) {
+    toast((e as Error).message, 'error')
+  }
+}
+
+/**
  * 極簡 toast：右下角固定位、3 秒自動消失、可點 × 關閉。
  * 容器 aria-live="polite"，成功用 role="status"、錯誤用 role="alert"。
  */

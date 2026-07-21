@@ -13,7 +13,7 @@ import { fmtDate } from '../format'
 import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
-import { useToast } from './Toast'
+import { runWithToast, useToast } from './Toast'
 
 /** 編輯中的組（id=null 代表新建）。draft 為各鍵的字串草稿（未填 = 不覆寫）。 */
 type Editing = { id: string | null; name: string; draft: Record<string, string> }
@@ -41,39 +41,34 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
   async function startEdit(id: string) {
     setFieldErrors({})
     setFormError(null)
-    try {
-      const full = await getConfigurationSet(id)
-      const draft: Record<string, string> = {}
-      for (const f of CONFIG_FIELDS) {
-        const v = full.values?.[f.key]
-        if (v !== undefined) draft[f.key] = String(v)
-      }
-      setEditing({ id, name: full.name, draft })
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    }
+    await runWithToast(toast, () => getConfigurationSet(id), {
+      onSuccess: (full) => {
+        const draft: Record<string, string> = {}
+        for (const f of CONFIG_FIELDS) {
+          const v = full.values?.[f.key]
+          if (v !== undefined) draft[f.key] = String(v)
+        }
+        setEditing({ id, name: full.name, draft })
+      },
+    })
   }
 
   async function onActivate(id: string) {
-    try {
-      await activateConfigurationSet(id)
-      toast('已啟用', 'success')
-      await reload()
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    }
+    await runWithToast(toast, () => activateConfigurationSet(id), {
+      success: '已啟用',
+      onSuccess: reload,
+    })
   }
 
   async function onDelete(id: string, name: string) {
     if (!window.confirm(`刪除參數組「${name}」？此動作無法復原。`)) return
-    try {
-      await deleteConfigurationSet(id)
-      toast('已刪除', 'success')
-      if (editing?.id === id) setEditing(null)
-      await reload()
-    } catch (e) {
-      toast((e as Error).message, 'error')
-    }
+    await runWithToast(toast, () => deleteConfigurationSet(id), {
+      success: '已刪除',
+      onSuccess: () => {
+        if (editing?.id === id) setEditing(null)
+        return reload()
+      },
+    })
   }
 
   function setDraftField(key: string, value: string) {

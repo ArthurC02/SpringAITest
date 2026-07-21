@@ -10,6 +10,8 @@ namespace Backend.Api.Common;
 /// </summary>
 public static class ValidationErrorResponse
 {
+    // 契約鏡像:與 platform/src/Platform.Web/Errors/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。
+    // 修改 422/ApiError 格式化邏輯時務必同步另一邊。
     public static IActionResult Create(ActionContext context)
     {
         var fieldErrors = new Dictionary<string, string>();
@@ -37,6 +39,8 @@ public static class ValidationErrorResponse
         };
     }
 
+    // 契約鏡像:與 platform/src/Platform.Web/Errors/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。
+    // 修改 422/ApiError 格式化邏輯時務必同步另一邊。
     private static string ToCamelCaseKey(string key)
     {
         var k = key;

@@ -1,8 +1,8 @@
 """服務間認證與多租戶 context 解析。
 
 所有 /workflows* 與 /documents* 端點皆須通過這裡的兩道檢查：
-1. require_internal：驗證 Spring 端與本服務共享的內部密鑰（X-Internal-Token）。
-2. get_context：解析 Spring 端轉送過來的租戶／使用者／角色資訊，組成 RequestContext。
+1. require_internal：驗證 platform 端（.NET，env 驅動）與本服務共享的內部密鑰（X-Internal-Token）。
+2. get_context：解析 platform 端轉送過來的租戶／使用者／角色資訊，組成 RequestContext。
 
 get_context 內部相依 require_internal，因此只要路由掛上 `Depends(get_context)`，
 就能保證「先驗證內部密鑰、再解析 context」的順序，不需要在每個路由重複宣告兩個依賴。
@@ -44,7 +44,7 @@ async def require_internal(
 
 @dataclass(frozen=True)
 class RequestContext:
-    """貫穿單一請求的租戶／使用者／角色資訊，一律由 Spring 端經 header 轉送過來。"""
+    """貫穿單一請求的租戶／使用者／角色資訊，一律由 platform 端經 header 轉送過來。"""
 
     tenant_id: str
     user_id: str

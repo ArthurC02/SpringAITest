@@ -2,7 +2,7 @@
 // 開發時經由 Vite proxy 轉發到 http://localhost:8080（見 vite.config.ts），
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
 import { getSession } from './auth'
-import { triggerLogout } from './http'
+import { parseErrorMessage, triggerLogout } from './http'
 import { CHAT_USER_ID_KEY, CHAT_CONVERSATION_ID_KEY } from '../storageKeys'
 
 /**
@@ -78,11 +78,7 @@ export async function streamChat(
   if (!res.ok || !res.body) {
     // 錯誤時 body 是 ApiError JSON（非 SSE），比照 apiFetch 取 message，
     // 免得整包原始 JSON 被當成訊息塞進聊天泡泡。
-    const data = await res.json().catch(() => null)
-    const message =
-      data && typeof data.message === 'string'
-        ? data.message
-        : `串流請求失敗（HTTP ${res.status}）`
+    const message = await parseErrorMessage(res, `串流請求失敗（HTTP ${res.status}）`)
     throw new Error(message)
   }
 

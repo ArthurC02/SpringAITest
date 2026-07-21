@@ -12,6 +12,7 @@ public static class ValidationErrorResponse
 {
     public static IActionResult Create(ActionContext context)
     {
+        // 契約鏡像:與 backend/src/Backend.Api/Common/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。修改 422/ApiError 格式化邏輯時務必同步另一邊。
         var fieldErrors = new Dictionary<string, string>();
         foreach (var (key, entry) in context.ModelState)
         {
@@ -39,6 +40,7 @@ public static class ValidationErrorResponse
 
     private static string ToCamelCaseKey(string key)
     {
+        // 契約鏡像:與 backend/src/Backend.Api/Common/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。修改 422/ApiError 格式化邏輯時務必同步另一邊。
         var k = key;
         if (k.StartsWith("$.", StringComparison.Ordinal))
         {
