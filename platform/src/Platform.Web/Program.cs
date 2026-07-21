@@ -152,18 +152,22 @@ var copilotAgent = builder.Services.AddAIAgent(
         (IServiceProvider sp, string name) =>
         {
             var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+            var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             var chatClientAgent = sp.GetRequiredService<IChatClient>().AsAIAgent(new ChatClientAgentOptions
             {
                 Name = name,
                 ChatOptions = new ChatOptions { Instructions = copilotInstructions },
                 ChatHistoryProvider = chatHistoryProvider,
-                AIContextProviders = new AIContextProvider[] { new ChatContextProvider(scopeFactory) },
+                AIContextProviders = new AIContextProvider[]
+                {
+                    new ChatContextProvider(scopeFactory, loggerFactory.CreateLogger<ChatContextProvider>()),
+                },
             });
             var routing = new SkillRoutingAgent(
                 chatClientAgent, sp.GetRequiredService<ILlmAgent>(), chatHistoryProvider, scopeFactory,
-                sp.GetRequiredService<ILoggerFactory>().CreateLogger<SkillRoutingAgent>());
+                loggerFactory.CreateLogger<SkillRoutingAgent>());
             var recorder = new ChatTurnRecorder(
-                routing, scopeFactory, sp.GetRequiredService<ILoggerFactory>().CreateLogger<ChatTurnRecorder>());
+                routing, scopeFactory, loggerFactory.CreateLogger<ChatTurnRecorder>());
             return new AguiWireDedupAgent(recorder, chatHistoryProvider);
         },
         ServiceLifetime.Singleton)
@@ -185,17 +189,21 @@ builder.Services.AddAIAgent(
         (IServiceProvider sp, string name) =>
         {
             var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
+            var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             var chatClientAgent = sp.GetRequiredService<IChatClient>().AsAIAgent(new ChatClientAgentOptions
             {
                 Name = name,
                 ChatHistoryProvider = chatHistoryProvider,
-                AIContextProviders = new AIContextProvider[] { new ChatContextProvider(scopeFactory) },
+                AIContextProviders = new AIContextProvider[]
+                {
+                    new ChatContextProvider(scopeFactory, loggerFactory.CreateLogger<ChatContextProvider>()),
+                },
             });
             var routing = new SkillRoutingAgent(
                 chatClientAgent, sp.GetRequiredService<ILlmAgent>(), chatHistoryProvider, scopeFactory,
-                sp.GetRequiredService<ILoggerFactory>().CreateLogger<SkillRoutingAgent>());
+                loggerFactory.CreateLogger<SkillRoutingAgent>());
             return new ChatTurnRecorder(
-                routing, scopeFactory, sp.GetRequiredService<ILoggerFactory>().CreateLogger<ChatTurnRecorder>());
+                routing, scopeFactory, loggerFactory.CreateLogger<ChatTurnRecorder>());
         },
         ServiceLifetime.Singleton)
     .WithInMemorySessionStore(withIsolation: false);

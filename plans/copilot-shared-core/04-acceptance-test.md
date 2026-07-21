@@ -75,15 +75,15 @@
 | `A-03` | 全 | `ThrowOnCatalog` `[Theory]`:`WorkflowInvocationException(502)` / `HttpRequestException` / `TaskCanceledException` / 壞 JSON | `ChatAsync` | 四例皆回正常 `Reply`、不擲例外、`SkillInvokes` 為空(best-effort 退化) |
 | `A-04` | 全 | `ThrowOnSkillInvoke` `[Theory]`:`WorkflowNotFound` / `Forbidden` / `BadInput` / `InvocationException` / `HttpRequestException` / `TaskCanceledException` | `ChatAsync`,路由命中該 skill | 六例皆**不擲例外**,對外仍得到一則回覆(單一工具失敗不炸整輪)。**經 `ChatAsync` 驅動,不得直接呼叫 `tool.InvokeAsync`** |
 | `A-05` | 全 | 目錄含 USER skill + ADMIN skill;路由都回 ADMIN skill 名 | (a) `Role=USER` (b) `Role=ADMIN` | (a) ADMIN skill **從未出現在** `SkillInvokes`;(b) 出現。`required_role` 為空 / `"USER"` 皆視為無限制 |
-| `A-06` | 全 | 目錄有料;`userCtx = null` | `ChatAsync` 與 `StreamChatAsync` | `CatalogContexts` 為空(從未取目錄)、`SkillInvokes` 為空、`FakeConversationStore.Saved` 為空、`Remembered` 為空 |
+| `A-06` | 全 | 目錄有料、mem0 有既存資料;`userCtx = null` | `ChatAsync` 與 `StreamChatAsync` | `CatalogContexts` 為空(從未取目錄)、`SkillInvokes` 為空、**`RecallAsync`／`RememberAsync` 均從未呼叫**、`FakeConversationStore.Saved` 為空。匿名不得共享或污染 mem0。 |
 | `A-07` | 全 | 目錄含 `template_infer`(`source=="builtin"`)與 `template_x`(`source=="custom"`);路由分別回這兩個名字 | `ChatAsync` ×2 | builtin `template_*` **不在** `SkillInvokes`;custom 同前綴者**在** |
 | `A-08` | 全 | `[Theory]` 目錄項:`input_schema=null` / 兩個必填 / 必填非字串 / 單必填字串+多選填 | 路由回該 skill 名後 `ChatAsync` | 前三者 `SkillInvokes` 為空(靜默跳過,不擲例外、不寫 error);第四者被呼叫且 `Input` **只含**該必填鍵 |
 | `A-09` | 全 | 路由腳本 `[Theory]`:(a) 1st NONE / 2nd 命中 (b) 1st NONE / 2nd NONE (c) 1st 命中 | `ChatAsync` | (a) `SkillInvokes` 恰 1 筆;(b) 為空且走純聊天兜底;(c) 恰 1 筆。**(a)(b) 是「最多重試兩次」的 on/off-point** |
 | `A-10` | 全 | 目錄同時含 `kb` 與 `kb_query`;路由回覆是含 `kb_query` 的整句話(非全等) | `ChatAsync` | 被呼叫的是 `kb_query`(**最長名**),不是 `kb` |
 | `A-11` | 全 | `SkillOutputByName`:`kb_query` 回 ABSTAIN 形狀、`rag_qa` 回正常答案;路由命中 `kb_query` | `ChatAsync` | `SkillInvokes` 恰 2 筆且**順序為** `kb_query` → `rag_qa`;回覆帶誠實標示 |
 | `A-12` | 全 | `kb_query` 回正常答案 | `ChatAsync` | `SkillInvokes` 恰 1 筆,**不含** `rag_qa`(兜底不誤觸發) |
-| `A-13` | 全 | `RecallResult="- 使用者是租戶 A\n"`,路由命中 skill 且產生摘要 | `ChatAsync` | recall 內容出現在送進 chat client 的 messages 中;`Remembered` 恰 1 筆且內容是**融合後最終回覆**(不是中間 skill JSON)。**順序**:recall 早於模型呼叫,remember 晚於最終回覆 |
-| `A-14` | 全 | ⚠️ 需先補 G1。`[Theory]`:(a) `RecallAsync` 擲例外 (b) `RememberAsync` 擲例外 | `ChatAsync` 與 `StreamChatAsync` | 兩例四路徑皆**正常回覆、不擲例外**;(a) 情況下 messages 不含 mem0 前言但其餘不變。**這條是目前唯一沒有測試背書的安全語義(G1)** |
+| `A-13` | 全 | 已登入；`RecallResult="- 使用者是租戶 A\n"`;路由未命中、正常主 run | `ChatAsync` | recall 內容出現在送進 chat client 的 **Instructions**（非 history messages）中；`Remembered` 恰 1 筆且內容是完整最終回覆。**順序**:recall 早於模型呼叫,remember 晚於最終回覆。skill 命中時的「不 recall、仍 remember 最終摘要」另由 `B-P4-07` 驗。 |
+| `A-14` | 全 | `[Theory]`:(a) `RecallAsync` 擲例外 (b) `RememberAsync` 擲例外，fake 直接違反 `IMem0Client` 契約 | `ChatAsync` 與 `StreamChatAsync` | 兩例四路徑皆**正常回覆、不擲例外**；(a) Instructions 不含 mem0 前言但其餘不變。此案釘住 best-effort 位於 **pipeline 邊界**，而非只依賴 `Mem0Client` 的內部慣例。 |
 | `A-15` | 全 | `FakeConversationStore.ThrowOnAdd = true`;已登入 | `POST /api/chat`(HTTP 層) | `500`,body 為 ApiError `{timestamp,status,message,fieldErrors}`,`message` 為固定中文泛化訊息(不洩漏例外細節) |
 | `A-16` | 全 | 同上 | `POST /api/chat/stream` | chunks **照常全數送達**、**無** `event:error` 幀、回應正常結束;`Remembered` 仍有 1 筆。與 `A-15` 合為決策表兩半,**此差異是刻意的,P3 不得抹平** |
 | `A-17` | 全 | `ThrowAfterChunks = 1`(串流吐第 1 塊後爆) | `POST /api/chat/stream` | 已送出的 chunk 保留 → 接 `event:error\ndata:<固定中文>\n\n` → 正常結束(非斷線);`FakeConversationStore.Saved` 為空(**半截回覆不得持久化**) |
@@ -103,14 +103,14 @@
 
 | ID | 前置條件 | 動作 | 預期結果 |
 | --- | --- | --- | --- |
-| `B-P1-01` | 無 | `POST /api/copilot/agui` **不帶** `Authorization` | `401`。**這是相對現行行為的唯一對外可觀察變更**(02-spec §1),`A-23` 需同批改為帶 JWT |
-| `B-P1-02` | 過期 / 簽章錯誤 / 格式錯誤 token(`[Theory]` 三值) | 同上 | 三例皆 `401`,不進入 agent、不建立 session |
+| `B-P1-01` | 無 | `POST /api/copilot/agui` **不帶** `Authorization` | `401`；`A-23` 需同批改為帶 JWT。 |
+| `B-P1-02` | 過期 / 簽章錯誤 / 格式錯誤 / 缺 tenant claim / 缺 user claim token(`[Theory]`) | 同上 | 全部 `401` 或在 strict store 以受控錯誤 fail-closed；不進入 agent、不建立可共享 session，尤其不得產生 `":"` 或部分 identity key。 |
 | `B-P1-03` | 有效 JWT | 同上 | `200`,`text/event-stream`,事件序列同 `A-23` |
-| `B-P1-04` | ⚠️ **本案最重要的一條。** 租戶 A 與租戶 B 各持有效 JWT,**使用同一個 `threadId="t1"`** | A 先說「我的密語是 XYZZY」,B 再以同 `threadId` 問「我的密語是什麼」 | B 這一輪送進模型的 messages **不含** `"XYZZY"`,B 的回覆也不含。**禁止以 `Assert.Null(session)` 判定** —— `GetSessionAsync` 對未知 key 會自動建空 session 而非回 `null`,nullity 斷言恆綠、抓不到隔離失效(01-plan §8 已記錄此假警報) |
-| `B-P1-05` | 同租戶不同使用者,同 `threadId` | 同 `B-P1-04` 手法 | 同樣不互見(conversation 維度鍵為 `"{UserId}:{conversationId}"`,02-spec §3.2) |
+| `B-P1-04` | ⚠️ **本案最重要的一條。** 租戶 A 與租戶 B 各持有效 JWT,**使用同一個 `threadId="t1"`** | A 先說「我的密語是 XYZZY」,B 再以同 `threadId` 問「我的密語是什麼」 | B 這一輪送進模型的 messages **不含** `"XYZZY"`,B 的回覆也不含。isolation key 為 JWT `{tenant}:{user}`；**禁止以 `Assert.Null(session)` 判定**。 |
+| `B-P1-05` | 同租戶不同使用者,同 `threadId` | 同 `B-P1-04` 手法 | 同樣不互見；驗證 `{tenant}:{user}` 的 user 維度不可省略。 |
 | `B-P1-06` | DI 容器**未註冊** `SessionIsolationKeyProvider` 的組態 | 帶有效 JWT 打 AG-UI | `500`(fail-closed)。**不得**回 `200` 而默默共用全域命名空間。此案證明 `Strict=true` 真的開著 |
 | `B-P1-07` | 有效 JWT(租戶 A);request body 的 `threadId` / `state` / `forwardedProps` 塞入偽造的租戶 B 識別 | 打 AG-UI | isolation key 取自 **JWT**,偽造欄位完全無效:租戶 B 的內容仍讀不到(以 `B-P1-04` 手法驗) |
-| `B-P1-08` | 前端 `App.tsx` | (a) 登入 → 登出 → 換帳號登入 (b) 檢查 `useCopilotReadable` 內容 | (a) `HttpAgent` 隨 `session.token` 重建,不沿用舊 token(舊 token 不出現在後續請求);(b) token **不在**任何 `useCopilotReadable` 中(既有禁令,02-spec §2.2)。層級:frontend lint/build + browser e2e |
+| `B-P1-08` | 前端 `App.tsx` | (a) 登入 → 登出 → 換帳號登入 (b) AG-UI 請求回 `401` (c) 檢查 `useCopilotReadable` | (a) `HttpAgent` 隨 `session.token` 重建,不沿用舊 token；(b) 走既有全域 logout，清 session/chat localStorage 並回登入頁；(c) token **不在**任何 `useCopilotReadable`。層級:frontend lint/build + browser e2e |
 
 ### 4.2 P2 — 記憶收斂(6 案)
 
@@ -119,7 +119,7 @@
 | `B-P2-01` | 有效 JWT,同一 `threadId` | 第一輪「我叫小明」,第二輪「我叫什麼」 | 第二輪送進模型的 messages 含第一輪內容。**現行 production 此項為 False**(01-plan §2 spike),這是新行為,不是回歸 |
 | `B-P2-02` | 框架 session store + `MessagesExceed(20)` | 同 `A-19` 的 (a) 20 (b) 21 | 結果與 `A-19` **逐項相同**(語意等價)。兩鏈路各驗一次 |
 | `B-P2-03` | ⚠️ 釘住未爆彈(G7)。歷史中**最舊的那一輪**是「tool call + tool result」配對,總長度剛好越過 20 | 觸發裁切 | 裁切後**不存在孤兒**:沒有無對應 `FunctionCallContent` 的 `FunctionResultContent`(反之亦然)。裁切以整個 turn 為原子單位。**這是行為改善不是回歸**,但必須有測試釘住,否則新實作退化無人察覺 |
-| `B-P2-04` | 前端 CopilotKit 重送完整 message 陣列 + 伺服器端已有同一批訊息 | 同 `threadId` 連發三輪 | 送進模型的 messages 中,每則 user 訊息**恰出現一次**(以 id 或內容計數);總長度不隨輪次呈平方成長。**不得重複累加**(02-spec §3.4) |
+| `B-P2-04` | 前端 CopilotKit 重送完整 message 陣列 + 伺服器端已有同一批訊息；assistant message ID 可被 client 重建 | 同 `threadId` 連發三輪 | 送進模型的 messages 中，每則 user 訊息恰出現一次；同一邏輯 assistant 回覆即使 ID 不同也恰出現一次（以保守 role/content/tool-call fingerprint 驗）；總長度不隨輪次呈平方成長。**不得重複累加**。 |
 | `B-P2-05` | `minimumPreservedTurns` 設定 | 累積 26 則後檢查 | 裁切**確實觸發**(訊息數 ≤ 20 級距)。spike 實測陷阱:`minimumPreservedTurns` 設成 20 時 26 則完全不觸發 —— 它是**下限**不是上限(02-spec §3.3)。此案就是為了抓那個打錯的數字 |
 | `B-P2-06` | `InMemoryChatMemoryStore` / `IChatMemoryStore` 已刪除 | 跑 `dotnet test` | `InMemoryChatMemoryStoreTests.cs` 的三條斷言**語意已由 `A-19` + `B-P2-02` 承接**後才可刪檔;不得只刪不搬(02-spec §8 開放問題 5) |
 
@@ -127,12 +127,12 @@
 
 | ID | 前置條件 | 動作 | 預期結果 |
 | --- | --- | --- | --- |
-| `B-P3-01` | mem0 有記憶;該輪會呼叫工具 | 兩鏈路各跑一輪 | recall 注入在模型呼叫**前**;`Remembered` 在**完整回覆後**寫入且內容是**含工具融合結果**的最終文字。等價於 `A-13`,但需在 AG-UI 側也成立 |
-| `B-P3-02` | `RecallAsync` 擲例外 | 兩鏈路 | 聊天正常完成,無 mem0 前言,不擲例外(承接 `A-14`) |
-| `B-P3-03` | `RememberAsync` 擲例外 | 兩鏈路 | 對外回覆已正常送出,不轉成錯誤;串流不寫 `event:error` |
+| `B-P3-01` | 已登入、mem0 有記憶；路由未命中的正常主 run | 兩鏈路各跑一輪 | recall 注入在模型呼叫**前**的 Instructions；`Remembered` 在**完整回覆後**寫入且內容是最終文字。路由命中不做 recall 的例外由 `B-P4-07` 驗。 |
+| `B-P3-02` | `RecallAsync` 擲例外 | 兩鏈路 | 聊天正常完成、Instructions 無 mem0 前言、不擲例外（承接 `A-14`；pipeline 邊界吞錯）。 |
+| `B-P3-03` | `RememberAsync` 擲例外 | 兩鏈路 | 對外回覆已正常送出、不轉成錯誤；串流不寫 `event:error`（pipeline 邊界吞錯）。 |
 | `B-P3-04` | 持久化失敗 | `POST /api/chat`(阻塞) | `500` + ApiError(等同 `A-15`) |
 | `B-P3-05` | 持久化失敗 | `POST /api/chat/stream` | 只記 warning、chunks 照常、無 `event:error`(等同 `A-16`)。**`B-P3-04`/`B-P3-05` 必須成對驗**,證明共用的 `StoreAIContextAsync` 沒有把兩種語意抹平(02-spec §8 開放問題 4) |
-| `B-P3-06` | 匿名(僅鏈路 A 可能發生) | `ChatAsync` / `StreamChatAsync` / `GET /api/chat/history` | 不寫 mem0、不持久化、history 回 `200` + 空陣列(等同 `A-06` + `A-21`) |
+| `B-P3-06` | 匿名(僅鏈路 A 可能發生)，mem0 fake 具既存資料 | `ChatAsync` / `StreamChatAsync` / `GET /api/chat/history` | 不 recall、不 remember mem0、不持久化、history 回 `200` + 空陣列（等同 `A-06` + `A-21`）。 |
 | `B-P3-07` | 租戶 A 使用者 U 先用副駕聊一輪,再用 ChatView 聊一輪 | `GET /api/chat/history` | **兩輪都在同一份歷史裡**,依 `(tenant_id, user_id)` 歸戶。這是 02-spec §4.2 的刻意決策,不是 bug;若造成混淆,退路是加來源標記而非分表 |
 | `B-P3-08` | 護欄 prompt 改走 `ChatOptions.Instructions` | 累積超過 20 則後再發一輪 | 護欄**仍生效**且**未被視窗裁掉**(system 訊息不進 history,02-spec §3.3)。斷言對象:模型收到的 instructions 非空 |
 
@@ -148,7 +148,7 @@
 | `B-P4-04` | `SingleRequiredStringKey` | 兩鏈路 `[Theory]` 四型 | 同 `A-08`,**靜默跳過** |
 | `B-P4-05` | 最多重試兩次 | 兩鏈路 `[Theory]` 三腳本 | 同 `A-09` |
 | `B-P4-06` | `MatchTool` 先全等再寬鬆取最長名 | 兩鏈路 | 同 `A-10` |
-| `B-P4-07` | 路由不帶歷史 / mem0 | 已有 5 輪歷史 + mem0 有記憶,再問一輪 | 路由那一次模型呼叫收到的 messages **不含**任何前輪內容、**不含** mem0 前言(刻意設計) |
+| `B-P4-07` | 路由不帶歷史 / mem0 | 已登入、有 5 輪歷史 + mem0 有記憶,再問一輪並命中 skill | 路由與 summary 的模型呼叫不含任何前輪內容、也不含 mem0 前言（刻意設計）；但 recorder 在完整 skill 摘要後仍對登入身分 remember 最終回覆。 |
 | `B-P4-08` | `kb_query` ABSTAIN → `rag_qa` | 兩鏈路 | 同 `A-11`(順序斷言)+ `A-12`(不誤觸發) |
 | `B-P4-09` | 目錄失敗 best-effort | 兩鏈路 `[Theory]` 四例外 | 同 `A-03` |
 | `B-P4-10` | 單一工具失敗不炸整輪 | 兩鏈路 `[Theory]` 六例外 | 同 `A-04` |
@@ -171,6 +171,12 @@
 ## 5. C 組 — 真鏈路 e2e(8 案)
 
 > 依專案記憶 **fakes-hide-real-behavior**:全手寫 fake 單元全綠 ≠ 能動。每個 phase 收尾派 `e2e-verifier` 用 docker compose 打真服務一次。以下每案的**真依賴**欄位標明「哪一環不得被 stub」。
+>
+> `scripts/verify-copilot-shared-core.ps1` 是可重跑的 **black-box smoke companion**，不是 C-01～C-08 的充分證明：它無法檢查模型輸入、session 重複計數、tool-call/result 配對、mem0 實際儲存或 chunk 到達時序；`-Rebuild` 的 `mock-gpt` 也不能驗 routing。**C gates 不得因此降級**：`C-03`/`C-04`/`C-05`/`C-07`/`C-08` 的 release evidence 仍須由下列具名 integration tests 與 `e2e-verifier` 真服務 trace／必要時手動 browser proxy 檢查提供；routing 必須使用真實模型。
+>
+> 上述缺口的自動化、artifact、PASS/FAIL 判準與執行順序，見 [05-release-evidence-plan.md](05-release-evidence-plan.md)。
+>
+> 最低補強對照：`C-03` → `CopilotAguiApiTests.Agui_TenantIsolation_SameThreadId_TenantB_CannotSeeTenantASecret` 與 `Agui_SameTenantDifferentUsers_SameThreadId_UserBCannotSeeUserASecret`；`C-04` → `Agui_SameThreadId_ThreeRounds_FullArrayResend_MismatchedAssistantId_UserMessagesStillAppearExactlyOnce` + `ChatSessionWindowTests.Window_ToolCallAndResult_NotSplitByCompaction`；`C-05` → `Agui_ChatTurn_PersistsToConversationStore_AppearsInChatHistory` + 真 mem0 儲存 trace；`C-07` → `Agui_And_ChatView_SameCatalog_SameQuestion_SkillInvokes_NameAndInputMatch` + 真實模型／workflow trace；`C-08` → e2e-verifier 的 proxy trace 與手動 browser timing 檢查。這些是 smoke script 以外、不可省略的 release 證據。
 
 | ID | Phase | 真依賴(不得 stub) | 動作 | 預期結果 |
 | --- | --- | --- | --- | --- |

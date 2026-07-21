@@ -1,6 +1,6 @@
 # 計畫書 — 副駕共用核心層(Copilot Shared Core)
 
-> 狀態: **已實作(2026-07-21)。** P0–P4 全部完成,通過 code review 與 e2e 驗證;platform 362 測試(Service 216 + Web 146)。與本計畫主要偏離點:isolation key 為 `{tenant}:{user}`(非單純租戶);鏈路 A(`ChatAssistant`)刻意 `withIsolation:false` 以保留匿名連續性;新增計畫外的 `AguiWireDedupAgent`(AG-UI 每輪重送完整 messages 陣列的去重層);mem0 best-effort 語意精確化為「吞錯在 `Mem0Client` 內部,`IMem0Client` 契約擲例外則傳播」。以下內容為原始框架級決策記錄,未逐項回填實作細節。
+> 狀態: **已實作，持續 hardening(2026-07-21)。** P0–P4 已完成；本計畫以下的原始決策已由 02-spec／04-acceptance-test 回填為目前契約：isolation key 為 `{tenant}:{user}`；鏈路 A(`ChatAssistant`)刻意 `withIsolation:false`，因其 session `conversationId` 已在推導層加上登入身分前綴，並保留匿名短期連續性；`AguiWireDedupAgent` 必須處理 AG-UI 重送完整陣列及 assistant ID 不一致；mem0 的 best-effort 由共用 pipeline 邊界保證，即使 `IMem0Client` 實作擲例外也不得中斷聊天；匿名聊天不 recall/remember mem0。
 > 關聯:[chat-skill-routing](../chat-skill-routing/01-plan.md) —— 本計畫實質上是該計畫 03-design §10 標為「P4 / 非目標」的那一列(AG-UI 側掛同批能力),外加兩條鏈路的共用層抽取。
 > 前提知識:使用者多為非技術人員、以自然語言在聊天中提問(專案記憶 non-technical-users-chat-first)。
 
@@ -68,7 +68,7 @@
 | 職責 | 用什麼 | 兩鏈路共用 |
 | --- | --- | --- |
 | 短期記憶 20 則 | 框架 session store + `SlidingWindowCompactionStrategy(MessagesExceed(20))` | 是 |
-| 租戶隔離 | `SessionIsolationKeyProvider`(從 JWT 取 tenant),fail-closed | 是 |
+| 租戶隔離 | `SessionIsolationKeyProvider`(從 JWT 取 `{tenant}:{user}`),fail-closed | 是 |
 | mem0 recall + 對話持久化 | `AIContextProvider`(`ProvideAIContextAsync` 注入 / `StoreAIContextAsync` 寫入) | 是 |
 | 數字護欄 prompt | `ChatOptions.Instructions` | 是 |
 | 確定性 skill 路由 | `AIAgentBuilder.Use(...)` middleware(攔整個 run,正是其用途) | 是 |

@@ -214,26 +214,36 @@ public sealed class FakeWorkflowService : IWorkflowService
 public sealed class FakeMem0Client : IMem0Client
 {
     public string RecallResult { get; set; } = string.Empty;
+    public List<(string UserId, string Query)> Recalled { get; } = new();
     public List<(string UserId, string UserMessage, string AiReply)> Remembered { get; } = new();
 
     /// <summary>非 null 時 RecallAsync 擲此例外。</summary>
     public Exception? ThrowOnRecall { get; set; }
 
+    /// <summary>在 RecallAsync 內、檢查 ThrowOnRecall 前執行，供取消傳播測試在呼叫中取消同一 token。</summary>
+    public Action<CancellationToken>? OnRecall { get; set; }
+
     /// <summary>非 null 時 RememberAsync 擲此例外。</summary>
     public Exception? ThrowOnRemember { get; set; }
 
+    /// <summary>在 RememberAsync 內、檢查 ThrowOnRemember 前執行，供取消傳播測試在呼叫中取消同一 token。</summary>
+    public Action<CancellationToken>? OnRemember { get; set; }
+
     public Task<string> RecallAsync(string userId, string query, CancellationToken ct = default)
     {
+        OnRecall?.Invoke(ct);
         if (ThrowOnRecall is not null)
         {
             throw ThrowOnRecall;
         }
 
+        Recalled.Add((userId, query));
         return Task.FromResult(RecallResult);
     }
 
     public Task RememberAsync(string userId, string userMessage, string aiReply, CancellationToken ct = default)
     {
+        OnRemember?.Invoke(ct);
         if (ThrowOnRemember is not null)
         {
             throw ThrowOnRemember;
@@ -366,7 +376,10 @@ internal static class TestChatAgent
         {
             Name = "ChatAssistant",
             ChatHistoryProvider = historyProvider,
-            AIContextProviders = new AIContextProvider[] { new ChatContextProvider(scopeFactory) },
+            AIContextProviders = new AIContextProvider[]
+            {
+                new ChatContextProvider(scopeFactory, NullLogger<ChatContextProvider>.Instance),
+            },
         });
         var routing = new SkillRoutingAgent(
             chatClientAgent, llmAgent ?? new FakeLlmAgent(), historyProvider, scopeFactory,

@@ -213,8 +213,7 @@ public sealed class ChatBehaviorBaselineTests
     }
 
     // ================================================================
-    // A-06:匿名 — 不路由(不讀目錄)、不執行 skill、不持久化聊天記錄(backend)
-    // ⚠️ 與 04 §3 表格描述有出入,見下方測試內註解(Remembered 實際上不是空的)。
+    // A-06:匿名 — 不路由(不讀目錄)、不執行 skill、不持久化聊天記錄(backend)、不讀寫 mem0。
     // ================================================================
     [Fact]
     public async Task A06a_Anonymous_Chat_NoCatalogRead_NoSkillInvoked_NoConversationPersisted()
@@ -229,11 +228,8 @@ public sealed class ChatBehaviorBaselineTests
         Assert.Empty(wf.CatalogContexts);
         Assert.Empty(wf.SkillInvokes);
         Assert.Empty(convos.Saved);
-
-        // ⚠️ 現行行為與規格不符:mem0.RememberAsync 在 ChatAsync 是無條件呼叫(不受 userCtx 是否為 null
-        // 影響,只有 backend 持久化 AddAsync 才受 userCtx 保護)。因此匿名聊天仍然會寫入 mem0(uid 退回
-        // NormalizeUser(userId) = "u1",不是空清單。已依現行實際行為改寫斷言,並非規格表格所寫的「為空」。
-        Assert.Single(mem0.Remembered);
+        Assert.Empty(mem0.Recalled);
+        Assert.Empty(mem0.Remembered);
     }
 
     [Fact]
@@ -251,9 +247,8 @@ public sealed class ChatBehaviorBaselineTests
         Assert.Empty(wf.CatalogContexts);
         Assert.Empty(wf.SkillInvokes);
         Assert.Empty(convos.Saved);
-
-        // 同上一條的偏差說明:串流匿名聊天一樣無條件寫 mem0。
-        Assert.Single(mem0.Remembered);
+        Assert.Empty(mem0.Recalled);
+        Assert.Empty(mem0.Remembered);
     }
 
     // ================================================================
@@ -541,15 +536,10 @@ public sealed class ChatBehaviorBaselineTests
         new object[] { false, true },  // (b) RememberAsync 擲例外
     };
 
-    // Mem0Client(production IMem0Client 實作)在自己內部把所有下游錯誤都吞掉,回空字串 / no-op
-    // (見 Mem0Client.cs 的 try/catch),介面文件因此宣告「絕不拋例外」。ChatService 信任這個契約,
-    // 呼叫 _mem0.RecallAsync / RememberAsync 時並未再包一層防禦性 try/catch。若 IMem0Client 的實作
-    // 違反契約而擲出例外(FakeMem0Client 的 G1 失敗開關即模擬此情境),例外會直接從
-    // ChatAsync / StreamChatAsync 傳播出去——這與規格表格所寫的「皆正常回覆、不擲例外」相反。
-    // 以下斷言改為驗證現行實際行為(例外會傳播,不會被吞掉)。
+    // mem0 best-effort 是 pipeline 不變式:就算替換實作違反原本的「不拋例外」契約,聊天仍須正常完成。
     [Theory]
     [MemberData(nameof(Mem0FailureModes))]
-    public async Task A14_ChatAsync_Mem0Failure_PropagatesException_DoesNotSwallow(
+    public async Task A14_ChatAsync_Mem0Failure_IsBestEffort_StillReplies(
         bool throwOnRecall, bool throwOnRemember)
     {
         var mem0 = new FakeMem0Client
@@ -560,13 +550,13 @@ public sealed class ChatBehaviorBaselineTests
         var wf = new FakeWorkflowService(); // 空目錄 → 無工具 → 純聊天兜底(才會走到 recall/MISS 路徑)
         var svc = Build(new FakeLlmAgent(), wf, mem0, chatClient: new FakeChatClient { Response = "回覆" });
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => svc.ChatAsync("問題", "u1", "c1", UserA));
+        var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
+        Assert.Equal("回覆", reply.Reply);
     }
 
     [Theory]
     [MemberData(nameof(Mem0FailureModes))]
-    public async Task A14_StreamChatAsync_Mem0Failure_PropagatesException_DoesNotSwallow(
+    public async Task A14_StreamChatAsync_Mem0Failure_IsBestEffort_StillStreams(
         bool throwOnRecall, bool throwOnRemember)
     {
         var mem0 = new FakeMem0Client
@@ -577,12 +567,12 @@ public sealed class ChatBehaviorBaselineTests
         var wf = new FakeWorkflowService();
         var svc = Build(new FakeLlmAgent(), wf, mem0, chatClient: new FakeChatClient { Chunks = new[] { "甲", "乙" } });
 
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        var chunks = new List<string>();
+        await foreach (var chunk in svc.StreamChatAsync("問題", "u1", "c1", UserA))
         {
-            await foreach (var _ in svc.StreamChatAsync("問題", "u1", "c1", UserA))
-            {
-            }
-        });
+            chunks.Add(chunk);
+        }
+        Assert.Equal(new[] { "甲", "乙" }, chunks);
     }
 
     // ================================================================

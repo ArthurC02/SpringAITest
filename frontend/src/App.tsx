@@ -3,6 +3,7 @@ import { CopilotKit } from '@copilotkit/react-core'
 import { HttpAgent } from '@ag-ui/client'
 import '@copilotkit/react-ui/styles.css'
 import { useAuth } from './hooks/useAuth'
+import { triggerLogout } from './api/http'
 import AuthPage from './components/AuthPage'
 import AppShell from './components/AppShell'
 import './App.css'
@@ -21,6 +22,14 @@ export default function App() {
       new HttpAgent({
         url: '/api/copilot/agui',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
+        // HttpAgent must keep the original Response for its SSE parser, so it cannot use
+        // apiFetch (which consumes JSON). Still route an expired AG-UI session through
+        // the same global logout path as every other authenticated request.
+        fetch: async (url, requestInit) => {
+          const response = await fetch(url, requestInit)
+          if (response.status === 401) triggerLogout()
+          return response
+        },
       }),
     [token],
   )

@@ -24,9 +24,8 @@ namespace Platform.Service;
 /// - 串流(<see cref="RunCoreStreamingAsync"/>):基線的 AddAsync 包一層 try/catch(best-effort,只記
 ///   warning),RememberAsync 緊接在 try/catch 之後、不受 persist 結果影響、一律執行。
 ///
-/// 匿名(<see cref="IChatIdentityAccessor.CurrentUser"/> 為 null)兩條路徑行為一致、不受上述差異影響:
-/// 沒有 persist 這一步(對話以 (tenant_id, user_id) 隔離,匿名沒有身分可歸屬),直接 remember(A-06:mem0
-/// 沒有登入保護,uid 已由 <see cref="IChatIdentityAccessor.DeriveMemoryKeys"/> 的匿名 fallback 決定)。
+/// 匿名(<see cref="IChatIdentityAccessor.CurrentUser"/> 為 null)兩條路徑都不做副作用:保留短期 session
+/// continuity，但不持久化、也不讀寫 mem0，避免 caller-controlled anonymous uid 造成跨訪客資料污染。
 ///
 /// 阻塞路徑要不要升級成 500 不是本類的職責:本類把失敗訊號留在
 /// <see cref="IChatIdentityAccessor.PersistFailure"/>,由呼叫阻塞端點的 <c>ChatService.ChatAsync</c>
@@ -102,18 +101,15 @@ public sealed class ChatTurnRecorder : DelegatingAIAgent
     {
         using var scope = _scopeFactory.CreateScope();
         var identity = scope.ServiceProvider.GetRequiredService<IChatIdentityAccessor>();
-        var mem0 = scope.ServiceProvider.GetRequiredService<IMem0Client>();
-        var (uid, _) = identity.DeriveMemoryKeys();
-
         var userCtx = identity.CurrentUser;
         if (userCtx is null)
         {
-            // 匿名不持久化到 backend(對話以 (tenant_id, user_id) 隔離,匿名沒有身分可歸屬),直接 remember。
-            // IMem0Client 契約上不拋例外(Mem0Client 內部吞錯),若違反契約而擲出,直接讓例外傳播,不包
-            // 防禦性 try/catch(A-14)。
-            await mem0.RememberAsync(uid, userMessage, reply, ct);
+            // 匿名只保留 ChatService 的短期 session，沒有可安全歸屬的長期 identity。
             return;
         }
+
+        var (uid, _) = identity.DeriveMemoryKeys();
+        var mem0 = scope.ServiceProvider.GetRequiredService<IMem0Client>();
 
         var conversations = scope.ServiceProvider.GetRequiredService<IConversationStore>();
 
@@ -131,7 +127,7 @@ public sealed class ChatTurnRecorder : DelegatingAIAgent
                 identity.PersistFailure = ex;
             }
 
-            await mem0.RememberAsync(uid, userMessage, reply, ct);
+            await RememberBestEffortAsync(mem0, uid, userMessage, reply, ct);
             return;
         }
 
@@ -149,6 +145,19 @@ public sealed class ChatTurnRecorder : DelegatingAIAgent
             return;
         }
 
-        await mem0.RememberAsync(uid, userMessage, reply, ct);
+        await RememberBestEffortAsync(mem0, uid, userMessage, reply, ct);
+    }
+
+    private async Task RememberBestEffortAsync(
+        IMem0Client mem0, string uid, string userMessage, string reply, CancellationToken ct)
+    {
+        try
+        {
+            await mem0.RememberAsync(uid, userMessage, reply, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "mem0 remember 失敗，略過長期記憶：{Message}", ex.Message);
+        }
     }
 }

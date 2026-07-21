@@ -27,8 +27,7 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
     {
         get
         {
-            var user = _httpContextAccessor.HttpContext?.User;
-            return user?.Identity?.IsAuthenticated == true ? user.ToUserContext() : null;
+            return _httpContextAccessor.HttpContext?.User.ToUsableChatUserContext();
         }
     }
 

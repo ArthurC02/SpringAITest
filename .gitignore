@@ -29,3 +29,6 @@ pnpm-debug.log*
 ### 雜項 ###
 litellm-venv/
 .playwright-mcp/
+
+# Local release evidence may contain request/trace projections; never commit it.
+artifacts/copilot-shared-core/

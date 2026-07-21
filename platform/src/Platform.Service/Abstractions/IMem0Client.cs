@@ -1,8 +1,8 @@
 namespace Platform.Service.Abstractions;
 
 /// <summary>
-/// mem0 長期記憶 client。所有錯誤都吞掉(記憶是加分項,絕不讓聊天失敗):
-/// <see cref="RecallAsync"/> 出錯回空字串、<see cref="RememberAsync"/> 出錯直接返回。
+/// mem0 長期記憶 client。正式實作應自行採 best-effort（recall 回空、remember no-op）；
+/// shared chat pipeline 另有最後一道防線，確保替換實作擲例外也不會中斷聊天。
 /// </summary>
 public interface IMem0Client
 {

@@ -518,6 +518,10 @@ public sealed class ChatSkillRoutingTests
     private const string GuardPrompt =
         "回答前先判斷問題類型，不要急著搶答。若問題涉及任何數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，你「必須」先呼叫對應的 skill 工具，並只依工具回傳的結果作答。嚴禁在未呼叫工具的情況下自行給出數字；嚴禁自己做任何算術（加減乘除、百分比、成長率）——這類計算一律交給工具，因為你自行心算常常算錯。若沒有合適的工具、文件未提供該數據、或你無法確定，請直接說「查無此數據」，不要編造或估算。只有純聊天或不涉及數字的問題，才可直接回答。";
 
+    // P4 guardrail:這是唯一刻意逐字釘住的 prompt，避免摘要階段放寬任何「工具數字不可改」限制。
+    private const string SummaryInstruction =
+        "把以下『工具結果』改寫成給使用者的自然、完整中文回覆。數字、金額、比率、百分比一字都不得更改、刪除或新增，只做語言潤飾與說明。若工具結果表示查無資料或發生錯誤，如實轉達，不要編造。";
+
     // 路由命中 skill → 確定性執行 → LLM 只潤飾;數字原封帶入摘要輸入,回覆是摘要輸出(HIT 路徑,不受 P2 影響)。
     [Fact]
     public async Task RoutedPath_SelectsSkill_ExecutesDeterministically_SummarizesResult()
@@ -548,7 +552,7 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal("這季毛利率多少?", invoke.Input["query"].GetString());
 
         // (b) 摘要呼叫:system 為禁改數字指令、user 帶入工具的確定性結果(數字原封)。
-        Assert.Contains("一字都不得更改", agent.CompleteCalls[1][0].Content);
+        Assert.Equal(SummaryInstruction, agent.CompleteCalls[1][0].Content);
         var summaryUser = agent.CompleteCalls[1].Last();
         Assert.Equal("user", summaryUser.Role);
         Assert.Contains("毛利率 32.8%", summaryUser.Content);

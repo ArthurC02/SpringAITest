@@ -128,6 +128,25 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
+    // JWT 簽章有效不代表可作為聊天 identity。缺 subject 或 tenantCode 時 provider 必回 null，讓
+    // Strict session store 在建立 session 前 fail-closed；不得把空字串組成共享 key，例如 ":"。
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Agui_ValidJwtMissingRequiredIdentityClaim_Returns500BeforeAgentOrSession(bool omitSubject)
+    {
+        var client = _factory.CreateClient().WithToken(TestTokens.MintMissingChatIdentityClaim(omitSubject));
+        var runsBefore = ChatClient.Runs.Count;
+
+        var resp = await SendAguiAsync(client, RunInputFor($"missing-claim-{omitSubject}", "不應進入 agent"));
+
+        Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal(runsBefore, ChatClient.Runs.Count);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(500, body["status"]!.GetValue<int>());
+        Assert.Equal("伺服器發生錯誤，請稍後再試", body["message"]!.GetValue<string>());
+    }
+
     // B-P1-03(承接現行 A-23,帶 JWT):有效 JWT → 200 + text/event-stream + 協定標準 "data: "(有空格)
     // + 既有事件序列。這是相對匿名姿態唯一改變的前置條件,事件序列本身不變。
     [Fact]
@@ -295,8 +314,8 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     }
 
     // B-P2-04 的另一種真實情境(e2e 觀察到兩種都會發生):前端 echo 回來的 assistant messageId
-    // 與伺服器當初送出的不一致(例如前端自行重新產生 id)。此時該則 assistant 訊息去重會失手、重覆一次,
-    // 但 user 訊息的去重不受影響(id 各自獨立比對),且增長仍是線性、不是複合暴增。
+    // 與伺服器當初送出的不一致(例如前端自行重新產生 id)。純文字 assistant 以 role+完整文字作保守
+    // fallback 去重；user 一律只按 id，比對規則不會吞掉合法的相同內容重複發話。
     [Fact]
     public async Task Agui_SameThreadId_ThreeRounds_FullArrayResend_MismatchedAssistantId_UserMessagesStillAppearExactlyOnce()
     {
@@ -323,9 +342,44 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         {
             Assert.Single(lastRunTexts, t => t == text);
         }
-        // 不做複合暴增的上界檢查(11+ 則):assistant id 不對齊時允許各輪的 assistant 回覆多重覆一次
-        // (每輪 +1),但總數仍應遠低於修復前的複合暴增規模。
-        Assert.True(lastRunTexts.Count <= 8, $"訊息數不應複合暴增,實際 {lastRunTexts.Count} 則:{string.Join(",", lastRunTexts)}");
+        // full-array 重送即使 assistant id 改寫，舊 assistant 內容也恰好各一份：3 user + 2 assistant。
+        Assert.Equal(5, lastRunTexts.Count);
+        Assert.Equal(2, lastRunTexts.Count(t => t == "你好世界"));
+    }
+
+    // 相同文字的 assistant 回覆可以在不同 turn 合法重複。mismatched-ID fallback 必須是 multiset：
+    // session 有兩則舊「你好世界」時，wire 的三則同文 assistant 只消耗兩則舊項，第三則必須保留。
+    [Fact]
+    public async Task Agui_FullArrayResend_RepeatedAssistantText_ConsumesKnownCopiesButPreservesAdditionalMessage()
+    {
+        const string threadId = "b-p2-04-assistant-multiset";
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        var wireHistory = new List<object>();
+
+        foreach (var userText in new[] { "第一輪", "第二輪" })
+        {
+            wireHistory.Add(UserMsg(Guid.NewGuid().ToString("N"), userText));
+            var response = await SendAguiAsync(client, RunInputWithMessages(threadId, wireHistory));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var raw = await response.Content.ReadAsStringAsync();
+            var (_, assistantText) = ExtractAssistantMessage(raw);
+            wireHistory.Add(AssistantMsg(Guid.NewGuid().ToString("N"), assistantText));
+        }
+
+        // 這是另一則合法、內容剛好相同的 assistant message，不是前兩則的 echo。
+        wireHistory.Add(AssistantMsg(Guid.NewGuid().ToString("N"), "你好世界"));
+        wireHistory.Add(UserMsg(Guid.NewGuid().ToString("N"), "第三輪"));
+
+        var finalResponse = await SendAguiAsync(client, RunInputWithMessages(threadId, wireHistory));
+        Assert.Equal(HttpStatusCode.OK, finalResponse.StatusCode);
+        await finalResponse.Content.ReadAsStringAsync();
+
+        var lastRunTexts = ChatClient.Runs[^1].Select(message => message.Text ?? string.Empty).ToList();
+        Assert.Equal(3, lastRunTexts.Count(text => text == "你好世界"));
+        foreach (var userText in new[] { "第一輪", "第二輪", "第三輪" })
+        {
+            Assert.Single(lastRunTexts, text => text == userText);
+        }
     }
 
     // 使用者連續兩輪送出「內容相同、id 不同」的訊息(單訊息 client 模式,每輪只送新訊息)——
@@ -458,13 +512,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         }
     }
 
-    // ---- P3 review(低):IMem0Client 擲例外的傳播行為 ----
-    //
-    // A-14 基線(ChatContextProvider.cs/ChatTurnRecorder.cs 文件注記):IMem0Client 契約上不拋例外
-    // (真實 Mem0Client 內部把下游錯誤吞掉、best-effort);若違反契約而擲出,呼叫端(ChatContextProvider/
-    // ChatTurnRecorder)不包防禦性 try/catch,例外原樣傳播。以下兩案直接打 /api/copilot/agui,
-    // 用會拋例外的 IMem0Client fake 驗證「例外真的會傳播、不會被靜默吞掉」這個契約本身
-    // ——不是驗證 Mem0Client 的 best-effort(那是 Mem0Client 自己的實作細節,不在本測試範圍)。
+    // ---- P3:IMem0Client 擲例外仍是 pipeline-wide best-effort ----
 
     /// <summary>從 AG-UI SSE 回應擷取每個 frame 的 JsonElement,依序排列(不假設事件數量)。</summary>
     private static List<JsonElement> ExtractFrames(string rawSse) =>
@@ -473,13 +521,10 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
             .Select(json => JsonDocument.Parse(json).RootElement)
             .ToList();
 
-    // RecallAsync 發生在 ChatContextProvider.ProvideAIContextAsync,任何 TEXT_MESSAGE_* frame 寫出之前。
-    // 實測:MapAGUI 本身不讓例外冒出到 ASP.NET 例外處理管線(不是 500 ApiError)——回應仍是 200 +
-    // text/event-stream,RUN_STARTED 之後直接是一個 RUN_ERROR frame(code:"StreamingError",message 帶原始
-    // 例外訊息),沒有任何 TEXT_MESSAGE_* frame。這證明 IMem0Client 的例外確實傳播穿透 ChatContextProvider,
-    // 不會被靜默吞掉——只是 MapAGUI 把「傳播出來的例外」轉譯成 RUN_ERROR frame,而非 HTTP 500。
+    // RecallAsync 發生在 ChatContextProvider.ProvideAIContextAsync；替換實作拋例外時只略過 long-term
+    // context，AG-UI 仍須送出正常完整回覆。
     [Fact]
-    public async Task Agui_Mem0RecallThrows_PropagatesAsRunErrorFrame_NoTextMessage()
+    public async Task Agui_Mem0RecallThrows_IsBestEffort_EmitsNormalReply()
     {
         await using var factory = new TestWebAppFactory(
             mem0Override: new ThrowingMem0Client(onRecall: new InvalidOperationException("mem0 recall 壞掉")));
@@ -491,19 +536,15 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         var raw = await resp.Content.ReadAsStringAsync();
         var frames = ExtractFrames(raw);
 
-        Assert.Equal(new[] { "RUN_STARTED", "RUN_ERROR" }, frames.Select(f => f.GetProperty("type").GetString()));
-        var errorFrame = frames[^1];
-        Assert.Equal("mem0 recall 壞掉", errorFrame.GetProperty("message").GetString());
-        Assert.Equal("StreamingError", errorFrame.GetProperty("code").GetString());
+        var types = frames.Select(f => f.GetProperty("type").GetString()).ToList();
+        Assert.Contains("TEXT_MESSAGE_CONTENT", types);
+        Assert.Contains("RUN_FINISHED", types);
+        Assert.DoesNotContain("RUN_ERROR", types);
     }
 
-    // RememberAsync 發生在 ChatTurnRecorder,await foreach 正常結束、TEXT_MESSAGE_CONTENT 都已送出「之後」。
-    // 實測:已送出的 TEXT_MESSAGE_START/CONTENT 保留不受影響,但收尾的 TEXT_MESSAGE_END 與 RUN_FINISHED
-    // 都沒有送出,直接被一個 RUN_ERROR frame取代——與 /api/chat/stream 手捲 SSE 的「event:error,保留已送出
-    // 內容,結尾額外補一幀」不同格式,但同樣是「錯誤不悄悄發生」的語意:呼叫端看得到 RUN_ERROR,不會誤以為
-    // 這輪正常結束(RUN_FINISHED)。
+    // RememberAsync 在完整回覆後執行；失敗只能記 warning，不能將已完成的 turn 轉成 RUN_ERROR。
     [Fact]
-    public async Task Agui_Mem0RememberThrows_PreservesSentContent_ButEndsWithRunErrorInsteadOfRunFinished()
+    public async Task Agui_Mem0RememberThrows_IsBestEffort_EndsNormally()
     {
         await using var factory = new TestWebAppFactory(
             mem0Override: new ThrowingMem0Client(onRemember: new InvalidOperationException("mem0 remember 壞掉")));
@@ -516,12 +557,11 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         var frames = ExtractFrames(raw);
         var types = frames.Select(f => f.GetProperty("type").GetString()).ToList();
 
-        Assert.Equal(
-            new[] { "RUN_STARTED", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CONTENT", "RUN_ERROR" },
-            types);
-        Assert.DoesNotContain("TEXT_MESSAGE_END", types);
-        Assert.DoesNotContain("RUN_FINISHED", types);
-        Assert.Equal("mem0 remember 壞掉", frames[^1].GetProperty("message").GetString());
+        Assert.Contains("TEXT_MESSAGE_START", types);
+        Assert.Contains("TEXT_MESSAGE_CONTENT", types);
+        Assert.Contains("TEXT_MESSAGE_END", types);
+        Assert.Contains("RUN_FINISHED", types);
+        Assert.DoesNotContain("RUN_ERROR", types);
     }
 
     // ---- P4(copilot-shared-core §11 步驟 14):路由共用 —— 副駕取得同批 skill 能力 ----
@@ -759,7 +799,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(rememberedBefore, FakeMem0Client.Remembered.Count);
     }
 
-    /// <summary>可注入 recall/remember 例外的 IMem0Client fake,驗證 IMem0Client 違反「不拋例外」契約時的傳播行為。</summary>
+    /// <summary>可注入 recall/remember 例外的 IMem0Client fake，驗證 pipeline 邊界仍會降級。</summary>
     private sealed class ThrowingMem0Client : Platform.Service.Abstractions.IMem0Client
     {
         private readonly Exception? _onRecall;

@@ -1,6 +1,6 @@
 # 詳細設計 — 副駕共用核心層(Copilot Shared Core)
 
-> 狀態: **規劃中。** 承接 [01-plan.md](01-plan.md)(框架級決策 + 探查證據)與 [02-spec.md](02-spec.md)(WHAT)。
+> 狀態: **已實作，持續 hardening。** 本檔保留原始 HOW 與探查證據；目前生效的行為契約以已回填的 [02-spec.md](02-spec.md) 與 [04-acceptance-test.md](04-acceptance-test.md) 為準。
 > 本文件是 **HOW**:確切簽章、層級順序、呼叫鏈、await 傳染面、落地順序、刻意簡化總表。**不重述** 01/02 的結論,只在需要時引用其節次。
 > **規劃任務,不動生產碼。** 唯一產出即本檔。
 >
@@ -10,6 +10,16 @@
 > - **【卡】** = 無法在不寫實作的情況下拍板者,明確標出卡點。全文僅一處(§9.3)。
 >
 > 驗證程式寫在系統暫存目錄的 scratchpad,已刪除,repo 內零殘留。
+
+---
+
+## 0.2 已實作後的 hardening 補充（優先於舊示意碼）
+
+- AG-UI strict isolation key 是 JWT `{tenant}:{user}`；tenant 或 user 缺失時 fail-closed，絕不可生成共享 key。
+- `ChatAssistant` 使用 `withIsolation:false`，但登入 session key 已在 `ChatMemoryKeyDerivation` 前綴 `{tenant}:{user}`；匿名保留既有短期 session continuity，且不進長期 mem0。
+- mem0 的 best-effort 是 `ChatContextProvider` 與 `ChatTurnRecorder` 的邊界保證：任何 `IMem0Client` 例外都記錄並降級，不能依賴特定 `Mem0Client` 實作自行吞錯。
+- `AguiWireDedupAgent` 先按 ID 去重；assistant ID 不一致時以保守 role/content/tool-call fingerprint 補救，不能讓重送陣列重複寫入 history。
+- `HttpAgent` 收到 AG-UI `401` 必須觸發既有全域 logout。這是前端 session 一致性要求，不影響 AG-UI 端點本身的認證邊界。
 
 ---
 
@@ -208,11 +218,15 @@ public sealed class ChatContextProvider : AIContextProvider
 ```csharp
 var instructions = ChatGuardPrompt;
 
-var (uid, _) = _identity.DeriveMemoryKeys();          // 匿名時 uid = "default" 之類,見 §4.4
+var user = _identity.CurrentUser;
+if (user is null)
+    return new AIContext { Instructions = instructions }; // 匿名不 recall mem0
+
+var (uid, _) = _identity.DeriveMemoryKeys();
 var lastUser = context.RequestMessages.LastOrDefault(m => m.Role == ChatRole.User)?.Text ?? "";
 
-// mem0 全程 best-effort:Mem0Client 內部已吞錯回空字串(現行語意,不得改)。
-var memories = await _mem0.RecallAsync(uid, lastUser, cancellationToken);
+// pipeline boundary best-effort:任意 IMem0Client 實作例外都降級為空 recall。
+var memories = await RecallBestEffortAsync(uid, lastUser, cancellationToken);
 if (!string.IsNullOrWhiteSpace(memories))
 {
     instructions += "\n" + SystemMemoryPrefix + "\n" + memories;
@@ -452,23 +466,18 @@ AG-UI  :threadId(wire) → 同樣經 DeriveMemoryKeys 前綴身分
 
 再經 `IsolationKeyScopedAgentSessionStore` 前綴 → 實際 store key = `{tenant}::{tenant}:{user}:{cid}`。租戶碼重複一次,無害(§9.5 列為刻意簡化)。
 
-### 5.4 匿名鏈路 A 與 `Strict=true` 的衝突(必須處理,否則匿名聊天直接 500)
+### 5.4 匿名鏈路 A 與 `Strict=true` 的責任分界
 
-**【核】問題**:`/api/chat` 是 `AllowAnonymous`(`ChatController.cs:17`),匿名時 `JwtTenantIsolationKeyProvider` 回 `null`,`Strict=true` 的 store 會拋 `InvalidOperationException`。
-
-**解**:匿名根本不碰 store。
+AG-UI 使用 strict isolation store；`/api/chat` 的 `ChatAssistant` 則刻意 `withIsolation:false`。登入 ChatView session key 在 derivation 已帶 `{tenant}:{user}`，匿名維持 caller conversationId 的短期連續性。兩者不可混為一談。
 
 ```csharp
 // ChatService,兩條路徑共用
-var session = userCtx is not null
-    ? await _hostAgent.GetOrCreateSessionAsync(cid, ct)   // 有身分才進 store(isolation key 必得到)
-    : await _hostAgent.CreateSessionAsync(ct);            // 匿名:每輪一顆用完即丟的空 session
+var session = await _hostAgent.GetOrCreateSessionAsync(cid, ct);
 …
-if (userCtx is not null)
-    await _hostAgent.SaveSessionAsync(cid, session, ct);  // 匿名不存
+await _hostAgent.SaveSessionAsync(cid, session, ct);
 ```
 
-這同時**原樣保住**現行的「匿名裸聊:不路由、不寫記憶、不持久化、`/api/chat/history` 回空陣列」四條語意,且 `Strict=true` 一步都不放寬。
+這同時保住「匿名裸聊:不路由、不 recall/remember mem0、不持久化、`/api/chat/history` 回空陣列」；AG-UI 的 `Strict=true` 一步都不放寬。
 
 ---
 
@@ -739,7 +748,7 @@ if (_identity.PersistFailure is { } ex)
 
 ### 10.3 每個 phase 收尾派 `e2e-verifier` 打真鏈路一次
 
-02-spec §7.3 + 專案記憶 `fakes-hide-real-behavior`。P1 額外要驗:`ServiceLifetime.Scoped` 的 agent 沒有 captive dependency 警告(§4.6 註)。
+02-spec §7.3 + 專案記憶 `fakes-hide-real-behavior`。`scripts/verify-copilot-shared-core.ps1` 僅是 black-box smoke companion，不可取代 C-03/C-04/C-05/C-07/C-08 的具名 integration tests、真服務 trace 與 browser/proxy 檢查；其 mock-gpt rebuild 路徑不可驗 routing。P1 額外要驗:`ServiceLifetime.Scoped` 的 agent 沒有 captive dependency 警告(§4.6 註)。
 
 ---
 

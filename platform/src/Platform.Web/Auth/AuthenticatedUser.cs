@@ -26,4 +26,21 @@ public static class ClaimsPrincipalExtensions
         var user = principal.ToAuthenticatedUser();
         return new UserContext(user.Username, user.TenantCode, user.Role);
     }
+
+    /// <summary>
+    /// 取得可作為聊天記憶、持久化與租戶隔離邊界的身分。JWT 通過簽章驗證不代表其身分 claims
+    /// 一定完整；缺少 subject 或 tenantCode 時絕不可退化成共用的空白 key。
+    /// </summary>
+    public static UserContext? ToUsableChatUserContext(this ClaimsPrincipal principal)
+    {
+        if (principal.Identity?.IsAuthenticated != true)
+        {
+            return null;
+        }
+
+        var user = principal.ToUserContext();
+        return string.IsNullOrWhiteSpace(user.UserId) || string.IsNullOrWhiteSpace(user.TenantCode)
+            ? null
+            : user;
+    }
 }

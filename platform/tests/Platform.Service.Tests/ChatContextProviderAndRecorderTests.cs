@@ -23,7 +23,9 @@ public sealed class ChatContextProviderAndRecorderTests
     {
         var chatClient = new FakeChatClient();
         var mem0 = new FakeMem0Client { RecallResult = "- 使用者喜歡貓\n" };
-        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0);
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "t-p3-1", UserA);
+        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0, identity: identity);
 
         var session = await hostAgent.GetOrCreateSessionAsync("t-p3-1");
         await hostAgent.RunAsync("問題", session);
@@ -44,7 +46,9 @@ public sealed class ChatContextProviderAndRecorderTests
     {
         var chatClient = new FakeChatClient();
         var mem0 = new FakeMem0Client { RecallResult = "- 使用者是租戶 A\n" };
-        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0);
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "t-p3-2", UserA);
+        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0, identity: identity);
 
         var session = await hostAgent.GetOrCreateSessionAsync("t-p3-2");
         await hostAgent.RunAsync("第一問", session);
@@ -86,5 +90,41 @@ public sealed class ChatContextProviderAndRecorderTests
 
         Assert.Empty(mem0.Remembered);
         Assert.Empty(convos.Saved);
+    }
+
+    [Fact]
+    public async Task Mem0Recall_CallerRequestedCancellation_Propagates()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var mem0 = new FakeMem0Client
+        {
+            OnRecall = _ => cancellation.Cancel(),
+            ThrowOnRecall = new OperationCanceledException(cancellation.Token),
+        };
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "cancel-recall", UserA);
+        var (hostAgent, _, _) = TestChatAgent.Build(mem0: mem0, identity: identity);
+        var session = await hostAgent.GetOrCreateSessionAsync("cancel-recall");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => hostAgent.RunAsync("問題", session, cancellationToken: cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Mem0Remember_CallerRequestedCancellation_Propagates()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var mem0 = new FakeMem0Client
+        {
+            OnRemember = _ => cancellation.Cancel(),
+            ThrowOnRemember = new OperationCanceledException(cancellation.Token),
+        };
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "cancel-remember", UserA);
+        var (hostAgent, _, _) = TestChatAgent.Build(mem0: mem0, identity: identity);
+        var session = await hostAgent.GetOrCreateSessionAsync("cancel-remember");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => hostAgent.RunAsync("問題", session, cancellationToken: cancellation.Token));
     }
 }

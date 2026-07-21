@@ -80,7 +80,7 @@ public sealed class ChatController : ControllerBase
 
     /// <summary>AllowAnonymous 下認證中介軟體仍會驗有帶的 Bearer:驗過就有身分,沒帶或無效即匿名。</summary>
     private UserContext? MaybeUserContext()
-        => User.Identity?.IsAuthenticated == true ? User.ToUserContext() : null;
+        => User.ToUsableChatUserContext();
 
     /// <summary>
     /// 帶了 Authorization header 但驗證未通過(過期/無效 JWT)時回 X-Auth-Invalid: 1,

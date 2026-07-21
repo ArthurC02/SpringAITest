@@ -39,4 +39,28 @@ internal static class TestTokens
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
+
+    /// <summary>簽章與期限均有效、但刻意缺少聊天 identity claim 的 JWT，用來釘住 fail-closed 邊界。</summary>
+    public static string MintMissingChatIdentityClaim(bool omitSubject)
+    {
+        var now = DateTime.UtcNow;
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(DefaultSecret));
+        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var claims = new List<Claim> { new("role", "USER") };
+        if (omitSubject)
+        {
+            claims.Add(new("tenantCode", "demo-a"));
+        }
+        else
+        {
+            claims.Add(new Claim(JwtRegisteredClaimNames.Sub, "user-a"));
+        }
+
+        var token = new JwtSecurityToken(
+            claims: claims,
+            notBefore: now,
+            expires: now.AddHours(24),
+            signingCredentials: credentials);
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
 }

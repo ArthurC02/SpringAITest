@@ -16,7 +16,7 @@
 - AG-UI 仍輸出協定標準 `data: `(**有空格**),事件型別集合不變。
 - ApiError `{timestamp, status, message, fieldErrors}` 不變。
 
-**唯一對外可觀察的行為變更**:`/api/copilot/agui` 從 `AllowAnonymous` 變成需要認證(P1),詳見 §2.3。
+**新增 hardening 的對外行為**:AG-UI 收到 `401` 時前端必須沿用全域登出流程清除 session；匿名 `/api/chat*` 保留短期對話，但不再 recall/remember mem0。其餘協定格式不變。
 
 ### 1.1 P0 前置(03-design 核對後補)
 
@@ -40,6 +40,7 @@
 
 - token 變動(登入 / 換帳號)時 agent 必須重建,不可沿用舊 token。
 - 既有禁令維持:**不得**把 token 放進 `useCopilotReadable`(見 `frontend/AGENTS.md`)。
+- `HttpAgent` 的 fetch wrapper 收到 `401` 時，必須呼叫既有全域 logout，清除 session 與 chat localStorage 後回登入頁；不得留下「看似登入、每次副駕請求都失敗」的狀態。
 
 ### 2.3 未登入時的副駕
 
@@ -47,16 +48,14 @@
 
 ### 2.4 租戶隔離
 
-註冊 `SessionIsolationKeyProvider`,isolation key 取自 **JWT 的 tenant**,不得取自 wire 上的 `threadId` 或任何 request body 欄位。
+註冊 `SessionIsolationKeyProvider`,isolation key 固定為 **JWT 的 `{tenant}:{user}`**，不得取自 wire 上的 `threadId` 或任何 request body 欄位。
 
-- `Strict = true`(fail-closed):取不到租戶身分時拋例外,不得退回全域命名空間。
+- `Strict = true`(fail-closed):tenant 或 user 任一缺失／空白時視為無身分並拋例外；不得產生 `":"` 等共享 key，也不得退回全域命名空間。
 - 驗收必須驗**內容隔離**:不同租戶以同一 `threadId` 提問,第二個租戶不得讀到第一個的內容。**不可用 nullity 判定** —— `GetSessionAsync` 對未知 key 會自動建立空 session 而非回 `null`(01-plan §2 spike 實測)。
 
 ### 2.5 匿名與 `Strict=true` 的衝突(03-design 核對後補)
 
-`/api/chat` 維持 `AllowAnonymous`(§2.1 只改副駕端點),但 `Strict=true` 的 isolation key provider 對匿名請求**會拋** → 匿名聊天直接 500,是回歸。
-
-**解法:匿名走 `CreateSessionAsync` 用完即丟、完全不碰 store。** `Strict=true` 一步不放寬 —— 放寬等於讓匿名請求落進全域命名空間,正是 fail-closed 要防的事。
+`/api/chat` 維持 `AllowAnonymous`，但不使用 AG-UI 的 strict isolation store。`ChatAssistant` 明確 `withIsolation:false`：登入請求的 session `conversationId` 已由推導層前綴為 `{tenant}:{user}:...`，匿名則保留既有 caller-scoped conversationId 短期連續性。這不是放寬 AG-UI 隔離；兩條鏈路的隔離責任分別在 strict provider 與 key derivation。
 
 ---
 
@@ -70,8 +69,8 @@
 
 沿用 `ChatService.cs:202-213` `DeriveMemoryKeys` 的防 IDOR 語意,但拆成兩層:
 
-- **租戶維度** → 交給 `SessionIsolationKeyProvider`(§2.4)。
-- **conversation 維度** → `"{UserId}:{conversationId}"`,當作 `GetSessionAsync` 的 `conversationId` 參數。
+- **AG-UI 隔離維度** → `SessionIsolationKeyProvider` 的 `{tenant}:{user}`(§2.4)。
+- **ChatAssistant conversation 維度** → 已登入為 `"{tenant}:{user}:{conversationId}"`，當作 session `conversationId`；匿名維持既有可連續的 client conversation key。
 
 已登入時**不信任 request body 的 `userId`**(現行語意,不得放寬)。
 
@@ -87,7 +86,7 @@
 
 `MapAGUI` 須改用能從 DI 解析 agent 的 overload(`MapAGUI(IHostedAgentBuilder, pattern)`),搭配 session store。
 
-副駕取得伺服器端記憶後,前端仍會重送完整 message 陣列 —— **兩者不得重複累加**。驗收須確認同一 `threadId` 多輪對話不會出現訊息重複。
+副駕取得伺服器端記憶後,前端仍會重送完整 message 陣列 —— **兩者不得重複累加**。去重優先採 message ID；對 assistant 訊息必須有保守的 role/content/tool-call fingerprint fallback，以處理 client 重建 assistant ID。user 訊息不得因內容相同而被錯誤吞掉。驗收須確認同一 `threadId` 多輪對話不會出現訊息重複。
 
 ---
 
@@ -104,15 +103,15 @@
 
 | 元件 | 位置 | 職責 |
 | --- | --- | --- |
-| `AIContextProvider` | `ChatClientAgent` **內** | mem0 recall → 注入 `Instructions`;護欄 prompt(`ChatGuardPrompt` 語意)→ 注入 `Instructions` |
-| `ChatTurnRecorder : DelegatingAIAgent` | `ChatClientAgent` **外** | mem0 remember + 對話持久化到 backend(短路輪也會執行) |
+| `AIContextProvider` | `ChatClientAgent` **內** | 僅已登入者的 mem0 recall → 注入 `Instructions`;護欄 prompt(`ChatGuardPrompt` 語意)→ 注入 `Instructions` |
+| `ChatTurnRecorder : DelegatingAIAgent` | `ChatClientAgent` **外** | 僅已登入者的 mem0 remember + 對話持久化到 backend(短路輪也會執行) |
 
 ### 4.2 不得改變的語意
 
-- mem0 recall 在 prompt 前、remember 在**完整回覆後**(含工具融合結果)。
-- mem0 全程 **best-effort**,錯誤吞掉不得讓聊天中斷(現行 `ChatService.cs` 語意)。
+- 已登入的非路由主 run：mem0 recall 在 prompt 前、remember 在**完整回覆後**(含工具融合結果)。路由命中時，路由／summary 呼叫刻意不帶 history 或 mem0；但已登入使用者的最終摘要仍會在 recorder 被 remember。
+- mem0 全程 **best-effort**，由 `ChatContextProvider`／`ChatTurnRecorder` 的 pipeline 邊界保證；即使任一 `IMem0Client` 實作擲例外，也必須記錄後降級（recall 視為空、remember 視為 no-op），不得讓聊天中斷。
 - 對話持久化:鏈路 A 阻塞路徑失敗**往上拋 500**、串流路徑 best-effort 只記 warning —— 此差異是現行行為,P3 維持。
-- 匿名(鏈路 A 才可能出現)不寫記憶、不持久化、`/api/chat/history` 回空陣列。
+- 匿名(鏈路 A 才可能出現)不 recall/remember mem0、不持久化、`/api/chat/history` 回空陣列。
 
 ### 4.3 副駕的對話會進歷史
 
@@ -196,7 +195,7 @@ P4 之後副駕同時具備:
 
 ### 7.3 真鏈路驗證
 
-每個 phase 收尾派 `e2e-verifier` 打真服務一次。專案記憶 fakes-hide-real-behavior:全手寫 fake 會掩蓋真實序列化與跨服務差異,單元全綠不等於能動。
+每個 phase 收尾派 `e2e-verifier` 打真服務一次。專案記憶 fakes-hide-real-behavior:全手寫 fake 會掩蓋真實序列化與跨服務差異,單元全綠不等於能動。`scripts/verify-copilot-shared-core.ps1` 可作為 black-box smoke companion，但不能檢查模型輸入、session 去重/工具配對、mem0 儲存或 chunk 時序；其 `-Rebuild` 使用 `mock-gpt`，不能證明 routing。C-03/C-04/C-05/C-07/C-08 仍須具名 integration tests、`e2e-verifier` trace 與必要的 browser/proxy 檢查，routing 使用真實模型。
 
 ---
 

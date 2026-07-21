@@ -104,7 +104,7 @@ public sealed class ChatServiceTests
         var mem0 = new FakeMem0Client { RecallResult = "- 使用者喜歡貓\n" };
         var svc = Build(new FakeLlmAgent(), mem0, new FakeConversationStore(), chatClient: chatClient);
 
-        await svc.ChatAsync("問題", "u1", "c1");
+        await svc.ChatAsync("問題", "u1", "c1", UserA);
 
         // 護欄永遠打頭;mem0 前言緊接在後,一個換行相接,同一則 Instructions 字串(不再是第二則訊息)。
         var instructions = chatClient.LastOptions!.Instructions!;
@@ -274,7 +274,7 @@ public sealed class ChatServiceTests
     // 文件注記),匿名與登入對稱地有連續性——與現行 IChatMemoryStore(不分登入與否)行為一致。
 
     [Fact]
-    public async Task Fallback_BothBlank_UseDefault_ForMem0AndSharedWindow()
+    public async Task Fallback_BothBlank_SkipsMem0_AndUsesSharedWindow()
     {
         var chatClient = new FakeChatClient();
         var mem0 = new FakeMem0Client();
@@ -283,8 +283,8 @@ public sealed class ChatServiceTests
         await svc.ChatAsync("第一問", "", "");
         await svc.ChatAsync("第二問", "", "");
 
-        // userId 空白 → mem0 收到 uid="default"。
-        Assert.Equal("default", mem0.Remembered[0].UserId);
+        // 匿名沒有可安全歸屬的長期 identity，不能把所有訪客寫進 default mem0 uid。
+        Assert.Empty(mem0.Remembered);
         // conversationId 空白 → 退回 uid("default"),兩輪共用同一短期記憶視窗。
         Assert.Contains(chatClient.LastMessages!, m => m.Role == ChatRole.User && m.Text == "第一問");
         Assert.Equal("第二問", chatClient.LastMessages!.Last().Text);
@@ -485,15 +485,14 @@ public sealed class ChatServiceTests
     }
 
     [Fact]
-    public async Task Fallback_ConversationOnly_UserBlank_Mem0UsesDefault_WindowUsesCid()
+    public async Task Fallback_ConversationOnly_UserBlank_SkipsMem0_WindowUsesCid()
     {
         var chatClient = new FakeChatClient();
         var mem0 = new FakeMem0Client();
         var svc = Build(new FakeLlmAgent(), mem0, new FakeConversationStore(), chatClient: chatClient);
 
         await svc.ChatAsync("問一", "", "c1");
-        // userId 空白 → mem0 用 "default"。
-        Assert.Equal("default", mem0.Remembered[0].UserId);
+        Assert.Empty(mem0.Remembered);
 
         // 短期記憶用 "c1":同一 cid 第二輪含第一輪。
         await svc.ChatAsync("問二", "", "c1");

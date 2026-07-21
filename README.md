@@ -9,6 +9,7 @@ SpringAITest/
 ├── scripts/                    跨平台啟動腳本（.sh 給 Linux/macOS、.ps1 給 Windows）
 │   ├── start-infra.sh / .ps1   模式 A：只起基礎設施
 │   ├── start-full.sh  / .ps1   模式 B：全容器（infra + 前端 + 後端）
+│   ├── verify-copilot-shared-core.ps1  Copilot Shared Core 可重跑 black-box smoke companion
 │   └── ensure-mem0-db.* 　　　  備妥 mem0 的 postgres 前置（建 mem0_app、刷新 collation）；由上面兩腳本自動呼叫
 ├── platform/                    前置閘道：ASP.NET Core 10 WebAPI（Gateway + LLM 編排）
 │   ├── Platform.sln             .NET 方案檔
@@ -46,7 +47,7 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 362 個（Service 216 + Web 146）+ 手寫 fake（未引入 mocking 套件）。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 367 個（Service 218 + Web 149）+ 手寫 fake（未引入 mocking 套件）。
 - **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 173 個、手寫 fake repository（未引入 mocking 套件）。
 - **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint（lint）+ vite build（type check + bundle）。
 - **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 459 個。
@@ -95,6 +96,25 @@ OPENAI_API_KEY=sk-你的金鑰
 
 > 停止:`cd infra && docker compose --profile full down`。
 
+### Copilot Shared Core black-box smoke 驗證
+
+服務已啟動後，可執行這支可重跑的 black-box smoke companion；它不會刪除容器或 volume：
+
+```powershell
+pwsh -File scripts\verify-copilot-shared-core.ps1
+```
+
+參數如下：
+
+- `-BaseUrl http://localhost:8080`：platform base URL（預設值）。
+- `-ProxyBaseUrl http://localhost:5173`：Vite/nginx proxy base URL（預設值）。
+- `-Rebuild`：以 `CHAT_MODEL=mock-gpt` 啟動／重建 full mode，再開始驗證。
+- `-IncludeMem0Outage`：執行 C-06；此案例會暫停 mem0，並在 `finally` 保證重啟，因此僅在可接受短暫 mem0 中斷時使用。
+
+這支腳本提供 C cases 的部分外部 smoke 訊號，**不是** C-01～C-08 的充分 release 證據。它無法檢查模型實際輸入、session 中的重複訊息計數、tool call/result 配對完整性、mem0 是否真的寫入，也無法量測逐 chunk 到達時間；`-Rebuild` 使用 `mock-gpt`，因此不能驗證 skill routing。
+
+release evidence 仍須保留 [plans/copilot-shared-core/04-acceptance-test.md](plans/copilot-shared-core/04-acceptance-test.md) 定義的 C gates：`C-03`/`C-04`/`C-05`/`C-07`/`C-08` 必須由具名 integration tests，加上 `e2e-verifier` 的真服務 trace／必要時手動 browser proxy 檢查完成；routing 驗證必須使用真實模型，不能以 `mock-gpt` 取代。此 smoke script 只能作為它們的補充。
+
 ### 模式 A:在主機補起平台與前端
 
 `start-infra` 起基礎設施與核心服務容器；平台閘道與前端在主機跑（享熱重載 / HMR）:
@@ -136,7 +156,7 @@ npm install && npm run dev                # :5173（Vite proxy /api → :8080）
 
 ```bash
 # 送出訊息（非串流）。userId / conversationId 皆選填：
-#   userId         → mem0 長期記憶分群（哪個「人」），省略歸 default 使用者。
+#   userId         → 匿名短期對話的 caller key；已登入時由 JWT 身分覆蓋。
 #   conversationId → 短期記憶分群（哪一「串」對話），省略則退回以 userId 分群。
 curl -X POST http://localhost:8080/api/chat \
   -H "Content-Type: application/json" \
@@ -152,7 +172,7 @@ curl http://localhost:8080/api/chat/history
 ```
 
 > Windows PowerShell 內 JSON 的雙引號需轉義:`-d '{\"message\": \"...\"}'`。
-> 前端登入後，`userId` 使用登入帳號 username（mem0 長期記憶按人分群），`conversationId` 存 localStorage 並隨請求帶上。同一個 username 跨對話穩定；`conversationId` 在按「新建對話」時換新 UUID，讓短期記憶重新開始。
+> 前端登入後，`userId` 不受 request body 信任，長期記憶與持久化均由 JWT `{tenant}:{user}` 歸戶；`conversationId` 存 localStorage 並隨請求帶上。同一登入身分跨對話穩定；按「新建對話」時換新 UUID，讓短期記憶重新開始。匿名 `/api/chat*` 只保留短期對話，不 recall/remember mem0，也不持久化。
 
 ## 後端:兩層服務架構
 
@@ -205,7 +225,7 @@ OpenAI / ...（未來可加 Claude 等）
 跨對話、跨 session 的長期記憶由 **mem0**（官方 `mem0-api-server`）提供,後端經 REST 呼叫:
 
 ```
-使用者訊息（帶 userId）
+已登入使用者訊息（由 JWT `{tenant}:{user}` 歸戶）
    │
    ▼  ① 呼叫 LLM 前：POST mem0 /search → 取回相關記憶,塞進 system prompt
 共用 pipeline（ChatContextProvider）─────────────────────────► LLM 回覆
@@ -214,8 +234,8 @@ OpenAI / ...（未來可加 Claude 等）
 mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量存進 postgres/pgvector
 ```
 
-- **接點是共用的 pipeline，不是單一 controller**:`ChatContextProvider`（呼叫 LLM 前 `recall`，記憶注入 prompt）與 `ChatTurnRecorder`（回覆後 `remember`）掛在兩條聊天鏈路共用的 Agent Framework pipeline 上，`ChatView`（`/api/chat*`）與 CopilotKit 副駕（`/api/copilot/agui`）都會用到，不再只服務前者。mem0 掛掉時 `recall` 回空、`remember` 無動作（`Mem0Client` 內部吞錯），**聊天主流程不受影響**。
-- **記憶按 `userId` 分群**:前端每個瀏覽器自帶一組 `userId`(見 [API](#api));查無記憶時行為與未整合前完全相同。
+- **接點是共用的 pipeline，不是單一 controller**:`ChatContextProvider`（呼叫 LLM 前 `recall`，記憶注入 Instructions）與 `ChatTurnRecorder`（完整回覆後 `remember`）掛在兩條聊天鏈路共用的 Agent Framework pipeline 上，已登入的 `ChatView`（`/api/chat*`）與 CopilotKit 副駕（`/api/copilot/agui`）都會用到。匿名 `ChatView` 僅保留短期連續性，既不 recall/remember mem0，也不持久化。mem0 的 best-effort 由 pipeline 邊界保證：任何 `IMem0Client` 例外都會記錄並降級為空 recall/no-op remember，**聊天主流程不受影響**。
+- **記憶按 JWT 身分分群**:登入後以 `{tenant}:{user}` 分群，request body 的 `userId` 不能指定或冒用其他人的長期記憶（見 [API](#api)）。
 - **不另接 OpenAI / 不另加向量庫**:mem0 的 LLM 與 embedder 都指向現有 LiteLLM,向量存進現有 postgres 的 pgvector(故 `postgres` 映像用 `pgvector/pgvector:pg17`)。embedding 模型需在 `litellm-config.yaml` 註冊(`text-embedding-3-small`)。
 
 > **官方映像的兩個坑**(已由 `infra/mem0.Dockerfile` 與 `scripts/ensure-mem0-db.*` 處理,啟動腳本會自動套用):
@@ -227,7 +247,7 @@ mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量�
 同一次對話的近期來回，由 **Microsoft Agent Framework 的 session store**（`InMemoryChatHistoryProvider` + `SlidingWindowCompactionStrategy`）提供，和 mem0 互補:
 
 - **兩種記憶各司其職**:mem0 存「跨 session 的長期事實」(走 system prompt 注入);短期記憶存「這一串對話的近期訊息」(直接把前幾輪對話補回 prompt),讓 LLM 認得「上一句」。
-- **框架實作、兩條聊天鏈路共用**:per-conversation 保留最近 20 則訊息、以「輪」為單位裁切（不會拆散工具呼叫/結果配對），`ChatView`（`/api/chat*`）與 CopilotKit 副駕都吃同一份設定（見 [API](#api)）。
+- **框架實作、兩條聊天鏈路共用**:per-conversation 保留最近 20 則訊息、以「輪」為單位裁切（不會拆散工具呼叫/結果配對）。AG-UI 用 JWT `{tenant}:{user}` strict isolation（任一 claim 缺失即 fail-closed）；ChatView 的登入 session key 已前綴同一身分、匿名則保留自己的短期 conversation key。AG-UI 重送完整 message 陣列時先按 ID 去重，assistant ID 重建時以保守 fingerprint 避免重複歷史。
 - **記憶體儲存、重啟即清**:短期記憶在應用程序記憶體中，重啟平台閘道後對話脈絡歸零屬預期。若要跨重啟保留完整對話，須改為在資料庫（如 backend appdb）持久化。
 
 ## 認證與多租戶
@@ -369,7 +389,7 @@ curl -X POST http://localhost:8080/api/skills/validate \
 
 ### 注意事項
 
-- **前端認證**:登入頁面支持使用種子帳號或自助註冊（需租戶邀請碼），登入後存 token 於 localStorage，所有 API 請求皆帶 `Authorization: Bearer <token>` header（`apiFetch` 統一處理）。任何 401 回應會清空 session 並回登入頁。
+- **前端認證**:登入頁面支持使用種子帳號或自助註冊（需租戶邀請碼），登入後存 token 於 localStorage，所有 API 請求皆帶 `Authorization: Bearer <token>` header。`apiFetch` 與 CopilotKit `HttpAgent` 的 custom fetch 都必須把任何 401 送入同一全域 logout，清空 session 與 chat localStorage 後回登入頁。
 - **向量嵌入**:開發預設 `WORKFLOW_EMBEDDINGS_PROVIDER=fake`，無需 OpenAI 額度，可驗證整條 RAG 鏈。正式環境改為 `openai` 並確保 `OPENAI_API_KEY` 有效。
 - **多租戶隔離**:文件與向量檢索結果都按租戶代碼隔離，使用者只能看到同租戶的資料。
 - **appdb 資料庫**:核心服務 backend 連接的生產資料庫（`localhost:5433`），存儲使用者、租戶、聊天歷史、文件、向量與組態；重啟後資料持久保留。
