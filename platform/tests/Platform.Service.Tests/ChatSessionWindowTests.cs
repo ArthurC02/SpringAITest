@@ -35,6 +35,7 @@ public sealed class ChatSessionWindowTests
 
     // ---- T-P2-1:視窗 20 則(on-point)—— 不裁切 ----
     [Fact]
+    [Trait("EvidenceGate", "E-03")]
     public async Task Window_At20Messages_NothingCompacted()
     {
         var chatClient = new FakeChatClient();
@@ -56,6 +57,7 @@ public sealed class ChatSessionWindowTests
 
     // ---- T-P2-2:視窗 21 則(off-point)—— 最舊整個 turn 被裁 ----
     [Fact]
+    [Trait("EvidenceGate", "E-03")]
     public async Task Window_At21Messages_OldestTurnDropped()
     {
         var chatClient = new FakeChatClient { Response = "round1-reply" };
@@ -103,6 +105,7 @@ public sealed class ChatSessionWindowTests
 
     // ---- B-P2-03:tool call / tool result 配對不被拆散,裁切以整個 turn 為原子單位 ----
     [Fact]
+    [Trait("EvidenceGate", "E-03")]
     public async Task Window_ToolCallAndResult_NotSplitByCompaction()
     {
         var chatClient = new FakeChatClient { Response = "確認" };

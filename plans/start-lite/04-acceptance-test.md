@@ -1,8 +1,8 @@
 # 驗收測試 — start-lite(無容器啟動模式)
 
-> 狀態: **規劃中(實作前)。** 依據: [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)(§5 驗收條件來源)、[03-design.md](03-design.md)(簽章與 DI 佈線)。
+> 狀態: **已實作、e2e 驗證通過。** 依據: [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)(§5 驗收條件)、[03-design.md](03-design.md)(簽章與 DI 佈線)。
 >
-> 本案的核心風險與 copilot-shared-core 不同:那邊是「重構既有行為,怕改壞」;這邊是「**新增一條平行模式,怕污染預設模式**」。因此安全網的重心是 **A 組:三個環變全部未設時,現行為一個位元都不能變** —— 既有 platform 367 案、backend 173 案、workflow 459 案就是這張網,任何一案因本計畫變紅即 blocker。
+> 本案的核心風險是「**新增一條平行模式,怕污染預設模式**」。安全網是 **A 組:三個環變全部未設時,現行為一個位元都不能變** —— 既有 platform 390 案、backend 185 案、workflow 459 案驗證通過。
 
 ---
 
@@ -36,8 +36,8 @@
 
 | ID | 前置條件 | 動作 | 預期結果 |
 | --- | --- | --- | --- |
-| `A-01` | 三個環變皆未設 | `platform/` 下 `dotnet test` | **367 案全綠、案數不減**(Service 218 + Web 149;若期間其他計畫增了案數,以動工前基線為準) |
-| `A-02` | 同上 | `backend/` 下 `dotnet test` | **173 案全綠**,且 Fakes 搬遷後**未改任何斷言**(原則 5) |
+| `A-01` | 三個環變皆未設 | `platform/` 下 `dotnet test` | **390 案全綠、案數不減**(Service 241 + Web 149;起始基線 367,新增 23 案) |
+| `A-02` | 同上 | `backend/` 下 `dotnet test` | **185 案全綠**,且 Fakes 搬遷後**未改任何斷言**(原則 5;起始基線 173,新增 12 案) |
 | `A-03` | `WebApplicationFactory`,環變未設 | 解析 `IMem0Client` | 具體型別是 **`Mem0Client`**(HTTP 版),不是 InMemory |
 | `A-04` | 同上,backend `WebApplicationFactory`(Testing 環境) | 解析六個 repository 介面 | 具體型別是 **Dapper 版**;`NpgsqlDataSource` 仍有註冊。Testing 環境跳過 DbBootstrap 的既有行為不變 |
 | `A-05` | `OTEL_MODE` 未設,Testing 環境 | platform 啟動(`WebApplicationFactory`) | 不掛 Console exporter、不註冊 `RingBufferActivityExporter` singleton(`GetService` 回 null)、無 get_recent_traces tool。既有「Testing 不掛 OTLP」行為不變 |

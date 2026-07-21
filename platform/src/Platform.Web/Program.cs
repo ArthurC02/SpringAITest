@@ -6,6 +6,7 @@ using Platform.Service.Options;
 using Platform.Web.Auth;
 using Platform.Web.Errors;
 using Platform.Web.Infrastructure;
+using Platform.Web.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Agents.AI;
@@ -14,6 +15,7 @@ using Microsoft.Agents.AI.Hosting;
 using Microsoft.Agents.AI.Hosting.AGUI.AspNetCore;
 using Microsoft.Extensions.AI;
 using OpenAI;
+using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Trace;
 
@@ -115,6 +117,17 @@ builder.Services.AddSingleton<IChatClient>(_ =>
     .AsIChatClient());
 builder.Services.AddAGUI();
 
+// ---------------------------------------------------------------------------
+// OTel Lite 模式(OTEL_MODE=console,start-lite):ring buffer 必須在 WithTracing lambda 之外
+// 建立(lambda 內 service collection 已唯讀),才能同時交給 OTel pipeline(SimpleActivityExportProcessor)
+// 與下面兩顆 hosted agent 的 get_recent_traces 工具(共用同一顆 buffer)。實際掛載見底部 OTel 區段。
+// 預設(未設或其他值):otelConsole=false、ringBuffer/traceTool 不佈線,行為與現行 OTLP 模式逐位元相同。
+// ---------------------------------------------------------------------------
+var otelConsole = string.Equals(cfg["OTEL_MODE"], "console", StringComparison.OrdinalIgnoreCase);
+var ringBuffer = otelConsole ? new RingBufferActivityExporter() : null;
+// 單一 AIFunction 實例、兩條聊天管線共用(無狀態、讀同一顆 ring buffer);非 console 模式為 null。
+var traceTool = ringBuffer is not null ? ChatTraceToolProvider.Create(ringBuffer) : null;
+
 // 租戶隔離:isolation key 取自 JWT 身分(租戶:使用者),不得取自 threadId/body 任何欄位;
 // Strict=true(框架預設)fail-closed——取不到身分時 session store 直接拋例外,不退回全域命名空間。
 builder.Services.AddSingleton<SessionIsolationKeyProvider, JwtTenantIsolationKeyProvider>();
@@ -156,7 +169,12 @@ var copilotAgent = builder.Services.AddAIAgent(
             var chatClientAgent = sp.GetRequiredService<IChatClient>().AsAIAgent(new ChatClientAgentOptions
             {
                 Name = name,
-                ChatOptions = new ChatOptions { Instructions = copilotInstructions },
+                // Tools = null(預設模式)與不設 Tools 等價;console 模式掛 get_recent_traces。
+                ChatOptions = new ChatOptions
+                {
+                    Instructions = copilotInstructions,
+                    Tools = traceTool is not null ? new List<AITool> { traceTool } : null,
+                },
                 ChatHistoryProvider = chatHistoryProvider,
                 AIContextProviders = new AIContextProvider[]
                 {
@@ -190,7 +208,7 @@ builder.Services.AddAIAgent(
         {
             var scopeFactory = sp.GetRequiredService<IServiceScopeFactory>();
             var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
-            var chatClientAgent = sp.GetRequiredService<IChatClient>().AsAIAgent(new ChatClientAgentOptions
+            var chatAssistantOptions = new ChatClientAgentOptions
             {
                 Name = name,
                 ChatHistoryProvider = chatHistoryProvider,
@@ -198,7 +216,13 @@ builder.Services.AddAIAgent(
                 {
                     new ChatContextProvider(scopeFactory, loggerFactory.CreateLogger<ChatContextProvider>()),
                 },
-            });
+            };
+            // 鏈路 A 預設不帶 ChatOptions(維持逐位元現行行為);僅 console 模式掛 get_recent_traces。
+            if (traceTool is not null)
+            {
+                chatAssistantOptions.ChatOptions = new ChatOptions { Tools = new List<AITool> { traceTool } };
+            }
+            var chatClientAgent = sp.GetRequiredService<IChatClient>().AsAIAgent(chatAssistantOptions);
             var routing = new SkillRoutingAgent(
                 chatClientAgent, sp.GetRequiredService<ILlmAgent>(), chatHistoryProvider, scopeFactory,
                 loggerFactory.CreateLogger<SkillRoutingAgent>());
@@ -212,7 +236,16 @@ builder.Services.AddSingleton(sp => new AIHostAgent(
     sp.GetRequiredKeyedService<AgentSessionStore>("ChatAssistant")));
 
 // mem0:預設逾時即可(記憶best-effort)。
-builder.Services.AddHttpClient<IMem0Client, Mem0Client>();
+// MEM0_MODE=inmemory(start-lite):改用進程內 InMemoryMem0Client 單例(重啟即失憶);
+// 未設或其他值:維持現行 HTTP Mem0Client,行為逐位元不變。
+if (string.Equals(cfg["MEM0_MODE"], "inmemory", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<IMem0Client, InMemoryMem0Client>();
+}
+else
+{
+    builder.Services.AddHttpClient<IMem0Client, Mem0Client>();
+}
 
 // 下游工作流 client:連線逾時 5s;讀取逾時 150s(強制 HTTP/1.1 在 service 內設定)。
 builder.Services.AddHttpClient<IWorkflowService, WorkflowService>(c => c.Timeout = TimeSpan.FromSeconds(150))
@@ -326,8 +359,15 @@ builder.Services.AddOpenTelemetry()
         tracing.AddAspNetCoreInstrumentation(o =>
             o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/actuator/health"));
 
-        if (!builder.Environment.IsEnvironment("Testing")
-            && !builder.Environment.IsEnvironment("RateLimitingTesting"))
+        if (otelConsole)
+        {
+            // OTEL_MODE=console(start-lite):Console exporter(stdout 逐 span JSON)+ ring buffer
+            // (get_recent_traces 讀取來源)。ringBuffer 已在 lambda 外建立,此處僅掛 processor。
+            tracing.AddConsoleExporter();
+            tracing.AddProcessor(new SimpleActivityExportProcessor(ringBuffer!));
+        }
+        else if (!builder.Environment.IsEnvironment("Testing")
+                 && !builder.Environment.IsEnvironment("RateLimitingTesting"))
         {
             tracing.AddOtlpExporter(o =>
             {
@@ -340,6 +380,13 @@ builder.Services.AddOpenTelemetry()
             });
         }
     });
+
+// ring buffer 註冊為單例(lambda 外、AddOpenTelemetry 之後):get_recent_traces 工具與 OTel pipeline
+// 拿到的是同一顆(04-acceptance-test B-O-04)。非 console 模式不註冊(GetService 回 null,對齊 A-05)。
+if (ringBuffer is not null)
+{
+    builder.Services.AddSingleton(ringBuffer);
+}
 
 var app = builder.Build();
 

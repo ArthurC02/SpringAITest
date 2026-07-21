@@ -6,13 +6,13 @@ Solution-wide guidance only. Each area has its own `AGENTS.md` (+ `CLAUDE.md` im
 
 | Area        | What it is                                                                                                                                                                | Details                                  |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `platform/` | ASP.NET Core 10 gateway (`:8080`): JWT verify, SSE chat, Microsoft Agent Framework + AG-UI endpoint, mem0, BackendClient proxy, Skill CRUD/invoke proxy. xUnit 367 tests (Service 218 + Web 149). | [platform/AGENTS.md](platform/AGENTS.md) |
-| `backend/`  | ASP.NET Core 10 core service (`:8002`): feature folders, Dapper + appdb (PostgreSQL/pgvector), RabbitMQ document consumer, issues JWTs, Skills CRUD. xUnit 173 tests.     | [backend/AGENTS.md](backend/AGENTS.md)   |
+| `platform/` | ASP.NET Core 10 gateway (`:8080`): JWT verify, SSE chat, Microsoft Agent Framework + AG-UI endpoint, mem0, BackendClient proxy, Skill CRUD/invoke proxy. xUnit 391 tests (Service 241 + Web 150). | [platform/AGENTS.md](platform/AGENTS.md) |
+| `backend/`  | ASP.NET Core 10 core service (`:8002`): feature folders, Dapper + appdb (PostgreSQL/pgvector), RabbitMQ document consumer, issues JWTs, Skills CRUD. xUnit 185 tests.     | [backend/AGENTS.md](backend/AGENTS.md)   |
 | `frontend/` | React 19 + Vite + TypeScript SPA (`:5173`): login + four views (Chat, Documents, Analysis, Config), CopilotKit sidebar.                                             | [frontend/AGENTS.md](frontend/AGENTS.md) |
 | `workflow/` | Python 3.12+ LangGraph + FastAPI (host `:8001`): Skill engine layer, node registry, retrieval via backend HTTP. pytest 459 tests.                        | [workflow/AGENTS.md](workflow/AGENTS.md) |
 | `infra/`    | Docker Compose (LiteLLM, Langfuse, postgres, RabbitMQ, mem0, appdb…), `litellm-config.yaml`. `scripts/` holds startup helpers.                                            | [infra/AGENTS.md](infra/AGENTS.md)       |
 
-Start services with `.\scripts\start-infra.ps1` / `./scripts/start-infra.sh` (infra-only, default) or `start-full.*` (everything containerized). Run modes, port conflicts, and container known-issues: [infra/AGENTS.md](infra/AGENTS.md); run-mode matrix: [README.md](README.md).
+Start services with `.\scripts\start-infra.ps1` / `./scripts/start-infra.sh` (infra-only, default), `start-full.*` (everything containerized), or `start-lite.*` (no containers, all localhost). Run modes, port conflicts, and container known-issues: [infra/AGENTS.md](infra/AGENTS.md); run-mode matrix: [README.md](README.md).
 
 ## Subagent Delegation
 

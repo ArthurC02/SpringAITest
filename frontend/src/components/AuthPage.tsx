@@ -120,7 +120,7 @@ export default function AuthPage({ login, register }: Props) {
   const inviteErr = clientErrors.inviteCode || fieldErrors.inviteCode
 
   return (
-    <div className="auth">
+    <div className="auth" data-testid="auth-page">
       <form className="auth__card" onSubmit={onSubmit} noValidate>
         <h1 className="auth__title">{isRegister ? '註冊' : '登入'}</h1>
         <p className="muted" style={{ marginTop: 0 }}>資料分析平台</p>
@@ -129,6 +129,7 @@ export default function AuthPage({ login, register }: Props) {
           <label htmlFor="username">帳號</label>
           <input
             id="username"
+            data-testid="auth-username"
             className="input"
             value={username}
             onChange={(e) => onChange('username', e.target.value, setUsername)}
@@ -150,6 +151,7 @@ export default function AuthPage({ login, register }: Props) {
           <input
             id="password"
             type="password"
+            data-testid="auth-password"
             className="input"
             value={password}
             onChange={(e) => onChange('password', e.target.value, setPassword)}
@@ -173,6 +175,7 @@ export default function AuthPage({ login, register }: Props) {
               <label htmlFor="tenantCode">租戶代碼</label>
               <input
                 id="tenantCode"
+                data-testid="auth-tenant-code"
                 className="input"
                 value={tenantCode}
                 onChange={(e) => onChange('tenantCode', e.target.value, setTenantCode)}
@@ -191,6 +194,7 @@ export default function AuthPage({ login, register }: Props) {
               <label htmlFor="inviteCode">邀請碼</label>
               <input
                 id="inviteCode"
+                data-testid="auth-invite-code"
                 className="input"
                 value={inviteCode}
                 onChange={(e) => onChange('inviteCode', e.target.value, setInviteCode)}
@@ -215,13 +219,24 @@ export default function AuthPage({ login, register }: Props) {
           </p>
         )}
 
-        <button className="btn btn--primary" type="submit" disabled={busy} style={{ width: '100%' }}>
+        <button
+          className="btn btn--primary"
+          data-testid="auth-submit"
+          type="submit"
+          disabled={busy}
+          style={{ width: '100%' }}
+        >
           {busy ? '請稍候…' : isRegister ? '註冊' : '登入'}
         </button>
 
         <p className="muted" style={{ marginTop: 14, fontSize: 13 }}>
           {isRegister ? '已經有帳號?' : '還沒有帳號?'}{' '}
-          <button type="button" className="auth__switch" onClick={switchMode}>
+          <button
+            type="button"
+            className="auth__switch"
+            data-testid="auth-switch-mode"
+            onClick={switchMode}
+          >
             {isRegister ? '改為登入' : '註冊'}
           </button>
         </p>

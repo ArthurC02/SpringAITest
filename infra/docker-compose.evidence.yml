@@ -1,0 +1,139 @@
+# Optional release-evidence services. Use together with docker-compose.yml:
+# docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence up -d
+# They publish only on loopback and never replace the normal production profile.
+services:
+  # These overrides are inert unless the real-evidence wrapper explicitly sets
+  # EVIDENCE_REAL_*.  It temporarily recreates only these three real dependency
+  # services, then brings them back with docker-compose.yml in its finally block.
+  # Keep the model names as fixed LiteLLM aliases: a floating provider alias is
+  # not admissible release evidence.
+  mem0:
+    environment:
+      MEM0_DEFAULT_LLM_MODEL: ${EVIDENCE_REAL_MEM0_MODEL:-gpt-4o-mini}
+      MEM0_DEFAULT_EMBEDDER_MODEL: ${EVIDENCE_REAL_EMBEDDING_MODEL:-text-embedding-3-small}
+
+  backend:
+    environment:
+      # Match the normal compose default outside RealModel so starting the
+      # deterministic profile cannot silently change a caller's embedding mode.
+      EMBEDDINGS_PROVIDER: ${EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER:-${WORKFLOW_EMBEDDINGS_PROVIDER:-fake}}
+      EMBEDDING_MODEL: ${EVIDENCE_REAL_EMBEDDING_MODEL:-text-embedding-3-small}
+
+  workflow:
+    environment:
+      LLM_MODEL: ${EVIDENCE_REAL_WORKFLOW_MODEL:-mock-gpt}
+
+  evidence-model:
+    profiles: ["evidence"]
+    build:
+      context: ./evidence
+    command: ["python", "/app/evidence_model.py"]
+    ports:
+      - "127.0.0.1:4010:8080"
+    environment:
+      EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:?set a per-run HMAC key via the evidence wrapper}
+      EVIDENCE_FRAME_DELAY_SECONDS: ${EVIDENCE_FRAME_DELAY_SECONDS:-0.5}
+    networks: [evidence_internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  workflow-capture-proxy:
+    profiles: ["evidence"]
+    build:
+      context: ./evidence
+    command: ["python", "/app/workflow_capture_proxy.py"]
+    depends_on:
+      workflow:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8011:8081"
+    environment:
+      EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:?set a per-run HMAC key via the evidence wrapper}
+      WORKFLOW_UPSTREAM_URL: http://workflow:8000
+    networks:
+      - default
+      - evidence_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # A separate gateway instance keeps deterministic evidence traffic out of the
+  # normal platform service. Evidence runners use http://127.0.0.1:8180.
+  platform-evidence:
+    profiles: ["evidence"]
+    build:
+      context: ../platform
+      dockerfile: Dockerfile
+    depends_on:
+      evidence-model:
+        condition: service_healthy
+      workflow-capture-proxy:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8180:8080"
+    networks:
+      - default
+      - evidence_internal
+    environment:
+      # Deterministic is the default.  RealModel switches only this isolated
+      # gateway to LiteLLM; it never alters the normal platform service.
+      LLM_BASE_URL: ${EVIDENCE_PLATFORM_LLM_BASE_URL:-http://evidence-model:8080}
+      LITELLM_KEY: ${EVIDENCE_PLATFORM_LITELLM_KEY:-evidence-not-a-secret}
+      CHAT_MODEL: ${EVIDENCE_PLATFORM_CHAT_MODEL:-evidence-model}
+      MEM0_MODE: ${EVIDENCE_PLATFORM_MEM0_MODE:-inmemory}
+      MEM0_BASE_URL: http://mem0:8000
+      WORKFLOW_BASE_URL: http://workflow-capture-proxy:8081
+      BACKEND_BASE_URL: http://backend:8080
+      RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
+      TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-10.253.254.0/28}
+
+  # Curl targets this proxy directly. It retains production SSE nginx settings
+  # while routing to the isolated platform-evidence service.
+  evidence-nginx:
+    profiles: ["evidence"]
+    image: nginx:1.27-alpine
+    depends_on:
+      platform-evidence:
+        condition: service_started
+      evidence-model:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8181:80"
+    volumes:
+      - ./evidence/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - default
+      - evidence_internal
+
+  # Same compiled SPA as full mode, but its same-origin nginx routes to the
+  # isolated evidence platform. Browser evidence uses http://127.0.0.1:5180.
+  frontend-evidence:
+    profiles: ["evidence"]
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    depends_on:
+      platform-evidence:
+        condition: service_started
+    ports:
+      - "127.0.0.1:5180:80"
+    volumes:
+      - ./evidence/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+networks:
+  evidence_internal:
+    # A dedicated bridge keeps capture endpoints off the normal default network.
+    # Do not mark it `internal`: Docker Desktop on Windows then suppresses the
+    # loopback-published capture ports even though HostConfig shows a binding.
+    driver: bridge

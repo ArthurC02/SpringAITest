@@ -170,6 +170,7 @@ export default function AppShell({ session, onLogout }: Props) {
               <button
                 key={n.id}
                 className={`shell__nav${view === n.id ? ' shell__nav--active' : ''}`}
+                data-testid={`nav-${n.id}`}
                 aria-current={view === n.id ? 'page' : undefined}
                 onClick={() => setView(n.id)}
               >
@@ -184,11 +185,11 @@ export default function AppShell({ session, onLogout }: Props) {
 
         <div className="shell__main">
           <header className="shell__topbar">
-            <span className="shell__identity">
+            <span className="shell__identity" data-testid="session-identity">
               {session.username} @ {session.tenantCode}
             </span>
             <span className={`badge badge--${isAdmin ? 'admin' : 'user'}`}>{session.role}</span>
-            <button className="btn shell__logout" onClick={onLogout}>
+            <button className="btn shell__logout" data-testid="logout-button" onClick={onLogout}>
               登出
             </button>
           </header>
@@ -205,28 +206,30 @@ export default function AppShell({ session, onLogout }: Props) {
         </div>
 
         {/* 全站 AI 副駕:浮動側欄(自帶開合鈕),不動既有五視圖版面。defaultOpen=false。 */}
-        <CopilotSidebar
-          defaultOpen={false}
-          instructions={[
-            '你是「資料分析平台」的操作助理,一律以繁體中文簡潔回答。',
-            '',
-            '平台操作手冊(使用者問「怎麼做」時照此說明步驟):',
-            '- 文件:AI 檢索用的知識庫。新增:文件視圖 → 填標題 → 內容來源選「上傳檔案」(.txt/.md)或「貼上文字」→ 按「新增文件」。送出後狀態「處理中」,背景切塊與向量化完成後轉「就緒」,失敗則顯示「失敗」;清單可刪除文件。',
-            '- 聊天:與 AI 對話(串流回覆),「新對話」會重開上下文。',
-            '- 分析:查看統計摘要。',
-            '- 系統設定:僅管理員(ADMIN)可見可改。Skill 編輯在「系統設定 › Skill」(僅管理員):可新增/編輯/試跑/查版本;試跑會執行已存在的 Skill 並可展開節點軌跡。',
-            '文件依租戶隔離,使用者只看得到自己租戶的資料。',
-            '',
-            '你可代為執行的動作:createDocument(建文件)、deleteDocument(刪文件,務必先經使用者確認)、askKnowledgeBase(用知識庫回答問題)、switchView(切換視圖)。',
-            '回答「怎麼做 X」時先給步驟,若該事能用動作代勞,主動提議由你執行。沒把握的功能明說不確定,不要編造。',
-          ].join('\n')}
-          labels={{
-            title: 'AI 副駕',
-            initial:
-              '嗨,我是 AI 副駕,懂這個平台的操作,也能直接代勞。試試:\n・「文件功能怎麼用?」\n・「幫我把這段文字存成文件:…」\n・「用知識庫回答:…」\n・「切到分析頁」',
-            placeholder: '輸入訊息…',
-          }}
-        />
+        <div data-testid="copilot-sidebar">
+          <CopilotSidebar
+            defaultOpen={false}
+            instructions={[
+              '你是「資料分析平台」的操作助理,一律以繁體中文簡潔回答。',
+              '',
+              '平台操作手冊(使用者問「怎麼做」時照此說明步驟):',
+              '- 文件:AI 檢索用的知識庫。新增:文件視圖 → 填標題 → 內容來源選「上傳檔案」(.txt/.md)或「貼上文字」→ 按「新增文件」。送出後狀態「處理中」,背景切塊與向量化完成後轉「就緒」,失敗則顯示「失敗」;清單可刪除文件。',
+              '- 聊天:與 AI 對話(串流回覆),「新對話」會重開上下文。',
+              '- 分析:查看統計摘要。',
+              '- 系統設定:僅管理員(ADMIN)可見可改。Skill 編輯在「系統設定 › Skill」(僅管理員):可新增/編輯/試跑/查版本;試跑會執行已存在的 Skill 並可展開節點軌跡。',
+              '文件依租戶隔離,使用者只看得到自己租戶的資料。',
+              '',
+              '你可代為執行的動作:createDocument(建文件)、deleteDocument(刪文件,務必先經使用者確認)、askKnowledgeBase(用知識庫回答問題)、switchView(切換視圖)。',
+              '回答「怎麼做 X」時先給步驟,若該事能用動作代勞,主動提議由你執行。沒把握的功能明說不確定,不要編造。',
+            ].join('\n')}
+            labels={{
+              title: 'AI 副駕',
+              initial:
+                '嗨,我是 AI 副駕,懂這個平台的操作,也能直接代勞。試試:\n・「文件功能怎麼用?」\n・「幫我把這段文字存成文件:…」\n・「用知識庫回答:…」\n・「切到分析頁」',
+              placeholder: '輸入訊息…',
+            }}
+          />
+        </div>
       </div>
     </ToastProvider>
   )

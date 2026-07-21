@@ -20,6 +20,8 @@ __pycache__/
 node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/test-results/
+frontend/playwright-report/
 *.local
 npm-debug.log*
 yarn-debug.log*
@@ -29,6 +31,7 @@ pnpm-debug.log*
 ### 雜項 ###
 litellm-venv/
 .playwright-mcp/
+.lite/
 
 # Local release evidence may contain request/trace projections; never commit it.
 artifacts/copilot-shared-core/

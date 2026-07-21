@@ -49,13 +49,13 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
 
     // 模擬真實 @ag-ui/client:呼叫端自行組出「本輪要送出的完整 messages 陣列」(client 維護的全歷史)
     // 直接傳進來,而非只送單一新訊息——B-P2-04 的盲區正是舊版 RunInputFor 從未測過這個形狀。
-    private static object RunInputWithMessages(string threadId, IEnumerable<object> messages) => new
+    private static object RunInputWithMessages(string threadId, IEnumerable<object> messages, object[]? tools = null) => new
     {
         threadId,
         runId = "r1",
         state = new { },
         messages = messages.ToArray(),
-        tools = Array.Empty<object>(),
+        tools = tools ?? Array.Empty<object>(),
         context = Array.Empty<object>(),
         forwardedProps = new { },
     };
@@ -63,6 +63,25 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     private static object UserMsg(string id, string content) => new { id, role = "user", content };
 
     private static object AssistantMsg(string id, string content) => new { id, role = "assistant", content };
+
+    // Mirrors the client-side history that @ag-ui/client sends back after it has received a TOOL_CALL_*
+    // event. Keeping the parent assistant id is essential: non-text messages deliberately do not use the
+    // text fallback in AguiWireDedupAgent, because doing so could split a tool call/result exchange.
+    private static object AssistantToolCallMsg(string id, string callId, string name, string arguments) => new
+    {
+        id,
+        role = "assistant",
+        content = string.Empty,
+        toolCalls = new[] { new { id = callId, type = "function", function = new { name, arguments } } },
+    };
+
+    private static object ToolResultMsg(string callId, string content) => new
+    {
+        id = callId,
+        role = "tool",
+        toolCallId = callId,
+        content,
+    };
 
     /// <summary>從 AG-UI SSE 回應擷取 assistant 訊息的伺服器端 messageId 與完整文字內容(串接所有
     /// TEXT_MESSAGE_CONTENT 的 delta)——模擬真實 client 收到回覆後,會把這則訊息連同伺服器給的 id
@@ -186,6 +205,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     // ---- B-P1-04:租戶隔離(本案最重要)——同一 threadId,不同租戶,內容不得互見。驗內容,禁用 nullity。 ----
 
     [Fact]
+    [Trait("EvidenceGate", "E-02")]
     public async Task Agui_TenantIsolation_SameThreadId_TenantB_CannotSeeTenantASecret()
     {
         const string threadId = "b-p1-04";
@@ -212,6 +232,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     // (JwtTenantIsolationKeyProvider,見該檔案 P2 註記),兩者皆只源自 JWT claims、fail-closed 語意不變,
     // 只是粒度變細至使用者層級,因此同租戶不同使用者以同一 threadId 提問不再互見。
     [Fact]
+    [Trait("EvidenceGate", "E-02")]
     public async Task Agui_SameTenantDifferentUsers_SameThreadId_UserBCannotSeeUserASecret()
     {
         const string threadId = "b-p1-05";
@@ -285,6 +306,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     // 收到的最後一輪 messages 中每則 user 訊息仍恰出現一次,且總數只隨輪次線性成長(1→3→5),不因
     // wire 重送 + session 疊加而複合暴增(修復前反編譯/Langfuse trace 證實會長到 1→5→11)。
     [Fact]
+    [Trait("EvidenceGate", "E-03")]
     public async Task Agui_SameThreadId_ThreeRounds_FullArrayResend_AlignedAssistantId_UserMessagesAppearExactlyOnce()
     {
         const string threadId = "b-p2-04-full-array-aligned";
@@ -317,6 +339,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     // 與伺服器當初送出的不一致(例如前端自行重新產生 id)。純文字 assistant 以 role+完整文字作保守
     // fallback 去重；user 一律只按 id，比對規則不會吞掉合法的相同內容重複發話。
     [Fact]
+    [Trait("EvidenceGate", "E-03")]
     public async Task Agui_SameThreadId_ThreeRounds_FullArrayResend_MismatchedAssistantId_UserMessagesStillAppearExactlyOnce()
     {
         const string threadId = "b-p2-04-full-array-mismatched";
@@ -350,6 +373,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     // 相同文字的 assistant 回覆可以在不同 turn 合法重複。mismatched-ID fallback 必須是 multiset：
     // session 有兩則舊「你好世界」時，wire 的三則同文 assistant 只消耗兩則舊項，第三則必須保留。
     [Fact]
+    [Trait("EvidenceGate", "E-03")]
     public async Task Agui_FullArrayResend_RepeatedAssistantText_ConsumesKnownCopiesButPreservesAdditionalMessage()
     {
         const string threadId = "b-p2-04-assistant-multiset";
@@ -591,6 +615,64 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
 
         var args = frames.First(f => f.GetProperty("type").GetString() == "TOOL_CALL_ARGS");
         Assert.Contains("documents", args.GetProperty("delta").GetString());
+    }
+
+    // E-03 / C-04 deterministic driver contract: the client must be able to consume the real AG-UI
+    // call id, invoke its handler once, and resend a result with that exact id. The next model input is
+    // the canonical assertion point: it must contain one, and only one, matched FunctionCall/Result pair.
+    // This is intentionally not a response-only check and does not emit a JWT or prompt artifact.
+    [Fact]
+    [Trait("EvidenceGate", "E-03")]
+    public async Task Agui_ClientToolRoundTrip_UsesEmittedCallId_AndModelInputHasExactlyOneMatchedPair()
+    {
+        const string threadId = "e-03-tool-roundtrip";
+        const string toolName = "switchView";
+        const string toolArguments = "{\"view\":\"documents\"}";
+        const string toolResult = "{\"handled\":true,\"view\":\"documents\"}";
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        var wireHistory = new List<object> { UserMsg(Guid.NewGuid().ToString("N"), FakeChatClient.ToolCallTrigger) };
+
+        var initialResponse = await SendAguiAsync(
+            client, RunInputWithMessages(threadId, wireHistory, SwitchViewClientTools));
+        Assert.Equal(HttpStatusCode.OK, initialResponse.StatusCode);
+        var initialFrames = ExtractFrames(await initialResponse.Content.ReadAsStringAsync());
+        var callStart = Assert.Single(initialFrames, frame =>
+            frame.GetProperty("type").GetString() == "TOOL_CALL_START");
+        var callId = callStart.GetProperty("toolCallId").GetString();
+        var parentMessageId = callStart.GetProperty("parentMessageId").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(callId));
+        Assert.False(string.IsNullOrWhiteSpace(parentMessageId));
+        Assert.Equal(toolName, callStart.GetProperty("toolCallName").GetString());
+
+        // This represents the deterministic driver's registered browser-side handler. It only consumes
+        // the id issued by the real SSE event; no hard-coded call id can make this test pass.
+        var handlerInvocations = 0;
+        string HandleSwitchView(string emittedCallId)
+        {
+            Assert.Equal(callId, emittedCallId);
+            handlerInvocations++;
+            return toolResult;
+        }
+
+        wireHistory.Add(AssistantToolCallMsg(parentMessageId!, callId!, toolName, toolArguments));
+        wireHistory.Add(ToolResultMsg(callId!, HandleSwitchView(callId!)));
+        wireHistory.Add(UserMsg(Guid.NewGuid().ToString("N"), "工具已完成，請繼續回答"));
+
+        var followUpResponse = await SendAguiAsync(client, RunInputWithMessages(threadId, wireHistory));
+        Assert.Equal(HttpStatusCode.OK, followUpResponse.StatusCode);
+        await followUpResponse.Content.ReadAsStringAsync();
+        Assert.Equal(1, handlerInvocations);
+
+        var modelInput = ChatClient.Runs[^1];
+        var calls = modelInput.SelectMany(message => message.Contents.OfType<FunctionCallContent>()).ToList();
+        var results = modelInput.SelectMany(message => message.Contents.OfType<FunctionResultContent>()).ToList();
+        var actualCall = Assert.Single(calls);
+        var actualResult = Assert.Single(results);
+        Assert.Equal(callId, actualCall.CallId);
+        Assert.Equal(callId, actualResult.CallId);
+        Assert.Equal(toolName, actualCall.Name);
+        Assert.Contains("documents", JsonSerializer.Serialize(actualCall.Arguments));
+        Assert.Contains("handled", JsonSerializer.Serialize(actualResult.Result));
     }
 
     // 單一可路由 skill(唯一必填字串 query),T-P4-2/T-P4-3/B-P4-12/13 共用的最小目錄。

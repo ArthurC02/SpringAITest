@@ -10,7 +10,8 @@ param(
     [string]$BaseUrl = 'http://localhost:8080',
     [string]$ProxyBaseUrl = 'http://localhost:5173',
     [switch]$Rebuild,
-    [switch]$IncludeMem0Outage
+    [switch]$IncludeMem0Outage,
+    [string]$EvidenceDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +19,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $infraDir = Join-Path $repoRoot 'infra'
 $script:passed = 0
 $script:failed = 0
+$evidenceRun = $null
+if ($EvidenceDir) {
+    Import-Module (Join-Path $PSScriptRoot 'EvidenceHarness.psm1') -Force
+    $evidenceRun = New-EvidenceRun -RepoRoot $repoRoot -EvidenceDir $EvidenceDir -Lane BlackBoxSmoke -Gates @('black-box-smoke')
+}
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -259,4 +265,11 @@ Invoke-Case 'C-08 frontend proxy framing (browser timing still required)' {
 Write-Host "Result: $script:passed passed, $script:failed failed"
 Write-Host 'Remaining release evidence: inspect C-03/C-04 model/session traces, C-05 mem0 storage,'
 Write-Host 'run C-07 with a real routing-capable model, and verify C-08 chunk timing in a browser/curl trace.'
+if ($evidenceRun) {
+    $smokeStatus = if ($script:failed -eq 0) { 'PASS' } else { 'FAIL' }
+    Set-EvidenceGate -Run $evidenceRun -Gate 'black-box-smoke' -Status $smokeStatus -Detail "passed=$script:passed; failed=$script:failed"
+    $evidenceResult = Complete-EvidenceRun -Run $evidenceRun
+    Write-Host "Evidence bundle: $($evidenceRun.FullPath)"
+    if ($evidenceResult -eq 'FAIL') { exit 1 }
+}
 if ($script:failed -ne 0) { exit 1 }

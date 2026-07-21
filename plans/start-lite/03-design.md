@@ -1,12 +1,12 @@
 # 詳細設計 — start-lite（無容器啟動模式）
 
-> 狀態: **規劃中。** 本檔是 **HOW**：確切簽章、DI 佈線、時序/資料流、執行緒安全、邊界案例、測試設計。**不重述** 01-plan/02-spec 的結論，只在需要時引用其節次。
+> 狀態: **已實作、e2e 驗證通過。** 本檔記錄 **HOW**：確切簽章、DI 佈線、時序/資料流、執行緒安全、邊界案例、測試設計。實作已交付並驗收。
 >
-> **規劃任務，不動生產碼。** 唯一產出即本檔。
+> **Lite 執行期產物：** 所有日誌、PID 檔統一寫入 gitignored `.lite/` 資料夾（`.lite/backend.log`, `.lite/start-lite.pids` 等），不散落 repo root。
 >
 > **本文的論據分級**：
 > - **【核】** = 已對現行原始碼實測或直接引用確認。
-> - **【推】** = 由【核】的事實推導出的設計決策，實作前無法 100% 證實。
+> - **【推】** = 由【核】的事實推導出的設計決策。
 
 ---
 
@@ -999,11 +999,14 @@ if (!(node --version)) { $errors += "node not found" }
 if (!(python --version)) { $errors += "python 3.12+ not found" }
 if ($errors) { $errors | ForEach-Object { Write-Host "ERROR: $_" }; exit 1 }
 
+# 建立 .lite 資料夾(存放日誌與 PID 檔)
+New-Item -ItemType Directory -Path ".lite" -Force | Out-Null
+
 # LiteLLM 啟動(可選)
 Write-Host "Starting LiteLLM on :4000..."
 $litellmJob = Start-Process -FilePath "pwsh" -ArgumentList `
   "-Command", "cd $PSScriptRoot/..; uvx --from 'litellm[proxy]' litellm --config infra/litellm-config.lite.yaml --port 4000" `
-  -PassThru -RedirectStandardOutput "litellm.log" -RedirectStandardError "litellm-err.log"
+  -PassThru -RedirectStandardOutput ".lite/litellm.log" -RedirectStandardError ".lite/litellm-err.log"
 
 # 平行啟動四服務
 $jobs = @()
@@ -1011,7 +1014,7 @@ $jobs = @()
 $jobs += Start-Process -FilePath "dotnet" -ArgumentList `
   "run", "--project", "backend/src/Backend.Api/Backend.Api.csproj" `
   -WorkingDirectory "$PSScriptRoot\.." `
-  -PassThru -RedirectStandardOutput "backend.log" -RedirectStandardError "backend-err.log" `
+  -PassThru -RedirectStandardOutput ".lite/backend.log" -RedirectStandardError ".lite/backend-err.log" `
   -EnvironmentVariables @{
     "DB_PROVIDER" = "inmemory"
     "EMBEDDINGS_PROVIDER" = "fake"
@@ -1021,7 +1024,7 @@ $jobs += Start-Process -FilePath "dotnet" -ArgumentList `
 
 $jobs += Start-Process -FilePath "pwsh" -ArgumentList `
   "-Command", "cd $PSScriptRoot/../workflow; uv run uvicorn app.main:app --host 127.0.0.1 --port 8001" `
-  -PassThru -RedirectStandardOutput "workflow.log" -RedirectStandardError "workflow-err.log" `
+  -PassThru -RedirectStandardOutput ".lite/workflow.log" -RedirectStandardError ".lite/workflow-err.log" `
   -EnvironmentVariables @{
     "BACKEND_BASE_URL" = "http://localhost:8002"
     "LLM_BASE_URL" = "http://localhost:4000"
@@ -1032,7 +1035,7 @@ $jobs += Start-Process -FilePath "pwsh" -ArgumentList `
 $jobs += Start-Process -FilePath "dotnet" -ArgumentList `
   "run", "--project", "platform/src/Platform.Web/Platform.Web.csproj" `
   -WorkingDirectory "$PSScriptRoot\.." `
-  -PassThru -RedirectStandardOutput "platform.log" -RedirectStandardError "platform-err.log" `
+  -PassThru -RedirectStandardOutput ".lite/platform.log" -RedirectStandardError ".lite/platform-err.log" `
   -EnvironmentVariables @{
     "MEM0_MODE" = "inmemory"
     "OTEL_MODE" = "console"
@@ -1043,7 +1046,7 @@ $jobs += Start-Process -FilePath "dotnet" -ArgumentList `
 
 $jobs += Start-Process -FilePath "npm" -ArgumentList "run", "dev" `
   -WorkingDirectory "$PSScriptRoot\..\frontend" `
-  -PassThru -RedirectStandardOutput "frontend.log" -RedirectStandardError "frontend-err.log"
+  -PassThru -RedirectStandardOutput ".lite/frontend.log" -RedirectStandardError ".lite/frontend-err.log"
 
 # 健康檢查
 $healthChecks = @(
@@ -1071,15 +1074,15 @@ foreach ($check in $healthChecks) {
 }
 
 # 保存 job IDs 供 stop-lite.ps1 使用
-$jobs | ForEach-Object { $_.Id } | Set-Content "start-lite.pids"
-$litellmJob.Id | Add-Content "start-lite.pids"
+$jobs | ForEach-Object { $_.Id } | Set-Content ".lite/start-lite.pids"
+$litellmJob.Id | Add-Content ".lite/start-lite.pids"
 
 Write-Host "`n✓ All services started successfully!"
-Write-Host "  backend:  http://localhost:8002  (logs: backend.log)"
-Write-Host "  workflow: http://localhost:8001  (logs: workflow.log)"
-Write-Host "  platform: http://localhost:8080  (logs: platform.log)"
-Write-Host "  frontend: http://localhost:5173  (logs: frontend.log)"
-Write-Host "  litellm:  http://localhost:4000  (logs: litellm.log)"
+Write-Host "  backend:  http://localhost:8002  (logs: .lite/backend.log)"
+Write-Host "  workflow: http://localhost:8001  (logs: .lite/workflow.log)"
+Write-Host "  platform: http://localhost:8080  (logs: .lite/platform.log)"
+Write-Host "  frontend: http://localhost:5173  (logs: .lite/frontend.log)"
+Write-Host "  litellm:  http://localhost:4000  (logs: .lite/litellm.log)"
 Write-Host ""
 Write-Host "To stop, run: .\stop-lite.ps1"
 ```
@@ -1105,11 +1108,14 @@ if [ ${#errors[@]} -gt 0 ]; then
   exit 1
 fi
 
+# 建立 .lite 資料夾
+mkdir -p .lite
+
 # LiteLLM 啟動
 echo "Starting LiteLLM on :4000..."
 nohup uvx --from 'litellm[proxy]' litellm --config infra/litellm-config.lite.yaml --port 4000 \
-  > litellm.log 2>&1 &
-echo $! >> start-lite.pids
+  > .lite/litellm.log 2>&1 &
+echo $! >> .lite/start-lite.pids
 
 # 平行啟動四服務
 (
@@ -1118,8 +1124,8 @@ echo $! >> start-lite.pids
   ASPNETCORE_URLS=http://localhost:8002 \
   ASPNETCORE_ENVIRONMENT=Development \
   nohup dotnet run --project src/Backend.Api/Backend.Api.csproj \
-    > ../backend.log 2>&1 &
-  echo $! >> ../start-lite.pids
+    > ../.lite/backend.log 2>&1 &
+  echo $! >> ../.lite/start-lite.pids
 )
 
 (
@@ -1129,8 +1135,8 @@ echo $! >> start-lite.pids
   LLM_MODEL=mock-gpt \
   LANGFUSE_ENABLED=false \
   nohup uv run uvicorn app.main:app --host 127.0.0.1 --port 8001 \
-    > ../workflow.log 2>&1 &
-  echo $! >> ../start-lite.pids
+    > ../.lite/workflow.log 2>&1 &
+  echo $! >> ../.lite/start-lite.pids
 )
 
 (
@@ -1139,14 +1145,14 @@ echo $! >> start-lite.pids
   ASPNETCORE_URLS=http://localhost:8080 \
   ASPNETCORE_ENVIRONMENT=Development \
   nohup dotnet run --project src/Platform.Web/Platform.Web.csproj \
-    > ../platform.log 2>&1 &
-  echo $! >> ../start-lite.pids
+    > ../.lite/platform.log 2>&1 &
+  echo $! >> ../.lite/start-lite.pids
 )
 
 (
   cd frontend
-  nohup npm run dev > ../frontend.log 2>&1 &
-  echo $! >> ../start-lite.pids
+  nohup npm run dev > ../.lite/frontend.log 2>&1 &
+  echo $! >> ../.lite/start-lite.pids
 )
 
 # 健康檢查
@@ -1173,11 +1179,11 @@ check_health "http://localhost:8080/actuator/health" "platform"
 
 echo ""
 echo "✓ All services started successfully!"
-echo "  backend:  http://localhost:8002  (logs: backend.log)"
-echo "  workflow: http://localhost:8001  (logs: workflow.log)"
-echo "  platform: http://localhost:8080  (logs: platform.log)"
-echo "  frontend: http://localhost:5173  (logs: frontend.log)"
-echo "  litellm:  http://localhost:4000  (logs: litellm.log)"
+echo "  backend:  http://localhost:8002  (logs: .lite/backend.log)"
+echo "  workflow: http://localhost:8001  (logs: .lite/workflow.log)"
+echo "  platform: http://localhost:8080  (logs: .lite/platform.log)"
+echo "  frontend: http://localhost:5173  (logs: .lite/frontend.log)"
+echo "  litellm:  http://localhost:4000  (logs: .lite/litellm.log)"
 echo ""
 echo "To stop, run: ./stop-lite.sh"
 ```
@@ -1186,11 +1192,11 @@ echo "To stop, run: ./stop-lite.sh"
 
 ```powershell
 # stop-lite.ps1
-if (Test-Path "start-lite.pids") {
-  Get-Content "start-lite.pids" | ForEach-Object {
+if (Test-Path ".lite/start-lite.pids") {
+  Get-Content ".lite/start-lite.pids" | ForEach-Object {
     Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
   }
-  Remove-Item "start-lite.pids"
+  Remove-Item ".lite/start-lite.pids"
   Write-Host "All services stopped."
 } else {
   Write-Host "No running processes found."
@@ -1200,11 +1206,11 @@ if (Test-Path "start-lite.pids") {
 ```bash
 # stop-lite.sh
 #!/bin/bash
-if [ -f start-lite.pids ]; then
+if [ -f .lite/start-lite.pids ]; then
   while IFS= read -r pid; do
     kill -9 "$pid" 2>/dev/null || true
-  done < start-lite.pids
-  rm start-lite.pids
+  done < .lite/start-lite.pids
+  rm .lite/start-lite.pids
   echo "All services stopped."
 else
   echo "No running processes found."

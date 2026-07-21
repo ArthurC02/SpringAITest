@@ -47,8 +47,8 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 367 個（Service 218 + Web 149）+ 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 173 個、手寫 fake repository（未引入 mocking 套件）。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 391 個（Service 241 + Web 150）+ 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 185 個、手寫 fake repository（未引入 mocking 套件）。
 - **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint（lint）+ vite build（type check + bundle）。
 - **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 459 個。
 
@@ -74,27 +74,32 @@ OPENAI_API_KEY=sk-你的金鑰
 
 前後端**對稱**——可各自跑主機（開發)或進容器,基礎設施與核心服務一律用 compose 起。前端 `:5173` / 平台閘道 `:8080`,**請擇一,別同時跑**。
 
-| 模式              | 啟動腳本      | infra | 核心服務（:8002） | 平台閘道（:8080）             | 前端（:5173）             | 適用        |
-| ----------------- | ------------- | ----- | ----------------- | ----------------------------- | ------------------------- | ----------- |
-| **A 開發**（預設) | `start-infra` | 容器  | 容器              | 主機 `dotnet run`（可 debug） | 主機 `npm run dev`（HMR） | 日常開發    |
-| **B 全容器**      | `start-full`  | 容器  | 容器              | 容器                          | 容器（nginx）             | 展示 / 部署 |
+| 模式              | 啟動腳本      | infra    | 核心服務（:8002） | 平台閘道（:8080）             | 前端（:5173）             | 適用              |
+| ----------------- | ------------- | -------- | ----------------- | ----------------------------- | ------------------------- | ----------------- |
+| **A 開發**（預設) | `start-infra` | 容器     | 容器              | 主機 `dotnet run`（可 debug） | 主機 `npm run dev`（HMR） | 日常開發          |
+| **B 全容器**      | `start-full`  | 容器     | 容器              | 容器                          | 容器（nginx）             | 展示 / 部署       |
+| **C 無容器**      | `start-lite`  | 本機服務 | 主機 in-memory    | 主機 `dotnet run`（可 debug） | 主機 `npm run dev`（HMR） | 前端開發 / 快速迭代 |
 
 ### 快速啟動腳本（跨平台）
 
-`scripts/` 內的腳本會自動切到 `infra/`、檢查 `.env`、再起對應服務（從哪個目錄執行都可以）:
+`scripts/` 內的腳本會自動檢查依賴、再起對應服務（從哪個目錄執行都可以）:
 
 ```bash
 # Linux / macOS（首次需 chmod +x scripts/*.sh）
-./scripts/start-infra.sh     # 模式 A：只起 infra
-./scripts/start-full.sh      # 模式 B：全容器
+./scripts/start-infra.sh     # 模式 A：只起 docker infra（前端後端本機 run）
+./scripts/start-full.sh      # 模式 B：全容器化
+./scripts/start-lite.sh      # 模式 C：無容器（四服務本機平行啟動）
 ```
 ```powershell
 # Windows（PowerShell）
 .\scripts\start-infra.ps1
 .\scripts\start-full.ps1
+.\scripts\start-lite.ps1     # 模式 C：無容器
 ```
 
-> 停止:`cd infra && docker compose --profile full down`。
+**停止服務:**
+- 模式 A / B：`cd infra && docker compose --profile full down`
+- 模式 C：`.\scripts\stop-lite.ps1` (Windows) 或 `./scripts/stop-lite.sh` (Linux/macOS)
 
 ### Copilot Shared Core black-box smoke 驗證
 
@@ -114,6 +119,22 @@ pwsh -File scripts\verify-copilot-shared-core.ps1
 這支腳本提供 C cases 的部分外部 smoke 訊號，**不是** C-01～C-08 的充分 release 證據。它無法檢查模型實際輸入、session 中的重複訊息計數、tool call/result 配對完整性、mem0 是否真的寫入，也無法量測逐 chunk 到達時間；`-Rebuild` 使用 `mock-gpt`，因此不能驗證 skill routing。
 
 release evidence 仍須保留 [plans/copilot-shared-core/04-acceptance-test.md](plans/copilot-shared-core/04-acceptance-test.md) 定義的 C gates：`C-03`/`C-04`/`C-05`/`C-07`/`C-08` 必須由具名 integration tests，加上 `e2e-verifier` 的真服務 trace／必要時手動 browser proxy 檢查完成；routing 驗證必須使用真實模型，不能以 `mock-gpt` 取代。此 smoke script 只能作為它們的補充。
+
+### Copilot Shared Core release evidence（目前 blocked/failed）
+
+release-evidence harness 已執行，但**尚未達成 release sign-off**。最新 Deterministic lane 的 `E-01`、`E-02`、`E-03`、`E-06` 已全部通過；E-06 以完整 content SSE events（不是 TCP chunks 或其他 AG-UI protocol events）驗證 nginx/Vite 未緩衝。Real-model lane 的 `E-04` 未在時限內由 mem0 取回 authenticated fact；`E-05` 第一輪最終回覆未包含 fixture 數字，且該 failure bundle 尚未保存可稽核的 routing capture。不得以 deterministic PASS 取代這兩個 gate 發布。
+
+```powershell
+# 首次或 evidence image / profile 有變更時加 -BuildEvidenceProfile；兩個 lane 都會輸出 bundle。
+pwsh -File scripts\verify-copilot-shared-core-evidence.ps1 `
+  -Lane Deterministic -StartEvidenceProfile -BuildEvidenceProfile
+
+# 真模型 lane 使用固定 snapshot aliases；不可改用 mock-gpt。
+pwsh -File scripts\verify-copilot-shared-core-evidence.ps1 `
+  -Lane RealModel -StartEvidenceProfile -BuildEvidenceProfile
+```
+
+每次輸出位於被 Git 忽略的 `artifacts/copilot-shared-core/<UTC-run-id>/`。最新 deterministic PASS bundle 為 `artifacts/copilot-shared-core/20260721T083532847Z-f8054fd1/`；real-model failure bundle 為 `artifacts/copilot-shared-core/20260721T073849789Z-5000aa13/`。內容僅含 HMAC 投影與結果，不應加入版本控制。完整狀態與修復門檻見 [release evidence plan](plans/copilot-shared-core/05-release-evidence-plan.md)。
 
 ### 模式 A:在主機補起平台與前端
 

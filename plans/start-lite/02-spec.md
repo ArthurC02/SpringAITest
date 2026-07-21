@@ -1,6 +1,6 @@
 # 規格 — start-lite（無容器啟動模式）
 
-> 狀態: **規劃中。** 承接 [01-plan.md](01-plan.md);本檔是 **WHAT**(定案的行為與契約),實作順序見 03-design(待起草)。
+> 狀態: **已實作、e2e 驗證通過。** 承接 [01-plan.md](01-plan.md);本檔定義 **WHAT**(已交付的行為與契約)。
 
 ---
 
@@ -426,36 +426,36 @@ foreach ($check in $healthChecks) {
 **完成輸出:**
 ```
 ✓ All services started successfully!
-  backend:  http://localhost:8002  (logs: backend.log)
-  workflow: http://localhost:8001  (logs: workflow.log)
-  platform: http://localhost:8080  (logs: platform.log)
-  frontend: http://localhost:5173  (logs: frontend.log)
-  litellm:  http://localhost:4000  (logs: litellm.log)
+  backend:  http://localhost:8002  (logs: .lite/backend.log)
+  workflow: http://localhost:8001  (logs: .lite/workflow.log)
+  platform: http://localhost:8080  (logs: .lite/platform.log)
+  frontend: http://localhost:5173  (logs: .lite/frontend.log)
+  litellm:  http://localhost:4000  (logs: .lite/litellm.log)
 
 To stop, run: .\stop-lite.ps1
 ```
 
 **保存 job IDs 到檔案** (供 stop-lite.ps1 收攤):
 ```powershell
-$jobs | ForEach-Object { $_.Id } | Set-Content "start-lite.pids"
+$jobs | ForEach-Object { $_.Id } | Set-Content ".lite/start-lite.pids"
 ```
 
 ### 4.2 start-lite.sh (Linux/macOS)
 
 類似邏輯,改用 bash:
 - `command -v dotnet` 檢查工具
-- `nohup dotnet run ... > backend.log 2>&1 &` 後臺啟
+- `nohup dotnet run ... > .lite/backend.log 2>&1 &` 後臺啟
 - 用 `curl -f http://localhost:8002/health` 健康檢查
-- `echo $! >> start-lite.pids` 保存進程 ID
+- `echo $! >> .lite/start-lite.pids` 保存進程 ID
 
 ### 4.3 stop-lite.ps1
 
 ```powershell
-if (Test-Path "start-lite.pids") {
-  Get-Content "start-lite.pids" | ForEach-Object {
+if (Test-Path ".lite/start-lite.pids") {
+  Get-Content ".lite/start-lite.pids" | ForEach-Object {
     Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
   }
-  Remove-Item "start-lite.pids"
+  Remove-Item ".lite/start-lite.pids"
   Write-Host "All services stopped."
 } else {
   Write-Host "No running processes found."
@@ -465,11 +465,11 @@ if (Test-Path "start-lite.pids") {
 ### 4.4 stop-lite.sh
 
 ```bash
-if [ -f start-lite.pids ]; then
+if [ -f .lite/start-lite.pids ]; then
   while IFS= read -r pid; do
     kill -9 "$pid" 2>/dev/null
-  done < start-lite.pids
-  rm start-lite.pids
+  done < .lite/start-lite.pids
+  rm .lite/start-lite.pids
   echo "All services stopped."
 else
   echo "No running processes found."
@@ -483,7 +483,7 @@ fi
 ### 5.1 環境啟動驗收
 
 - [ ] `./scripts/start-lite.ps1` 執行無例外,四個服務皆通過健康檢查
-- [ ] 日誌檔 backend.log / workflow.log / platform.log 無 error/exception (warning 可接受)
+- [ ] 日誌檔 .lite/backend.log / .lite/workflow.log / .lite/platform.log 無 error/exception (warning 可接受)
 - [ ] 四個 port 監聽確認: `netstat -ano | findstr "(8002|8001|8080|5173|4000)"`
 
 ### 5.2 認證與隔離
@@ -513,7 +513,7 @@ fi
 
 ### 5.5 OTel 與遙測驗收
 
-- [ ] `OTEL_MODE=console` 時,platform.log 內容包含 span JSON(每次 LLM 呼叫有痕跡)
+- [ ] `OTEL_MODE=console` 時,.lite/platform.log 內容包含 span JSON(每次 LLM 呼叫有痕跡)
 - [ ] ring buffer 最多 200 spans(超限自動出隊)
 
 ### 5.6 LLM 讀遙測驗收
@@ -550,9 +550,30 @@ fi
 
 ---
 
-## 7. 疑難排解指南(文件交付時補充)
+## 7. 疑難排解指南
 
-_(待後續補) 含常見問題如「dotnet not found」、「port 8080 already in use」、「health check timeout」等_
+### 腳本啟動坑
+
+1. **`dotnet run` 綁定錯誤埠 (e.g. :5008 instead of :8080)**
+   - 原因: launchSettings.json 的 profile 優先於環境變數 `ASPNETCORE_URLS`
+   - 解決: 在啟動腳本中加 `--no-launch-profile` 旗標，or 臨時改 launchSettings.json
+
+2. **Windows 上 npm 子行程孤兒(佔住 :5173)**
+   - 原因: `npm run dev` 生衍的 node 子行程收不到信號
+   - 解決: 用 `taskkill /T /F /PID <pid>` 殺掉進程樹 (stop-lite.ps1 已實裝)
+
+3. **Linux/macOS 上終端背景工作未正確等待**
+   - 原因: `nohup ... &` 後迴圈檢查埠連線失敗
+   - 解決: 加重試邏輯與延遲，或用 `pgrep -P` 建立進程樹追蹤 (start-lite.sh 已實裝)
+
+### LiteLLM 工具鏈限制
+
+4. **`uvx --from "litellm[proxy]"` 安裝失敗 (missing Rust/MSVC)**
+   - 原因: litellm 最新版本含 Rust 依賴，無預建 wheel 時會觸發 `pip install` 編譯
+   - 症狀: Windows 上缺 Visual Studio Build Tools 時，`error: Microsoft Visual C++ 14.0 or greater is required`
+   - 解決 (a): 裝 Visual Studio Build Tools (C++ workload)
+   - 解決 (b): 在 start-lite 腳本中改用舊版 litellm(有預建 wheel),如 `uvx --from "litellm[proxy]==1.x.y" litellm ...`
+   - **注意**: 此為環境依賴問題,非腳本 bug;本機開發環境應備足工具
 
 ---
 

@@ -1,15 +1,11 @@
-# LiteLLM 閘道設定。Spring 端的 options.model 要對應這裡的 model_name。
+# LiteLLM 閘道設定（Lite 版）。以 litellm-config.yaml 為基礎，
+# 唯一差異：移除 langfuse success/failure callback——lite 模式不起 Langfuse，
+# 保留 callback 會讓每次 LLM 呼叫都對 :3000 連線失敗並噴錯誤日誌（見 04-acceptance-test C-10）。
+# 其餘（mock-gpt 路由、drop_params、master_key）與正式版一致。
 model_list:
   - model_name: gpt-4o-mini            # ← Spring application.yml 的 spring.ai.openai.chat.options.model
     litellm_params:
       model: openai/gpt-4o-mini        # 真正路由目標（之後要加 Claude 就在這裡多一筆）
-      api_key: os.environ/OPENAI_API_KEY
-
-  # Release-evidence real-model lane only: a fixed provider snapshot, never a
-  # floating alias. The evidence wrapper records this deployment identifier.
-  - model_name: evidence-gpt-4o-mini-2024-07-18
-    litellm_params:
-      model: openai/gpt-4o-mini-2024-07-18
       api_key: os.environ/OPENAI_API_KEY
 
   - model_name: text-embedding-3-small # mem0 的 embedder 與工作流服務的 RAG 嵌入都走這裡
@@ -23,8 +19,6 @@ model_list:
       mock_response: "這是一段由 LiteLLM 模擬的回覆，用來在沒有 OpenAI 額度時驗證 SSE 逐字串流是否正常。Streaming works! 0123456789，繁體中文也沒問題。"
 
 litellm_settings:
-  success_callback: ["langfuse"]       # 成功呼叫 → Langfuse
-  failure_callback: ["langfuse"]       # 失敗呼叫 → Langfuse
   drop_params: true                    # 自動丟掉供應商不支援的參數，避免相容性錯誤
 
 general_settings:

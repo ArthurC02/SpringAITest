@@ -5,6 +5,7 @@ using Backend.Api.Config;
 using Backend.Api.Configuration;
 using Backend.Api.Conversations;
 using Backend.Api.Data;
+using Backend.Api.Data.InMemory;
 using Backend.Api.Files;
 using Backend.Api.Skills;
 using Microsoft.AspNetCore.Mvc;
@@ -25,17 +26,32 @@ var litellmKey = cfg["LITELLM_KEY"] ?? "sk-1234";
 var embeddingModel = cfg["EMBEDDING_MODEL"] ?? "text-embedding-3-small";
 var rabbitUrl = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:5672";
 var workflowBaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001";
+var useInMemoryDb = string.Equals(cfg["DB_PROVIDER"], "inmemory", StringComparison.OrdinalIgnoreCase);
 
 // ---------------------------------------------------------------------------
-// 資料層:NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
+// 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
+// DB_PROVIDER=inmemory(Lite 模式):六個行程記憶體儲存庫,注為 singleton
+// (scoped 會每請求重建 → 什麼都存不住),且**不**建 NpgsqlDataSource(不連 DB)。
 // ---------------------------------------------------------------------------
-builder.Services.AddNpgsqlDataSource(connString);
-builder.Services.AddScoped<IAuthRepository, AuthRepository>();
-builder.Services.AddScoped<IConversationRepository, ConversationRepository>();
-builder.Services.AddScoped<IRagRepository, RagRepository>();
-builder.Services.AddScoped<IConfigRepository, ConfigRepository>();
-builder.Services.AddScoped<ISkillRepository, SkillRepository>();
-builder.Services.AddScoped<IConfigurationSetRepository, ConfigurationSetRepository>();
+if (useInMemoryDb)
+{
+    builder.Services.AddSingleton<IAuthRepository, InMemoryAuthRepository>();
+    builder.Services.AddSingleton<IConversationRepository, InMemoryConversationRepository>();
+    builder.Services.AddSingleton<IRagRepository, InMemoryRagRepository>();
+    builder.Services.AddSingleton<IConfigRepository, InMemoryConfigRepository>();
+    builder.Services.AddSingleton<ISkillRepository, InMemorySkillRepository>();
+    builder.Services.AddSingleton<IConfigurationSetRepository, InMemoryConfigurationSetRepository>();
+}
+else
+{
+    builder.Services.AddNpgsqlDataSource(connString);
+    builder.Services.AddScoped<IAuthRepository, AuthRepository>();
+    builder.Services.AddScoped<IConversationRepository, ConversationRepository>();
+    builder.Services.AddScoped<IRagRepository, RagRepository>();
+    builder.Services.AddScoped<IConfigRepository, ConfigRepository>();
+    builder.Services.AddScoped<ISkillRepository, SkillRepository>();
+    builder.Services.AddScoped<IConfigurationSetRepository, ConfigurationSetRepository>();
+}
 
 // ---------------------------------------------------------------------------
 // Services
@@ -95,8 +111,8 @@ builder.Services.AddProblemDetails();
 
 var app = builder.Build();
 
-// 啟動時建表 + 種子(Testing 環境跳過:測試以 fake repository 取代,不連真 DB)。
-if (!app.Environment.IsEnvironment("Testing"))
+// 啟動時建表 + 種子(Testing 環境或 DB_PROVIDER=inmemory 時跳過:兩者皆不連真 DB)。
+if (!app.Environment.IsEnvironment("Testing") && !useInMemoryDb)
 {
     var dataSource = app.Services.GetRequiredService<Npgsql.NpgsqlDataSource>();
     var logger = app.Services.GetRequiredService<ILogger<Program>>();

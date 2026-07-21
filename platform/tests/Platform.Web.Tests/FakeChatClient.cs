@@ -62,7 +62,7 @@ public sealed class FakeChatClient : IChatClient
             yield return new ChatResponseUpdate(ChatRole.Assistant, new List<AIContent>
             {
                 new FunctionCallContent("call-1", toolName, new Dictionary<string, object?> { ["view"] = "documents" }),
-            });
+            }) { MessageId = Guid.NewGuid().ToString("N") };
             yield break;
         }
 

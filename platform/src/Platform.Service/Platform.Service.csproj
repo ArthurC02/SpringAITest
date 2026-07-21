@@ -10,6 +10,8 @@
     <PackageReference Include="Microsoft.Agents.AI" Version="1.13.0" />
     <PackageReference Include="Microsoft.Agents.AI.Hosting" Version="1.13.0-preview.260703.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
+    <!-- RingBufferActivityExporter : BaseExporter<Activity> (OTel Lite console 模式);對齊 Web 的 1.16.0 OTel 家族。 -->
+    <PackageReference Include="OpenTelemetry" Version="1.16.0" />
     <PackageReference Include="RabbitMQ.Client" Version="7.2.1" />
   </ItemGroup>
 
