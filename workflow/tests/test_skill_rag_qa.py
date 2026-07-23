@@ -85,11 +85,11 @@ def test_rag_answer_multiple_docs_build_citations_in_order():
 
 
 def _invoke(deps, **state) -> dict:
-    return invoke_builtin("rag_qa", deps, **state)
+    return invoke_builtin("rag-qa", deps, **state)
 
 
 def test_rag_qa_skill_cold_start_compiles():
-    loaded = skills.get("rag_qa")
+    loaded = skills.get("rag-qa")
     assert loaded is not None
     assert loaded.source == "builtin"
     assert loaded.deps is not None
@@ -123,7 +123,7 @@ def test_rag_qa_skill_with_docs_returns_citations(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# API 級：POST /skills/rag_qa/invoke 走通（mock LLM + mock backend 檢索）
+# API 級：POST /skills/rag-qa/invoke 走通（mock LLM + mock backend 檢索）
 # ---------------------------------------------------------------------------
 
 
@@ -133,10 +133,10 @@ def test_rag_qa_invoke_api_level_with_docs(monkeypatch):
         [{"document_id": "doc-1", "title": "文件", "content": "內容片段", "score": 0.9}],
     )
 
-    original = skills.get("rag_qa")
+    original = skills.get("rag-qa")
     llm = FakeStructuredLLM(outputs={_RagAnswerOutput: _RagAnswerOutput(answer="API 答案")})
     deps = make_deps({}, llm=llm)
-    skills._SKILLS["rag_qa"] = original.__class__(
+    skills._SKILLS["rag-qa"] = original.__class__(
         skill=original.skill,
         graph=compiler.compile(original.skill, deps),
         input_model=original.input_model,
@@ -147,27 +147,27 @@ def test_rag_qa_invoke_api_level_with_docs(monkeypatch):
     )
     try:
         resp = client.post(
-            "/skills/rag_qa/invoke",
+            "/skills/rag-qa/invoke",
             json={"input": {"question": "這是什麼？"}},
             headers=auth_headers(),
         )
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body["skill"] == "rag_qa"
+        assert body["skill"] == "rag-qa"
         assert body["output"]["answer"] == "API 答案"
         assert body["output"]["citations"] == [
             {"document_id": "doc-1", "title": "文件", "snippet": "內容片段"}
         ]
         assert not any(k.startswith("__") for k in body["output"])
     finally:
-        skills._SKILLS["rag_qa"] = original
+        skills._SKILLS["rag-qa"] = original
 
 
 def test_rag_qa_invoke_api_level_rejects_blank_question():
     """input_schema 的 required/min_length：422（決策表另一半見上面 happy path）。"""
     resp = client.post(
-        "/skills/rag_qa/invoke", json={"input": {"question": ""}}, headers=auth_headers()
+        "/skills/rag-qa/invoke", json={"input": {"question": ""}}, headers=auth_headers()
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["error"] == "workflow_input_invalid"
@@ -187,7 +187,7 @@ def test_rag_qa_invoke_api_level_reserved_tenant_id_cannot_override_caller(monke
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
 
     resp = client.post(
-        "/skills/rag_qa/invoke",
+        "/skills/rag-qa/invoke",
         json={"input": {"question": "公司地址在哪？", "tenant_id": "evil-tenant"}},
         headers=auth_headers(tenant_id="demo-a"),
     )

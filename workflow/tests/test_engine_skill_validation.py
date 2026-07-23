@@ -11,6 +11,8 @@ from app.engine.skill import (
     DATAFLOW_ERROR,
     INVALID_EXPRESSION,
     INVALID_FLOW,
+    INVALID_NAME,
+    INVALID_SCHEMA,
     UNBOUNDED_LOOP,
     UNKNOWN_NODE,
     validate_source,
@@ -21,7 +23,7 @@ from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from app.nodes import retrieve as _retrieve_node  # noqa: F401
 
 HEAD = """
-name: probe_skill
+name: probe-skill
 description: 驗證測試用
 required_role: USER
 input_schema:
@@ -185,7 +187,7 @@ def test_unknown_step_type():
 
 def test_yaml_syntax_error_collapses_to_invalid_flow():
     """【AT2-07】壞 YAML（未閉合引號）→ invalid_flow，不拋未捕捉例外。"""
-    result = validate_source('name: probe_skill\nflow:\n  - node: "query_intake\n')
+    result = validate_source('name: probe-skill\nflow:\n  - node: "query_intake\n')
 
     assert result.valid is False
     assert INVALID_FLOW in _codes(result)
@@ -200,12 +202,71 @@ def test_non_mapping_definition_collapses_to_invalid_flow():
     assert INVALID_FLOW in _codes(result)
 
 
-def test_bad_skill_name_collapses_to_invalid_flow():
-    """schema 層級的錯（name 不符 ^[a-z][a-z0-9_]{2,63}$）也收斂成 invalid_flow。"""
+def test_bad_ascii_name_is_invalid_name():
+    """name 不符 ^[a-z][a-z0-9_]{2,63}$（大寫/連字號）→ invalid_name，不再誤標 invalid_flow。"""
     result = validate_source("name: Bad-Name\nflow:\n  - node: query_intake\n")
 
     assert result.valid is False
-    assert INVALID_FLOW in _codes(result)
+    assert INVALID_NAME in _codes(result)
+    assert INVALID_FLOW not in _codes(result)
+
+
+def test_chinese_name_is_invalid_name_with_clean_message():
+    """中文 name（正是使用者踩到的案例）→ invalid_name，訊息講名稱規則，且不外洩 pydantic dump/URL。"""
+    result = validate_source("name: 測試\nflow:\n  - node: query_intake\n")
+
+    assert result.valid is False
+    assert INVALID_NAME in _codes(result)
+    msg = next(e.message for e in result.errors if e.code == INVALID_NAME)
+    assert "名稱" in msg
+    assert "pydantic.dev" not in msg
+    assert "validation error for Skill" not in msg
+
+
+# ---------------------------------------------------------------------------
+# 標準 name 規則（§1）on/off-point：^[a-z0-9]([a-z0-9-]*[a-z0-9])?$、1–64、無 `--`、無底線
+# ---------------------------------------------------------------------------
+
+
+def _name_result(name: str):
+    return validate_source(f"name: {name}\nflow:\n  - node: query_intake@1.0\n")
+
+
+@pytest.mark.parametrize("name", ["kb-query", "9x", "x", "a" * 64, "a-b-c", "rag-qa"])
+def test_standard_name_accepted(name):
+    """標準連字號名稱（含數字開頭、單字、64 字上限）通過 —— 不落 invalid_name。"""
+    assert INVALID_NAME not in _codes(_name_result(name))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "kb_query",  # 底線不再合法（決策表：舊名現在被拒）
+        "-x",  # 開頭連字號
+        "x-",  # 結尾連字號
+        "x--y",  # 連續連字號
+        "a" * 65,  # 65 字（off-point）
+        "Bad",  # 大寫
+    ],
+)
+def test_nonstandard_name_rejected(name):
+    result = _name_result(name)
+    assert result.valid is False
+    assert INVALID_NAME in _codes(result)
+
+
+def test_other_schema_field_error_is_invalid_schema():
+    """非 name 欄位的 schema 錯（required_role 值不在 Literal 內）→ invalid_schema，訊息點名該欄位。"""
+    result = validate_source(
+        "name: probe-skill\nrequired_role: SUPERUSER\nflow:\n  - node: query_intake\n"
+    )
+
+    assert result.valid is False
+    assert INVALID_SCHEMA in _codes(result)
+    assert INVALID_NAME not in _codes(result)
+    msg = next(e.message for e in result.errors if e.code == INVALID_SCHEMA)
+    assert "required_role" in msg
+    assert "pydantic.dev" not in msg
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +318,7 @@ def test_builtin_kb_query_yaml_validates_clean():
 
     import app.skills
 
-    path = Path(app.skills.__file__).parent / "kb_query.yaml"
+    path = Path(app.skills.__file__).parent / "kb-query.yaml"
     result = validate_source(path.read_text(encoding="utf-8"))
 
     assert result.errors == []  # 連 dataflow 警告都不該有
@@ -272,7 +333,7 @@ def test_builtin_kb_query_yaml_validates_clean():
 def test_compiler_rejects_unbounded_loop_even_without_api_validation():
     """【AT-GOV-02】治理硬規則寫在引擎層：compile() 對缺 max_iterations 的 loop 一樣拒編。"""
     definition = {
-        "name": "probe_skill",
+        "name": "probe-skill",
         "flow": [
             {
                 "loop": {
@@ -295,7 +356,7 @@ def test_compiler_rejects_out_of_range_loop_bound(max_iterations):
     """【AT-GOV-02】超出 1~10 的上限同樣在編譯期擋下，不只在驗證 API。"""
     skill = skill_mod.Skill.model_validate(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "flow": [
                 {
                     "loop": {
@@ -316,7 +377,7 @@ def test_compiler_rejects_invalid_expression():
     """條件式的白名單在編譯期也是硬規則（繞過 validate 一樣過不了）。"""
     skill = skill_mod.Skill.model_validate(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "flow": [
                 {
                     "branch": {
@@ -332,3 +393,30 @@ def test_compiler_rejects_invalid_expression():
         compiler.compile(skill, deps=None)
 
     assert exc.type.__name__ in {"SkillCompileError", "ExpressionError"}
+
+
+# ---------------------------------------------------------------------------
+# 定義端點 flow-only：kind: agentic 的授權漂移必須被權威拒絕（agentic_requires_import）
+# ---------------------------------------------------------------------------
+
+
+def test_definition_declaring_agentic_kind_rejected():
+    """crafted-valid-flow 洞：flow 本身合法但自稱 kind: agentic → 定義端點必須擋下。
+
+    agentic 只能經 package 匯入；定義原文宣稱 agentic 是漂移，會在 P1 變 active break。
+    """
+    result = validate_source(
+        "name: probe-skill\nkind: agentic\nflow:\n  - node: query_intake@1.0\n"
+    )
+
+    assert result.valid is False
+    assert result.errors[0].code == "agentic_requires_import"
+    assert result.skill is None
+
+
+def test_definition_flow_kind_still_validates():
+    """決策表另一半:kind: flow（或省略,預設 flow）的合法定義照舊通過。"""
+    assert validate_source(
+        "name: probe-skill\nkind: flow\nflow:\n  - node: query_intake@1.0\n"
+    ).valid is True
+    assert _validate("flow:\n  - node: query_intake@1.0\n").valid is True

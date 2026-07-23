@@ -1,5 +1,6 @@
 using Dapper;
 using Npgsql;
+using Backend.Api.Skills;
 
 namespace Backend.Api.Data;
 
@@ -81,6 +82,27 @@ public static class DbBootstrap
           created_at timestamptz NOT NULL DEFAULT now(),
           CONSTRAINT uq_skill_revision UNIQUE (skill_id, revision));
         CREATE INDEX IF NOT EXISTS ix_skill_revision_skill ON skill_revision (skill_id);
+        -- Agent Skill package 與 revision snapshot。kind 不再由 package 是否為 NULL 推導：
+        -- flow import 也保存原 zip，才能保留任意額外 entries。
+        ALTER TABLE skill ADD COLUMN IF NOT EXISTS package bytea;
+        ALTER TABLE skill_revision ADD COLUMN IF NOT EXISTS package_sha256 text;
+        ALTER TABLE skill_revision ADD COLUMN IF NOT EXISTS package bytea;
+        ALTER TABLE skill ADD COLUMN IF NOT EXISTS kind text;
+        ALTER TABLE skill_revision ADD COLUMN IF NOT EXISTS kind text;
+        -- 只對新增欄位為 NULL 的舊資料做一次性分類；之後 flow package 非 NULL 也不會被誤判 agentic。
+        UPDATE skill
+        SET kind = CASE
+          WHEN definition ~ '(?m)^[ \t]*kind:[ \t]*agentic[ \t]*$' THEN 'agentic'
+          ELSE 'flow'
+        END
+        WHERE kind IS NULL;
+        UPDATE skill_revision
+        SET kind = CASE WHEN package_sha256 IS NOT NULL THEN 'agentic' ELSE 'flow' END
+        WHERE kind IS NULL;
+        ALTER TABLE skill ALTER COLUMN kind SET DEFAULT 'flow';
+        ALTER TABLE skill ALTER COLUMN kind SET NOT NULL;
+        ALTER TABLE skill_revision ALTER COLUMN kind SET DEFAULT 'flow';
+        ALTER TABLE skill_revision ALTER COLUMN kind SET NOT NULL;
         -- Configuration Set(設計 §7.1):一組可調的執行期覆寫鍵(values jsonb),per-tenant。
         -- tenant_id 用 text(= 租戶 code,與 skill/rag_documents 一致)。is_active 一租戶至多一筆為 true,
         -- 由部分唯一索引 uq_confset_active 於 DB 級兜底(不靠應用碼保唯一)。
@@ -103,6 +125,7 @@ public static class DbBootstrap
         {
             await using var conn = await dataSource.OpenConnectionAsync(ct);
             await conn.ExecuteAsync(new CommandDefinition(Ddl, cancellationToken: ct));
+            await MigrateSkillPackagesAndNamesAsync(conn, ct);
             await SeedAsync(conn, ct);
         }
         catch (Exception ex)
@@ -112,6 +135,168 @@ public static class DbBootstrap
             throw;
         }
     }
+
+    /// <summary>
+    /// 05 §5 就地遷移：底線名稱改 kebab、所有 revision definition/hash 同步，current revision
+    /// 與 skill current row 保持一致。legacy agentic package 的 SKILL.md 同時升級為標準
+    /// metadata/allowed-tools frontmatter；其他 zip entry bytes 保留。
+    /// </summary>
+    private static async Task MigrateSkillPackagesAndNamesAsync(
+        NpgsqlConnection conn, CancellationToken ct)
+    {
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var rows = (await conn.QueryAsync<SkillMigrationRow>(new CommandDefinition(
+            "SELECT id AS Id, tenant_id AS TenantId, name AS Name, definition AS Definition,"
+            + " kind AS Kind, package AS Package, current_revision AS CurrentRevision"
+            + " FROM skill ORDER BY tenant_id, name FOR UPDATE",
+            transaction: tx, cancellationToken: ct))).AsList();
+
+        foreach (var row in rows)
+        {
+            var targetName = row.Name.Replace('_', '-');
+            if (!SkillNameRules.IsStandard(targetName))
+            {
+                throw new InvalidOperationException(
+                    $"無法把既有 Skill 名稱遷移為標準格式：tenant={row.TenantId}, name={row.Name}, target={targetName}");
+            }
+
+            if (!string.Equals(targetName, row.Name, StringComparison.Ordinal))
+            {
+                var collision = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                    "SELECT EXISTS(SELECT 1 FROM skill"
+                    + " WHERE tenant_id = @TenantId AND name = @targetName AND id <> @Id)",
+                    new { row.TenantId, targetName, row.Id }, tx, cancellationToken: ct));
+                if (collision)
+                {
+                    throw new InvalidOperationException(
+                        $"Skill 名稱遷移發生衝突：tenant={row.TenantId}, old={row.Name}, target={targetName}");
+                }
+            }
+
+            var nameChanged = !string.Equals(targetName, row.Name, StringComparison.Ordinal);
+            var packageNeedsRewrite = row.Package is not null
+                && SkillPackageMigration.PackageNeedsRewrite(row.Package, targetName, row.Kind);
+            var definitionNeedsRewrite =
+                !SkillPackageMigration.DefinitionNameMatches(row.Definition, targetName)
+                || (string.Equals(row.Kind, "agentic", StringComparison.Ordinal)
+                    && !SkillPackageMigration.IsStandardAgenticCanonical(row.Definition, targetName));
+            var definition = row.Definition;
+            if (nameChanged || definitionNeedsRewrite || packageNeedsRewrite)
+            {
+                definition = string.Equals(row.Kind, "agentic", StringComparison.Ordinal)
+                    ? SkillPackageMigration.RewriteAgenticCanonical(row.Definition, targetName)
+                    : SkillPackageMigration.RewriteDefinitionName(row.Definition, targetName);
+            }
+
+            byte[]? package = row.Package;
+            string? packageSha = null;
+            if (package is not null)
+            {
+                if (packageNeedsRewrite)
+                {
+                    var migrated = SkillPackageMigration.Rewrite(
+                        package, targetName, row.Kind, row.Definition);
+                    package = migrated.Bytes;
+                    if (migrated.CanonicalDefinition is not null)
+                    {
+                        definition = migrated.CanonicalDefinition;
+                    }
+                }
+
+                packageSha = SkillHash.Sha256(package);
+            }
+
+            var revisions = (await conn.QueryAsync<SkillRevisionMigrationRow>(new CommandDefinition(
+                "SELECT revision AS Revision, definition AS Definition, kind AS Kind,"
+                + " package AS Package, package_sha256 AS PackageSha256"
+                + " FROM skill_revision WHERE skill_id = @Id ORDER BY revision",
+                new { row.Id }, tx, cancellationToken: ct))).AsList();
+
+            foreach (var revision in revisions)
+            {
+                var revisionDefinition = revision.Definition;
+                var revisionNeedsDefinitionRewrite =
+                    nameChanged
+                    || !SkillPackageMigration.DefinitionNameMatches(revision.Definition, targetName)
+                    || (string.Equals(revision.Kind, "agentic", StringComparison.Ordinal)
+                        && !SkillPackageMigration.IsStandardAgenticCanonical(
+                            revision.Definition, targetName));
+                if (revisionNeedsDefinitionRewrite)
+                {
+                    revisionDefinition =
+                        string.Equals(revision.Kind, "agentic", StringComparison.Ordinal)
+                            ? SkillPackageMigration.RewriteAgenticCanonical(
+                                revision.Definition, targetName)
+                            : SkillPackageMigration.RewriteDefinitionName(
+                                revision.Definition, targetName);
+                }
+                var revisionPackage = revision.Package;
+                var revisionPackageSha = revision.PackageSha256;
+                if (revisionPackage is not null
+                    && SkillPackageMigration.PackageNeedsRewrite(
+                        revisionPackage, targetName, revision.Kind))
+                {
+                    var migrated = SkillPackageMigration.Rewrite(
+                        revisionPackage, targetName, revision.Kind, revision.Definition);
+                    revisionPackage = migrated.Bytes;
+                    revisionPackageSha = SkillHash.Sha256(revisionPackage);
+                    if (migrated.CanonicalDefinition is not null)
+                    {
+                        revisionDefinition = migrated.CanonicalDefinition;
+                    }
+                }
+
+                // 舊 schema 只在 skill 保存 current package：把它補進 current revision snapshot。
+                if (revision.Revision == row.CurrentRevision && revisionPackage is null && package is not null)
+                {
+                    revisionPackage = package;
+                    revisionPackageSha = packageSha;
+                    revisionDefinition = definition;
+                }
+
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "UPDATE skill_revision SET definition = @revisionDefinition,"
+                    + " definition_sha256 = @definitionSha, kind = @Kind,"
+                    + " package = @revisionPackage, package_sha256 = @revisionPackageSha"
+                    + " WHERE skill_id = @Id AND revision = @Revision",
+                    new
+                    {
+                        row.Id,
+                        revision.Revision,
+                        revisionDefinition,
+                        definitionSha = SkillHash.Sha256(revisionDefinition),
+                        revision.Kind,
+                        revisionPackage,
+                        revisionPackageSha,
+                    }, tx, cancellationToken: ct));
+            }
+
+            await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE skill SET name = @targetName, definition = @definition,"
+                + " package = @package, kind = @Kind"
+                + " WHERE id = @Id",
+                new { row.Id, targetName, definition, package, row.Kind },
+                tx, cancellationToken: ct));
+        }
+
+        await tx.CommitAsync(ct);
+    }
+
+    private sealed record SkillMigrationRow(
+        Guid Id,
+        string TenantId,
+        string Name,
+        string Definition,
+        string Kind,
+        byte[]? Package,
+        int CurrentRevision);
+
+    private sealed record SkillRevisionMigrationRow(
+        int Revision,
+        string Definition,
+        string Kind,
+        byte[]? Package,
+        string? PackageSha256);
 
     private static async Task SeedAsync(NpgsqlConnection conn, CancellationToken ct)
     {

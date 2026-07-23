@@ -50,22 +50,22 @@ def test_engine_keys_are_exactly_trace_errors_fatal_error():
 def test_invoke_input_engine_keys_are_stripped_from_state():
     """capture graph 釘住：進 state 的 dict 不含任何引擎鍵，query 照常在。"""
     captured: dict = {}
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
 
     class _CaptureGraph:
         async def ainvoke(self, state, config=None):
             captured.update(state)
             return {**state, "ran": True}
 
-    skills._SKILLS["__engine_probe__"] = original.__class__(
-        skill=Skill.model_validate({"name": "engine_probe", "flow": [{"node": "t"}]}),
+    skills._SKILLS["__engine-probe__"] = original.__class__(
+        skill=Skill.model_validate({"name": "engine-probe", "flow": [{"node": "t"}]}),
         graph=_CaptureGraph(),
         input_model=None,
         deps=None,
     )
     try:
         resp = client.post(
-            "/skills/__engine_probe__/invoke",
+            "/skills/__engine-probe__/invoke",
             json={
                 "input": {
                     "query": "x",
@@ -83,7 +83,7 @@ def test_invoke_input_engine_keys_are_stripped_from_state():
         assert "trace" not in captured
         assert "errors" not in captured
     finally:
-        skills._SKILLS.pop("__engine_probe__", None)
+        skills._SKILLS.pop("__engine-probe__", None)
 
 
 def test_invoke_input_engine_keys_do_not_break_real_kb_query_graph():
@@ -94,9 +94,9 @@ def test_invoke_input_engine_keys_do_not_break_real_kb_query_graph():
     """
     from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch, make_deps
 
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
     deps = make_deps({"vector": FakeSearch(lambda q, f: [TEXT_2025Q3])})
-    skills._SKILLS["__kb_engine_probe__"] = original.__class__(
+    skills._SKILLS["__kb_engine-probe__"] = original.__class__(
         skill=original.skill,
         graph=compiler.compile(original.skill, deps),
         input_model=original.input_model,
@@ -104,7 +104,7 @@ def test_invoke_input_engine_keys_do_not_break_real_kb_query_graph():
     )
     try:
         resp = client.post(
-            "/skills/__kb_engine_probe__/invoke",
+            "/skills/__kb_engine-probe__/invoke",
             json={
                 "input": {
                     "query": "2025Q3 稅後淨利是多少？",
@@ -121,4 +121,4 @@ def test_invoke_input_engine_keys_do_not_break_real_kb_query_graph():
         assert body["output"]["answer_mode"] == "ANSWER"  # fatal_error 沒把全圖 skip 掉
         assert "1,234" in body["output"]["final_answer"]
     finally:
-        skills._SKILLS.pop("__kb_engine_probe__", None)
+        skills._SKILLS.pop("__kb_engine-probe__", None)

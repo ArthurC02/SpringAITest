@@ -61,7 +61,9 @@ export async function parseErrorMessage(res: Response, fallback: string): Promis
 async function request(path: string, options: RequestInit): Promise<Response> {
   const session = getSession()
   const headers = new Headers(options.headers)
-  if (options.body && !headers.has('Content-Type')) {
+  // FormData（multipart 上傳，例：agentic package import）不可硬設 Content-Type，
+  // 否則會蓋掉瀏覽器自動帶的 multipart boundary。其餘 body 一律補 application/json。
+  if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   if (session) headers.set('Authorization', `Bearer ${session.token}`)

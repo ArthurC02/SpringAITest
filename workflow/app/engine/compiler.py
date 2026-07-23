@@ -461,8 +461,75 @@ def _ends_with_audit(flow: list) -> bool:
     )
 
 
+AGENT_RUNNER_NODE = "agent_skill_runner"
+
+
+def _build_agentic_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
+    """agentic 分派（設計 §4.1／§4.3）：單一 agent_skill_runner node + 強制附加的稽核。
+
+    治理與 flow 完全一致：runner 由 harnessed 包裝（fatal 短路、例外安全、immutable 身分、
+    declared-writes 剝除、trace），終端仍由既有規則串 audit_feedback。作者的 flow 不被讀取
+    —— canonical definition 把 flow 視為 internal detail，package 作者無法注入 node contracts。
+    """
+    audit_spec = skill_mod.resolve_node(AUDIT_NODE)
+    if audit_spec is None:
+        raise SkillCompileError(f"稽核節點 {AUDIT_NODE} 未註冊")
+    runner_spec = skill_mod.resolve_node(AGENT_RUNNER_NODE)
+    if runner_spec is None:
+        raise SkillCompileError(f"agentic runner 節點 {AGENT_RUNNER_NODE} 未註冊")
+
+    reader = getattr(deps, "agent_package_reader", None)
+    if reader is None:
+        raise SkillCompileError(
+            "agentic skill 需要 deps.agent_package_reader（package reader port 未注入）"
+        )
+    chat_model_factory = getattr(deps, "agent_chat_model", None)
+    if chat_model_factory is None:
+        raise SkillCompileError(
+            "agentic skill 需要 deps.agent_chat_model（LLM factory 未注入）"
+        )
+
+    # state schema：runner（writes=answer）+ 強制附加的 audit 的 reads/writes 聯集
+    scan = _Scan()
+    scan.specs.append(runner_spec)
+
+    g = StateGraph(build_state_schema(skill, scan, audit_spec))
+    builder = _Builder(g, deps, set(skill.uses_tools))
+
+    runner_fn = runner_spec.build(
+        deps,
+        reader=reader,
+        chat_model_factory=chat_model_factory,
+        container_deps=deps,
+        skill_name=skill.name,
+        uses_tools=list(skill.uses_tools),
+        input_keys=tuple(skill.input_schema),
+        timeout_s=skill.timeout_seconds,
+    )
+    # runner 呼叫 get_llm() → 與 flow LLM 節點一致，trace 記模型版本（觀測性，非行為）
+    llm_version = str(getattr(getattr(deps, "llm", None), "version", "") or "")
+    g.add_node(
+        AGENT_RUNNER_NODE,
+        harnessed(
+            runner_spec.name,
+            runner_fn,
+            run_on_fatal=runner_spec.run_on_fatal,
+            component_version=llm_version,
+            writes=runner_spec.writes,
+        ),
+    )
+    g.add_edge(START, AGENT_RUNNER_NODE)
+    audit_id = builder.add_node_step(f"{AUDIT_NODE}@{audit_spec.version}", {})
+    g.add_edge(AGENT_RUNNER_NODE, audit_id)
+    g.add_edge(audit_id, END)
+    return g.compile()
+
+
 def _build_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
     """實際建圖（快取未命中時才會被呼叫 —— AT2-28 以此為計數點）。"""
+    if skill.kind == "agentic":
+        return _build_agentic_graph(skill, deps)
+
     audit_spec = skill_mod.resolve_node(AUDIT_NODE)
     if audit_spec is None:  # 稽核節點必須存在，否則治理硬規則無從落實
         raise SkillCompileError(f"稽核節點 {AUDIT_NODE} 未註冊")

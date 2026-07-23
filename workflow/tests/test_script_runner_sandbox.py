@@ -82,7 +82,7 @@ ALL_ATTACKS = STATIC_ATTACKS + EXTRA_ATTACKS
 def _save(source: str, **step_fields):
     """存檔驗證（等同 POST /skills/validate 的程式路徑）。"""
     return validate_definition(
-        {"name": "probe_skill", "flow": [{"script": source, **step_fields}]}
+        {"name": "probe-skill", "flow": [{"script": source, **step_fields}]}
     )
 
 
@@ -119,7 +119,7 @@ def test_forbidden_script_survives_yaml_entry_point():
     from app.engine.skill import validate_source
 
     result = validate_source(
-        "name: probe_skill\nflow:\n  - script: |\n      import os\n      state['x'] = 1\n"
+        "name: probe-skill\nflow:\n  - script: |\n      import os\n      state['x'] = 1\n"
     )
 
     assert result.valid is False

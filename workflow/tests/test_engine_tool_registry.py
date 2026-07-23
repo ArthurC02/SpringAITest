@@ -58,7 +58,7 @@ def _deps(**extra):
 
 
 def _run(definition: dict, state: dict | None = None, deps=None) -> dict:
-    skill = Skill.model_validate({"name": "probe_skill", **definition})
+    skill = Skill.model_validate({"name": "probe-skill", **definition})
     graph = compiler.compile(skill, deps or _deps())
     return compiler.public_output(
         asyncio.run(graph.ainvoke({"tenant_id": "t-test", **(state or {})}))
@@ -201,7 +201,7 @@ def test_script_calling_tool_outside_uses_tools_is_rejected_at_save_time(probe_c
     """【AT3-16】常數名的 tools.call 不在 uses_tools → 存檔即 unknown_tool。"""
     result = validate_definition(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "uses_tools": ["local.calculator"],
             "flow": [{"script": f"tools.call('{PROBE_TOOL}', x=1)"}],
         }
@@ -272,7 +272,7 @@ def test_unknown_tool_in_tool_step():
     """【AT3-17】tool 步驟引用未註冊的 tool → unknown_tool。"""
     result = validate_definition(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "flow": [{"tool": "no_such_tool", "args": {}, "save_as": "out"}],
         }
     )
@@ -285,7 +285,7 @@ def test_unknown_tool_in_uses_tools():
     """uses_tools 列了未註冊的 tool 一樣是 unknown_tool（宣告即檢查）。"""
     result = validate_definition(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "uses_tools": ["no_such_tool"],
             "flow": [{"node": "query_intake"}],
         }
@@ -299,7 +299,7 @@ def test_known_tool_step_validates_clean():
     """決策表另一半：已註冊的 tool + 合法 save_as → 零錯誤。"""
     result = validate_definition(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "input_schema": {"formula": {"type": "str", "required": True}},
             "flow": [
                 {
@@ -319,7 +319,7 @@ def test_compiler_rejects_unknown_tool_even_without_api_validation():
     """治理硬規則在引擎層：繞過 validate API 直接 compile() 也擋（對齊 AT-GOV-02 的形狀）。"""
     skill = Skill.model_validate(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "flow": [{"tool": "no_such_tool", "args": {}, "save_as": "out"}],
         }
     )
@@ -335,7 +335,7 @@ def test_tool_step_cannot_save_into_reserved_key(save_as):
     """save_as 不得是保留鍵／引擎鍵／__ 前綴鍵（否則 tool 步驟就是一條覆寫保留鍵的路）。"""
     result = validate_definition(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "flow": [
                 {"tool": "local.calculator", "args": {"expression": "1+1"}, "save_as": save_as}
             ],

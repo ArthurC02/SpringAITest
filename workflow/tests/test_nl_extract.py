@@ -120,7 +120,7 @@ def test_nodes_catalog_lists_nl_extract():
 # ---------------------------------------------------------------------------
 
 _FLOW_DEFINITION = """
-name: nl_extract_flow_probe
+name: nl-extract-flow-probe
 input_schema:
   query: {type: str, required: true, min_length: 1}
 flow:
@@ -166,7 +166,7 @@ def test_retrieve_nl_extract_script_compiles_and_computes(monkeypatch):
 # 決策表另一半:最終 revenue_qa YAML 過 /skills/validate(印證 script 過白名單分析器)
 # ---------------------------------------------------------------------------
 
-REVENUE_QA_YAML = """name: revenue_qa
+REVENUE_QA_YAML = """name: revenue-qa
 description: 從年報文件抽取 2024 與 2025 營收數字,計算 YoY 年增率,回答營收數字比較類問題。
 required_role: USER
 input_schema:

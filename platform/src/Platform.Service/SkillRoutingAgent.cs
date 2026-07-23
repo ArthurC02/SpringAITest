@@ -182,9 +182,9 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
     // ============================================================================
     // 以下逐字搬自 ChatService(02-spec §5:TryRouteAndExecuteAsync + 5 個私有方法 + 3 個 prompt 常數)。
-    // 語意逐項保留,不放寬:匿名不路由 / 角色過濾 / builtin template_* 跳過 / SingleRequiredStringKey
+    // 語意逐項保留,不放寬:匿名不路由 / 角色過濾 / builtin template-* 跳過 / SingleRequiredStringKey
     // 靜默跳過 / 最多兩次路由 / MatchTool 全等再寬鬆取最長名 / 路由決策不帶歷史與 mem0(裸 ILlmAgent)/
-    // kb_query ABSTAIN → rag_qa 兜底 / 目錄失敗 best-effort 退純聊天 / 單一工具失敗回錯誤字串。
+    // kb-query ABSTAIN → rag-qa 兜底 / 目錄失敗 best-effort 退純聊天 / 單一工具失敗回錯誤字串。
     // ============================================================================
 
     /// <summary>
@@ -331,7 +331,7 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
     /// <summary>
     /// 輸出取字串答案時依序嘗試的 key;都沒有就整包序列化回給模型。
-    /// business_result 排最前:template_* composed skill 的 nl_logic 節點把「使用者規則套用後」的權威答案
+    /// business_result 排最前:template-* composed skill 的 nl_logic 節點把「使用者規則套用後」的權威答案
     /// 寫入 business_result(retrieval 型同時有套規則前的 final_answer),須先於 final_answer 命中。
     /// </summary>
     private static readonly string[] OutputKeys = { "business_result", "answer", "final_answer", "report", "summary" };
@@ -367,7 +367,7 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
     /// <summary>
     /// Skill 目錄(原樣穿透的 JsonElement 陣列)→ 聊天工具。純函式,可獨立單測。
-    /// 過濾:template_* 內建骨架(空殼,不可路由)→ 跳過;角色不符 → 跳過;
+    /// 過濾:template-* 內建骨架(空殼,不可路由)→ 跳過;角色不符 → 跳過;
     /// 非「恰好一個必填字串輸入」→ 跳過(P1 天花板,多參/非字串待 P3)。
     /// </summary>
     private IReadOnlyList<LlmTool> SkillCatalogToTools(JsonElement catalog, UserContext userCtx, IWorkflowService workflows)
@@ -389,9 +389,9 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
             var name = nameEl.GetString()!;
 
-            // template_* 內建骨架是空殼,不可被路由當工具(與前端同一條規則)。
+            // template-* 內建骨架是空殼,不可被路由當工具(與前端同一條規則)。
             var source = item.TryGetProperty("source", out var s) ? s.GetString() : null;
-            if (source == "builtin" && name.StartsWith("template_", StringComparison.Ordinal))
+            if (source == "builtin" && name.StartsWith("template-", StringComparison.Ordinal))
             {
                 continue;
             }
@@ -473,8 +473,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// <summary>
     /// Skill 版工具委派:打 /skills/{name}/invoke,輸入鍵由 SingleRequiredStringKey 從 input_schema 挑出。
     /// 失敗回錯誤字串給模型轉述,不炸整輪聊天。
-    /// kb_query 證據不足棄答時,確定性退回 rag_qa 兜底(不依賴模型自己補打第二刀),並如實註明。
-    /// ponytail: kb_query→rag_qa 是寫死的專屬特判,等有第二顆需要同類兜底的 skill 再抽象成表驅動。
+    /// kb-query 證據不足棄答時,確定性退回 rag-qa 兜底(不依賴模型自己補打第二刀),並如實註明。
+    /// ponytail: kb-query→rag-qa 是寫死的專屬特判,等有第二顆需要同類兜底的 skill 再抽象成表驅動。
     /// </summary>
     private async Task<string> InvokeSkillToolAsync(
         string name, string inputKey, string arg, UserContext userCtx, IWorkflowService workflows, CancellationToken ct)
@@ -487,13 +487,13 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
             };
             var res = await workflows.InvokeSkillAsync(name, input, userCtx, ct);
 
-            if (name == "kb_query" && IsAbstain(res))
+            if (name == "kb-query" && IsAbstain(res))
             {
                 var ragInput = new Dictionary<string, JsonElement>
                 {
                     ["question"] = JsonSerializer.SerializeToElement(arg),
                 };
-                var rag = await workflows.InvokeSkillAsync("rag_qa", ragInput, userCtx, ct);
+                var rag = await workflows.InvokeSkillAsync("rag-qa", ragInput, userCtx, ct);
                 return "嚴格稽核查詢因證據不足而棄答;以下是一般知識庫檢索(不含稽核保證)的結果:"
                     + ExtractSkillAnswer(rag);
             }
@@ -511,7 +511,10 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     private static JsonElement SkillOutputElement(JsonElement res) =>
         res.ValueKind == JsonValueKind.Object && res.TryGetProperty("output", out var o) ? o : res;
 
-    /// <summary>依 OutputKeys 從 output 取字串答案,都沒有回整包 raw JSON。</summary>
+    // ponytail: 與 ChatController.StreamErrorMessage 同字面(Web→Service 單向依賴,Service 取不到 Web 常數,只能同步一份)。
+    private const string FatalRunFallback = "回覆過程發生錯誤，請稍後再試";
+
+    /// <summary>依 OutputKeys 從 output 取字串答案;無答案鍵時,致命/錯誤 run 回友善訊息,否則回整包 raw JSON。</summary>
     private static string ExtractSkillAnswer(JsonElement res)
     {
         var output = SkillOutputElement(res);
@@ -524,10 +527,36 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
             }
         }
 
+        // 無答案鍵 + fatal run(agentic 遞迴/逾時/套件讀取錯誤):輸出只剩 trace/fatal_error/errors 等內部欄位,
+        // 不可整包丟給聊天模型改寫給非技術使用者;回固定友善訊息。純 flow(無 fatal_error/errors)維持原 raw fallback。
+        if (IsFatalRun(output))
+        {
+            return FatalRunFallback;
+        }
+
         return output.GetRawText();
     }
 
-    /// <summary>output.answer_mode == "ABSTAIN" → kb_query 稽核閘門判定證據不足而棄答。</summary>
+    /// <summary>output 帶 fatal_error 或非空 errors → agentic run 致命失敗(無 answer 鍵時據此改回友善訊息)。</summary>
+    private static bool IsFatalRun(JsonElement output)
+    {
+        if (output.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (output.TryGetProperty("fatal_error", out var fatal)
+            && fatal.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+        {
+            return true;
+        }
+
+        return output.TryGetProperty("errors", out var errors)
+            && errors.ValueKind == JsonValueKind.Array
+            && errors.GetArrayLength() > 0;
+    }
+
+    /// <summary>output.answer_mode == "ABSTAIN" → kb-query 稽核閘門判定證據不足而棄答。</summary>
     private static bool IsAbstain(JsonElement res)
     {
         var output = SkillOutputElement(res);

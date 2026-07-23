@@ -92,7 +92,7 @@ export default function AppShell({ session, onLogout }: Props) {
         { name: 'question', type: 'string', description: '要問知識庫的問題', required: true },
       ],
       handler: async ({ question }) => {
-        const res = await invokeSkill('rag_qa', { question })
+        const res = await invokeSkill('rag-qa', { question })
         const answer = res.output?.answer
         return typeof answer === 'string' ? answer : JSON.stringify(res.output)
       },

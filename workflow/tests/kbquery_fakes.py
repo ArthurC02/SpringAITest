@@ -190,7 +190,7 @@ def run_graph(deps: KbQueryDeps, query: str, **extra_state) -> dict:
     手寫圖（原 build_kb_query_graph）已隨 Node-First 遷移退役；kb_query 現在只有
     skills/kb_query.yaml 這一張圖，直接用 compiler 編譯後執行。
     """
-    graph = compiler.compile(skills.get("kb_query").skill, deps)
+    graph = compiler.compile(skills.get("kb-query").skill, deps)
     return asyncio.run(
         graph.ainvoke({"query": query, "tenant_id": "t-test", **extra_state})
     )

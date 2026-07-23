@@ -41,6 +41,10 @@ from app.nodes import rag_answer as _rag_answer  # noqa: F401
 from app.nodes import summarize_text as _summarize_text  # noqa: F401
 from app.nodes import triage as _triage_nodes  # noqa: F401
 
+# agentic runner 節點（@node agent_skill_runner）：custom.load 對 kind: agentic 的自訂 skill
+# 走 compiler 的 agentic 分派，compile 需先能 resolve 此節點（縫：移除即 agentic 編譯期炸）。
+from app.nodes import agent_skill_runner as _agent_skill_runner  # noqa: F401
+
 _SKILL_DIR = Path(__file__).parent
 
 # 五支 template_* 骨架:簡單模式 compose 的基底。與 kb_query 共用同一組正式依賴
@@ -48,22 +52,22 @@ _SKILL_DIR = Path(__file__).parent
 # query_intake 的各埠）。deps 映射必須與五支 yaml 同批存在:查無 → deps=None →
 # 節點需要依賴時編譯期就炸（縫③,整服務起不來）。
 _TEMPLATE_NAMES = (
-    "template_retrieval",
-    "template_compare",
-    "template_stats",
-    "template_infer",
-    "template_inspire",
+    "template-retrieval",
+    "template-compare",
+    "template-stats",
+    "template-infer",
+    "template-inspire",
 )
 
 # Node-First 遷移（Phase 1）四顆新內建 skill：與 kb_query/template_* 共用同一組
 # 正式依賴——rag_answer/summarize_text/triage_*/doc_insights/report_synthesize
 # 只用得到其中的 llm 埠，其餘（檢索/稽核各埠）用不到但無妨（同一支 KbQueryDeps
 # 也滿足編譯器強制附加的 audit_feedback 節點所需的 audit_repo）。
-_NODE_FIRST_MIGRATION_NAMES = ("rag_qa", "summarize", "triage", "analyze_report")
+_NODE_FIRST_MIGRATION_NAMES = ("rag-qa", "summarize", "triage", "analyze-report")
 
 # skill 名 → 依賴組裝函式。沒有對應項目的 skill 以 None 建圖（節點若需要依賴會在編譯期炸）。
 _DEPS_BUILDERS = {
-    "kb_query": _kb_query_deps,
+    "kb-query": _kb_query_deps,
     **{name: _kb_query_deps for name in _TEMPLATE_NAMES},
     **{name: _kb_query_deps for name in _NODE_FIRST_MIGRATION_NAMES},
 }

@@ -65,6 +65,11 @@ builder.Services.AddHttpClient("skill-validator", c => c.Timeout = TimeSpan.From
 builder.Services.AddScoped<ISkillValidator>(sp => new WorkflowSkillValidator(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("skill-validator"), workflowBaseUrl, internalToken));
 
+// Agent Skill package 驗證(P0):multipart 轉送 zip 給引擎 POST /skills/validate-package(唯一結構/語意權威)。
+builder.Services.AddHttpClient("skill-package-validator", c => c.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddScoped<ISkillPackageValidator>(sp => new WorkflowSkillPackageValidator(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient("skill-package-validator"), workflowBaseUrl, internalToken));
+
 // 嵌入 provider 由 EMBEDDINGS_PROVIDER 決定;預設 fake(確定性、免金鑰)。
 if (string.Equals(embeddingsProvider, "openai", StringComparison.OrdinalIgnoreCase))
 {

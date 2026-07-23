@@ -1,11 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
 
 from app import backend_http, skills, tracing
-from app.engine import compiler, node_registry
+from app.engine import compiler, node_registry, package
 from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
 from app.engine.skill import ValidationResult, validate_source
 from app.skills import config_apply, custom
@@ -17,6 +17,8 @@ from app.skills import config_apply, custom
 # 冷啟動「編譯」template_* 所需的 nl_logic / retrieve 註冊由 app.skills 自身負責觸發
 # （見 skills/__init__.py），故 app.skills 單獨匯入亦自足。
 from app import tools as _tools  # noqa: F401
+from app.nodes import agent_skill_runner as _agent_skill_runner  # noqa: F401
+from app.nodes.agent_skill_runner import DEFAULT_AGENT_TIMEOUT_S
 from app.nodes import analyze_report as _analyze_report_nodes  # noqa: F401
 from app.nodes import nl_extract as _nl_extract  # noqa: F401
 from app.nodes import nl_logic as _nl_logic  # noqa: F401
@@ -28,9 +30,12 @@ from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from app.schemas import (
     InvokeRequest,
     NodeInfo,
+    PackageManifest,
+    PackageSkillMeta,
     SkillInfo,
     SkillInvokeResponse,
     SkillValidateRequest,
+    ValidatePackageResult,
 )
 from app.security import RequestContext, get_context
 
@@ -80,6 +85,15 @@ def _validate_input(model, raw: dict, name: str) -> None:
                 "message": str(e),
             },
         )
+
+
+# agentic runner 的 node-level timeout（skill.timeout_seconds or DEFAULT_AGENT_TIMEOUT_S）必須
+# 穩定先於 invoke-level 逾時觸發，才能走 Harness fatal → audit 的稽核保證（設計 §4.3-5）。兩者
+# 用同一個 skill.timeout_seconds 時會撞在一起、外層因早幾 ms 起跑而搶先取消 runner、稽核被跳過。
+# 故 agentic 的 outer deadline = inner + GRACE：inner 必先 fire 產生 fatal + 稽核，outer 僅在 node
+# 自身取消失效時當純 backstop。flow skill 的逾時行為完全不變。
+# ponytail: 一個小固定餘裕，語意即「讓 node 逾時穩定先跑」；夠大到蓋過起跑時序差即可
+AGENT_INVOKE_TIMEOUT_GRACE_S = 5.0
 
 
 async def _run_with_timeout(coro, timeout_seconds: float, name: str):
@@ -154,6 +168,7 @@ async def list_skills(ctx: RequestContext = Depends(get_context)) -> list[SkillI
             required_role=loaded.skill.required_role,
             source=loaded.source,
             revision=loaded.skill.revision,
+            kind=loaded.skill.kind,
             input_schema=loaded.skill.input_schema or None,
             # 內建骨架帶原文供前端 compose patch;custom 不帶（catalog dict 無此鍵 → None）
             definition=loaded.definition or None,
@@ -182,6 +197,48 @@ async def validate_skill(
     僅在此寫入路徑生效；不改 required_role 語意，也不影響 invoke／custom.load。
     """
     return validate_source(req.definition, author_role=ctx.role)
+
+
+@app.post(
+    "/skills/validate-package",
+    response_model=ValidatePackageResult,
+    response_model_exclude_none=True,
+)
+async def validate_package(
+    package_file: UploadFile = File(alias="package"),
+    expected_name: str | None = Form(default=None),
+    ctx: RequestContext = Depends(get_context),
+) -> ValidatePackageResult:
+    """驗證上傳的 Skill package zip（設計 §2.2）。internal-only，multipart。
+
+    無副作用：只解析與驗證，不編譯、不寫入、不執行 package 內的 script（規格 R8）。
+    valid=true 時回既有 validation 回應的 superset（多 kind、canonical_definition、
+    package_manifest）；valid=false 時 exclude_none 保證不出現任何可被寫入的 metadata
+    /definition —— backend 以「有沒有 skill/canonical_definition」決定能不能寫。
+
+    Workflow 是 SKILL.md 的唯一 parser 與語意 validator（規格 R3）；backend 不另做一套。
+    """
+    raw = await package_file.read()
+    try:
+        parsed = package.parse_package(raw, expected_name)
+    except package.PackageError as e:
+        return ValidatePackageResult(valid=False, errors=list(e.errors))
+
+    return ValidatePackageResult(
+        valid=True,
+        errors=[],
+        skill=PackageSkillMeta(
+            name=parsed.skill.name,
+            description=parsed.skill.description,
+            required_role=parsed.skill.required_role,
+            input_schema=parsed.skill.input_schema,
+            kind=parsed.kind,
+        ),
+        canonical_definition=parsed.canonical_definition,
+        package_manifest=PackageManifest(
+            entries=list(parsed.entries), sha256=parsed.sha256
+        ),
+    )
 
 
 @app.post("/skills/{name}/invoke", response_model=SkillInvokeResponse)
@@ -250,8 +307,14 @@ async def invoke_skill(
     # _clean_skill_input 已把呼叫端夾帶的同名 input 剝掉 → 此處是唯一可信注入點，杜絕偽造）。
     if retrieval_top_k is not None:
         state["retrieval_top_k"] = retrieval_top_k
-    # 逾時讀有效設定的 workflow.timeout_seconds（skill 自帶的 timeout_seconds 仍優先）
-    timeout_seconds = loaded.skill.timeout_seconds or timeout_default
+    # 逾時讀有效設定的 workflow.timeout_seconds（skill 自帶的 timeout_seconds 仍優先）。
+    # agentic：outer = node 的 inner deadline + GRACE，讓 runner 的 node-level timeout 先觸發
+    # （fatal → 稽核仍跑），outer 只當純 backstop；flow 走原本行為，不受影響。
+    if loaded.skill.kind == "agentic":
+        inner = loaded.skill.timeout_seconds or DEFAULT_AGENT_TIMEOUT_S
+        timeout_seconds = inner + AGENT_INVOKE_TIMEOUT_GRACE_S
+    else:
+        timeout_seconds = loaded.skill.timeout_seconds or timeout_default
     # recursion_limit：規格 §6.3-2 的全圖護欄（langgraph 預設 10007 形同沒有護欄）
     config = {**tracing.runnable_config(), "recursion_limit": loaded.recursion_limit}
 

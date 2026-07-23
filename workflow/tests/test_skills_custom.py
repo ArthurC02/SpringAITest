@@ -23,7 +23,7 @@ client = TestClient(app)
 # 自訂 skill 的定義：刻意只用 script 步驟 —— 不打網路、不呼叫 LLM，
 # 但一樣經過編譯器強制附加的 audit_feedback（治理硬規則對自訂 skill 也成立）。
 QUARTERLY_QA = """
-name: quarterly_qa
+name: quarterly-qa
 description: 季報問答（租戶自訂）
 required_role: USER
 input_schema:
@@ -34,7 +34,7 @@ flow:
 """
 
 ADMIN_ONLY = """
-name: admin_only
+name: admin-only
 description: 僅限管理員
 required_role: ADMIN
 input_schema:
@@ -46,7 +46,7 @@ flow:
 
 # 無 script 步驟的合法定義：撰寫者角色 gate 不該擋 USER 作者提交這種定義。
 NODE_ONLY = """
-name: node_only_probe
+name: node-only-probe
 description: 無 script 步驟
 input_schema:
   query: {type: str, required: true, min_length: 1}
@@ -56,10 +56,19 @@ flow:
 
 # 存檔時驗過、事後失效的定義（引用了不存在的節點）
 BROKEN = """
-name: broken_skill
+name: broken-skill
 description: 事後失效
 flow:
   - node: no_such_node
+"""
+
+AGENTIC_CANONICAL = """name: sales-helper
+description: 銷售小幫手
+metadata:
+  kind: agentic
+  required_role: USER
+  timeout_seconds: "30"
+  input_schema: '{"query":{"type":"str","required":true}}'
 """
 
 
@@ -160,36 +169,58 @@ def backend(monkeypatch):
 
 
 def test_list_skills_merges_builtin_and_custom(backend, fake_deps):
-    """【AT4-09】kb_query source=builtin、quarterly_qa source=custom，兩者皆有 revision。"""
-    fake = backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA, revision=3)]})
+    """【AT4-09】kb-query source=builtin、quarterly-qa source=custom，兩者皆有 revision。"""
+    fake = backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA, revision=3)]})
 
     resp = client.get("/skills", headers=_headers())
 
     assert resp.status_code == 200
     body = {item["name"]: item for item in resp.json()}
-    assert body["kb_query"]["source"] == "builtin"
-    assert body["kb_query"]["revision"] == 1
-    assert body["quarterly_qa"]["source"] == "custom"
-    assert body["quarterly_qa"]["revision"] == 3
-    assert body["quarterly_qa"]["required_role"] == "USER"
-    assert body["quarterly_qa"]["description"] == "季報問答（租戶自訂）"
+    assert body["kb-query"]["source"] == "builtin"
+    assert body["kb-query"]["revision"] == 1
+    assert body["quarterly-qa"]["source"] == "custom"
+    assert body["quarterly-qa"]["revision"] == 3
+    assert body["quarterly-qa"]["required_role"] == "USER"
+    assert body["quarterly-qa"]["description"] == "季報問答（租戶自訂）"
     # 前端動態渲染執行表單的依據：自訂 skill 的 input_schema 逐鍵比對（不放寬）
-    assert body["quarterly_qa"]["input_schema"] == {
+    assert body["quarterly-qa"]["input_schema"] == {
         "query": {"type": "str", "required": True, "min_length": 1, "default": None}
     }
-    assert body["kb_query"]["input_schema"]["query"]["required"] is True
+    assert body["kb-query"]["input_schema"]["query"]["required"] is True
     # 出站請求帶了內部密鑰與租戶標頭（fake 內已 assert token；這裡釘住租戶）
     assert all(h["X-Tenant-Id"] == "demo-a" for _, h in fake.calls)
 
 
+def test_custom_catalog_declares_flow_and_agentic_kind(backend, fake_deps):
+    backend(
+        {
+            "demo-a": [
+                row("quarterly-qa", QUARTERLY_QA),
+                row(
+                    "sales-helper",
+                    AGENTIC_CANONICAL,
+                    description="銷售小幫手",
+                ),
+            ]
+        }
+    )
+
+    body = {item["name"]: item for item in client.get("/skills", headers=_headers()).json()}
+    assert body["quarterly-qa"]["kind"] == "flow"
+    assert body["sales-helper"]["kind"] == "agentic"
+    assert body["sales-helper"]["input_schema"] == {
+        "query": {"type": "str", "required": True, "min_length": None, "default": None}
+    }
+
+
 def test_list_skills_is_tenant_scoped(backend, fake_deps):
     """跨租戶不可見：demo-b 列不到 demo-a 的自訂 skill，但內建 skill 照列。"""
-    backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA)]})
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA)]})
 
     names = [i["name"] for i in client.get("/skills", headers=_headers(tenant_id="demo-b")).json()]
 
-    assert "quarterly_qa" not in names
-    assert "kb_query" in names
+    assert "quarterly-qa" not in names
+    assert "kb-query" in names
 
 
 def test_list_skills_survives_backend_down(backend, fake_deps):
@@ -200,31 +231,31 @@ def test_list_skills_survives_backend_down(backend, fake_deps):
 
     assert resp.status_code == 200
     names = [i["name"] for i in resp.json()]
-    # 內建集合 = kb_query + 五支 template_* 骨架（設計 §5.4 縫④：骨架亦入 GET /skills，
-    # 由前端過濾 template_ 前綴）+ Node-First 遷移（Phase 1）新增的四顆內建 skill
-    # （analyze_report/rag_qa/summarize/triage）。backend 不可達時只缺自訂項，內建照列。
+    # 內建集合 = kb-query + 五支 template-* 骨架（設計 §5.4 縫④：骨架亦入 GET /skills，
+    # 由前端過濾 template- 前綴）+ Node-First 遷移（Phase 1）新增的四顆內建 skill
+    # （analyze-report/rag-qa/summarize/triage）。backend 不可達時只缺自訂項，內建照列。
     assert names == [
-        "analyze_report",
-        "kb_query",
-        "rag_qa",
+        "analyze-report",
+        "kb-query",
+        "rag-qa",
         "summarize",
-        "template_compare",
-        "template_infer",
-        "template_inspire",
-        "template_retrieval",
-        "template_stats",
+        "template-compare",
+        "template-infer",
+        "template-inspire",
+        "template-retrieval",
+        "template-stats",
         "triage",
     ]
 
 
 def test_list_skills_keeps_entry_when_definition_unreadable(backend, fake_deps):
     """單筆定義取不到／壞掉 → 該筆仍列得出來，只有 input_schema 退成 null。"""
-    backend({"demo-a": [row("quarterly_qa", "name: quarterly_qa\nflow: [")]})  # 壞 YAML
+    backend({"demo-a": [row("quarterly-qa", "name: quarterly-qa\nflow: [")]})  # 壞 YAML
 
     body = {i["name"]: i for i in client.get("/skills", headers=_headers()).json()}
 
-    assert body["quarterly_qa"]["source"] == "custom"
-    assert body["quarterly_qa"]["input_schema"] is None
+    assert body["quarterly-qa"]["source"] == "custom"
+    assert body["quarterly-qa"]["input_schema"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -234,17 +265,17 @@ def test_list_skills_keeps_entry_when_definition_unreadable(backend, fake_deps):
 
 def test_invoke_custom_skill_happy_path(backend, fake_deps):
     """決策表的另一半：合法輸入 → 200 {skill, output}，稽核照樣落地。"""
-    backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA)]})
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA)]})
 
     resp = client.post(
-        "/skills/quarterly_qa/invoke",
+        "/skills/quarterly-qa/invoke",
         json={"input": {"query": "2025Q3 稅後淨利？"}},
         headers=_headers(),
     )
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["skill"] == "quarterly_qa"
+    assert body["skill"] == "quarterly-qa"
     assert body["output"]["final_answer"] == "echo: 2025Q3 稅後淨利？"
     # 治理硬規則對自訂 skill 一樣成立：稽核節點強制附加、audit trail 落地
     assert [t["node_name"] for t in body["output"]["trace"]][-1] == "audit_feedback"
@@ -265,10 +296,10 @@ def test_invoke_unknown_custom_skill_returns_404(backend, fake_deps):
 
 def test_invoke_custom_skill_cross_tenant_returns_404(backend, fake_deps):
     """跨租戶不可見：demo-b 執行 demo-a 的 skill → 404（不洩漏存在性）。"""
-    backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA)]})
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA)]})
 
     resp = client.post(
-        "/skills/quarterly_qa/invoke",
+        "/skills/quarterly-qa/invoke",
         json={"input": {"query": "x"}},
         headers=_headers(tenant_id="demo-b"),
     )
@@ -278,10 +309,10 @@ def test_invoke_custom_skill_cross_tenant_returns_404(backend, fake_deps):
 
 def test_invoke_disabled_custom_skill_returns_404(backend, fake_deps):
     """軟刪（enabled=false）等同不存在。"""
-    backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA, enabled=False)]})
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA, enabled=False)]})
 
     resp = client.post(
-        "/skills/quarterly_qa/invoke",
+        "/skills/quarterly-qa/invoke",
         json={"input": {"query": "x"}},
         headers=_headers(),
     )
@@ -291,10 +322,10 @@ def test_invoke_disabled_custom_skill_returns_404(backend, fake_deps):
 
 def test_invoke_custom_admin_skill_forbidden_for_user(backend, fake_deps):
     """required_role: ADMIN 的自訂 skill 被 USER 呼叫 → 403（順序上先於 422：input 是空的）。"""
-    backend({"demo-a": [row("admin_only", ADMIN_ONLY, required_role="ADMIN")]})
+    backend({"demo-a": [row("admin-only", ADMIN_ONLY, required_role="ADMIN")]})
 
     resp = client.post(
-        "/skills/admin_only/invoke", json={"input": {}}, headers=_headers()
+        "/skills/admin-only/invoke", json={"input": {}}, headers=_headers()
     )
 
     assert resp.status_code == 403
@@ -302,7 +333,7 @@ def test_invoke_custom_admin_skill_forbidden_for_user(backend, fake_deps):
 
     # 決策表另一半：ADMIN 過了角色關卡，才輪到 input 驗證（422）
     forbidden_then_422 = client.post(
-        "/skills/admin_only/invoke", json={"input": {}}, headers=_headers(role="ADMIN")
+        "/skills/admin-only/invoke", json={"input": {}}, headers=_headers(role="ADMIN")
     )
     assert forbidden_then_422.status_code == 422
 
@@ -312,10 +343,10 @@ def test_invoke_custom_admin_skill_forbidden_for_user(backend, fake_deps):
 )
 def test_invoke_custom_skill_invalid_input_returns_422(backend, fake_deps, input_body):
     """input_schema 的 required / min_length 由動態 Pydantic model 執行（同內建 skill）。"""
-    backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA)]})
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA)]})
 
     resp = client.post(
-        "/skills/quarterly_qa/invoke", json={"input": input_body}, headers=_headers()
+        "/skills/quarterly-qa/invoke", json={"input": input_body}, headers=_headers()
     )
 
     assert resp.status_code == 422
@@ -327,7 +358,7 @@ def test_invoke_custom_skill_backend_down_returns_controlled_500(backend, fake_d
     backend(down=True)
 
     resp = client.post(
-        "/skills/quarterly_qa/invoke",
+        "/skills/quarterly-qa/invoke",
         json={"input": {"query": "x"}},
         headers=_headers(),
     )
@@ -340,10 +371,10 @@ def test_invoke_custom_skill_backend_down_returns_controlled_500(backend, fake_d
 
 def test_invoke_custom_skill_with_broken_definition_returns_500(backend, fake_deps):
     """DB 裡的定義事後失效（節點被下架）→ 500，不是 422：不是呼叫端的錯。"""
-    backend({"demo-a": [row("broken_skill", BROKEN)]})
+    backend({"demo-a": [row("broken-skill", BROKEN)]})
 
     resp = client.post(
-        "/skills/broken_skill/invoke", json={"input": {}}, headers=_headers()
+        "/skills/broken-skill/invoke", json={"input": {}}, headers=_headers()
     )
 
     assert resp.status_code == 500
@@ -352,10 +383,10 @@ def test_invoke_custom_skill_with_broken_definition_returns_500(backend, fake_de
 
 def test_invoke_custom_skill_reserved_keys_cannot_be_forged(backend, fake_deps):
     """保留鍵剝除對自訂 skill 一樣成立：input 夾帶 tenant_id / query_id 一律無效。"""
-    backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA)]})
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA)]})
 
     resp = client.post(
-        "/skills/quarterly_qa/invoke",
+        "/skills/quarterly-qa/invoke",
         json={
             "input": {
                 "query": "x",
@@ -388,19 +419,19 @@ def test_custom_skill_compiles_once_per_revision(backend, fake_deps, monkeypatch
         return real_build(skill, deps)
 
     monkeypatch.setattr(compiler, "_build_graph", counting_build)
-    fake = backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA, revision=3)]})
+    fake = backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA, revision=3)]})
 
     body = {"input": {"query": "x"}}
-    assert client.post("/skills/quarterly_qa/invoke", json=body, headers=_headers()).status_code == 200
-    assert client.post("/skills/quarterly_qa/invoke", json=body, headers=_headers()).status_code == 200
-    assert builds == ["quarterly_qa@3"]  # 第二次命中快取
+    assert client.post("/skills/quarterly-qa/invoke", json=body, headers=_headers()).status_code == 200
+    assert client.post("/skills/quarterly-qa/invoke", json=body, headers=_headers()).status_code == 200
+    assert builds == ["quarterly-qa@3"]  # 第二次命中快取
 
     # backend 出新 revision → 重編（快取鍵含 revision 與內容雜湊）
     fake.by_tenant["demo-a"] = [
-        row("quarterly_qa", QUARTERLY_QA.replace("echo: ", "echo2: "), revision=4)
+        row("quarterly-qa", QUARTERLY_QA.replace("echo: ", "echo2: "), revision=4)
     ]
-    assert client.post("/skills/quarterly_qa/invoke", json=body, headers=_headers()).status_code == 200
-    assert builds == ["quarterly_qa@3", "quarterly_qa@4"]
+    assert client.post("/skills/quarterly-qa/invoke", json=body, headers=_headers()).status_code == 200
+    assert builds == ["quarterly-qa@3", "quarterly-qa@4"]
 
 
 # ---------------------------------------------------------------------------
@@ -427,9 +458,10 @@ def test_validate_returns_skill_metadata_when_valid(backend, fake_deps):
     assert body["valid"] is True
     assert body["errors"] == []
     assert body["skill"] == {
-        "name": "quarterly_qa",
+        "name": "quarterly-qa",
         "description": "季報問答（租戶自訂）",
         "required_role": "USER",
+        "kind": "flow",
         "input_schema": {"query": {"type": "str", "required": True, "min_length": 1}},
     }
 
@@ -516,12 +548,12 @@ def test_validate_non_script_definition_passes_for_user_author(backend, fake_dep
 
     body = resp.json()
     assert body["valid"] is True
-    assert body["skill"]["name"] == "node_only_probe"
+    assert body["skill"]["name"] == "node-only-probe"
 
 
 def test_validate_has_no_side_effects_on_custom_catalog(backend, fake_deps):
     """【AT4-11】驗證三次不得寫入任何東西：清單前後一致、也不會註冊成可執行 skill。"""
-    backend({"demo-a": [row("quarterly_qa", QUARTERLY_QA)]})
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA)]})
 
     before = client.get("/skills", headers=_headers()).json()
     for definition in (QUARTERLY_QA, BROKEN, QUARTERLY_QA):
@@ -529,6 +561,6 @@ def test_validate_has_no_side_effects_on_custom_catalog(backend, fake_deps):
     after = client.get("/skills", headers=_headers()).json()
 
     assert after == before
-    assert skills.get("quarterly_qa") is None  # 自訂 skill 不會被寫進內建註冊表
-    assert skills.get("broken_skill") is None
+    assert skills.get("quarterly-qa") is None  # 自訂 skill 不會被寫進內建註冊表
+    assert skills.get("broken-skill") is None
 

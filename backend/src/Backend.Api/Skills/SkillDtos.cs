@@ -12,7 +12,8 @@ public sealed record SkillInfo(
     [property: JsonPropertyName("enabled")] bool Enabled,
     [property: JsonPropertyName("current_revision")] int CurrentRevision,
     [property: JsonPropertyName("created_at")] DateTime CreatedAt,
-    [property: JsonPropertyName("updated_at")] DateTime UpdatedAt);
+    [property: JsonPropertyName("updated_at")] DateTime UpdatedAt,
+    [property: JsonPropertyName("kind")] string Kind = "flow");
 
 /// <summary>
 /// Skill 完整內容(含 definition 原文)。JSON snake_case。
@@ -27,7 +28,11 @@ public sealed record Skill(
     [property: JsonPropertyName("enabled")] bool Enabled,
     [property: JsonPropertyName("current_revision")] int CurrentRevision,
     [property: JsonPropertyName("created_at")] DateTime CreatedAt,
-    [property: JsonPropertyName("updated_at")] DateTime UpdatedAt);
+    [property: JsonPropertyName("updated_at")] DateTime UpdatedAt,
+    [property: JsonPropertyName("kind")] string Kind = "flow",
+    // 匯入 package 的原始 zip bytes(flow/agentic 都可有；definition-only flow 為 null)。
+    // **永不序列化**：package 不得出現在任何公開 JSON。export 與內部 package 端點讀它。
+    [property: JsonIgnore] byte[]? Package = null);
 
 /// <summary>
 /// 建立/更新 Skill 的請求 body — **只有 definition 一個欄位**(YAML 原文)。
@@ -43,4 +48,24 @@ public sealed record SkillRevisionInfo(
     [property: JsonPropertyName("definition")] string Definition,
     [property: JsonPropertyName("definition_sha256")] string DefinitionSha256,
     [property: JsonPropertyName("created_by")] string CreatedBy,
-    [property: JsonPropertyName("created_at")] DateTime CreatedAt);
+    [property: JsonPropertyName("created_at")] DateTime CreatedAt,
+    [property: JsonPropertyName("kind")] string Kind = "flow",
+    [property: JsonPropertyName("has_package")] bool HasPackage = false,
+    // 匯入 revision 記 package SHA-256；definition-only flow 為 null。
+    [property: JsonPropertyName("package_sha256")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PackageSha256 = null);
+
+/// <summary>
+/// Server-side restore 使用的完整 revision。Package 僅在 backend 內部流動，不會直接序列化。
+/// 舊 agentic revision 在加入 package snapshot 前可能為 null；controller 會回 409，避免錯誤回復。
+/// </summary>
+public sealed record StoredSkillRevision(
+    int Revision,
+    string Definition,
+    string DefinitionSha256,
+    string CreatedBy,
+    DateTime CreatedAt,
+    string Kind,
+    byte[]? Package,
+    string? PackageSha256);

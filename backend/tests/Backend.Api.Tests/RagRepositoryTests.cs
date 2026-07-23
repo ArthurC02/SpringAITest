@@ -10,7 +10,8 @@ namespace Backend.Api.Tests;
 /// 比照 ConfigurationSetRepositoryTests / AuthRepositoryTests 共用同一個 PostgresFixture
 /// (appdb 不可達則 SkipIfUnavailable 略過,不假綠)。每測用自己的 "ragrepo-<case>-" 租戶。
 /// </summary>
-public sealed class RagRepositoryTests : IClassFixture<PostgresFixture>, IAsyncLifetime
+[Collection("Postgres")]
+public sealed class RagRepositoryTests : IAsyncLifetime
 {
     private readonly PostgresFixture _fx;
 

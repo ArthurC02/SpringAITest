@@ -11,7 +11,7 @@ Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfus
 
 - **向量檢索（RAG）**：`/documents` 負責文件的切塊、嵌入、儲存；`app/nodes/retrieve.py` 提供共用的
   LangGraph 檢索節點，各工作流可直接掛用。
-- **分析工作流**：`rag_qa`（檢索增強問答）、`analyze_report`（主題分析報告，管理員限定）。
+- **分析工作流**：`rag-qa`（檢索增強問答）、`analyze-report`（主題分析報告，管理員限定）。
 - **服務間認證**：所有 `/skills*`、`/nodes`、`/documents*` 端點都要求 `X-Internal-Token` 與 platform 端（.NET）共享的密鑰吻合。
 - **角色權限邊界**：每個工作流宣告 `required_role`（`USER` 或 `ADMIN`），由 `X-User-Role` 標頭核對。
 - **多租戶隔離**：所有文件與檢索操作皆以 `X-Tenant-Id` 為第一層邊界，租戶之間資料互不可見。
@@ -67,14 +67,14 @@ Langfuse LangChain callback，讓「圖的執行過程」本身也能在 Langfus
 | --- | --- | --- | --- |
 | `summarize` | 將輸入文字做三句以內的摘要（線性流程） | USER | `{"text": "..."}` |
 | `triage` | 依問題複雜度分流回答（條件分支流程） | USER | `{"question": "..."}` |
-| `rag_qa` | 檢索增強問答：以租戶內文件回答問題並附引用 | USER | `{"question": "..."}`（非空） |
-| `kb_query` | 向量知識庫檢索：查詢租戶文件內容 | USER | `{"query": "..."}`（非空） |
-| `analyze_report` | 檢索租戶文件並產出主題分析報告 | **ADMIN** | `{"topic": "..."}`（非空） |
+| `rag-qa` | 檢索增強問答：以租戶內文件回答問題並附引用 | USER | `{"question": "..."}`（非空） |
+| `kb-query` | 向量知識庫檢索：查詢租戶文件內容 | USER | `{"query": "..."}`（非空） |
+| `analyze-report` | 檢索租戶文件並產出主題分析報告 | **ADMIN** | `{"topic": "..."}`（非空） |
 
-`rag_qa` 與 `analyze_report` 的狀態都含 `docs`（檢索到的片段列表，每筆有 `document_id`／`title`／
-`content`／`score`）。查無任何片段時：`rag_qa` 直接給固定文案「在你的租戶資料中找不到相關內容，
-請先上傳文件。」且 `citations` 為空陣列；`analyze_report` 的 `insights` 固定為「（無資料）」——
-兩者皆不會在查無資料時呼叫 LLM。`rag_qa` 的 `citations` 一律由程式從 `docs` 產生（非 LLM 輸出），
+`rag-qa` 與 `analyze-report` 的狀態都含 `docs`（檢索到的片段列表，每筆有 `document_id`／`title`／
+`content`／`score`）。查無任何片段時：`rag-qa` 直接給固定文案「在你的租戶資料中找不到相關內容，
+請先上傳文件。」且 `citations` 為空陣列；`analyze-report` 的 `insights` 固定為「（無資料）」——
+兩者皆不會在查無資料時呼叫 LLM。`rag-qa` 的 `citations` 一律由程式從 `docs` 產生（非 LLM 輸出），
 避免引用內容與實際檢索結果不一致。
 
 ## 本機開發
@@ -111,7 +111,7 @@ curl -Headers $headers http://localhost:8001/skills
 
 curl -Method Post -Headers ($headers + @{"Content-Type"="application/json"}) `
   -Body '{"input":{"question":"退款政策是什麼？"}}' `
-  http://localhost:8001/skills/rag_qa/invoke
+  http://localhost:8001/skills/rag-qa/invoke
 ```
 
 > 文件的新增/列表/刪除已移到 backend 核心服務（經 platform 的 `/api/documents`）；

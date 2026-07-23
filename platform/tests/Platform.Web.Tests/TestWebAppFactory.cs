@@ -13,7 +13,7 @@ namespace Platform.Web.Tests;
 /// 但把 backend 相依的服務層與對外相依(LLM、mem0)換成 fake,不需要真的 backend。
 /// Testing 環境下不掛 OTLP exporter。
 /// </summary>
-public sealed class TestWebAppFactory : WebApplicationFactory<Program>
+public class TestWebAppFactory : WebApplicationFactory<Program>
 {
     private readonly bool _enableRateLimiting;
     private readonly bool _removeSessionIsolationProvider;

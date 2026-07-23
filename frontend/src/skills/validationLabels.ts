@@ -1,4 +1,5 @@
 import type { SkillValidation } from '../types'
+import { NAME_RULE_MESSAGE } from './skillName'
 
 /** 引擎錯誤碼 → 人話（規格 §3.4）。未知碼直接顯示原碼，不吞掉。 */
 export const CODE_LABEL: Record<string, string> = {
@@ -12,6 +13,9 @@ export const CODE_LABEL: Record<string, string> = {
     '程式規則用了不支援的寫法（例如 .append()、lambda、清單推導式、while 迴圈或 import）；請改用簡單賦值搭配 sorted()，例如「結果 = 結果 + [新項目]」。',
   dataflow_error: '資料流警告：讀取了無前置步驟產出的鍵',
   invalid_flow: 'flow 為空、步驟型別未知，或 YAML 解析失敗',
+  // name 是技術識別碼(slug),不是 flow 問題 —— workflow 現在只在真的 flow 壞掉時發 invalid_flow。
+  invalid_name: NAME_RULE_MESSAGE,
+  invalid_schema: '有欄位格式不正確，請檢查各欄位。',
 }
 
 // dataflow_error 是警告級：不阻擋存檔（規格 §3.4）。其餘皆為阻擋級。

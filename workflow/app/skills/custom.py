@@ -17,9 +17,10 @@ import logging
 from typing import Any
 
 import httpx
+import yaml
 
 from app.backend_http import get_client
-from app.engine import compiler
+from app.engine import compiler, package
 from app.engine import skill as skill_mod
 from app.engine.skill import InputField
 from app.security import RequestContext
@@ -55,6 +56,19 @@ def singleton_deps() -> Any:
 
 # 既有呼叫端沿用 custom.deps() 名稱（re-export 別名，避免與 load 的 deps 參數混淆）。
 deps = singleton_deps
+
+
+def _is_agentic(definition: str) -> bool:
+    """definition 是否為 agentic canonical 投影（metadata.kind: agentic，§3 標準形狀）。
+    壞 YAML → False，交回 flow 路徑的 validate_source 收斂處理（不在這裡拋未捕捉例外）。"""
+    try:
+        data = yaml.safe_load(definition)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    metadata = data.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("kind") == "agentic"
 
 
 def _headers(ctx: RequestContext) -> dict[str, str]:
@@ -104,10 +118,17 @@ async def _entry(ctx: RequestContext, info: dict) -> dict:
     （前端據此退回 JSON textarea，比整筆不見得好）。
     """
     schema: dict[str, InputField] | None = None
+    kind = "flow"
     try:
         data = await _fetch(f"/api/skills/{info['name']}", ctx)
         if data:
-            schema = skill_mod.parse_source(data["definition"]).input_schema
+            definition = data["definition"]
+            if _is_agentic(definition):
+                parsed = package.skill_from_agentic_meta(yaml.safe_load(definition))[0]
+            else:
+                parsed = skill_mod.parse_source(definition)
+            schema = parsed.input_schema
+            kind = parsed.kind
     except Exception as e:  # 取不到／壞 YAML／schema 不合 —— 一筆的問題不該炸整份清單
         logger.warning("自訂 skill %s 的 input_schema 取得失敗: %s", info.get("name"), e)
 
@@ -117,6 +138,7 @@ async def _entry(ctx: RequestContext, info: dict) -> dict:
         "required_role": info.get("required_role") or "USER",
         "source": "custom",
         "revision": int(info.get("current_revision") or 1),
+        "kind": kind,
         "input_schema": schema,
     }
 
@@ -135,17 +157,29 @@ async def load(
         return None
 
     definition = data.get("definition") or ""
-    result = skill_mod.validate_source(definition)
-    if not result.valid:
-        # 存檔時是驗過的：走到這裡代表定義在事後失效（例如引用的節點被下架）。
-        # 不是呼叫端的錯 → 受控的 500，而不是 422。
-        raise InvalidCustomSkill(
-            f"自訂 skill '{name}' 的定義未通過靜態驗證: "
-            f"{[e.code for e in result.errors]}"
-        )
+    # agentic 的 definition 是 workflow 於 import 時產生的 canonical 投影（service-authored，
+    # §3 標準形狀）：不走 flow-only 的 validate_source（那會以 AGENTIC_REQUIRES_IMPORT 拒絕投影），
+    # 改以與 import 同一個 skill_from_agentic_meta 解回 flat Skill（compile 走 agentic 分派）。
+    agentic = _is_agentic(definition)
+    if agentic:
+        try:
+            skill = package.skill_from_agentic_meta(yaml.safe_load(definition))[0]
+        except (yaml.YAMLError, package.PackageError) as e:
+            raise InvalidCustomSkill(
+                f"自訂 skill '{name}' 的 agentic canonical 定義解析失敗: {e}"
+            )
+    else:
+        result = skill_mod.validate_source(definition)
+        if not result.valid:
+            # 存檔時是驗過的：走到這裡代表定義在事後失效（例如引用的節點被下架）。
+            # 不是呼叫端的錯 → 受控的 500，而不是 422。
+            raise InvalidCustomSkill(
+                f"自訂 skill '{name}' 的定義未通過靜態驗證: "
+                f"{[e.code for e in result.errors]}"
+            )
+        skill = skill_mod.parse_source(definition)
 
     try:
-        skill = skill_mod.parse_source(definition)
         # revision 取 backend 的 current_revision（YAML 裡的 revision 欄位作者不會維護）→
         # 快取鍵 (name, revision, 內容雜湊)：同 revision 命中、改版即重編。
         skill = skill.model_copy(

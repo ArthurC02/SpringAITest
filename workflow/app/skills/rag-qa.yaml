@@ -1,4 +1,4 @@
-name: rag_qa
+name: rag-qa
 description: 檢索增強問答：以租戶內文件回答問題並附引用
 required_role: USER
 

@@ -158,7 +158,7 @@ def test_same_name_different_version_can_coexist_and_skill_pins_v1():
 
         assert node_registry.get(name, version="1.0").version == "1.0"
         assert node_registry.get(name).version == "2.0"  # 未指定 → 最新版
-        assert f"{name}@1.0" in skills.get("kb_query").definition
+        assert f"{name}@1.0" in skills.get("kb-query").definition
     finally:
         node_registry._REGISTRY.pop((name, "2.0"), None)
 

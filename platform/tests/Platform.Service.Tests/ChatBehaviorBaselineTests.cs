@@ -55,7 +55,7 @@ public sealed class ChatBehaviorBaselineTests
 
     // 單一可路由 skill(唯一必填字串 query),多數案例的最小目錄。
     private const string SingleSkillCatalog = """
-    [ { "name":"kb_query", "description":"知識庫檢索", "required_role":"USER", "source":"builtin",
+    [ { "name":"kb-query", "description":"知識庫檢索", "required_role":"USER", "source":"builtin",
         "input_schema": { "query": { "type":"str", "required":true } } } ]
     """;
 
@@ -66,20 +66,20 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A01_RoutedSkill_InvokesWithCorrectInput_RepliesWithSummary_NotRawJson()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");              // 第一次 CompleteAsync = 路由
+        agent.Responses.Enqueue("kb-query");              // 第一次 CompleteAsync = 路由
         agent.Responses.Enqueue("本季毛利率是 32.8%。");   // 第二次 CompleteAsync = 摘要
         var mem0 = new FakeMem0Client();
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"毛利率 32.8%" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"毛利率 32.8%" } }"""),
         };
         var svc = Build(agent, wf, mem0);
 
         var reply = await svc.ChatAsync("這季毛利率多少?", "u1", "c1", UserA);
 
         var invoke = Assert.Single(wf.SkillInvokes);
-        Assert.Equal("kb_query", invoke.Name);
+        Assert.Equal("kb-query", invoke.Name);
         Assert.Equal("這季毛利率多少?", invoke.Input["query"].GetString());
 
         // 回覆是摘要輸出,不是工具原始 JSON(原始 JSON 會以 "{" 開頭)。
@@ -154,7 +154,7 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A04_SingleSkillFailure_DoesNotThrow_StillReturnsReply(Exception error)
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");                 // 路由命中
+        agent.Responses.Enqueue("kb-query");                 // 路由命中
         agent.Responses.Enqueue("已如實轉達錯誤的摘要");       // 摘要(工具失敗文字被轉述,不炸)
         var wf = new FakeWorkflowService { Catalog = Cat(SingleSkillCatalog), ThrowOnSkillInvoke = error };
         var svc = Build(agent, wf);
@@ -169,9 +169,9 @@ public sealed class ChatBehaviorBaselineTests
     // ================================================================
     private const string RoleCatalog = """
     [
-      { "name":"user_skill", "description":"一般查詢", "required_role":"USER", "source":"custom",
+      { "name":"user-skill", "description":"一般查詢", "required_role":"USER", "source":"custom",
         "input_schema": { "query": { "type":"str", "required":true } } },
-      { "name":"admin_only_skill", "description":"管理限定", "required_role":"ADMIN", "source":"custom",
+      { "name":"admin-only-skill", "description":"管理限定", "required_role":"ADMIN", "source":"custom",
         "input_schema": { "query": { "type":"str", "required":true } } }
     ]
     """;
@@ -180,36 +180,36 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A05a_UserRole_AdminOnlySkill_NeverInSkillInvokes()
     {
         var agent = new FakeLlmAgent();
-        // USER 的路由表裡不存在 admin_only_skill,兩次路由都無法命中,退純聊天兜底(FakeChatClient 接手)。
-        agent.Responses.Enqueue("admin_only_skill");
-        agent.Responses.Enqueue("admin_only_skill");
+        // USER 的路由表裡不存在 admin-only-skill,兩次路由都無法命中,退純聊天兜底(FakeChatClient 接手)。
+        agent.Responses.Enqueue("admin-only-skill");
+        agent.Responses.Enqueue("admin-only-skill");
         var wf = new FakeWorkflowService { Catalog = Cat(RoleCatalog) };
         var svc = Build(agent, wf);
 
         await svc.ChatAsync("管理報表", "u1", "c1", UserA);
 
-        Assert.DoesNotContain(wf.SkillInvokes, i => i.Name == "admin_only_skill");
+        Assert.DoesNotContain(wf.SkillInvokes, i => i.Name == "admin-only-skill");
     }
 
     [Fact]
     public async Task A05b_AdminRole_AdminOnlySkill_Invoked()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("admin_only_skill");
+        agent.Responses.Enqueue("admin-only-skill");
         agent.Responses.Enqueue("報表摘要");
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(RoleCatalog),
             SkillOutputByName = new()
             {
-                ["admin_only_skill"] = Cat("""{ "skill":"admin_only_skill", "output": { "business_result":"報表內容" } }"""),
+                ["admin-only-skill"] = Cat("""{ "skill":"admin-only-skill", "output": { "business_result":"報表內容" } }"""),
             },
         };
         var svc = Build(agent, wf);
 
         await svc.ChatAsync("管理報表", "u1", "c1", AdminA);
 
-        Assert.Contains(wf.SkillInvokes, i => i.Name == "admin_only_skill");
+        Assert.Contains(wf.SkillInvokes, i => i.Name == "admin-only-skill");
     }
 
     // ================================================================
@@ -252,7 +252,7 @@ public sealed class ChatBehaviorBaselineTests
     }
 
     // ================================================================
-    // A-07:內建 template_* 骨架永不可路由,同前綴的 custom skill 可路由
+    // A-07:內建 template-* 骨架永不可路由,同前綴的 custom skill 可路由
     // ================================================================
     [Fact]
     public async Task A07_BuiltinTemplatePrefix_NeverRouted_CustomSamePrefix_IsRouted()
@@ -261,33 +261,33 @@ public sealed class ChatBehaviorBaselineTests
         {
             Catalog = Cat("""
             [
-              { "name":"template_infer", "description":"骨架", "required_role":"USER", "source":"builtin",
+              { "name":"template-infer", "description":"骨架", "required_role":"USER", "source":"builtin",
                 "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"template_x", "description":"自訂骨架同名前綴", "required_role":"USER", "source":"custom",
+              { "name":"template-x", "description":"自訂骨架同名前綴", "required_role":"USER", "source":"custom",
                 "input_schema": { "query": { "type":"str", "required":true } } }
             ]
             """),
             SkillOutputByName = new()
             {
-                ["template_x"] = Cat("""{ "skill":"template_x", "output": { "business_result":"custom 命中" } }"""),
+                ["template-x"] = Cat("""{ "skill":"template-x", "output": { "business_result":"custom 命中" } }"""),
             },
         };
 
-        // 第一輪:路由試圖選 builtin template_infer(它根本不在路由表裡,兩次嘗試都無法命中)。
+        // 第一輪:路由試圖選 builtin template-infer(它根本不在路由表裡,兩次嘗試都無法命中)。
         var agent1 = new FakeLlmAgent();
-        agent1.Responses.Enqueue("template_infer");
-        agent1.Responses.Enqueue("template_infer");
+        agent1.Responses.Enqueue("template-infer");
+        agent1.Responses.Enqueue("template-infer");
         await Build(agent1, wf).ChatAsync("骨架問題", "u1", "c1", UserA);
 
         Assert.Empty(wf.SkillInvokes);
 
-        // 第二輪:路由選 custom template_x(同前綴但 source=custom,不受過濾)。
+        // 第二輪:路由選 custom template-x(同前綴但 source=custom,不受過濾)。
         var agent2 = new FakeLlmAgent();
-        agent2.Responses.Enqueue("template_x");
+        agent2.Responses.Enqueue("template-x");
         agent2.Responses.Enqueue("custom 摘要");
         await Build(agent2, wf).ChatAsync("custom 問題", "u2", "c2", UserA);
 
-        Assert.Equal(new[] { "template_x" }, wf.SkillInvokes.Select(i => i.Name).ToArray());
+        Assert.Equal(new[] { "template-x" }, wf.SkillInvokes.Select(i => i.Name).ToArray());
     }
 
     // ================================================================
@@ -310,17 +310,17 @@ public sealed class ChatBehaviorBaselineTests
         var wf = new FakeWorkflowService
         {
             Catalog = Cat($$"""
-            [ { "name":"weird_skill", "description":"x", "required_role":"USER", "source":"custom",
+            [ { "name":"weird-skill", "description":"x", "required_role":"USER", "source":"custom",
                 "input_schema": {{schemaJson}} } ]
             """),
-            SkillOutput = Cat("""{ "skill":"weird_skill", "output": { "business_result":"命中" } }"""),
+            SkillOutput = Cat("""{ "skill":"weird-skill", "output": { "business_result":"命中" } }"""),
         };
         var chatClient = new FakeChatClient();
         var svc = Build(agent, wf, chatClient: chatClient);
 
         if (shouldInvoke)
         {
-            agent.Responses.Enqueue("weird_skill");
+            agent.Responses.Enqueue("weird-skill");
             agent.Responses.Enqueue("摘要輸出");
         }
         else
@@ -352,19 +352,19 @@ public sealed class ChatBehaviorBaselineTests
     {
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("NONE");
-        agent.Responses.Enqueue("kb_query");
+        agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("摘要輸出");
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, wf);
 
         var reply = await svc.ChatAsync("這季毛利率?", "u1", "c1", UserA);
 
         Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb_query", Assert.Single(wf.SkillInvokes).Name);
+        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
     }
 
     [Fact]
@@ -387,29 +387,29 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A09c_FirstAttemptHits_NoWastedRetry()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");
+        agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("摘要輸出");
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, wf);
 
         var reply = await svc.ChatAsync("這季毛利率?", "u1", "c1", UserA);
 
         Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb_query", Assert.Single(wf.SkillInvokes).Name);
+        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
     }
 
     // ================================================================
-    // A-10:寬鬆比對先全等再取最長名(kb_query 而非其前綴 kb)
+    // A-10:寬鬆比對先全等再取最長名(kb-query 而非其前綴 kb)
     // ================================================================
     [Fact]
     public async Task A10_LenientMatch_PicksLongestToolName_NotShorterPrefix()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("我建議使用 kb_query 這個工具"); // 非全等,同時含 kb 與 kb_query 的 token
+        agent.Responses.Enqueue("我建議使用 kb-query 這個工具"); // 非全等,同時含 kb 與 kb-query 的 token
         agent.Responses.Enqueue("摘要輸出");
         var wf = new FakeWorkflowService
         {
@@ -417,49 +417,49 @@ public sealed class ChatBehaviorBaselineTests
             [
               { "name":"kb", "description":"短名", "required_role":"USER", "source":"custom",
                 "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"kb_query", "description":"長名", "required_role":"USER", "source":"custom",
+              { "name":"kb-query", "description":"長名", "required_role":"USER", "source":"custom",
                 "input_schema": { "query": { "type":"str", "required":true } } }
             ]
             """),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, wf);
 
         await svc.ChatAsync("問題", "u1", "c1", UserA);
 
-        Assert.Equal("kb_query", Assert.Single(wf.SkillInvokes).Name);
+        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
     }
 
     // ================================================================
-    // A-11:kb_query 棄答(ABSTAIN)→ 確定性兜底打 rag_qa,順序必須是 kb_query → rag_qa
+    // A-11:kb-query 棄答(ABSTAIN)→ 確定性兜底打 rag-qa,順序必須是 kb-query → rag-qa
     // ================================================================
     [Fact]
     public async Task A11_KbQueryAbstain_FallsBackToRagQa_InOrder_WithHonestLabelInSummaryMessage()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");
+        agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("依證據不足的誠實回覆");
         var wf = new FakeWorkflowService
         {
             Catalog = Cat("""
             [
-              { "name":"kb_query", "description":"稽核檢索", "required_role":"USER", "source":"builtin",
+              { "name":"kb-query", "description":"稽核檢索", "required_role":"USER", "source":"builtin",
                 "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"rag_qa", "description":"一般知識庫問答", "required_role":"USER", "source":"builtin",
+              { "name":"rag-qa", "description":"一般知識庫問答", "required_role":"USER", "source":"builtin",
                 "input_schema": { "question": { "type":"str", "required":true } } }
             ]
             """),
             SkillOutputByName = new()
             {
-                ["kb_query"] = Cat("""{ "skill":"kb_query", "output": { "answer_mode":"ABSTAIN", "final_answer":"【無法提供答案】證據不足" } }"""),
-                ["rag_qa"] = Cat("""{ "skill":"rag_qa", "output": { "answer":"rag 的答案" } }"""),
+                ["kb-query"] = Cat("""{ "skill":"kb-query", "output": { "answer_mode":"ABSTAIN", "final_answer":"【無法提供答案】證據不足" } }"""),
+                ["rag-qa"] = Cat("""{ "skill":"rag-qa", "output": { "answer":"rag 的答案" } }"""),
             },
         };
         var svc = Build(agent, wf);
 
         var reply = await svc.ChatAsync("寵物守則對貓的規定?", "u1", "c1", UserA);
 
-        Assert.Equal(new[] { "kb_query", "rag_qa" }, wf.SkillInvokes.Select(i => i.Name).ToArray());
+        Assert.Equal(new[] { "kb-query", "rag-qa" }, wf.SkillInvokes.Select(i => i.Name).ToArray());
         // 誠實標示出現在送進最後一次(摘要)LLM 呼叫的訊息中——斷言面是「送進 ILlmAgent 的 message 清單」
         // 且用 Contains 驗證業務資料是否存在,不是驗證整段 prompt 逐字相等。
         Assert.Contains(agent.CompleteCalls[^1], m => m.Content.Contains("嚴格稽核查詢因證據不足而棄答"));
@@ -467,20 +467,20 @@ public sealed class ChatBehaviorBaselineTests
     }
 
     // ================================================================
-    // A-12:kb_query 正常回答時不誤觸發 rag_qa 兜底
+    // A-12:kb-query 正常回答時不誤觸發 rag-qa 兜底
     // ================================================================
     [Fact]
     public async Task A12_KbQueryAnswersNormally_DoesNotTriggerRagQaFallback()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");
+        agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("有憑據的答案摘要");
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutputByName = new()
             {
-                ["kb_query"] = Cat("""{ "skill":"kb_query", "output": { "answer_mode":"ANSWER", "final_answer":"有憑據的答案" } }"""),
+                ["kb-query"] = Cat("""{ "skill":"kb-query", "output": { "answer_mode":"ANSWER", "final_answer":"有憑據的答案" } }"""),
             },
         };
         var svc = Build(agent, wf);
@@ -488,8 +488,8 @@ public sealed class ChatBehaviorBaselineTests
         var reply = await svc.ChatAsync("q", "u1", "c1", UserA);
 
         var invoke = Assert.Single(wf.SkillInvokes);
-        Assert.Equal("kb_query", invoke.Name);
-        Assert.DoesNotContain(wf.SkillInvokes, i => i.Name == "rag_qa");
+        Assert.Equal("kb-query", invoke.Name);
+        Assert.DoesNotContain(wf.SkillInvokes, i => i.Name == "rag-qa");
         Assert.Equal("有憑據的答案摘要", reply.Reply);
     }
 
@@ -501,13 +501,13 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A13_RoutedSkillPath_RememberIsFusedFinalReply_RecallIsNotInjectedOnThisPath()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");
+        agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("最終融合摘要");
         var mem0 = new FakeMem0Client { RecallResult = "- 使用者是租戶 A\n" };
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中答案" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中答案" } }"""),
         };
         var svc = Build(agent, wf, mem0);
 

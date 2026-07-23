@@ -1,8 +1,8 @@
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.engine.skill import InputField
+from app.engine.skill import InputField, SkillError, SkillMeta
 
 
 class InvokeRequest(BaseModel):
@@ -19,6 +19,9 @@ class SkillInfo(BaseModel):
     required_role: str
     source: str
     revision: int
+    # additive contract：舊的內部 producer/fake 未帶 kind 時仍視為 flow；FastAPI response
+    # 會把預設值序列化，因此 catalog 對外一律明確輸出 kind。
+    kind: Literal["flow", "agentic"] = "flow"
     input_schema: dict[str, InputField] | None = None
     # 內建 template_* 骨架的 YAML 原文,供前端 compose 定點 patch;custom 項不帶（None）。
     definition: str | None = None
@@ -39,6 +42,33 @@ class SkillInvokeResponse(BaseModel):
 
     skill: str
     output: dict[str, Any]
+
+
+class PackageSkillMeta(SkillMeta):
+    """validate-package 回應沿用公開 SkillMeta；internal 額外資料位於外層 result。"""
+
+    pass
+
+
+class PackageManifest(BaseModel):
+    """package 清單：正規化後的 entry 路徑與原始 zip bytes 的 SHA-256。"""
+
+    entries: list[str]
+    sha256: str
+
+
+class ValidatePackageResult(BaseModel):
+    """POST /skills/validate-package 的回應（設計 §2.2）：既有 validation 回應的 internal superset。
+
+    canonical_definition 與 package_manifest 僅在此出現，不擴張公開 validator 契約。
+    invalid（valid=false）時以 exclude_none 保證不出現任何可被寫入的 metadata/definition。
+    """
+
+    valid: bool
+    errors: list[SkillError] = Field(default_factory=list)
+    skill: PackageSkillMeta | None = None
+    canonical_definition: str | None = None
+    package_manifest: PackageManifest | None = None
 
 
 class NodeInfo(BaseModel):

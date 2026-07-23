@@ -77,11 +77,11 @@ def test_report_synthesize_sends_expected_prompt():
 
 
 def _invoke(deps, **state) -> dict:
-    return invoke_builtin("analyze_report", deps, **state)
+    return invoke_builtin("analyze-report", deps, **state)
 
 
 def test_analyze_report_skill_cold_start_compiles():
-    loaded = skills.get("analyze_report")
+    loaded = skills.get("analyze-report")
     assert loaded is not None
     assert loaded.source == "builtin"
     assert loaded.skill.required_role == "ADMIN"
@@ -126,7 +126,7 @@ def test_analyze_report_skill_with_docs_produces_report(monkeypatch):
 
 def test_analyze_report_invoke_forbidden_for_user_role():
     resp = client.post(
-        "/skills/analyze_report/invoke",
+        "/skills/analyze-report/invoke",
         json={"input": {"topic": "營收"}},
         headers=auth_headers(role="USER"),
     )
@@ -140,7 +140,7 @@ def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
         [{"document_id": "d1", "title": "季報", "content": "營收成長", "score": 0.8}],
     )
 
-    original = skills.get("analyze_report")
+    original = skills.get("analyze-report")
     llm = FakeStructuredLLM(
         outputs={
             _DocInsightsOutput: _DocInsightsOutput(insights="要點"),
@@ -148,7 +148,7 @@ def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
         }
     )
     deps = make_deps({}, llm=llm)
-    skills._SKILLS["analyze_report"] = original.__class__(
+    skills._SKILLS["analyze-report"] = original.__class__(
         skill=original.skill,
         graph=compiler.compile(original.skill, deps),
         input_model=original.input_model,
@@ -159,14 +159,14 @@ def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
     )
     try:
         resp = client.post(
-            "/skills/analyze_report/invoke",
+            "/skills/analyze-report/invoke",
             json={"input": {"topic": "營收"}},
             headers=auth_headers(role="ADMIN"),
         )
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body["skill"] == "analyze_report"
+        assert body["skill"] == "analyze-report"
         assert body["output"]["report"] == "API 報告"
     finally:
-        skills._SKILLS["analyze_report"] = original
+        skills._SKILLS["analyze-report"] = original

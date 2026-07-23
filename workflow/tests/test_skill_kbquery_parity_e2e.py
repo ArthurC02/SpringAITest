@@ -558,7 +558,7 @@ def _trace_projection(entries) -> list[dict]:
 
 def run_skill_graph(deps, query: str, **extra_state) -> dict:
     """用 skills/kb_query.yaml 的編譯圖跑一次。"""
-    graph = compiler.compile(skills.get("kb_query").skill, deps)
+    graph = compiler.compile(skills.get("kb-query").skill, deps)
     output = asyncio.run(
         graph.ainvoke({"query": query, "tenant_id": "t-test", **extra_state})
     )

@@ -58,7 +58,7 @@ def _run(
 ) -> dict:
     """input_schema 要宣告：state 的頻道是編譯期由契約組出來的，未宣告的輸入鍵會被丟掉。"""
     skill = Skill.model_validate(
-        {"name": "probe_skill", "input_schema": input_schema or {}, "flow": flow}
+        {"name": "probe-skill", "input_schema": input_schema or {}, "flow": flow}
     )
     graph = compiler.compile(skill, deps or _deps())
     return compiler.public_output(
@@ -295,7 +295,7 @@ def test_trace_leaks_neither_llm_reasoning_nor_script_source():
 
 def test_compiler_rejects_forbidden_script_even_without_api_validation():
     skill = Skill.model_validate(
-        {"name": "probe_skill", "flow": [{"script": "import os"}]}
+        {"name": "probe-skill", "flow": [{"script": "import os"}]}
     )
 
     with pytest.raises(compiler.SkillCompileError) as exc:
@@ -309,7 +309,7 @@ def test_compiler_rejects_out_of_range_script_timeout(timeout_ms):
     """timeout_ms 上限 10000（規格 §3.2）：邊界外在編譯期就擋。"""
     skill = Skill.model_validate(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "flow": [{"script": "state['x'] = 1", "timeout_ms": timeout_ms}],
         }
     )

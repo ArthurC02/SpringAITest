@@ -74,7 +74,7 @@ def _deps():
 def _run(flow: list[dict], state: dict | None = None, deps=None) -> dict:
     import asyncio
 
-    skill = Skill.model_validate({"name": "probe_skill", "flow": flow})
+    skill = Skill.model_validate({"name": "probe-skill", "flow": flow})
     graph = compiler.compile(skill, deps or _deps())
     return compiler.public_output(asyncio.run(graph.ainvoke(state or {})))
 
@@ -250,7 +250,7 @@ def test_loop_counter_key_stripped_from_public_output():
 
     skill = Skill.model_validate(
         {
-            "name": "probe_skill",
+            "name": "probe-skill",
             "flow": [
                 {"node": "t_seed"},
                 {"loop": {"max_iterations": 2, "body": [{"node": "t_tick"}]}},
@@ -421,13 +421,13 @@ def test_recursion_limit_is_bounded_by_flow_structure():
     """護欄由 flow 結構算出上界，而不是沿用 langgraph 的 10007（形同沒有護欄）。"""
     from app import skills
 
-    kb = compiler.recursion_limit(skills.get("kb_query").skill)
+    kb = compiler.recursion_limit(skills.get("kb-query").skill)
     assert 40 < kb < 100  # 4 前置 + 10×(4 body + tick) + 組稿 + 稽核，遠低於預設 10007
 
     nested = compiler.recursion_limit(
         Skill.model_validate(
             {
-                "name": "nested_probe",
+                "name": "nested-probe",
                 "flow": [
                     {
                         "loop": {
@@ -467,7 +467,7 @@ def test_compile_caches_by_revision(monkeypatch):
     monkeypatch.setattr(compiler, "_build_graph", counting_build)
 
     deps = _deps()
-    definition = {"name": "cache_probe", "revision": 1, "flow": [{"node": "t_a"}]}
+    definition = {"name": "cache-probe", "revision": 1, "flow": [{"node": "t_a"}]}
     skill = Skill.model_validate(definition)
 
     first = compiler.compile(skill, deps)

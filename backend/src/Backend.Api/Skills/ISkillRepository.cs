@@ -19,6 +19,16 @@ public interface ISkillRepository
     /// <summary>更新(name 不變,current_revision +1,同時寫入該版的稽核列);不存在或已軟刪回 null。</summary>
     Task<Skill?> UpdateAsync(string tenantId, string name, Skill skill, string updatedBy, CancellationToken ct);
 
+    /// <summary>
+    /// Agent Skill 匯入(P0):以「建立 / 更新 / 復活」upsert 語意在**單一交易**內寫入
+    /// definition + metadata + package(匯入的 flow/agentic 都保存原始 zip bytes)+ 兩個 hash，
+    /// 並把 package snapshot 寫入 revision，供 server-side restore。
+    /// 與 CreateAsync 不同:import 對既有(仍啟用)skill 也直接更新(不回 null),永遠 bump revision。
+    /// package/packageSha256 為 null → definition-only flow。
+    /// </summary>
+    Task<Skill?> ImportAsync(
+        string tenantId, Skill skill, byte[]? package, string? packageSha256, string createdBy, CancellationToken ct);
+
     /// <summary>軟刪(enabled=false);不存在(含跨租戶不可見、已軟刪)回 false。revision 保留。</summary>
     Task<bool> DeleteAsync(string tenantId, string name, CancellationToken ct);
 
@@ -27,4 +37,8 @@ public interface ISkillRepository
     /// 查無此 skill(含跨租戶)→ 空清單;每個 skill 建立時必寫 revision 1,故「空清單」等同「不存在」。
     /// </summary>
     Task<IReadOnlyList<SkillRevisionInfo>> ListRevisionsAsync(string tenantId, string name, CancellationToken ct);
+
+    /// <summary>取得一筆完整 revision（含內部 package snapshot）；不存在或跨租戶回 null。</summary>
+    Task<StoredSkillRevision?> GetRevisionAsync(
+        string tenantId, string name, int revision, CancellationToken ct);
 }

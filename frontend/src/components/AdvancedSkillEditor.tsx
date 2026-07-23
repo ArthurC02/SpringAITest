@@ -13,7 +13,7 @@ const DEBOUNCE_MS = 800
 export type AdvancedMode =
   | { kind: 'create' }
   | { kind: 'edit'; name: string }
-  | { kind: 'view'; name: string } // 內建 kb_query：唯讀檢視，無存檔/驗證
+  | { kind: 'view'; name: string } // 內建 kb-query：唯讀檢視，無存檔/驗證
 
 interface Props {
   mode: AdvancedMode
@@ -26,7 +26,7 @@ interface Props {
 
 /**
  * 進階 Skill 編輯器：三欄（節點目錄 / YAML / 驗證結果）。從舊 SkillsTab 抽出，供
- * 兩門共用（簡單模式「進階編輯」單向交棒、既有 skill 直接編輯、內建 kb_query 唯讀檢視）。
+ * 兩門共用（簡單模式「進階編輯」單向交棒、既有 skill 直接編輯、內建 kb-query 唯讀檢視）。
  * ponytail: 存檔/驗證 state 內聚在本元件（不上抬給呼叫端），比設計稿的受控 props 少一層鑽孔、行為一致。
  */
 export default function AdvancedSkillEditor({ mode, initialDefinition, saved, onSaved, onClose }: Props) {

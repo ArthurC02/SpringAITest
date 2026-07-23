@@ -83,7 +83,8 @@ public sealed class PostgresFixture : IAsyncLifetime
 /// 這些是手寫 fake 無法背書的部分:部分唯一索引 uq_confset_active、原子 activate 的並發正確性、
 /// jsonb 往返、跨租戶查詢過濾。每測用自己的 "p4repo-<case>-" 租戶,互不干擾。
 /// </summary>
-public sealed class ConfigurationSetRepositoryTests : IClassFixture<PostgresFixture>
+[Collection("Postgres")]
+public sealed class ConfigurationSetRepositoryTests
 {
     private readonly PostgresFixture _fx;
 

@@ -17,9 +17,9 @@ public sealed class ChatSessionWindowTests
 {
     private static readonly UserContext UserA = new("user-a", "demo-a", "USER");
 
-    // 單一 kb_query 工具目錄,供下方「連續 skill HIT」裁切測試路由命中用。
+    // 單一 kb-query 工具目錄,供下方「連續 skill HIT」裁切測試路由命中用。
     private const string SingleSkillCatalog = """
-    [ { "name":"kb_query", "description":"x", "required_role":"USER", "source":"builtin",
+    [ { "name":"kb-query", "description":"x", "required_role":"USER", "source":"builtin",
         "input_schema": { "query": { "type":"str", "required":true } } } ]
     """;
 
@@ -193,10 +193,10 @@ public sealed class ChatSessionWindowTests
 
     private static JsonElement Cat(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
-    /// <summary>把 agent 的下一輪路由 + 摘要腳本化為「命中 kb_query」。</summary>
+    /// <summary>把 agent 的下一輪路由 + 摘要腳本化為「命中 kb-query」。</summary>
     private static void EnqueueHit(FakeLlmAgent agent, string summaryReply)
     {
-        agent.Responses.Enqueue("kb_query");
+        agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue(summaryReply);
     }
 
@@ -208,7 +208,7 @@ public sealed class ChatSessionWindowTests
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"x" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
         };
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, historyProvider, _) = TestChatAgent.Build(identity: identity, llmAgent: agent, workflows: wf);
@@ -240,7 +240,7 @@ public sealed class ChatSessionWindowTests
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"x" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
         };
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, historyProvider, _) = TestChatAgent.Build(identity: identity, llmAgent: agent, workflows: wf);
@@ -278,7 +278,7 @@ public sealed class ChatSessionWindowTests
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"x" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
         };
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, historyProvider, _) = TestChatAgent.Build(identity: identity, llmAgent: agent, workflows: wf);

@@ -5,6 +5,7 @@ import type { SkillInputField, SkillValidation } from '../types'
 import { compose } from '../skills/compose'
 import { TEMPLATES, type SkillForm, type SkillTemplate } from '../skills/templates'
 import { CODE_LABEL, blockingErrors } from '../skills/validationLabels'
+import { NAME_RULE_MESSAGE, isValidSkillName, slugifySkillName } from '../skills/skillName'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import SkillRunPanel from './SkillRunPanel'
@@ -95,13 +96,16 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
       setError('這個範本的骨架設定尚未取得，無法儲存。')
       return
     }
-    // 名稱空白時 compose 不覆寫 __SLOT_name__ → 會用範本預設名（template_*）靜默建骨架，故先擋。
-    // ponytail: 前端 guard 是主要修法；後端 ReservedNames 加 template_ 前綴兜底是升級路徑（本次不做）。
+    // 名稱空白時 compose 不覆寫 __SLOT_name__ → 會用範本預設名（template-*）靜默建骨架，故先擋。
+    // ponytail: 前端 guard 是主要修法；後端 ReservedNames 加 template- 前綴兜底是升級路徑（本次不做）。
     const name = form.name?.trim()
     if (!name) {
       setError('請先為這個 Skill 取一個名稱。')
       return
     }
+    // 名稱是技術識別碼(slug):不合規就在前端擋下,不送出 —— 內聯 field-error 已提示規則與建議,
+    // 避免非技術使用者看到 server 把中文名稱誤標成 flow 的錯誤。
+    if (!isValidSkillName(name)) return
     setBusy(true)
     setError(null)
     setValidation(null)
@@ -130,6 +134,11 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
 
   const errorLabels = validation ? humanErrors(validation) : []
   const showField = (f: keyof SkillForm) => template?.openFields.includes(f)
+
+  // 名稱即時 slug 驗證(存檔前擋);不合規時給一個可一鍵套用的建議 slug。
+  const nameTrimmed = form.name?.trim() ?? ''
+  const nameError = nameTrimmed !== '' && !isValidSkillName(nameTrimmed) ? NAME_RULE_MESSAGE : null
+  const nameSuggestion = nameError ? slugifySkillName(nameTrimmed) : ''
 
   return (
     <div className="simple-skill">
@@ -174,12 +183,32 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
       {/* ② 名稱 */}
       <section className="simple-skill__block">
         <h4 className="simple-skill__block-title">② 名稱</h4>
-        <input
-          className="input"
-          value={form.name ?? ''}
-          placeholder="例如：sales-rule"
-          onChange={(e) => setField('name', e.target.value)}
-        />
+        <div className="field">
+          <input
+            className="input"
+            value={form.name ?? ''}
+            placeholder="例如：sales-rule"
+            aria-invalid={!!nameError}
+            onChange={(e) => setField('name', e.target.value)}
+          />
+          {nameError && (
+            <span className="field-error" role="alert">
+              {nameError}
+              {nameSuggestion && (
+                <>
+                  {' '}建議使用{' '}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setField('name', nameSuggestion)}
+                  >
+                    {nameSuggestion}
+                  </button>
+                </>
+              )}
+            </span>
+          )}
+        </div>
       </section>
 
       {/* ③ 描述 */}
@@ -257,7 +286,7 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
           className="btn btn--primary"
           type="button"
           onClick={onSave}
-          disabled={busy || !template || !baseDefinition || !form.name?.trim()}
+          disabled={busy || !template || !baseDefinition || !form.name?.trim() || !!nameError}
         >
           {busy ? '儲存中…' : '儲存'}
         </button>

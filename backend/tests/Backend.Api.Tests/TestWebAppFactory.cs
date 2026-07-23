@@ -49,6 +49,10 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
             // Skill 驗證不打真的 workflow(:8001)。
             services.RemoveAll<ISkillValidator>();
             services.AddSingleton<ISkillValidator, FakeSkillValidator>();
+
+            // Agent Skill package 驗證同樣不打真 workflow;fake 依 expected_name 腳本化 valid/invalid/unreachable。
+            services.RemoveAll<ISkillPackageValidator>();
+            services.AddSingleton<ISkillPackageValidator, FakeSkillPackageValidator>();
         });
     }
 

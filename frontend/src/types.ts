@@ -9,6 +9,9 @@ export interface Message {
 /** 後端角色。註冊/登入回傳，決定側欄「系統設定」是否顯示。 */
 export type Role = 'ADMIN' | 'USER'
 
+/** Skill 的作者格式；catalog / CRUD / revision API 都以 additive 欄位提供。 */
+export type SkillKind = 'flow' | 'agentic'
+
 /** 登入成功後存進 localStorage 的一整包身分（單一 JSON key）。 */
 export interface Session {
   token: string
@@ -63,6 +66,8 @@ export interface SkillInfo {
   updated_at: string
   /** 軟刪後 enabled=false。 */
   enabled: boolean
+  /** 未攜帶時是舊 server，相容視為 flow。 */
+  kind?: SkillKind
 }
 
 /** 單筆 Skill；definition = Skill YAML 原文（權威格式，見規格書 §3）。 */
@@ -77,6 +82,12 @@ export interface SkillRevision {
   definition_sha256: string
   created_by: string
   created_at: string
+  /** 每個 revision 自己的格式；同一 skill 的歷史可能混合 flow 與 agentic。 */
+  kind: SkillKind
+  /** agentic revision 的 package hash；僅稽核用途，絕不含 package bytes。 */
+  package_sha256?: string
+  /** server 是否仍保存本 revision 的 package，可否回復 agentic 歷史。 */
+  has_package?: boolean
 }
 
 /** input_schema 的一個欄位（規格 §3.1：{query: {type: str, required: true, min_length: 1}}）。 */
@@ -94,8 +105,14 @@ export interface SkillCatalogEntry {
   source: 'builtin' | 'custom'
   revision: number | null
   input_schema?: Record<string, SkillInputField> | null
-  /** 內建骨架項（template_* / kb_query）的 YAML 原文；compose patch 用。custom 為 undefined。 */
+  /** 內建骨架項（template-* / kb-query）的 YAML 原文；compose patch 用。custom 為 undefined。 */
   definition?: string
+  /**
+   * Skill 種類（Platform additive 透傳；缺席 → 視為 flow）。agentic 走 package 編輯器，
+   * flow 走既有 YAML/simple editor。實務上 catalog 尚未帶此欄，故編輯路由以 definition 的
+   * `kind: agentic` 為可靠訊號（skillKind()），此欄為前向相容。
+   */
+  kind?: SkillKind
 }
 
 /** POST /api/skills/validate 的一條錯誤；line 為 YAML 行號（引擎給得出來時才有）。 */

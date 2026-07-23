@@ -21,7 +21,7 @@ client = TestClient(app)
 
 
 VALID_YAML = """
-name: probe_skill
+name: probe-skill
 description: 驗證測試用
 input_schema:
   query: {type: str, required: true, min_length: 1}
@@ -40,12 +40,18 @@ def test_list_skills_returns_builtin_kb_query():
 
     assert resp.status_code == 200
     body = {item["name"]: item for item in resp.json()}
-    assert "kb_query" in body
-    item = body["kb_query"]
+    assert "kb-query" in body
+    item = body["kb-query"]
     assert item["source"] == "builtin"
     assert item["required_role"] == "USER"
     assert item["description"]
     assert isinstance(item["revision"], int)
+
+
+def test_builtin_catalog_declares_flow_kind():
+    body = {item["name"]: item for item in client.get("/skills", headers=_headers()).json()}
+    assert body["kb-query"]["kind"] == "flow"
+    assert body["template-compare"]["kind"] == "flow"
 
 
 def test_skills_endpoints_require_internal_token():
@@ -85,13 +91,14 @@ def test_validate_valid_definition():
     body = resp.json()
     assert body["valid"] is True
     assert body["errors"] == []
-    assert body["skill"]["name"] == "probe_skill"
+    assert body["skill"]["name"] == "probe-skill"
+    assert body["skill"]["kind"] == "flow"
 
 
 def test_validate_reports_error_codes_in_body():
     resp = client.post(
         "/skills/validate",
-        json={"definition": "name: probe_skill\nflow:\n  - node: no_such_node\n"},
+        json={"definition": "name: probe-skill\nflow:\n  - node: no_such_node\n"},
         headers=_headers(),
     )
 
@@ -127,7 +134,7 @@ def test_validate_has_no_side_effects():
 
     after = client.get("/skills", headers=_headers()).json()
     assert after == before
-    assert skills.get("probe_skill") is None
+    assert skills.get("probe-skill") is None
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +193,7 @@ def test_invoke_backend_unavailable_returns_500(monkeypatch):
 def test_invoke_invalid_input_returns_422(input_body):
     """input_schema 的 required / min_length 由動態 Pydantic model 執行（對齊 KbQueryInput）。"""
     resp = client.post(
-        "/skills/kb_query/invoke", json={"input": input_body}, headers=_headers()
+        "/skills/kb-query/invoke", json={"input": input_body}, headers=_headers()
     )
 
     assert resp.status_code == 422
@@ -195,42 +202,42 @@ def test_invoke_invalid_input_returns_422(input_body):
 
 def test_invoke_admin_skill_forbidden_for_user_role():
     """required_role: ADMIN 的 skill 被 USER 呼叫 → 403（順序上先於 422：input 是空的）。"""
-    loaded = skills.get("kb_query")
+    loaded = skills.get("kb-query")
     admin_skill = loaded.skill.model_copy(update={"required_role": "ADMIN"})
-    skills._SKILLS["__admin_probe__"] = loaded.__class__(
-        skill=admin_skill.model_copy(update={"name": "admin_probe"}),
+    skills._SKILLS["__admin-probe__"] = loaded.__class__(
+        skill=admin_skill.model_copy(update={"name": "admin-probe"}),
         graph=loaded.graph,
         input_model=loaded.input_model,
         deps=loaded.deps,
     )
     try:
         resp = client.post(
-            "/skills/__admin_probe__/invoke", json={"input": {}}, headers=_headers()
+            "/skills/__admin-probe__/invoke", json={"input": {}}, headers=_headers()
         )
         assert resp.status_code == 403
         assert resp.json()["detail"]["error"] == "workflow_forbidden"
 
         ok = client.post(
-            "/skills/__admin_probe__/invoke",
+            "/skills/__admin-probe__/invoke",
             json={"input": {}},
             headers=_headers(role="ADMIN"),
         )
         assert ok.status_code == 422  # ADMIN 過了角色關卡，才輪到 input 驗證
     finally:
-        skills._SKILLS.pop("__admin_probe__", None)
+        skills._SKILLS.pop("__admin-probe__", None)
 
 
 def test_invoke_timeout_returns_504(monkeypatch):
     """執行超過逾時上限 → 504 workflow_timeout（與 /workflows/{name}/invoke 同碼）。"""
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
 
     class _SlowGraph:
         async def ainvoke(self, state, config=None):
             await asyncio.sleep(0.5)
             return {}
 
-    skills._SKILLS["__slow_probe__"] = original.__class__(
-        skill=Skill.model_validate({"name": "slow_probe", "flow": [{"node": "t"}]}),
+    skills._SKILLS["__slow-probe__"] = original.__class__(
+        skill=Skill.model_validate({"name": "slow-probe", "flow": [{"node": "t"}]}),
         graph=_SlowGraph(),
         input_model=None,
         deps=None,
@@ -238,56 +245,56 @@ def test_invoke_timeout_returns_504(monkeypatch):
     monkeypatch.setattr(settings, "workflow_timeout_seconds", 0.05)
     try:
         resp = client.post(
-            "/skills/__slow_probe__/invoke", json={"input": {}}, headers=_headers()
+            "/skills/__slow-probe__/invoke", json={"input": {}}, headers=_headers()
         )
         assert resp.status_code == 504
         assert resp.json()["detail"]["error"] == "workflow_timeout"
     finally:
-        skills._SKILLS.pop("__slow_probe__", None)
+        skills._SKILLS.pop("__slow-probe__", None)
 
 
 def test_invoke_unexpected_exception_returns_500():
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
 
     class _BoomGraph:
         async def ainvoke(self, state, config=None):
             raise RuntimeError("boom")
 
-    skills._SKILLS["__boom_probe__"] = original.__class__(
-        skill=Skill.model_validate({"name": "boom_probe", "flow": [{"node": "t"}]}),
+    skills._SKILLS["__boom-probe__"] = original.__class__(
+        skill=Skill.model_validate({"name": "boom-probe", "flow": [{"node": "t"}]}),
         graph=_BoomGraph(),
         input_model=None,
         deps=None,
     )
     try:
         resp = client.post(
-            "/skills/__boom_probe__/invoke", json={"input": {}}, headers=_headers()
+            "/skills/__boom-probe__/invoke", json={"input": {}}, headers=_headers()
         )
         assert resp.status_code == 500
         assert resp.json()["detail"]["error"] == "workflow_execution_failed"
     finally:
-        skills._SKILLS.pop("__boom_probe__", None)
+        skills._SKILLS.pop("__boom-probe__", None)
 
 
 def test_invoke_reserved_input_keys_cannot_override_caller_tenant(monkeypatch):
     """保留鍵剝除沿用 /workflows 的 _RESERVED_INPUT_KEYS：input 夾帶 tenant_id 無效。"""
     captured: dict = {}
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
 
     class _CaptureGraph:
         async def ainvoke(self, state, config=None):
             captured.update(state)
             return {**state, "__loop_0_count": 1}
 
-    skills._SKILLS["__capture_probe__"] = original.__class__(
-        skill=Skill.model_validate({"name": "capture_probe", "flow": [{"node": "t"}]}),
+    skills._SKILLS["__capture-probe__"] = original.__class__(
+        skill=Skill.model_validate({"name": "capture-probe", "flow": [{"node": "t"}]}),
         graph=_CaptureGraph(),
         input_model=None,
         deps=None,
     )
     try:
         resp = client.post(
-            "/skills/__capture_probe__/invoke",
+            "/skills/__capture-probe__/invoke",
             json={"input": {"query": "x", "tenant_id": "evil-tenant", "role": "ADMIN"}},
             headers=_headers(tenant_id="demo-a", user_id="alice", role="USER"),
         )
@@ -301,7 +308,7 @@ def test_invoke_reserved_input_keys_cannot_override_caller_tenant(monkeypatch):
         # 引擎內部鍵不外洩到 API 回應
         assert "__loop_0_count" not in resp.json()["output"]
     finally:
-        skills._SKILLS.pop("__capture_probe__", None)
+        skills._SKILLS.pop("__capture-probe__", None)
 
 
 def test_invoke_cannot_forge_reserved_audit_keys():
@@ -318,13 +325,13 @@ def test_invoke_cannot_forge_reserved_audit_keys():
     deps = make_deps({})
     skill = Skill.model_validate(
         {
-            "name": "forge_probe",
+            "name": "forge-probe",
             "input_schema": {"query": {"type": "str", "required": True, "min_length": 1}},
             "flow": [{"node": "answer_composer@1.0"}],  # 刻意不含 query_intake
         }
     )
-    original = skills.get("kb_query")
-    skills._SKILLS["__forge_probe__"] = original.__class__(
+    original = skills.get("kb-query")
+    skills._SKILLS["__forge-probe__"] = original.__class__(
         skill=skill,
         graph=compiler.compile(skill, deps),
         input_model=None,
@@ -333,7 +340,7 @@ def test_invoke_cannot_forge_reserved_audit_keys():
     )
     try:
         resp = client.post(
-            "/skills/__forge_probe__/invoke",
+            "/skills/__forge-probe__/invoke",
             json={
                 "input": {
                     "query": "真正的問題",
@@ -355,7 +362,7 @@ def test_invoke_cannot_forge_reserved_audit_keys():
         assert output.get("query_id") != "FORGED-ID"
         assert output.get("original_query") != "無害的問題"
     finally:
-        skills._SKILLS.pop("__forge_probe__", None)
+        skills._SKILLS.pop("__forge-probe__", None)
 
 
 def test_invoke_kb_query_definition_happy_path_returns_output():
@@ -368,7 +375,7 @@ def test_invoke_kb_query_definition_happy_path_returns_output():
     from app.engine import compiler
     from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch, make_deps
 
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
     deps = make_deps({"vector": FakeSearch(lambda q, f: [TEXT_2025Q3])})
     skills._SKILLS["__kb_probe__"] = original.__class__(
         skill=original.skill,
@@ -421,11 +428,11 @@ def test_invoke_seeds_tool_context_with_caller_identity():
     deps = make_deps({})
     skill = Skill.model_validate(
         {
-            "name": "ctx_probe",
+            "name": "ctx-probe",
             "flow": [{"tool": "__ctx_probe_tool__", "save_as": "probe_result"}],
         }
     )
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
     skills._SKILLS["__ctx_probe__"] = original.__class__(
         skill=skill,
         graph=compiler.compile(skill, deps),

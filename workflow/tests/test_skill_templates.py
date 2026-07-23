@@ -1,4 +1,4 @@
-"""P2a 五支 template_* 骨架的 workflow 側就地驗（SSR-P2A-001~004、SSR-P2A-002 catalog、
+"""P2a 五支 template-* 骨架的 workflow 側就地驗（SSR-P2A-001~004、SSR-P2A-002 catalog、
 SSR-P4-013 topK 縫⑦）。
 
 這是把「組出的 YAML 過不過得了 workflow 驗證/編譯/執行」就地驗掉（設計 §8：不在瀏覽器
@@ -32,14 +32,14 @@ from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch, FakeStructuredLLM, make
 client = TestClient(app)
 
 TEMPLATE_NAMES = (
-    "template_retrieval",
-    "template_compare",
-    "template_stats",
-    "template_infer",
-    "template_inspire",
+    "template-retrieval",
+    "template-compare",
+    "template-stats",
+    "template-infer",
+    "template-inspire",
 )
-NL_TEMPLATES = ("template_retrieval", "template_infer", "template_inspire")
-SCRIPT_TEMPLATES = ("template_compare", "template_stats")
+NL_TEMPLATES = ("template-retrieval", "template-infer", "template-inspire")
+SCRIPT_TEMPLATES = ("template-compare", "template-stats")
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ def test_catalog_custom_entry_has_no_definition(monkeypatch):
     async def fake_catalog(ctx):
         return [
             {
-                "name": "sales_rule",
+                "name": "sales-rule",
                 "description": "租戶自訂",
                 "required_role": "USER",
                 "source": "custom",
@@ -164,9 +164,9 @@ def test_catalog_custom_entry_has_no_definition(monkeypatch):
 
     monkeypatch.setattr(custom, "catalog", fake_catalog)
     body = {i["name"]: i for i in client.get("/skills", headers=auth_headers()).json()}
-    assert body["sales_rule"]["definition"] is None
+    assert body["sales-rule"]["definition"] is None
     # 內建仍帶定義（未被 custom 影響）
-    assert body["kb_query"]["definition"]
+    assert body["kb-query"]["definition"]
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ def test_unpatched_skeleton_is_valid(name):
 
 
 def test_patched_retrieval_invoke_produces_business_result():
-    raw = skills.get("template_retrieval").definition
+    raw = skills.get("template-retrieval").definition
     patched = patch_rule(raw, "把答案濃縮成一句話")
     assert skill_mod.validate_source(patched).valid is True
 
@@ -222,7 +222,7 @@ def test_patched_retrieval_invoke_produces_business_result():
     assert out["trace"][-1].node_name == "audit_feedback"
 
 
-@pytest.mark.parametrize("name", ("template_infer", "template_inspire"))
+@pytest.mark.parametrize("name", ("template-infer", "template-inspire"))
 def test_patched_nl_thin_retrieval_invoke_produces_business_result(name, monkeypatch):
     raw = skills.get(name).definition
     patched = patch_rule(raw, "根據 docs 推論一句話")
@@ -239,7 +239,7 @@ def test_patched_nl_thin_retrieval_invoke_produces_business_result(name, monkeyp
 
 
 def test_patched_compare_invoke_sorts_docs_by_score(monkeypatch):
-    raw = skills.get("template_compare").definition
+    raw = skills.get("template-compare").definition
     patched = patch_rule(raw, COMPARE_RULE)
     assert skill_mod.validate_source(patched).valid is True
 
@@ -251,7 +251,7 @@ def test_patched_compare_invoke_sorts_docs_by_score(monkeypatch):
 
 
 def test_patched_stats_invoke_aggregates(monkeypatch):
-    raw = skills.get("template_stats").definition
+    raw = skills.get("template-stats").definition
     patched = patch_rule(raw, STATS_RULE)
     assert skill_mod.validate_source(patched).valid is True
 
@@ -268,7 +268,7 @@ def test_patched_stats_invoke_aggregates(monkeypatch):
 
 @pytest.mark.parametrize(
     "name, default_top_k",
-    [("template_compare", 8), ("template_stats", 50)],
+    [("template-compare", 8), ("template-stats", 50)],
 )
 def test_topk_slot_default_is_carried_to_retrieve(name, default_top_k, monkeypatch):
     """未覆寫時,通用 retrieve 收到骨架顯式帶的 top_k（不是 retrieve.py 的模組全域 4）。"""
@@ -286,7 +286,7 @@ def test_topk_slot_override_is_carried_to_retrieve(monkeypatch):
     """把 # __SLOT_topK__ 那行 patch 成 17 → 通用 retrieve 實收 17。"""
     captured: dict = {}
     _install_fake_retrieve(monkeypatch, captured=captured)
-    raw = skills.get("template_compare").definition
+    raw = skills.get("template-compare").definition
     patched = patch_topk(raw, 17)
     patched = patch_rule(patched, COMPARE_RULE)
     assert skill_mod.validate_source(patched).valid is True

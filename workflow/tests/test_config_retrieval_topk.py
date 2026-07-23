@@ -151,8 +151,8 @@ def _register_builtin_skill(name, template, base_deps):
 
 @pytest.fixture
 def probe(fake_base_deps):
-    cleanup = _register_builtin_skill("cfg_topk_probe", RETRIEVE_SKILL, fake_base_deps)
-    yield "cfg_topk_probe"
+    cleanup = _register_builtin_skill("cfg-topk-probe", RETRIEVE_SKILL, fake_base_deps)
+    yield "cfg-topk-probe"
     cleanup()
 
 
@@ -230,10 +230,10 @@ def test_tenant_isolation_topk_not_cross_contaminated(active_backend, fake_base_
     """demo-a=40、demo-b=7（同 updated_at 字串）→ 各收各的，互不污染。"""
     active_backend.set_active("demo-a", {"retrieval.top_k": 40}, updated_at="shared-v")
     active_backend.set_active("demo-b", {"retrieval.top_k": 7}, updated_at="shared-v")
-    cleanup = _register_builtin_skill("cfg_topk_probe", RETRIEVE_SKILL, fake_base_deps)
+    cleanup = _register_builtin_skill("cfg-topk-probe", RETRIEVE_SKILL, fake_base_deps)
     try:
-        _invoke("cfg_topk_probe", tenant_id="demo-a")
-        _invoke("cfg_topk_probe", tenant_id="demo-b")
+        _invoke("cfg-topk-probe", tenant_id="demo-a")
+        _invoke("cfg-topk-probe", tenant_id="demo-b")
         assert captured_top_k == [40, 7]
     finally:
         cleanup()
@@ -272,9 +272,9 @@ def test_script_cannot_tamper_seeded_retrieval_top_k(active_backend, fake_base_d
     還原 bug（FORBIDDEN_WRITE_KEYS 拿掉 CONFIG_SEED_KEYS）→ script 寫入生效 → retrieve 收 999 → 紅。
     """
     active_backend.set_active("demo-a", {"retrieval.top_k": 17})
-    cleanup = _register_builtin_skill("cfg_topk_tamper", TAMPER_SKILL, fake_base_deps)
+    cleanup = _register_builtin_skill("cfg-topk-tamper", TAMPER_SKILL, fake_base_deps)
     try:
-        _invoke("cfg_topk_tamper")
+        _invoke("cfg-topk-tamper")
         assert captured_top_k == [17]
     finally:
         cleanup()

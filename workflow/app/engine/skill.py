@@ -15,7 +15,11 @@ import re
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+# 標準 name 規則（agentskills.io）：小寫英數 + 連字號;不可首尾連字號;可數字開頭;1–64 字。
+# `--` 的排除在 field_validator 內另做（pydantic v2 rust-regex 不支援負向前瞻）。
+_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 from app.engine import expressions, node_registry, script_runner, tool_registry
 from app.engine.harness import CONFIG_SEED_KEYS, IDENTITY_KEYS, IMMUTABLE_KEYS
@@ -28,6 +32,14 @@ INVALID_EXPRESSION = "invalid_expression"
 FORBIDDEN_SCRIPT = "forbidden_script"
 DATAFLOW_ERROR = "dataflow_error"
 INVALID_FLOW = "invalid_flow"
+# schema 層級錯誤依欄位分流（規格 UX 修正）：name 欄位的 pattern/length/type 錯 → invalid_name
+# （面向非技術使用者的名稱規則訊息），其餘欄位 → invalid_schema。invalid_flow 只留給
+# 真正的 flow 問題（空 flow、未知步驟型別、YAML 解析失敗），標籤才名實相符。
+INVALID_NAME = "invalid_name"
+INVALID_SCHEMA = "invalid_schema"
+# 定義端點只收 flow：authored YAML 宣告 kind: agentic 卻沒有 package（無 script/資源）是漂移，
+# 存進去會在 P1 變成 active break。agentic 只能經 /skills/validate-package 匯入。
+AGENTIC_REQUIRES_IMPORT = "agentic_requires_import"
 
 # 只有 dataflow_error 是警告級：它是「可能忘了前置步驟」的提示，不阻擋存檔。
 WARNING_CODES = frozenset({DATAFLOW_ERROR})
@@ -66,14 +78,30 @@ class InputField(BaseModel):
 class Skill(BaseModel):
     """Skill 定義（YAML 為權威格式，這裡是解析後的結構）。"""
 
-    name: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
+    # 標準 name 規則（agentskills.io）：小寫英數 + 連字號;不可首尾／連續連字號;可數字開頭;
+    # 1–64 字。底線不再合法。用 field_validator（非 Field pattern）—— pydantic v2 的
+    # rust-regex 引擎不支援負向前瞻,連續連字號 `--` 的排除改在 Python re 這裡做。
+    name: str
     description: str = ""
+    # kind 為 additive，預設 flow：既有 flow 定義不帶此欄位仍解析為 flow，所有 flow
+    # parse/validate/compile 路徑行為不變。agentic 只由 package 匯入設定（P0 package parser）。
+    kind: Literal["flow", "agentic"] = "flow"
     required_role: Literal["USER", "ADMIN"] = "USER"
     input_schema: dict[str, InputField] = Field(default_factory=dict)
     timeout_seconds: int | None = None
     uses_tools: list[str] = Field(default_factory=list)  # P3
     revision: int = 1
     flow: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        # 白名單、預設拒絕：長度 1–64、符合標準字元集、且不含連續 `--`。任一不符即拒。
+        if not (1 <= len(v) <= 64) or not _NAME_RE.match(v) or "--" in v:
+            raise ValueError(
+                "名稱只能用小寫英文、數字、連字號（-），不可首尾或連續連字號（1–64 字）"
+            )
+        return v
 
 
 class SkillError(BaseModel):
@@ -94,6 +122,7 @@ class SkillMeta(BaseModel):
     name: str
     description: str
     required_role: str
+    kind: Literal["flow", "agentic"] = "flow"
     input_schema: dict[str, InputField] = Field(default_factory=dict)
 
 
@@ -140,8 +169,12 @@ class _Validator:
         return None
 
 
-def parse_step(step: dict[str, Any]) -> tuple[str, Any] | None:
-    """取出步驟的型別與內容；不是「恰好一個已知型別鍵」的 dict → None。"""
+def parse_step(step: Any) -> tuple[str, Any] | None:
+    """取出步驟的型別與內容；不是「恰好一個已知型別鍵」的 dict → None。
+
+    step 型別標 Any：呼叫端傳的是 YAML 解析結果（可能不是 dict），下面的 isinstance
+    是真實的執行期守衛，不是死碼。
+    """
     if not isinstance(step, dict):
         return None
     kinds = [k for k in step if k in STEP_TYPES]
@@ -160,8 +193,11 @@ def state_ref(value: Any) -> str | None:
     return None
 
 
-def resolve_node(ref: str) -> node_registry.NodeSpec | None:
-    """解析 `name` 或 `name@version` 為 NodeSpec；查無回 None。"""
+def resolve_node(ref: Any) -> node_registry.NodeSpec | None:
+    """解析 `name` 或 `name@version` 為 NodeSpec；查無回 None。
+
+    ref 型別標 Any：來源是 YAML 解析值（可能不是 str），isinstance 是執行期守衛。
+    """
     if not isinstance(ref, str):
         return None
     name, _, version = ref.partition("@")
@@ -380,7 +416,8 @@ def _check_tool(step: dict, name: Any, v: _Validator, available: set[str]) -> No
             token="save_as",
         )
         return
-    available.add(save_as)
+    # writable_key(save_as) 為真已保證 save_as 是 str（isidentifier 等檢查）
+    available.add(save_as)  # pyright: ignore[reportArgumentType]
 
 
 def _check_expression(expr: Any, v: _Validator, field: str) -> None:
@@ -467,7 +504,33 @@ def validate_definition(
     try:
         skill = Skill.model_validate(data)
     except ValidationError as e:
-        v.add(INVALID_FLOW, f"skill 定義不符合 schema: {e}")
+        # 依 loc 首元素（欄位名）分流，不再把所有 schema 錯都塞成 invalid_flow，也不外洩
+        # Pydantic 的原始多行 dump / pydantic.dev URL。
+        for err in e.errors():
+            loc = err.get("loc") or ()
+            field = str(loc[0]) if loc else ""
+            if field == "name":
+                v.add(
+                    INVALID_NAME,
+                    "名稱只能用小寫英文、數字、連字號（-），不可首尾或連續連字號（1–64 字）；中文請放在說明",
+                    token="name",
+                )
+            else:
+                v.add(
+                    INVALID_SCHEMA,
+                    f"欄位 {field} 格式不正確" if field else "skill 定義格式不正確",
+                    token=field or None,
+                )
+        return _result(v)
+
+    # 定義端點是 flow-only 的權威閘門：kind: agentic 需以 package 匯入（含 script/資源），
+    # 定義原文自稱 agentic 是漂移 —— 拒絕存檔，不落 meta（valid=false）。
+    if skill.kind == "agentic":
+        v.add(
+            AGENTIC_REQUIRES_IMPORT,
+            "agentic skill 不可由定義原文建立，必須以 package 匯入",
+            token="agentic",
+        )
         return _result(v)
 
     v.allowed_tools = allowed_tools(skill)
@@ -515,6 +578,7 @@ def _result(v: _Validator, skill: Skill | None = None) -> ValidationResult:
             name=skill.name,
             description=skill.description,
             required_role=skill.required_role,
+            kind=skill.kind,
             input_schema=skill.input_schema,
         )
         if valid and skill is not None

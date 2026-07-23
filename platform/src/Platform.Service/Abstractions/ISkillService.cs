@@ -22,10 +22,36 @@ public interface ISkillService
     Task<JsonElement> GetRevisionsAsync(string name, UserContext ctx, CancellationToken ct = default);
 
     /// <summary>
+    /// 回復指定 revision；backend 重新驗證 snapshot 並新增 revision。回應原樣穿透 Skill JSON。
+    /// </summary>
+    Task<JsonElement> RestoreRevisionAsync(
+        string name, int revision, UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>
     /// 匯出 Skill 為 Claude Skill 格式 zip(原封轉回 backend 的 bytes,不反序列化)。
     /// backend 404 → WorkflowNotFoundException(對外 404);其餘非 2xx → 對外 502。
     /// </summary>
     Task<SkillExport> ExportAsync(string name, UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>
+    /// Agent Skill 匯入(ADMIN):以上傳檔案的 bytes + 檔名重建乾淨的 multipart,代理到 backend
+    /// POST /api/skills/{name}/import(backend 以 form-binding 讀 Request.Form.Files["package"])。
+    /// 不代理原始 Request.Body:那條路徑在 platform 的 [ApiController] MVC pipeline 下 body 已被排空 → backend 收到空 multipart。
+    /// 改由 Web 層用 IFormFile 表單繫結拿到檔案位元組,本層以 MultipartFormDataContent 重新編碼(新 boundary,合法 HTTP)。
+    /// 重用 export 的授權/錯誤機制(Bearer→身分 header 轉譯、BackendErrorMapper、ApiError 穿透、global 401)。
+    /// 回應原樣穿透 backend 的 Skill JSON(含 additive kind),不套 DTO 以免吞掉欄位;
+    /// backend 403(非 ADMIN)→ 對外 403、422 → 套件驗證失敗、其餘非 2xx → 502。
+    /// backend 內部端點 GET /api/skills/{name}/package 刻意不代理(維持內部限定)。
+    /// </summary>
+    Task<JsonElement> ImportAsync(
+        string name, byte[] package, string fileName, UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>
+    /// Server-derived 匯入：代理 POST /api/skills/import，不送 client name，由 backend/workflow
+    /// 從 package canonical metadata 推導並驗證名稱。
+    /// </summary>
+    Task<JsonElement> ImportAsync(
+        byte[] package, string fileName, UserContext ctx, CancellationToken ct = default);
 
     /// <summary>建立 Skill;backend 409(同名) → DownstreamConflictException(對外 409)。</summary>
     Task<Skill> CreateAsync(SkillUpsert request, UserContext ctx, CancellationToken ct = default);

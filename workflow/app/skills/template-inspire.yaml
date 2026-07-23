@@ -1,4 +1,4 @@
-name: template_inspire            # __SLOT_name__
+name: template-inspire            # __SLOT_name__
 description: 啟發範本骨架            # __SLOT_description__
 required_role: USER
 

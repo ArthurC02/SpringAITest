@@ -1,4 +1,4 @@
-name: analyze_report
+name: analyze-report
 description: 檢索租戶文件並產出主題分析報告（管理員限定）
 required_role: ADMIN
 

@@ -98,7 +98,9 @@ public sealed class WorkflowSkillValidator : ISkillValidator
                         body.Skill.Name,
                         body.Skill.Description ?? string.Empty,
                         // 規格 §3.1:required_role 選填,預設 USER。
-                        string.IsNullOrWhiteSpace(body.Skill.RequiredRole) ? "USER" : body.Skill.RequiredRole));
+                        string.IsNullOrWhiteSpace(body.Skill.RequiredRole) ? "USER" : body.Skill.RequiredRole,
+                        // kind 為 additive(R4):舊引擎不帶 → 預設 flow。
+                        string.IsNullOrWhiteSpace(body.Skill.Kind) ? "flow" : body.Skill.Kind));
         }
     }
 
@@ -120,5 +122,6 @@ public sealed class WorkflowSkillValidator : ISkillValidator
     private sealed record ValidateSkill(
         [property: JsonPropertyName("name")] string Name,
         [property: JsonPropertyName("description")] string? Description,
-        [property: JsonPropertyName("required_role")] string? RequiredRole);
+        [property: JsonPropertyName("required_role")] string? RequiredRole,
+        [property: JsonPropertyName("kind")] string? Kind);
 }

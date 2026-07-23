@@ -23,7 +23,7 @@ SpringAITest/
 │   ├── Dockerfile              選用：容器模式用到
 │   ├── src/
 │   │   └── Backend.Api/         單一專案（feature folders：Auth、Conversations、Files、Retrieval、Analysis、Skills、Config）
-│   └── tests/                  xUnit 測試專案 173 個（Backend.Api.Tests）
+│   └── tests/                  xUnit 測試專案 245 個（Backend.Api.Tests）
 ├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、分析、系統設定四視圖）
 │   ├── vite.config.ts          dev 時把 /api proxy 到 :8080（免 CORS）
 │   ├── Dockerfile / nginx.conf 正式：多階段 build → nginx 靜態檔 + /api 反代（SSE 關緩衝）
@@ -31,7 +31,7 @@ SpringAITest/
 ├── workflow/                   工作流：Python + LangGraph + FastAPI（Skill 引擎、多個具名工作流、向量檢索、分析工作流、權限邊界）
 │   ├── app/
 │   │   ├── engine/             Skill 引擎層（@node、@tool 裝飾器、YAML 編譯器、表達式求值器、沙箱執行器）
-│   │   ├── skills/             Skill 定義（kb_query.yaml 內建範例、custom.py 自訂載入）
+│   │   ├── skills/             Skill 定義（kb-query.yaml 內建範例、custom.py 自訂載入）
 │   │   ├── tools.py            四個初始 tool（retrieve、embed、chunk、rerank）
 │   │   ├── nodes/              可重用節點（retrieve：租戶過濾向量檢索）、kb_query 節點家族（十個細粒度節點）
 │   │   └── main.py             FastAPI 進入點（內部密鑰驗證 + 多租戶 context）
@@ -47,10 +47,10 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 391 個（Service 241 + Web 150）+ 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 185 個、手寫 fake repository（未引入 mocking 套件）。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 431 個（Service 266 + Web 165）+ 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 245 個、手寫 fake repository（未引入 mocking 套件）。
 - **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint（lint）+ vite build（type check + bundle）。
-- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 459 個。
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 620 個。
 
 > .NET 後端需 .NET SDK 10 以上才能建置（`dotnet --version` 應顯示 `10.x`）。
 
@@ -221,7 +221,7 @@ workflow                                  Skill 引擎層
 | ---- | ----------- | --------------------- | --------------------------------------------------------------------------------------------- |
 | 平台 | Service     | `ChatServiceTests`    | xUnit + 手寫 fake HttpMessageHandler（BackendClient 代理行為）                                |
 | 平台 | Web         | `ChatControllerTests` | xUnit + WebApplicationFactory（整合測試）                                                     |
-| 核心 | Backend.Api | 173 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking 等單元測試 |
+| 核心 | Backend.Api | 245 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking 等單元測試 |
 
 ## 可觀測性架構（LiteLLM 閘道 + Langfuse）
 
@@ -320,7 +320,7 @@ curl -H "Authorization: Bearer eyJhbGc..." http://localhost:8080/api/documents
 | `/api/documents`                | POST | USER  | 新增文件（切塊 + 嵌入,存入租戶向量庫） |
 | `/api/documents`                | GET  | USER  | 列出文件（租戶隔離）                   |
 | `/api/skills`                   | GET  | USER  | 列出技能（內建 + 自訂，含 `required_role`） |
-| `/api/skills/{name}/invoke`     | POST | USER  | 執行技能（rag_qa、summarize 等）      |
+| `/api/skills/{name}/invoke`     | POST | USER  | 執行技能（rag-qa、summarize 等）      |
 | `/api/skills/validate`          | POST | ADMIN | 驗證 YAML 技能定義（語法 + schema）   |
 
 ```bash
@@ -339,14 +339,14 @@ curl -H "Authorization: Bearer <token>" http://localhost:8080/api/documents
 # 列出所有技能
 curl -H "Authorization: Bearer <token>" http://localhost:8080/api/skills
 
-# 執行 rag_qa 技能（RAG 問答）
-curl -X POST http://localhost:8080/api/skills/rag_qa/invoke \
+# 執行 rag-qa 技能（RAG 問答）
+curl -X POST http://localhost:8080/api/skills/rag-qa/invoke \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"input":{"question":"文件裡提到什麼？"}}'
 
-# 執行 analyze_report 技能（分析報告,ADMIN only）
-curl -X POST http://localhost:8080/api/skills/analyze_report/invoke \
+# 執行 analyze-report 技能（分析報告,ADMIN only）
+curl -X POST http://localhost:8080/api/skills/analyze-report/invoke \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"input":{"topic":"市場分析"}}'
@@ -360,13 +360,13 @@ curl -X POST http://localhost:8080/api/skills/analyze_report/invoke \
 | ---------------- | --------------------------- | ----- |
 | `summarize`      | 文本摘要                    | USER  |
 | `triage`         | 問題分流分類                | USER  |
-| `rag_qa`         | RAG 問答（向量檢索 + 生成） | USER  |
-| `kb_query`       | 向量知識庫檢索              | USER  |
-| `analyze_report` | 生成分析報告                | ADMIN |
+| `rag-qa`         | RAG 問答（向量檢索 + 生成） | USER  |
+| `kb-query`       | 向量知識庫檢索              | USER  |
+| `analyze-report` | 生成分析報告                | ADMIN |
 
 > 上述技能透過 `/api/skills/{name}/invoke` 端點執行，平台端一律要求 JWT 認證（見「認證與多租戶」），
-> 需帶 `Authorization: Bearer <token>`；`summarize`、`triage`、`rag_qa`、`kb_query` 任一登入使用者（USER）
-> 皆可呼叫，`analyze_report` 則限 ADMIN。
+> 需帶 `Authorization: Bearer <token>`；`summarize`、`triage`、`rag-qa`、`kb-query` 任一登入使用者（USER）
+> 皆可呼叫，`analyze-report` 則限 ADMIN。
 
 ### 技能（Skill）管理與執行
 

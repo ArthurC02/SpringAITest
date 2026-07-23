@@ -13,7 +13,7 @@ namespace Platform.Service.Tests;
 /// 聊天 → Skill 路由(CSR-P1)。工具來源為動態 Skill 目錄(BuildToolsAsync)。
 /// 註:新流程下 LLM 不再拿到原生 tools 引數;路由表(BuildToolsAsync 產出)改由測試直接驗證,
 /// 端到端的「路由 → 執行 → 摘要」編排另見本檔末的 orchestration 區。
-/// template_* 內建骨架是空殼、不可路由;可路由範例用非 template 名(builtin kb_query、custom tenant_a_private_search)。
+/// template-* 內建骨架是空殼、不可路由;可路由範例用非 template 名(builtin kb-query、custom tenant-a-private-search)。
 ///
 /// P2(copilot-shared-core)記憶收斂後:路由/摘要(HIT 路徑)仍走「裸」<c>ILlmAgent</c>
 /// (<see cref="FakeLlmAgent"/>,斷言面不變);未命中(MISS)/純聊天那一輪改跑共用的 hosted agent,
@@ -52,14 +52,14 @@ public sealed class ChatSkillRoutingTests
 
     private static JsonElement Cat(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
-    // 04 §2.2 的目錄樣本(template_retrieval → kb_query 以符合 template_* 過濾規則)。
+    // 04 §2.2 的目錄樣本(template-retrieval → kb-query 以符合 template-* 過濾規則)。
     private const string SampleCatalog = """
     [
-      { "name":"kb_query", "description":"從知識庫檢索答案", "required_role":"USER", "source":"builtin", "revision":1,
+      { "name":"kb-query", "description":"從知識庫檢索答案", "required_role":"USER", "source":"builtin", "revision":1,
         "input_schema": { "query": { "type":"str", "required":true, "min_length":1 } } },
-      { "name":"tenant_a_private_search", "description":"租戶 A 的專用檢索", "required_role":"USER", "source":"custom", "revision":3,
+      { "name":"tenant-a-private-search", "description":"租戶 A 的專用檢索", "required_role":"USER", "source":"custom", "revision":3,
         "input_schema": { "question_text": { "type":"str", "required":true } } },
-      { "name":"admin_report", "description":"管理報表", "required_role":"ADMIN", "source":"custom", "revision":2,
+      { "name":"admin-report", "description":"管理報表", "required_role":"ADMIN", "source":"custom", "revision":2,
         "input_schema": { "prompt": { "type":"str", "required":true } } }
     ]
     """;
@@ -74,9 +74,9 @@ public sealed class ChatSkillRoutingTests
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Contains("kb_query", names);
-        Assert.Contains("tenant_a_private_search", names);
-        Assert.DoesNotContain("admin_report", names);
+        Assert.Contains("kb-query", names);
+        Assert.Contains("tenant-a-private-search", names);
+        Assert.DoesNotContain("admin-report", names);
 
         // catalog 恰呼叫一次,並收到 tenant A / USER 身分。
         var ctx = Assert.Single(wf.CatalogContexts);
@@ -94,9 +94,9 @@ public sealed class ChatSkillRoutingTests
         var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Contains("kb_query", names);
-        Assert.Contains("tenant_a_private_search", names);
-        Assert.Contains("admin_report", names);
+        Assert.Contains("kb-query", names);
+        Assert.Contains("tenant-a-private-search", names);
+        Assert.Contains("admin-report", names);
     }
 
     // ---- T3 / CSR-P1-003:匿名裸聊且不讀目錄 ----
@@ -135,9 +135,9 @@ public sealed class ChatSkillRoutingTests
         {
             Catalog = Cat("""
             [
-              { "name":"kb_query", "description":"內建檢索", "required_role":"USER", "source":"builtin",
+              { "name":"kb-query", "description":"內建檢索", "required_role":"USER", "source":"builtin",
                 "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"tenant_a_private_search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
+              { "name":"tenant-a-private-search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
                 "input_schema": { "question_text": { "type":"str", "required":true } } }
             ]
             """),
@@ -147,8 +147,8 @@ public sealed class ChatSkillRoutingTests
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Contains("kb_query", names);
-        Assert.Contains("tenant_a_private_search", names);
+        Assert.Contains("kb-query", names);
+        Assert.Contains("tenant-a-private-search", names);
     }
 
     // ---- T5 / CSR-P1-009,010:schema 天花板,非單一必填字串一律跳過 ----
@@ -164,14 +164,14 @@ public sealed class ChatSkillRoutingTests
         var wf = new FakeWorkflowService
         {
             Catalog = Cat($$"""
-            [ { "name":"weird_skill", "description":"x", "required_role":"USER", "source":"custom", "input_schema": {{schema}} } ]
+            [ { "name":"weird-skill", "description":"x", "required_role":"USER", "source":"custom", "input_schema": {{schema}} } ]
             """),
         };
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
-        Assert.DoesNotContain(tools!, t => t.Name == "weird_skill");
+        Assert.DoesNotContain(tools!, t => t.Name == "weird-skill");
     }
 
     // ---- CSR-P1-011:optional 欄位不破壞單參資格 ----
@@ -181,7 +181,7 @@ public sealed class ChatSkillRoutingTests
         var wf = new FakeWorkflowService
         {
             Catalog = Cat("""
-            [ { "name":"has_optionals", "description":"x", "required_role":"USER", "source":"custom",
+            [ { "name":"has-optionals", "description":"x", "required_role":"USER", "source":"custom",
                 "input_schema": {
                   "query": { "type":"str", "required":true },
                   "top_k": { "type":"int", "required":false },
@@ -192,11 +192,11 @@ public sealed class ChatSkillRoutingTests
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "has_optionals");
+        var tool = tools!.Single(t => t.Name == "has-optionals");
         await tool.InvokeAsync("原文問句", CancellationToken.None);
 
         var invoke = Assert.Single(wf.SkillInvokes);
-        Assert.Equal("has_optionals", invoke.Name);
+        Assert.Equal("has-optionals", invoke.Name);
         // 只帶必填 str,不捏造 optional 值。
         Assert.Equal(new[] { "query" }, invoke.Input.Keys.ToArray());
         Assert.Equal("原文問句", invoke.Input["query"].GetString());
@@ -217,7 +217,7 @@ public sealed class ChatSkillRoutingTests
         Assert.Empty(tools!);
     }
 
-    // ---- 跨案關鍵修正:template_* 內建骨架不可被路由 ----
+    // ---- 跨案關鍵修正:template-* 內建骨架不可被路由 ----
     [Fact]
     public async Task BuiltinTemplateSkeletons_AreNeverRouted_ButRealSkillsAre()
     {
@@ -225,11 +225,11 @@ public sealed class ChatSkillRoutingTests
         {
             Catalog = Cat("""
             [
-              { "name":"template_retrieval", "description":"檢索骨架", "required_role":"USER", "source":"builtin",
+              { "name":"template-retrieval", "description":"檢索骨架", "required_role":"USER", "source":"builtin",
                 "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"template_stats", "description":"統計骨架", "required_role":"USER", "source":"builtin",
+              { "name":"template-stats", "description":"統計骨架", "required_role":"USER", "source":"builtin",
                 "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"kb_query", "description":"真的內建檢索", "required_role":"USER", "source":"builtin",
+              { "name":"kb-query", "description":"真的內建檢索", "required_role":"USER", "source":"builtin",
                 "input_schema": { "query": { "type":"str", "required":true } } }
             ]
             """),
@@ -239,19 +239,19 @@ public sealed class ChatSkillRoutingTests
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
-        Assert.DoesNotContain("template_retrieval", names);
-        Assert.DoesNotContain("template_stats", names);
-        Assert.Contains("kb_query", names);
+        Assert.DoesNotContain("template-retrieval", names);
+        Assert.DoesNotContain("template-stats", names);
+        Assert.Contains("kb-query", names);
     }
 
-    // 過濾條件是 source=="builtin" 且 template_ 前綴的合取:custom 的 template_ 前綴不被剝除。
+    // 過濾條件是 source=="builtin" 且 template- 前綴的合取:custom 的 template- 前綴不被剝除。
     [Fact]
     public async Task CustomSkill_WithTemplatePrefix_IsNotFiltered()
     {
         var wf = new FakeWorkflowService
         {
             Catalog = Cat("""
-            [ { "name":"template_custom_thing", "description":"x", "required_role":"USER", "source":"custom",
+            [ { "name":"template-custom-thing", "description":"x", "required_role":"USER", "source":"custom",
                 "input_schema": { "query": { "type":"str", "required":true } } } ]
             """),
         };
@@ -259,7 +259,53 @@ public sealed class ChatSkillRoutingTests
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
-        Assert.Contains(tools!, t => t.Name == "template_custom_thing");
+        Assert.Contains(tools!, t => t.Name == "template-custom-thing");
+    }
+
+    // ---- AST-P1-011 / R6 / D6:kind 不得拓寬路由 —— agentic 只是普通 catalog entry,路由規則一字不變 ----
+    // 恰一個必填字串 input 的 agentic skill 沿用既有路由;多參 agentic 不被路由(但仍可 explicit invoke)。
+    // 兩個 entry 都帶 kind:agentic,證明 SingleRequiredStringKey/角色/template 過濾完全無視 kind。
+    [Fact]
+    public async Task Agentic_SingleRequiredString_IsRoutable_MultiParam_IsNotRouted_KindIgnored()
+    {
+        var wf = new FakeWorkflowService
+        {
+            Catalog = Cat("""
+            [
+              { "name":"sales-helper", "description":"銷售助理", "required_role":"USER", "source":"custom", "kind":"agentic",
+                "input_schema": { "question": { "type":"str", "required":true } } },
+              { "name":"trip-planner", "description":"行程規劃", "required_role":"USER", "source":"custom", "kind":"agentic",
+                "input_schema": { "origin": { "type":"str", "required":true }, "destination": { "type":"str", "required":true } } }
+            ]
+            """),
+        };
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+
+        var names = tools!.Select(t => t.Name).ToArray();
+        Assert.Contains("sales-helper", names);        // 單必填字串 agentic → 可路由(與 flow 同一路徑)。
+        Assert.DoesNotContain("trip-planner", names);  // 多參 agentic → 不路由(kind 未使其成為例外)。
+    }
+
+    // 多參 agentic 雖不被路由,仍可經 explicit invoke 執行並回 {skill, output}(含固定 answer 鍵)。
+    [Fact]
+    public async Task MultiParamAgentic_NotRouted_ButExplicitInvokeSucceeds()
+    {
+        var wf = new FakeWorkflowService
+        {
+            SkillOutput = Cat("""{ "skill":"trip-planner", "output": { "answer":"建議行程已產生" } }"""),
+        };
+
+        var input = new Dictionary<string, JsonElement>
+        {
+            ["origin"] = JsonSerializer.SerializeToElement("台北"),
+            ["destination"] = JsonSerializer.SerializeToElement("東京"),
+        };
+        var result = await wf.InvokeSkillAsync("trip-planner", input, UserA);
+
+        Assert.Equal("trip-planner", result.GetProperty("skill").GetString());
+        Assert.Equal("建議行程已產生", result.GetProperty("output").GetProperty("answer").GetString());
     }
 
     // ---- T7 / CSR-P1-008,015:呼叫正確 Skill、輸入鍵與身分 ----
@@ -270,12 +316,12 @@ public sealed class ChatSkillRoutingTests
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "tenant_a_private_search");
+        var tool = tools!.Single(t => t.Name == "tenant-a-private-search");
 
         await tool.InvokeAsync("比較 Q1 與 Q2", CancellationToken.None);
 
         var invoke = Assert.Single(wf.SkillInvokes);
-        Assert.Equal("tenant_a_private_search", invoke.Name);
+        Assert.Equal("tenant-a-private-search", invoke.Name);
         // input_schema 的必填鍵是 question_text(非模型看到的 question)。
         Assert.Equal("比較 Q1 與 Q2", invoke.Input["question_text"].GetString());
         Assert.Equal("demo-a", invoke.Ctx.TenantCode);
@@ -362,6 +408,51 @@ public sealed class ChatSkillRoutingTests
         using var parsed = JsonDocument.Parse(result); // 合法 JSON
         Assert.Equal(2, parsed.RootElement.GetProperty("count").GetInt32());
         Assert.False(parsed.RootElement.TryGetProperty("skill", out _)); // 取的是 output 內層
+    }
+
+    // ---- agentic fatal run(遞迴/逾時/套件讀取錯誤):無 answer 鍵 + fatal_error/errors → 友善訊息,不倒內部 JSON ----
+    [Theory]
+    [InlineData("""{ "skill":"s", "output": { "trace":["n1","n2"], "fatal_error":"RecursionError", "errors":[] } }""")]
+    [InlineData("""{ "skill":"s", "output": { "trace":["n1"], "errors":["timeout at node n1"] } }""")]
+    public async Task FatalRunWithoutAnswerKey_ReturnsFriendlyMessage_NotInternalJson(string skillOutput)
+    {
+        var wf = new FakeWorkflowService
+        {
+            Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
+            SkillOutput = Cat(skillOutput),
+        };
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "s");
+
+        var result = await tool.InvokeAsync("q", CancellationToken.None);
+
+        Assert.Equal("回覆過程發生錯誤，請稍後再試", result);
+        // 內部欄位名絕不外洩給聊天模型改寫。
+        Assert.DoesNotContain("trace", result);
+        Assert.DoesNotContain("fatal_error", result);
+        Assert.DoesNotContain("errors", result);
+    }
+
+    // 無 answer 鍵但也非 fatal(errors 空、無 fatal_error)→ 仍維持原 raw JSON fallback,不誤判成友善訊息。
+    [Fact]
+    public async Task NoAnswerKeyNonFatal_StillUsesRawJsonFallback()
+    {
+        var wf = new FakeWorkflowService
+        {
+            Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
+            SkillOutput = Cat("""{ "skill":"s", "output": { "rows":[1,2], "errors":[] } }"""),
+        };
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "s");
+
+        var result = await tool.InvokeAsync("q", CancellationToken.None);
+
+        using var parsed = JsonDocument.Parse(result);
+        Assert.Equal(2, parsed.RootElement.GetProperty("rows").GetArrayLength());
     }
 
     [Fact]
@@ -461,12 +552,12 @@ public sealed class ChatSkillRoutingTests
     {
         var wf = new FakeWorkflowService
         {
-            Catalog = Cat("""[ { "name":"tenant_a_private_search", "description":"租戶 A 的專用檢索", "required_role":"USER", "source":"custom", "input_schema": { "question_text": { "type":"str", "required":true } } } ]"""),
+            Catalog = Cat("""[ { "name":"tenant-a-private-search", "description":"租戶 A 的專用檢索", "required_role":"USER", "source":"custom", "input_schema": { "question_text": { "type":"str", "required":true } } } ]"""),
         };
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "tenant_a_private_search");
+        var tool = tools!.Single(t => t.Name == "tenant-a-private-search");
 
         Assert.Contains("租戶 A 的專用檢索", tool.Description);
         Assert.Contains("question_text", tool.Description);
@@ -527,14 +618,14 @@ public sealed class ChatSkillRoutingTests
     public async Task RoutedPath_SelectsSkill_ExecutesDeterministically_SummarizesResult()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");            // 第一次 CompleteAsync = 路由 → 選 kb_query
+        agent.Responses.Enqueue("kb-query");            // 第一次 CompleteAsync = 路由 → 選 kb-query
         agent.Responses.Enqueue("本季毛利率是 32.8%。"); // 第二次 CompleteAsync = 摘要(只潤飾)
         var mem0 = new FakeMem0Client();
         var convos = new FakeConversationStore();
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SampleCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"毛利率 32.8%" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"毛利率 32.8%" } }"""),
         };
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, _, _) = TestChatAgent.Build(mem0: mem0, convos: convos, identity: identity, llmAgent: agent, workflows: wf);
@@ -548,7 +639,7 @@ public sealed class ChatSkillRoutingTests
 
         // (a) 選中的 skill 以「使用者原訊息」為輸入被呼叫(input key 由 schema 挑出 = query)。
         var invoke = Assert.Single(wf.SkillInvokes);
-        Assert.Equal("kb_query", invoke.Name);
+        Assert.Equal("kb-query", invoke.Name);
         Assert.Equal("這季毛利率多少?", invoke.Input["query"].GetString());
 
         // (b) 摘要呼叫:system 為禁改數字指令、user 帶入工具的確定性結果(數字原封)。
@@ -581,7 +672,7 @@ public sealed class ChatSkillRoutingTests
     }
 
     // 路由指令必須把「數字/YoY/比較」意圖導向工具(與 ChatGuardPrompt 同一組語義):
-    // 少了這一步,revenue_qa 這類 YoY 問題會被路由判成 NONE → 純聊天兜底吐「查無此數據」。
+    // 少了這一步,revenue-qa 這類 YoY 問題會被路由判成 NONE → 純聊天兜底吐「查無此數據」。
     [Fact]
     public async Task RoutingInstruction_SteersNumericIntent_TowardTool_NotNone()
     {
@@ -637,12 +728,12 @@ public sealed class ChatSkillRoutingTests
     public async Task RoutedPath_Streaming_SummaryStreamedFromToolResult()
     {
         var agent = new FakeLlmAgent { Chunks = new[] { "本季", "毛利率", "32.8%" } };
-        agent.Responses.Enqueue("kb_query");   // 路由(阻塞)
+        agent.Responses.Enqueue("kb-query");   // 路由(阻塞)
         var convos = new FakeConversationStore();
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SampleCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"毛利率 32.8%" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"毛利率 32.8%" } }"""),
         };
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, _, _) = TestChatAgent.Build(convos: convos, identity: identity, llmAgent: agent, workflows: wf);
@@ -669,19 +760,19 @@ public sealed class ChatSkillRoutingTests
     public async Task RoutedPath_LenientMatch_ReplyContainsToolName_StillRoutes()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("我建議使用 kb_query 這個工具");   // 非全等,含 token
+        agent.Responses.Enqueue("我建議使用 kb-query 這個工具");   // 非全等,含 token
         agent.Responses.Enqueue("摘要輸出");
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SampleCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, wf);
 
         var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
 
         Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb_query", Assert.Single(wf.SkillInvokes).Name);
+        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
     }
 
     // ---- 路由重試(NONE/無命中一次後再試一次;最多兩次) ----
@@ -692,19 +783,19 @@ public sealed class ChatSkillRoutingTests
     {
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("NONE");        // 第一次路由 = NONE
-        agent.Responses.Enqueue("kb_query");    // 第二次路由(重試)= 選中
+        agent.Responses.Enqueue("kb-query");    // 第二次路由(重試)= 選中
         agent.Responses.Enqueue("摘要輸出");    // 摘要
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SampleCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, wf);
 
         var reply = await svc.ChatAsync("這季毛利率?", "u1", "c1", UserA);
 
         Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb_query", Assert.Single(wf.SkillInvokes).Name);
+        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
         // 兩次路由 + 一次摘要 = 三次 CompleteAsync。
         Assert.Equal(3, agent.CompleteCalls.Count);
     }
@@ -734,19 +825,19 @@ public sealed class ChatSkillRoutingTests
     public async Task Routing_FirstAttemptHits_NoWastedRetry()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");    // 第一次路由即命中
+        agent.Responses.Enqueue("kb-query");    // 第一次路由即命中
         agent.Responses.Enqueue("摘要輸出");    // 摘要
         var wf = new FakeWorkflowService
         {
             Catalog = Cat(SampleCatalog),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, wf);
 
         var reply = await svc.ChatAsync("這季毛利率?", "u1", "c1", UserA);
 
         Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb_query", Assert.Single(wf.SkillInvokes).Name);
+        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
         // 路由一次 + 摘要一次 = 兩次;沒有第二次路由。
         Assert.Equal(2, agent.CompleteCalls.Count);
     }

@@ -1,4 +1,4 @@
-name: template_infer              # __SLOT_name__
+name: template-infer              # __SLOT_name__
 description: 推論範本骨架            # __SLOT_description__
 required_role: USER
 

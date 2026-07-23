@@ -1,8 +1,8 @@
 // 五支範本的薄 metadata（規格 §3.1）。刻意不含任何 flow YAML、node 名或版本 ——
-// 骨架原文是 workflow 內建 template_* 的唯一事實來源，前端只在 compose 時依 basedOn 取用。
+// 骨架原文是 workflow 內建 template-* 的唯一事實來源，前端只在 compose 時依 basedOn 取用。
 export interface SkillTemplate {
   id: 'retrieval' | 'compare' | 'stats' | 'infer' | 'inspire'
-  basedOn: `template_${SkillTemplate['id']}` // 指向 workflow 內建骨架名
+  basedOn: `template-${SkillTemplate['id']}` // 指向 workflow 內建骨架名（標準連字號）
   label: string
   slotKind: 'nl_logic' | 'script' // 決定 rule 欄注入 instruction 還是 Python body
   openFields: Array<keyof SkillForm> // 簡單模式可填白名單
@@ -19,7 +19,7 @@ export type SkillForm = Partial<
 export const TEMPLATES: SkillTemplate[] = [
   {
     id: 'retrieval',
-    basedOn: 'template_retrieval',
+    basedOn: 'template-retrieval',
     label: '知識問答',
     slotKind: 'nl_logic',
     // topK 移除：retrieval 走 kb_query deps，骨架無 # __SLOT_topK__ 槽（檢索筆數是 P4
@@ -30,7 +30,7 @@ export const TEMPLATES: SkillTemplate[] = [
   },
   {
     id: 'compare',
-    basedOn: 'template_compare',
+    basedOn: 'template-compare',
     label: '比對排序',
     slotKind: 'script',
     openFields: ['name', 'description', 'rule', 'sortBy'],
@@ -39,7 +39,7 @@ export const TEMPLATES: SkillTemplate[] = [
   },
   {
     id: 'stats',
-    basedOn: 'template_stats',
+    basedOn: 'template-stats',
     label: '統計聚合',
     slotKind: 'script',
     openFields: ['name', 'description', 'rule', 'metric', 'period', 'topK'],
@@ -53,7 +53,7 @@ export const TEMPLATES: SkillTemplate[] = [
   },
   {
     id: 'infer',
-    basedOn: 'template_infer',
+    basedOn: 'template-infer',
     label: '推論',
     slotKind: 'nl_logic',
     openFields: ['name', 'description', 'rule'],
@@ -62,7 +62,7 @@ export const TEMPLATES: SkillTemplate[] = [
   },
   {
     id: 'inspire',
-    basedOn: 'template_inspire',
+    basedOn: 'template-inspire',
     label: '啟發',
     slotKind: 'nl_logic',
     openFields: ['name', 'description', 'rule'],

@@ -677,7 +677,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
 
     // 單一可路由 skill(唯一必填字串 query),T-P4-2/T-P4-3/B-P4-12/13 共用的最小目錄。
     private const string SingleSkillCatalog = """
-    [ { "name":"kb_query", "description":"知識庫檢索", "required_role":"USER", "source":"builtin",
+    [ { "name":"kb-query", "description":"知識庫檢索", "required_role":"USER", "source":"builtin",
         "input_schema": { "query": { "type":"str", "required":true } } } ]
     """;
 
@@ -694,7 +694,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         FakeWorkflowService.CatalogOverride = Cat(SingleSkillCatalog);
         var routingAgent = (FakeLlmAgent)RoutingAgent;
         var originalResponse = routingAgent.Response;
-        routingAgent.Response = "kb_query";
+        routingAgent.Response = "kb-query";
         try
         {
             var client = _factory.CreateClient().WithToken(_factory.IssueToken());
@@ -727,7 +727,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         FakeWorkflowService.CatalogOverride = Cat(SingleSkillCatalog);
         var routingAgent = (FakeLlmAgent)RoutingAgent;
         var originalResponse = routingAgent.Response;
-        routingAgent.Response = "kb_query";
+        routingAgent.Response = "kb-query";
         try
         {
             var client = _factory.CreateClient().WithToken(_factory.IssueToken());
@@ -773,8 +773,8 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
             // 其他測試留下的紀錄,故只看本案「新增」的部分,不假設從 0 開始(比照本檔其餘案例的 threadId 隔離慣例)。
             var runsBefore = ChatClient.Runs.Count;
 
-            // 第一輪:路由 HIT(kb_query),摘要走「裸」LLM 串流,完全不經過 FakeChatClient。
-            routingAgent.Response = "kb_query";
+            // 第一輪:路由 HIT(kb-query),摘要走「裸」LLM 串流,完全不經過 FakeChatClient。
+            routingAgent.Response = "kb-query";
             wireHistory.Add(UserMsg(Guid.NewGuid().ToString("N"), hitQuestion));
             var resp1 = await SendAguiAsync(client, RunInputWithMessages(threadId, wireHistory));
             Assert.Equal(HttpStatusCode.OK, resp1.StatusCode);
@@ -821,6 +821,52 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         }
     }
 
+    // AST-P1-012:一個「單必填字串」的 agentic skill 經聊天路由命中 → 事件流不得出現任何 skill 名的
+    // TOOL_CALL_*(skill 從未註冊成 AITool,結構上不可能洩漏),且最終內容正確由固定的 answer 鍵萃取
+    // (invoke 輸出 {output:{answer:"42"}} → 摘要如實帶出 "42")。kind:agentic 不影響路由。
+    private const string AgenticSkillCatalog = """
+    [ { "name":"sales-helper", "description":"銷售助理", "required_role":"USER", "source":"custom", "kind":"agentic",
+        "input_schema": { "question": { "type":"str", "required":true } } } ]
+    """;
+
+    [Fact]
+    public async Task Agui_AgenticSkillRouted_NoToolCallEvents_FinalContentFromAnswerKey()
+    {
+        FakeWorkflowService.CatalogOverride = Cat(AgenticSkillCatalog);
+        var routingAgent = (FakeLlmAgent)RoutingAgent;
+        var originalResponse = routingAgent.Response;
+        routingAgent.Response = "sales-helper";   // 路由命中 agentic skill。
+        try
+        {
+            var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+            var resp = await SendAguiAsync(client, RunInputFor("ast-p1-012", "這季毛利率多少?"));
+
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var raw = await resp.Content.ReadAsStringAsync();
+            var frames = ExtractFrames(raw);
+            var types = frames.Select(f => f.GetProperty("type").GetString()).ToList();
+
+            // (a) 無任何 server-skill 的 TOOL_CALL_* 事件。
+            Assert.DoesNotContain(types, t => t == "TOOL_CALL_START" || t == "TOOL_CALL_ARGS" || t == "TOOL_CALL_END");
+
+            // (b) agentic skill 確實被路由並執行(以使用者原訊息為 question 輸入)。
+            var invoke = Assert.Single(FakeWorkflowService.SkillInvokes, i => i.Name == "sales-helper");
+            Assert.Equal("這季毛利率多少?", invoke.Input["question"].GetString());
+
+            // (c) 最終內容由 answer 鍵萃取(FakeWorkflowService 預設 output.answer = "42"),摘要如實帶出。
+            var finalText = string.Concat(frames
+                .Where(f => f.GetProperty("type").GetString() == "TEXT_MESSAGE_CONTENT")
+                .Select(f => f.GetProperty("delta").GetString()));
+            Assert.Equal("42", finalText);
+        }
+        finally
+        {
+            routingAgent.Response = originalResponse;
+            FakeWorkflowService.CatalogOverride = null;
+        }
+    }
+
     // B-P4-12:副駕取得同批能力——同一份目錄,ChatView(/api/chat)與副駕(/api/copilot/agui)各問同一個
     // 問題,兩邊呼叫 skill 時的 (Name, Input) 必須完全相同(兩條鏈路共用同一顆 SkillRoutingAgent 邏輯)。
     [Fact]
@@ -829,7 +875,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         FakeWorkflowService.CatalogOverride = Cat(SingleSkillCatalog);
         var routingAgent = (FakeLlmAgent)RoutingAgent;
         var originalResponse = routingAgent.Response;
-        routingAgent.Response = "kb_query";
+        routingAgent.Response = "kb-query";
         const string question = "這季毛利率多少?";
         try
         {

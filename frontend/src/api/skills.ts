@@ -56,12 +56,23 @@ export function updateSkill(name: string, definition: string): Promise<void> {
   })
 }
 
+/**
+ * 將指定 revision 還原成一個新的 current revision。這是唯一可同時支援 flow 與 agentic 的回溯路徑：
+ * agentic 的 historical package 只留在 server 端，不能以 definition-only PUT 重建。
+ */
+export function restoreSkillRevision(name: string, revision: number): Promise<Skill> {
+  return apiFetch<Skill>(
+    `/api/skills/${encodeURIComponent(name)}/revisions/${encodeURIComponent(String(revision))}/restore`,
+    { method: 'POST' },
+  )
+}
+
 /** 停用（後端為軟刪 enabled=false，revision 保留供稽核）。 */
 export function deleteSkill(name: string): Promise<void> {
   return apiFetch<void>(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
 }
 
-/** 匯出既有 skill 為 zip（SKILL.md + skill.yaml）並觸發瀏覽器下載。走 apiFetchBlob 保留 Bearer/401 行為。 */
+/** 匯出既有 skill 為 zip（單一自足 SKILL.md，§3.1）並觸發瀏覽器下載。走 apiFetchBlob 保留 Bearer/401 行為。 */
 export async function exportSkill(name: string): Promise<void> {
   const blob = await apiFetchBlob(`/api/skills/${encodeURIComponent(name)}/export`)
   const url = URL.createObjectURL(blob)
@@ -73,6 +84,26 @@ export async function exportSkill(name: string): Promise<void> {
   a.remove()
   // ponytail: 同一 tick 撤銷會偶發打斷下載，延遲 1s 撤銷。
   setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/**
+ * 匯入 package（ADMIN）：把原始 zip bytes 以 multipart（欄位名 `package`）POST 到 literal
+ * `/api/skills/import`。name 由 Workflow 唯一 YAML parser 從 SKILL.md 推導，client 不猜 route。
+ * 走 apiFetch 保留 Bearer / global-401；接受與否由 server 端 import validation 判定；
+ * server ApiError（422 等）由呼叫端 catch 顯示並保留草稿。回應為 stored Skill JSON。
+ */
+export function importSkill(zip: Blob, filename = 'package.zip'): Promise<Skill> {
+  const form = new FormData()
+  form.append('package', zip, filename)
+  return apiFetch<Skill>('/api/skills/import', {
+    method: 'POST',
+    body: form,
+  })
+}
+
+/** 取回 skill 的 export zip bytes（不觸發下載）——agentic 編輯器載入 package 用。走 apiFetchBlob 保 Bearer/401。 */
+export function getSkillPackage(name: string): Promise<Blob> {
+  return apiFetchBlob(`/api/skills/${encodeURIComponent(name)}/export`)
 }
 
 /** 引擎級靜態驗證;無副作用,編輯器即時校驗用。valid=false 也是 HTTP 200。 */

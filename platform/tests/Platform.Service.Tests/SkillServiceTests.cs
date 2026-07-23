@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -14,10 +15,10 @@ public sealed class SkillServiceTests
 {
     private static readonly UserContext AdminCtx = new("admin-a", "demo-a", "ADMIN");
 
-    private const string Yaml = "name: quarterly_qa\ndescription: 季報問答\nflow:\n  - node: query_intake\n";
+    private const string Yaml = "name: quarterly-qa\ndescription: 季報問答\nflow:\n  - node: query_intake\n";
 
     private const string SkillJson =
-        """{"name":"quarterly_qa","description":"季報問答","definition":"name: quarterly_qa","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}""";
+        """{"name":"quarterly-qa","description":"季報問答","definition":"name: quarterly-qa","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}""";
 
     private static SkillService Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
 
@@ -28,12 +29,12 @@ public sealed class SkillServiceTests
     public async Task List_PassesThroughSnakeCase_ForwardsIdentityHeaders()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            """[{"name":"quarterly_qa","description":"季報問答","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","extra_new_field":"kept"}]"""));
+            """[{"name":"quarterly-qa","description":"季報問答","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","extra_new_field":"kept"}]"""));
 
         var json = await Build(stub).ListAsync(AdminCtx);
 
         var item = json.EnumerateArray().Single();
-        Assert.Equal("quarterly_qa", item.GetProperty("name").GetString());
+        Assert.Equal("quarterly-qa", item.GetProperty("name").GetString());
         Assert.Equal("USER", item.GetProperty("required_role").GetString());
         Assert.True(item.GetProperty("enabled").GetBoolean());
         Assert.Equal(3, item.GetProperty("current_revision").GetInt32());
@@ -55,10 +56,10 @@ public sealed class SkillServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SkillJson));
 
-        var skill = await Build(stub).GetAsync("quarterly_qa", AdminCtx);
+        var skill = await Build(stub).GetAsync("quarterly-qa", AdminCtx);
 
-        Assert.Equal("http://backend/api/skills/quarterly_qa", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal("name: quarterly_qa", skill.GetProperty("definition").GetString());
+        Assert.Equal("http://backend/api/skills/quarterly-qa", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("name: quarterly-qa", skill.GetProperty("definition").GetString());
         Assert.Equal("USER", skill.GetProperty("required_role").GetString());
         Assert.Equal(3, skill.GetProperty("current_revision").GetInt32());
         Assert.Equal("2026-07-13T00:00:00Z", skill.GetProperty("created_at").GetString());
@@ -70,9 +71,9 @@ public sealed class SkillServiceTests
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
             """[{"revision":2,"definition":"name: q","definition_sha256":"abc","created_by":"admin-a","created_at":"2026-07-14T00:00:00Z"}]"""));
 
-        var json = await Build(stub).GetRevisionsAsync("quarterly_qa", AdminCtx);
+        var json = await Build(stub).GetRevisionsAsync("quarterly-qa", AdminCtx);
 
-        Assert.Equal("http://backend/api/skills/quarterly_qa/revisions", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("http://backend/api/skills/quarterly-qa/revisions", stub.LastRequest!.RequestUri!.ToString());
         var row = json.EnumerateArray().Single();
         Assert.Equal(2, row.GetProperty("revision").GetInt32());
         Assert.Equal("abc", row.GetProperty("definition_sha256").GetString());
@@ -90,6 +91,43 @@ public sealed class SkillServiceTests
         Assert.Equal("找不到 Skill：ghost", ex.Message);
     }
 
+    [Fact]
+    public async Task RestoreRevision_ForwardsPostPathAndIdentity_PassesThroughKind()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"name":"quarterly-qa","current_revision":4,"kind":"agentic"}"""));
+
+        var result = await Build(stub).RestoreRevisionAsync("quarterly-qa", 2, AdminCtx);
+
+        Assert.Equal(
+            "http://backend/api/skills/quarterly-qa/revisions/2/restore",
+            stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Post, stub.LastRequest.Method);
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.Equal("admin-a", stub.Header("X-User-Id"));
+        Assert.Equal("ADMIN", stub.Header("X-User-Role"));
+        Assert.Equal(4, result.GetProperty("current_revision").GetInt32());
+        Assert.Equal("agentic", result.GetProperty("kind").GetString());
+    }
+
+    [Theory]
+    [InlineData(403, typeof(WorkflowForbiddenException))]
+    [InlineData(404, typeof(WorkflowNotFoundException))]
+    [InlineData(409, typeof(DownstreamConflictException))]
+    [InlineData(422, typeof(SkillValidationFailedException))]
+    public async Task RestoreRevision_BackendError_MapsToSameStatus(
+        int status, Type exceptionType)
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(
+            (HttpStatusCode)status, "restore failed"));
+
+        var error = await Assert.ThrowsAnyAsync<Exception>(
+            () => Build(stub).RestoreRevisionAsync("quarterly-qa", 2, AdminCtx));
+
+        Assert.IsType(exceptionType, error);
+        Assert.Equal("restore failed", error.Message);
+    }
+
     [Fact] // body 只有 definition — name/description/required_role 都在 YAML 裡,不得另外送。
     public async Task Create_PostsDefinitionOnlyBody_MapsCreatedSkill()
     {
@@ -97,7 +135,7 @@ public sealed class SkillServiceTests
 
         var created = await Build(stub).CreateAsync(Upsert(), AdminCtx);
 
-        Assert.Equal("quarterly_qa", created.Name);
+        Assert.Equal("quarterly-qa", created.Name);
         Assert.Equal("http://backend/api/skills", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
         Assert.Equal("ADMIN", stub.Header("X-User-Role"));
@@ -114,9 +152,9 @@ public sealed class SkillServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, SkillJson));
 
-        await Build(stub).UpdateAsync("quarterly_qa", Upsert(), AdminCtx);
+        await Build(stub).UpdateAsync("quarterly-qa", Upsert(), AdminCtx);
 
-        Assert.Equal("http://backend/api/skills/quarterly_qa", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("http://backend/api/skills/quarterly-qa", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Put, stub.LastRequest!.Method);
 
         using var doc = JsonDocument.Parse(stub.LastBody!);
@@ -128,9 +166,9 @@ public sealed class SkillServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
 
-        await Build(stub).DeleteAsync("quarterly_qa", AdminCtx);
+        await Build(stub).DeleteAsync("quarterly-qa", AdminCtx);
 
-        Assert.Equal("http://backend/api/skills/quarterly_qa", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("http://backend/api/skills/quarterly-qa", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Delete, stub.LastRequest!.Method);
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
     }
@@ -154,9 +192,9 @@ public sealed class SkillServiceTests
         var bytes = new byte[] { 0x50, 0x4B, 0x03, 0x04, 0x00, 0x7F, 0xFF };  // 含非文字位元組
         var stub = new StubHttpMessageHandler(_ => Zip(HttpStatusCode.OK, bytes));
 
-        var export = await Build(stub).ExportAsync("quarterly_qa", AdminCtx);
+        var export = await Build(stub).ExportAsync("quarterly-qa", AdminCtx);
 
-        Assert.Equal("http://backend/api/skills/quarterly_qa/export", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("http://backend/api/skills/quarterly-qa/export", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Get, stub.LastRequest!.Method);
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
@@ -165,7 +203,7 @@ public sealed class SkillServiceTests
 
         Assert.Equal(bytes, export.Content);
         Assert.Equal("application/zip", export.ContentType);
-        Assert.Equal("quarterly_qa.zip", export.FileName);
+        Assert.Equal("quarterly-qa.zip", export.FileName);
     }
 
     [Fact] // backend 沒帶 content-type → fallback application/zip。
@@ -173,7 +211,7 @@ public sealed class SkillServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => Zip(HttpStatusCode.OK, new byte[] { 1, 2, 3 }, contentType: null));
 
-        var export = await Build(stub).ExportAsync("quarterly_qa", AdminCtx);
+        var export = await Build(stub).ExportAsync("quarterly-qa", AdminCtx);
 
         Assert.Equal("application/zip", export.ContentType);
     }
@@ -194,7 +232,7 @@ public sealed class SkillServiceTests
         var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
 
         var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
-            () => Build(stub).ExportAsync("quarterly_qa", AdminCtx));
+            () => Build(stub).ExportAsync("quarterly-qa", AdminCtx));
         Assert.Contains("500", ex.Message);
     }
 
@@ -203,7 +241,7 @@ public sealed class SkillServiceTests
     [InlineData(400, typeof(WorkflowBadInputException), "輸入驗證失敗")]
     [InlineData(403, typeof(WorkflowForbiddenException), "權限不足，無法存取 Skill")]
     [InlineData(404, typeof(WorkflowNotFoundException), "找不到 Skill：ghost")]
-    [InlineData(409, typeof(DownstreamConflictException), "Skill 名稱已存在：quarterly_qa")]
+    [InlineData(409, typeof(DownstreamConflictException), "Skill 名稱已存在：quarterly-qa")]
     [InlineData(422, typeof(SkillValidationFailedException), "Skill 定義驗證失敗")]
     public async Task Create_BackendError_MapsToSameStatusException_KeepsMessage(
         int status, Type expected, string message)
@@ -270,13 +308,151 @@ public sealed class SkillServiceTests
         Assert.Null(ex.FieldErrors);
     }
 
+    // ---- Agent Skill 匯入代理:multipart 原封串流轉送、錯誤穿透、kind 透傳 ----
+
+    private const string PackageFileName = "sales-helper.zip";
+
+    private static byte[] PackageBytes() => Encoding.UTF8.GetBytes("PKzip-bytes-payload");
+
+    // 匯入成功:POST 到 /import、帶四個身分 header、以上傳位元組重建乾淨 multipart(帶 Content-Length、非 chunked)、
+    // 內含名為 package 的檔位且位元組與上傳一致、回應含 kind。
+    [Fact]
+    public async Task Import_RebuildsMultipart_ForwardsHeadersAndPackagePart_PassesThroughKind()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"name":"sales-helper","description":"銷售助理","definition":"kind: agentic\n","required_role":"USER","enabled":true,"current_revision":1,"kind":"agentic","created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}"""));
+        var payload = PackageBytes();
+
+        var result = await Build(stub).ImportAsync("sales-helper", payload, PackageFileName, AdminCtx);
+
+        Assert.Equal("http://backend/api/skills/sales-helper/import", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
+        Assert.Equal("tok", stub.Header("X-Internal-Token"));
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.Equal("admin-a", stub.Header("X-User-Id"));
+        Assert.Equal("ADMIN", stub.Header("X-User-Role"));
+
+        // 重建成 multipart/form-data(新 boundary,合法 HTTP)。
+        Assert.Equal("multipart/form-data", stub.LastRequest!.Content!.Headers.ContentType!.MediaType);
+
+        // 關鍵回歸:轉送給 backend 的請求必須帶 Content-Length(> 0)而非 chunked —
+        // backend 的 multipart reader 會拒收無 Content-Length 的 chunked 請求。
+        Assert.True(stub.LastRequest!.Content!.Headers.ContentLength > 0);
+
+        // multipart body 內含名為 package 的檔位,檔名帶上,位元組與上傳逐字一致(非空)。
+        Assert.Contains("name=package", stub.LastBody);
+        Assert.Contains(PackageFileName, stub.LastBody);
+        Assert.Contains(Encoding.UTF8.GetString(payload), stub.LastBody);
+
+        // 回應原樣穿透:additive kind 帶上來,既有欄位不變。
+        Assert.Equal("sales-helper", result.GetProperty("name").GetString());
+        Assert.Equal("agentic", result.GetProperty("kind").GetString());
+        Assert.Equal(1, result.GetProperty("current_revision").GetInt32());
+    }
+
+    [Fact]
+    public async Task ImportDerived_ForwardsToAdditiveRoute_WithSameMultipartAndIdentity()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"name":"server-derived","kind":"agentic","current_revision":1}"""));
+        var payload = PackageBytes();
+
+        var result = await Build(stub).ImportAsync(
+            payload, PackageFileName, AdminCtx);
+
+        Assert.Equal("http://backend/api/skills/import", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("tok", stub.Header("X-Internal-Token"));
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.Equal("admin-a", stub.Header("X-User-Id"));
+        Assert.Equal("ADMIN", stub.Header("X-User-Role"));
+        Assert.Equal("multipart/form-data", stub.LastRequest.Content!.Headers.ContentType!.MediaType);
+        Assert.Contains(Encoding.UTF8.GetString(payload), stub.LastBody);
+        Assert.Equal("server-derived", result.GetProperty("name").GetString());
+    }
+
+    // backend 403(非 ADMIN,[AdminOnly])→ WorkflowForbiddenException(對外 403),與其他 skill 寫入一致。
+    [Fact]
+    public async Task Import_Backend403_ThrowsForbidden()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足，無法存取 Skill"));
+
+        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(
+            () => Build(stub).ImportAsync("sales-helper", PackageBytes(), PackageFileName, AdminCtx));
+        Assert.Equal("權限不足，無法存取 Skill", ex.Message);
+    }
+
+    // backend 422(套件驗證失敗)→ SkillValidationFailedException,fieldErrors(引擎錯誤碼)原樣穿過代理層。
+    [Fact]
+    public async Task Import_Backend422_PassesThroughFieldErrors()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
+            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 套件驗證失敗","fieldErrors":{"forbidden_script":"腳本未通過 AST 掃描","unknown_tool":"工具未註冊"}}"""));
+
+        var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
+            () => Build(stub).ImportAsync("sales-helper", PackageBytes(), PackageFileName, AdminCtx));
+
+        Assert.Equal("Skill 套件驗證失敗", ex.Message);
+        Assert.Equal("腳本未通過 AST 掃描", ex.FieldErrors!["forbidden_script"]);
+        Assert.Equal("工具未註冊", ex.FieldErrors!["unknown_tool"]);
+    }
+
+    // 「沒有回應」的等價類:傳輸失敗 → 502(不誤判成使用者的套件有問題)。
+    [Fact]
+    public async Task Import_TransportFailure_ThrowsWorkflowInvocation()
+    {
+        var stub = new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒"));
+
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(stub).ImportAsync("sales-helper", PackageBytes(), PackageFileName, AdminCtx));
+        Assert.Contains("Skill 服務呼叫失敗", ex.Message);
+    }
+
+    // 傳輸上限(16 MiB)的邊界:on-point(剛好上限)照常轉送;off-point(上限 +1)快速失敗(對外 400),不打 backend。
+    [Fact]
+    public async Task Import_AtSizeLimit_Forwards()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"name":"sales-helper","kind":"agentic","current_revision":1}"""));
+
+        await Build(stub).ImportAsync("sales-helper", new byte[16 * 1024 * 1024], PackageFileName, AdminCtx);
+
+        Assert.NotNull(stub.LastRequest); // 剛好等於上限 → 照常轉送
+    }
+
+    [Fact]
+    public async Task Import_OverSizeLimit_RejectsBeforeForwarding()
+    {
+        var stub = new StubHttpMessageHandler(_ => throw new InvalidOperationException("不該打到 backend"));
+
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(
+            () => Build(stub).ImportAsync("sales-helper", new byte[16 * 1024 * 1024 + 1], PackageFileName, AdminCtx));
+
+        Assert.Contains("超過上限", ex.Message);
+        Assert.Null(stub.LastRequest); // 上限檢查在轉送之前 → backend 從沒被呼叫
+    }
+
+    // AST-P1-013(相容性):backend 回的 Skill JSON 帶 additive kind → 舊 typed consumer(Skill record)
+    // 忽略未知欄位仍可反序列化,既有欄位不變。
+    [Fact]
+    public async Task Create_BackendReturnsKind_OldConsumerIgnoresUnknownField()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created,
+            """{"name":"quarterly-qa","description":"季報問答","definition":"name: quarterly-qa","required_role":"USER","enabled":true,"current_revision":1,"kind":"flow","created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}"""));
+
+        var created = await Build(stub).CreateAsync(Upsert(), AdminCtx);
+
+        // Skill record 沒有 kind 欄位;System.Text.Json 預設忽略未知欄位,反序列化不炸,既有欄位照常。
+        Assert.Equal("quarterly-qa", created.Name);
+        Assert.Equal(1, created.CurrentRevision);
+    }
+
     [Fact]
     public async Task Get_500_ThrowsWorkflowInvocation()
     {
         var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
 
         var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
-            () => Build(stub).GetAsync("quarterly_qa", AdminCtx));
+            () => Build(stub).GetAsync("quarterly-qa", AdminCtx));
         Assert.Contains("500", ex.Message);
     }
 

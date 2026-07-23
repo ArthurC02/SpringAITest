@@ -12,4 +12,8 @@ public static class SkillHash
 {
     public static string Sha256(string definition)
         => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(definition)));
+
+    /// <summary>agentic package 的 SHA-256(對「實際儲存的原始 zip bytes」計算 — 自洽,不依賴引擎 manifest 語意)。</summary>
+    public static string Sha256(byte[] bytes)
+        => Convert.ToHexStringLower(SHA256.HashData(bytes));
 }

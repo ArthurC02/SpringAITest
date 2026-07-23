@@ -11,32 +11,51 @@ skills/custom.py 走同一顆（同一個 backend base_url）。lifespan 沒跑�
 TestClient 不進 context manager）則靠 get_client() 延遲建立，行為與過去一致。
 """
 
+import asyncio
+
 import httpx
 
 from app.settings import settings
 
 _client: httpx.AsyncClient | None = None
+# 建立 client 時所在的事件圈：async httpx client 的連線/transport 綁定該圈，換圈重用會炸。
+_client_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_client() -> httpx.AsyncClient:
     """取得共用的 backend HTTP client（延遲建立；預設逾時 30s，個別呼叫可自帶 timeout 覆寫）。
 
     逾時預設放寬到 30s：openai 嵌入模式下 backend 要先算查詢嵌入，httpx 預設 5s 偶發不夠。
+
+    事件圈守衛：httpx.AsyncClient 的 transport/連線池綁定「建立當下的事件圈」。正式服務
+    整個生命週期只有一個圈，此守衛永不觸發、行為與過去一致；但測試以 Starlette TestClient
+    每個請求可能起用不同的短命事件圈（Windows proactor 尤甚），沿用綁在已關閉舊圈上的
+    client 會在 transport.close() 拋 "Event loop is closed"。偵測到綁定圈已非當前執行圈
+    （或已關閉）就重建，讓單例對多圈情境也安全。
     """
-    global _client
+    global _client, _client_loop
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if _client is not None and _client_loop is not None and current is not None:
+        if _client_loop is not current or _client_loop.is_closed():
+            _client = None  # 舊圈已作古：丟棄（不 aclose，其圈已關無從清理），下面重建
     if _client is None:
         _client = httpx.AsyncClient(
             base_url=settings.backend_base_url, timeout=httpx.Timeout(30.0)
         )
+        _client_loop = current
     return _client
 
 
 async def aclose_client() -> None:
     """關閉共用 client（lifespan 關機時呼叫；下次 get_client 會重新建立）。"""
-    global _client
+    global _client, _client_loop
     if _client is not None:
         await _client.aclose()
         _client = None
+        _client_loop = None
 
 
 async def search_chunks(query: str, top_k: int, tenant_id: str) -> list[dict]:

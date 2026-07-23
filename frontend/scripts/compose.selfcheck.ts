@@ -2,11 +2,17 @@
 // 不打網路、不呼叫 validateSkill。Node 25 原生 strip types：`node scripts/compose.selfcheck.ts`。
 import assert from 'node:assert/strict'
 import { compose } from '../src/skills/compose.ts'
+import {
+  canRestoreRevision,
+  isActiveSkillRequest,
+  isCurrentSkillRequest,
+  isSynchronizedSkillSnapshot,
+} from '../src/skills/revision.ts'
 import type { SkillTemplate } from '../src/skills/templates.ts'
 
 const nlTemplate: SkillTemplate = {
   id: 'retrieval',
-  basedOn: 'template_retrieval',
+  basedOn: 'template-retrieval',
   label: '知識問答',
   slotKind: 'nl_logic',
   openFields: ['name', 'description', 'rule', 'topK'],
@@ -17,13 +23,13 @@ const nlTemplate: SkillTemplate = {
 const scriptTemplate: SkillTemplate = {
   ...nlTemplate,
   id: 'compare',
-  basedOn: 'template_compare',
+  basedOn: 'template-compare',
   slotKind: 'script',
 }
 
 // 假骨架：block scalar 的 __RULE_SLOT__（8 空格縮排）+ 尾註 slot + 非白名單行。
 const nlSkeleton = [
-  'name: template_retrieval          # __SLOT_name__',
+  'name: template-retrieval          # __SLOT_name__',
   'description: 骨架描述               # __SLOT_description__',
   'required_role: USER',
   'flow:',
@@ -85,5 +91,36 @@ const noSlot = compose(nlTemplate, { name: 'x', topK: '99' }, nlSkeleton.replace
 assert.ok(noSlot.includes('top_k: 8'), 'Bug 2：無 topK 槽時該欄無作用，骨架原值不動')
 assert.ok(noSlot.includes('name: "x"'), 'Bug 2：其餘欄位仍正常覆寫')
 assert.ok(!noSlot.includes('99'), 'Bug 2：無槽欄位的值不外洩到輸出')
+
+// --- revision restore：逐版 kind 判斷，支援同一 skill 的 flow / agentic 混合歷史 ---
+assert.equal(canRestoreRevision({ kind: 'flow', has_package: false }), true, 'Flow 不需要 package 即可回溯')
+assert.equal(canRestoreRevision({ kind: 'agentic', has_package: true }), true, 'Agentic 有歷史 package 可回溯')
+assert.equal(canRestoreRevision({ kind: 'agentic', has_package: false }), false, 'Agentic 缺 package 必須禁用回溯')
+assert.equal(isCurrentSkillRequest(8, 8, 4, 4), true, 'generation/revision 皆相同才可寫回')
+assert.equal(isCurrentSkillRequest(7, 8, 4, 4), false, '舊 generation 的 response 必須丟棄')
+assert.equal(isCurrentSkillRequest(8, 8, 4, 3), false, '舊 revision 的 response 必須丟棄')
+assert.equal(isActiveSkillRequest(true, 8, 8), true, 'mounted 且 generation 相同才是 active')
+assert.equal(isActiveSkillRequest(false, 8, 8), false, 'unmount 後即使 generation 相同也必須停止')
+assert.equal(isActiveSkillRequest(true, 7, 8), false, 'generation 過期後不得繼續 retry/callback')
+
+const restoredDetail = { name: 'sales-helper', current_revision: 4, kind: 'agentic' as const }
+assert.equal(
+  isSynchronizedSkillSnapshot(4, restoredDetail, {
+    name: 'sales-helper',
+    revision: 4,
+    kind: 'agentic',
+  }),
+  true,
+  '同 name/revision/kind 才能組 snapshot',
+)
+assert.equal(
+  isSynchronizedSkillSnapshot(4, restoredDetail, {
+    name: 'sales-helper',
+    revision: 3,
+    kind: 'flow',
+  }),
+  false,
+  '不可把 restore response 與另一版 catalog 混合',
+)
 
 console.log('compose.selfcheck: all assertions passed')

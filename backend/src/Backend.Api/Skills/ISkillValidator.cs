@@ -7,7 +7,11 @@ public sealed record SkillValidationError(string Code, string? Message, int? Lin
 /// 引擎自 YAML 解析出的 skill 中繼資料(僅 valid=true 時提供)。
 /// backend 用它當儲存鍵與欄位值 — 這樣 backend 不必裝 YAML parser,YAML 的解析只有引擎一個實作。
 /// </summary>
-public sealed record SkillMetadata(string Name, string Description, string RequiredRole);
+/// <summary>
+/// kind 為 additive(R4):flow 驗證回應未帶時預設 "flow"。definition-only create 若引擎回報 agentic
+/// 則拒絕(agentic 只能走 import);package validate 回應以此區分 flow/agentic 儲存路徑。
+/// </summary>
+public sealed record SkillMetadata(string Name, string Description, string RequiredRole, string Kind = "flow");
 
 /// <summary>引擎驗證結果。valid=false → backend 拒絕存檔並回 422(errors 進 fieldErrors)。</summary>
 public sealed record SkillValidationResult(

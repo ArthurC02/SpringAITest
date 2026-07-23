@@ -381,10 +381,10 @@ def _register_builtin_probe(name, base_deps):
 
 
 def test_active_fetch_is_direct_with_internal_token_and_identity(backend, fake_base_deps):
-    backend.add_skill("demo-a", "cfg_qa")
+    backend.add_skill("demo-a", "cfg-qa")
 
     resp = client.post(
-        "/skills/cfg_qa/invoke",
+        "/skills/cfg-qa/invoke",
         json={"input": {"query": "hi"}},
         headers=_headers(tenant_id="demo-a", user_id="alice", role="USER"),
     )
@@ -406,10 +406,10 @@ def test_active_fetch_is_direct_with_internal_token_and_identity(backend, fake_b
 
 def test_no_active_builtin_uses_startup_graph(backend, fake_base_deps, build_spy):
     """/active 404 → per_config=None → builtin 用啟動預編圖，_build_graph 不被再呼叫。"""
-    cleanup = _register_builtin_probe("cfg_builtin_probe", fake_base_deps)
+    cleanup = _register_builtin_probe("cfg-builtin-probe", fake_base_deps)
     try:
         resp = client.post(
-            "/skills/cfg_builtin_probe/invoke",
+            "/skills/cfg-builtin-probe/invoke",
             json={"input": {"query": "hi"}},
             headers=_headers(),
         )
@@ -417,7 +417,7 @@ def test_no_active_builtin_uses_startup_graph(backend, fake_base_deps, build_spy
         assert resp.json()["output"]["final_answer"] == "echo: hi"
         # 唯一的 _build_graph 是 fixture 啟動預編（用 base deps）；invoke 不再以 per_config 重編
         per_config_builds = [
-            d for (n, d) in build_spy if n == "cfg_builtin_probe" and d is not fake_base_deps
+            d for (n, d) in build_spy if n == "cfg-builtin-probe" and d is not fake_base_deps
         ]
         assert per_config_builds == []  # 無覆寫 → 沿用啟動圖，零重編
         assert config_apply._config_deps_cache == {}  # 無覆寫 → 不寫 per-config 快取
@@ -433,17 +433,17 @@ def test_no_active_builtin_uses_startup_graph(backend, fake_base_deps, build_spy
 def test_active_override_recompiles_builtin_with_per_config(backend, fake_base_deps, build_spy):
     """【SSR-P4-012 / 縫⑤】builtin 有覆寫 → 以 loaded.skill + per_config 重編（非啟動圖），deps 反映覆寫。"""
     backend.set_active("demo-a", FULL_OVERRIDE, updated_at="v1")
-    cleanup = _register_builtin_probe("cfg_builtin_probe", fake_base_deps)
+    cleanup = _register_builtin_probe("cfg-builtin-probe", fake_base_deps)
     try:
         resp = client.post(
-            "/skills/cfg_builtin_probe/invoke",
+            "/skills/cfg-builtin-probe/invoke",
             json={"input": {"query": "hi"}},
             headers=_headers(),
         )
         assert resp.status_code == 200
         # 排除 fixture 的啟動預編（base deps）；只算以 per_config 的重編
         recompiles = [
-            d for (n, d) in build_spy if n == "cfg_builtin_probe" and d is not fake_base_deps
+            d for (n, d) in build_spy if n == "cfg-builtin-probe" and d is not fake_base_deps
         ]
         assert len(recompiles) == 1  # 重編一次
         deps = recompiles[0]
@@ -459,14 +459,14 @@ def test_active_override_recompiles_builtin_with_per_config(backend, fake_base_d
 def test_active_override_flows_into_custom_load(backend, fake_base_deps, build_spy):
     """【SSR-P4-012 custom】custom skill 以 per_config 編圖：_build_graph 收到的 deps 反映覆寫。"""
     backend.set_active("demo-a", FULL_OVERRIDE, updated_at="v1")
-    backend.add_skill("demo-a", "cfg_qa")
+    backend.add_skill("demo-a", "cfg-qa")
 
     resp = client.post(
-        "/skills/cfg_qa/invoke", json={"input": {"query": "hi"}}, headers=_headers()
+        "/skills/cfg-qa/invoke", json={"input": {"query": "hi"}}, headers=_headers()
     )
 
     assert resp.status_code == 200
-    compiles = [d for (n, d) in build_spy if n == "cfg_qa"]
+    compiles = [d for (n, d) in build_spy if n == "cfg-qa"]
     assert compiles, "custom skill 應以 per_config 編圖"
     deps = compiles[-1]
     assert deps.default_top_k == 25
@@ -482,18 +482,18 @@ def test_active_override_flows_into_custom_load(backend, fake_base_deps, build_s
 
 def test_same_version_hits_cache_new_version_recompiles(backend, fake_base_deps, build_spy):
     backend.set_active("demo-a", FULL_OVERRIDE, updated_at="v1")
-    backend.add_skill("demo-a", "cfg_qa", revision=1)
+    backend.add_skill("demo-a", "cfg-qa", revision=1)
     body = {"input": {"query": "hi"}}
 
-    assert client.post("/skills/cfg_qa/invoke", json=body, headers=_headers()).status_code == 200
-    assert client.post("/skills/cfg_qa/invoke", json=body, headers=_headers()).status_code == 200
-    v1_builds = [n for (n, _) in build_spy if n == "cfg_qa"]
+    assert client.post("/skills/cfg-qa/invoke", json=body, headers=_headers()).status_code == 200
+    assert client.post("/skills/cfg-qa/invoke", json=body, headers=_headers()).status_code == 200
+    v1_builds = [n for (n, _) in build_spy if n == "cfg-qa"]
     assert len(v1_builds) == 1  # 第二次同版 → per_config identity 穩定 → 圖快取命中，不重編
 
     # 換版（updated_at → v2，values 也變）→ 新 per_config → 重編一次
     backend.set_active("demo-a", {**FULL_OVERRIDE, "kb_query.top_k": 30}, updated_at="v2")
-    assert client.post("/skills/cfg_qa/invoke", json=body, headers=_headers()).status_code == 200
-    all_builds = [n for (n, _) in build_spy if n == "cfg_qa"]
+    assert client.post("/skills/cfg-qa/invoke", json=body, headers=_headers()).status_code == 200
+    all_builds = [n for (n, _) in build_spy if n == "cfg-qa"]
     assert len(all_builds) == 2  # V1 一次 + V2 一次
 
 
@@ -506,14 +506,14 @@ def test_tenant_isolation_config_not_cross_contaminated(backend, fake_base_deps,
     """相同 version 字串、不同租戶不同 values：各自套用各自的 top_k，互不污染。"""
     backend.set_active("demo-a", {"kb_query.top_k": 40}, updated_at="shared-v")
     backend.set_active("demo-b", {"kb_query.top_k": 7}, updated_at="shared-v")
-    backend.add_skill("demo-a", "cfg_qa")
-    backend.add_skill("demo-b", "cfg_qa")
+    backend.add_skill("demo-a", "cfg-qa")
+    backend.add_skill("demo-b", "cfg-qa")
     body = {"input": {"query": "hi"}}
 
-    assert client.post("/skills/cfg_qa/invoke", json=body, headers=_headers(tenant_id="demo-a")).status_code == 200
-    assert client.post("/skills/cfg_qa/invoke", json=body, headers=_headers(tenant_id="demo-b")).status_code == 200
+    assert client.post("/skills/cfg-qa/invoke", json=body, headers=_headers(tenant_id="demo-a")).status_code == 200
+    assert client.post("/skills/cfg-qa/invoke", json=body, headers=_headers(tenant_id="demo-b")).status_code == 200
 
-    by_tenant_topk = [d.default_top_k for (n, d) in build_spy if n == "cfg_qa"]
+    by_tenant_topk = [d.default_top_k for (n, d) in build_spy if n == "cfg-qa"]
     assert 40 in by_tenant_topk and 7 in by_tenant_topk
     # 兩租戶各有一筆 per-config 快取（鍵含 tenant_id → 同 version 字串不共用）
     assert ("demo-a", "shared-v") in config_apply._config_deps_cache
@@ -536,17 +536,17 @@ def test_active_unreachable_falls_back_to_global(backend, fake_base_deps, build_
     """
     backend.active_fail = "down"
     backend.set_active("demo-a", FULL_OVERRIDE)  # 有設定但取不到 → 不得偷用
-    backend.add_skill("demo-a", "cfg_qa")
+    backend.add_skill("demo-a", "cfg-qa")
 
     resp = client.post(
-        "/skills/cfg_qa/invoke", json={"input": {"query": "hi"}}, headers=_headers()
+        "/skills/cfg-qa/invoke", json={"input": {"query": "hi"}}, headers=_headers()
     )
 
     assert resp.status_code == 200  # 全域預設回落，skill 照跑
     # 故障未寫入任何 per-config 快取（不留半成品）
     assert config_apply._config_deps_cache == {}
     # 編圖用的 deps 是全域單例 base（未套覆寫）→ top_k 為全域預設，非 FULL_OVERRIDE 的 25
-    compiles = [d for (n, d) in build_spy if n == "cfg_qa"]
+    compiles = [d for (n, d) in build_spy if n == "cfg-qa"]
     assert compiles
     assert compiles[-1].default_top_k == settings.kb_query_top_k
 
@@ -555,10 +555,10 @@ def test_active_bad_json_falls_back_to_global(backend, fake_base_deps):
     """/active 回 200 但 body 非法 JSON → 回落全域預設（不炸、不寫快取）。"""
     backend.active_fail = "badjson"
     backend.set_active("demo-a", FULL_OVERRIDE)
-    backend.add_skill("demo-a", "cfg_qa")
+    backend.add_skill("demo-a", "cfg-qa")
 
     resp = client.post(
-        "/skills/cfg_qa/invoke", json={"input": {"query": "hi"}}, headers=_headers()
+        "/skills/cfg-qa/invoke", json={"input": {"query": "hi"}}, headers=_headers()
     )
 
     assert resp.status_code == 200
@@ -568,13 +568,13 @@ def test_active_bad_json_falls_back_to_global(backend, fake_base_deps):
 def test_active_404_does_not_cross_tenant_fallback(backend, fake_base_deps, build_spy):
     """本租戶無 active（404）→ 全域預設；絕不改用他租戶（demo-b）的設定。"""
     backend.set_active("demo-b", FULL_OVERRIDE)  # 只有 demo-b 有 active
-    backend.add_skill("demo-a", "cfg_qa")
+    backend.add_skill("demo-a", "cfg-qa")
 
     resp = client.post(
-        "/skills/cfg_qa/invoke", json={"input": {"query": "hi"}}, headers=_headers(tenant_id="demo-a")
+        "/skills/cfg-qa/invoke", json={"input": {"query": "hi"}}, headers=_headers(tenant_id="demo-a")
     )
 
     assert resp.status_code == 200
-    compiles = [d for (n, d) in build_spy if n == "cfg_qa"]
+    compiles = [d for (n, d) in build_spy if n == "cfg-qa"]
     assert compiles[-1].default_top_k == settings.kb_query_top_k  # demo-a 走全域，非 demo-b 的 25
     assert ("demo-a", "v1") not in config_apply._config_deps_cache

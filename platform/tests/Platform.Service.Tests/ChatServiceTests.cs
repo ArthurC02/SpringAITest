@@ -47,20 +47,20 @@ public sealed class ChatServiceTests
 
     private static JsonElement Cat(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
-    // 五顆內建可路由 skill(鏡射 workflow GET /skills 真實回應形狀)+ 一顆 template_* 骨架(須被濾掉)。
+    // 五顆內建可路由 skill(鏡射 workflow GET /skills 真實回應形狀)+ 一顆 template-* 骨架(須被濾掉)。
     private const string BuiltinCatalog = """
     [
-      { "name":"kb_query", "description":"可稽核的知識查詢", "required_role":"USER", "source":"builtin",
+      { "name":"kb-query", "description":"可稽核的知識查詢", "required_role":"USER", "source":"builtin",
         "input_schema": { "query": { "type":"str", "required":true } } },
-      { "name":"rag_qa", "description":"一般文件知識庫問答", "required_role":"USER", "source":"builtin",
+      { "name":"rag-qa", "description":"一般文件知識庫問答", "required_role":"USER", "source":"builtin",
         "input_schema": { "question": { "type":"str", "required":true } } },
       { "name":"summarize", "description":"文字摘要", "required_role":"USER", "source":"builtin",
         "input_schema": { "text": { "type":"str", "required":true } } },
       { "name":"triage", "description":"問題分流", "required_role":"USER", "source":"builtin",
         "input_schema": { "question": { "type":"str", "required":true } } },
-      { "name":"analyze_report", "description":"分析報告", "required_role":"ADMIN", "source":"builtin",
+      { "name":"analyze-report", "description":"分析報告", "required_role":"ADMIN", "source":"builtin",
         "input_schema": { "topic": { "type":"str", "required":true } } },
-      { "name":"template_infer", "description":"骨架,不可路由", "required_role":"USER", "source":"builtin",
+      { "name":"template-infer", "description":"骨架,不可路由", "required_role":"USER", "source":"builtin",
         "input_schema": { "query": { "type":"str", "required":true } } }
     ]
     """;
@@ -165,14 +165,14 @@ public sealed class ChatServiceTests
     public async Task Chat_RoutedSkillHit_PersistFailure_Propagates_DoesNotRemember()
     {
         var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb_query");           // 路由命中
+        agent.Responses.Enqueue("kb-query");           // 路由命中
         agent.Responses.Enqueue("摘要回覆");            // 摘要
         var convos = new FakeConversationStore { ThrowOnAdd = true };
         var mem0 = new FakeMem0Client();
         var wf = new FakeWorkflowService
         {
-            Catalog = Cat("""[ { "name":"kb_query", "description":"x", "required_role":"USER", "source":"builtin", "input_schema": { "query": { "type":"str", "required":true } } } ]"""),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            Catalog = Cat("""[ { "name":"kb-query", "description":"x", "required_role":"USER", "source":"builtin", "input_schema": { "query": { "type":"str", "required":true } } } ]"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, mem0, convos, wf);
 
@@ -232,13 +232,13 @@ public sealed class ChatServiceTests
     public async Task StreamChat_RoutedSkillHit_PersistFailure_IsBestEffort_StillStreamsAndRemembers()
     {
         var agent = new FakeLlmAgent { Chunks = new[] { "摘要", "片段" } };
-        agent.Responses.Enqueue("kb_query");           // 路由命中(阻塞)
+        agent.Responses.Enqueue("kb-query");           // 路由命中(阻塞)
         var convos = new FakeConversationStore { ThrowOnAdd = true };
         var mem0 = new FakeMem0Client();
         var wf = new FakeWorkflowService
         {
-            Catalog = Cat("""[ { "name":"kb_query", "description":"x", "required_role":"USER", "source":"builtin", "input_schema": { "query": { "type":"str", "required":true } } } ]"""),
-            SkillOutput = Cat("""{ "skill":"kb_query", "output": { "business_result":"命中" } }"""),
+            Catalog = Cat("""[ { "name":"kb-query", "description":"x", "required_role":"USER", "source":"builtin", "input_schema": { "query": { "type":"str", "required":true } } } ]"""),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
         };
         var svc = Build(agent, mem0, convos, wf);
 
@@ -343,7 +343,7 @@ public sealed class ChatServiceTests
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Equal(new[] { "kb_query", "rag_qa", "summarize", "triage" }, names);
+        Assert.Equal(new[] { "kb-query", "rag-qa", "summarize", "triage" }, names);
     }
 
     [Fact]
@@ -356,17 +356,17 @@ public sealed class ChatServiceTests
         var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
 
         Assert.Equal(5, tools!.Count);
-        Assert.Contains(tools!, t => t.Name == "analyze_report");
-        Assert.DoesNotContain(tools!, t => t.Name == "template_infer");
+        Assert.Contains(tools!, t => t.Name == "analyze-report");
+        Assert.DoesNotContain(tools!, t => t.Name == "template-infer");
     }
 
     // 每個內建 skill 都要用對輸入 key,走 /skills/{name}/invoke。
     [Theory]
-    [InlineData("kb_query", "query")]
-    [InlineData("rag_qa", "question")]
+    [InlineData("kb-query", "query")]
+    [InlineData("rag-qa", "question")]
     [InlineData("summarize", "text")]
     [InlineData("triage", "question")]
-    [InlineData("analyze_report", "topic")]
+    [InlineData("analyze-report", "topic")]
     public async Task EachBuiltinSkill_InvokesSkillEndpoint_WithItsInputKey(string skillName, string inputKey)
     {
         var agent = new FakeLlmAgent();
@@ -403,7 +403,7 @@ public sealed class ChatServiceTests
         }
 
         // 串流也先路由:第一次(阻塞)CompleteAsync 的 system 目錄列出可用工具。
-        Assert.Contains(agent.CompleteCalls, m => m.Count > 0 && m[0].Content.Contains("kb_query"));
+        Assert.Contains(agent.CompleteCalls, m => m.Count > 0 && m[0].Content.Contains("kb-query"));
     }
 
     [Fact]
@@ -415,14 +415,14 @@ public sealed class ChatServiceTests
             Catalog = Cat(BuiltinCatalog),
             SkillOutputByName = new()
             {
-                ["kb_query"] = JsonSerializer.SerializeToElement(new
+                ["kb-query"] = JsonSerializer.SerializeToElement(new
                 {
-                    skill = "kb_query",
+                    skill = "kb-query",
                     output = new { answer_mode = "ABSTAIN", final_answer = "【無法提供答案】證據不足" },
                 }),
-                ["rag_qa"] = JsonSerializer.SerializeToElement(new
+                ["rag-qa"] = JsonSerializer.SerializeToElement(new
                 {
-                    skill = "rag_qa",
+                    skill = "rag-qa",
                     output = new { answer = "rag 的答案" },
                 }),
             },
@@ -430,15 +430,15 @@ public sealed class ChatServiceTests
         var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "kb_query");
+        var tool = tools!.Single(t => t.Name == "kb-query");
 
         var result = await tool.InvokeAsync("寵物守則對貓的規定?", CancellationToken.None);
 
-        // 棄答 → 確定性改打 rag_qa skill,結果如實註明「不含稽核保證」(文案逐字對照 InvokeSkillToolAsync)。
+        // 棄答 → 確定性改打 rag-qa skill,結果如實註明「不含稽核保證」(文案逐字對照 InvokeSkillToolAsync)。
         Assert.Equal(
             "嚴格稽核查詢因證據不足而棄答;以下是一般知識庫檢索(不含稽核保證)的結果:rag 的答案",
             result);
-        Assert.Equal(new[] { "kb_query", "rag_qa" }, workflows.SkillInvokes.Select(i => i.Name).ToArray());
+        Assert.Equal(new[] { "kb-query", "rag-qa" }, workflows.SkillInvokes.Select(i => i.Name).ToArray());
         Assert.Equal("寵物守則對貓的規定?", workflows.SkillInvokes[1].Input["question"].GetString());
     }
 
@@ -451,9 +451,9 @@ public sealed class ChatServiceTests
             Catalog = Cat(BuiltinCatalog),
             SkillOutputByName = new()
             {
-                ["kb_query"] = JsonSerializer.SerializeToElement(new
+                ["kb-query"] = JsonSerializer.SerializeToElement(new
                 {
-                    skill = "kb_query",
+                    skill = "kb-query",
                     output = new { answer_mode = "ANSWER", final_answer = "有憑據的答案" },
                 }),
             },
@@ -461,7 +461,7 @@ public sealed class ChatServiceTests
         var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "kb_query");
+        var tool = tools!.Single(t => t.Name == "kb-query");
 
         var result = await tool.InvokeAsync("q", CancellationToken.None);
 

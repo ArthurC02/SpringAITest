@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 
 namespace Platform.Web.Tests;
 
@@ -18,7 +20,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
     private static string Yaml(string name) => $"name: {name}\ndescription: 季報問答\nflow:\n  - node: query_intake\n";
 
-    private static object Body(string name = "quarterly_qa") => new { definition = Yaml(name) };
+    private static object Body(string name = "quarterly-qa") => new { definition = Yaml(name) };
 
     private static object InvalidBody() => new { definition = "name: bad\nflow:\n  - loop: __invalid__\n" };
 
@@ -27,14 +29,16 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Theory]
     [InlineData("GET", "/api/skills")]
     [InlineData("GET", "/api/skills/catalog")]
-    [InlineData("GET", "/api/skills/echo_skill")]
-    [InlineData("GET", "/api/skills/echo_skill/revisions")]
-    [InlineData("GET", "/api/skills/echo_skill/export")]
+    [InlineData("GET", "/api/skills/echo-skill")]
+    [InlineData("GET", "/api/skills/echo-skill/revisions")]
+    [InlineData("POST", "/api/skills/echo-skill/revisions/1/restore")]
+    [InlineData("GET", "/api/skills/echo-skill/export")]
     [InlineData("POST", "/api/skills")]
-    [InlineData("PUT", "/api/skills/echo_skill")]
-    [InlineData("DELETE", "/api/skills/echo_skill")]
+    [InlineData("POST", "/api/skills/echo-skill/import")]
+    [InlineData("PUT", "/api/skills/echo-skill")]
+    [InlineData("DELETE", "/api/skills/echo-skill")]
     [InlineData("POST", "/api/skills/validate")]
-    [InlineData("POST", "/api/skills/echo_skill/invoke")]
+    [InlineData("POST", "/api/skills/echo-skill/invoke")]
     [InlineData("GET", "/api/nodes")]
     public async Task Endpoints_Return401_WithoutToken_AndNeverReachDownstream(string method, string path)
     {
@@ -42,7 +46,12 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         var beforeEngine = FakeWorkflowService.EngineCalls.Count;
 
         using var req = new HttpRequestMessage(new HttpMethod(method), path);
-        if (method is "POST" or "PUT")
+        if (path.EndsWith("/import", StringComparison.Ordinal))
+        {
+            // import 是 multipart/form-data 端點:送對應媒體型別,確保驗的是「無 JWT → 401」而非內容協商的 415。
+            req.Content = Package();
+        }
+        else if (method is "POST" or "PUT")
         {
             req.Content = JsonContent.Create(Body());
         }
@@ -70,7 +79,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var item = Assert.Single((await resp.ReadJsonAsync()).AsArray())!;
-        Assert.Equal("echo_skill", item["name"]!.GetValue<string>());
+        Assert.Equal("echo-skill", item["name"]!.GetValue<string>());
         Assert.Equal("USER", item["required_role"]!.GetValue<string>());
         Assert.True(item["enabled"]!.GetValue<bool>());
         Assert.Equal(1, item["current_revision"]!.GetValue<int>());
@@ -80,18 +89,18 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Get_Returns200_WithDefinition()
     {
-        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly_qa");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly-qa");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal("quarterly_qa", body["name"]!.GetValue<string>());
+        Assert.Equal("quarterly-qa", body["name"]!.GetValue<string>());
         Assert.Contains("node: query_intake", body["definition"]!.GetValue<string>());
     }
 
     [Fact]
     public async Task Revisions_Returns200_DescendingSnakeCase()
     {
-        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly_qa/revisions");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly-qa/revisions");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var arr = (await resp.ReadJsonAsync()).AsArray();
@@ -102,20 +111,57 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
+    public async Task RestoreRevision_Admin_Returns200AndNewRevision()
+    {
+        var response = await _factory.AdminClient().PostAsync(
+            "/api/skills/quarterly-qa/revisions/1/restore", content: null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal("quarterly-qa", body["name"]!.GetValue<string>());
+        Assert.Equal(3, body["current_revision"]!.GetValue<int>());
+        Assert.Contains("restore:quarterly-qa:1", FakeSkillService.Calls);
+    }
+
+    [Fact]
+    public async Task RestoreRevision_User_Returns403()
+    {
+        var user = _factory.CreateClient().WithToken(
+            _factory.IssueToken("user-a", "USER", "demo-a"));
+
+        var response = await user.PostAsync(
+            "/api/skills/quarterly-qa/revisions/1/restore", content: null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RestoreRevision_LegacyAgenticWithoutPackage_Returns409()
+    {
+        var response = await _factory.AdminClient().PostAsync(
+            "/api/skills/legacy-agentic/revisions/1/restore", content: null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains(
+            "package 快照功能之前",
+            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Create_Returns201_WithSkill()
     {
         var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body());
 
         Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal("quarterly_qa", body["name"]!.GetValue<string>());
+        Assert.Equal("quarterly-qa", body["name"]!.GetValue<string>());
         Assert.Equal(1, body["current_revision"]!.GetValue<int>());
     }
 
     [Fact]
     public async Task Update_Returns200_WithBumpedRevision()
     {
-        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/skills/quarterly_qa", Body());
+        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/skills/quarterly-qa", Body());
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal(2, (await resp.ReadJsonAsync())["current_revision"]!.GetValue<int>());
@@ -124,7 +170,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Delete_Returns204()
     {
-        var resp = await _factory.AdminClient().DeleteAsync("/api/skills/quarterly_qa");
+        var resp = await _factory.AdminClient().DeleteAsync("/api/skills/quarterly-qa");
 
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
     }
@@ -132,13 +178,13 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // 匯出:200、application/zip、Content-Disposition filename=<name>.zip、body bytes 一致。
     public async Task Export_Returns200_ZipBytes_WithAttachmentFilename()
     {
-        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly_qa/export");
+        var resp = await _factory.AdminClient().GetAsync("/api/skills/quarterly-qa/export");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("application/zip", resp.Content.Headers.ContentType!.MediaType);
         var disposition = resp.Content.Headers.ContentDisposition!;
         Assert.Equal("attachment", disposition.DispositionType);
-        Assert.Equal("quarterly_qa.zip",
+        Assert.Equal("quarterly-qa.zip",
             disposition.FileNameStar ?? disposition.FileName!.Trim('"'));
         Assert.Equal(FakeSkillService.ExportBytes, await resp.Content.ReadAsByteArrayAsync());
     }
@@ -152,6 +198,98 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         var body = await resp.ReadJsonAsync();
         Assert.Equal(404, body["status"]!.GetValue<int>());
         Assert.Equal("找不到 Skill：ghost", body["message"]!.GetValue<string>());
+    }
+
+    // ---- Agent Skill 匯入代理(multipart zip → backend);角色把關在 backend、ApiError 穿透 ----
+
+    /// <summary>一份 multipart package upload(package 檔位);內容不重要,代理層只轉送。</summary>
+    private static MultipartFormDataContent Package(string filename = "sales-helper.zip")
+    {
+        var content = new MultipartFormDataContent();
+        var file = new ByteArrayContent(Encoding.UTF8.GetBytes("PKzip-bytes"));
+        file.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        content.Add(file, "package", filename);
+        return content;
+    }
+
+    // ADMIN 匯入 → 2xx,回應原樣穿透 backend 的 Skill JSON(含 additive kind)。
+    [Fact]
+    public async Task Import_Admin_Returns200_PassesThroughSkillWithKind()
+    {
+        var resp = await _factory.AdminClient().PostAsync("/api/skills/sales-helper/import", Package());
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("sales-helper", body["name"]!.GetValue<string>());
+        Assert.Equal("agentic", body["kind"]!.GetValue<string>());
+        Assert.Equal(1, body["current_revision"]!.GetValue<int>());
+    }
+
+    // USER 匯入 → 403(角色把關在 backend,同其他 skill 寫入的 [AdminOnly] 模式)。
+    [Fact]
+    public async Task Import_User_Returns403()
+    {
+        var user = _factory.CreateClient().WithToken(_factory.IssueToken("user-a", "USER", "demo-a"));
+
+        var resp = await user.PostAsync("/api/skills/sales-helper/import", Package());
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(403, body["status"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task Import_UserWithOversizeMultipart_Returns403BeforeBodyBinding()
+    {
+        var user = _factory.CreateClient().WithToken(
+            _factory.IssueToken("user-a", "USER", "demo-a"));
+        var before = FakeSkillService.Calls.Count(c => c == "import:sales-helper");
+        using var oversized = new MultipartFormDataContent();
+        oversized.Add(
+            new ByteArrayContent(new byte[18 * 1024 * 1024]),
+            "package",
+            "oversized.zip");
+
+        var response = await user.PostAsync(
+            "/api/skills/sales-helper/import", oversized);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(
+            before,
+            FakeSkillService.Calls.Count(c => c == "import:sales-helper"));
+    }
+
+    [Fact]
+    public async Task ImportDerived_UserWithOversizeMultipart_Returns403BeforeBodyBinding()
+    {
+        var user = _factory.CreateClient().WithToken(
+            _factory.IssueToken("user-a", "USER", "demo-a"));
+        var before = FakeSkillService.Calls.Count(c => c == "import:server-derived");
+        using var oversized = new MultipartFormDataContent();
+        oversized.Add(
+            new ByteArrayContent(new byte[18 * 1024 * 1024]),
+            "package",
+            "oversized.zip");
+
+        var response = await user.PostAsync("/api/skills/import", oversized);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(
+            before,
+            FakeSkillService.Calls.Count(c => c == "import:server-derived"));
+    }
+
+    // backend 套件驗證失敗(422)→ 對外 422,fieldErrors(引擎錯誤碼)原樣穿過代理層。
+    [Fact]
+    public async Task Import_BackendValidationFailed_Returns422_WithFieldErrors()
+    {
+        var resp = await _factory.AdminClient().PostAsync("/api/skills/badpkg/import", Package());
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(422, body["status"]!.GetValue<int>());
+        Assert.Equal("Skill 套件驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("腳本未通過 AST 掃描", body["fieldErrors"]!["forbidden_script"]!.GetValue<string>());
     }
 
     // ---- 下游錯誤原樣穿透 ----
@@ -173,7 +311,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // PUT 也走同一條 422 路徑(不能只擋 POST)。
     public async Task Update_BackendValidationFailed_Returns422()
     {
-        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/skills/quarterly_qa", InvalidBody());
+        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/skills/quarterly-qa", InvalidBody());
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         Assert.NotNull((await resp.ReadJsonAsync())["fieldErrors"]!["unbounded_loop"]);
@@ -182,12 +320,12 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Create_Returns409_WithBackendMessage_Unchanged()
     {
-        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body("dup_skill"));
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body("dup-skill"));
 
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
         Assert.Equal(409, body["status"]!.GetValue<int>());
-        Assert.Equal("Skill 名稱已存在：dup_skill", body["message"]!.GetValue<string>());
+        Assert.Equal("Skill 名稱已存在：dup-skill", body["message"]!.GetValue<string>());
     }
 
     [Fact]
@@ -205,7 +343,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact] // backend 400 的欄位級錯誤不得被代理層吞掉。
     public async Task Create_BackendBadInputWithFieldErrors_ForwardsFieldErrors()
     {
-        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body("bad_field"));
+        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills", Body("bad-field"));
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -290,18 +428,54 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
         Assert.True(body["valid"]!.GetValue<bool>());
-        Assert.Equal("quarterly_qa", body["skill"]!["name"]!.GetValue<string>());
+        Assert.Equal("quarterly-qa", body["skill"]!["name"]!.GetValue<string>());
     }
 
     [Fact]
     public async Task Invoke_Returns200_WithEngineOutput()
     {
         var resp = await _factory.AdminClient().PostAsJsonAsync(
-            "/api/skills/quarterly_qa/invoke", new { input = new { query = "2025Q3" } });
+            "/api/skills/quarterly-qa/invoke", new { input = new { query = "2025Q3" } });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal("quarterly_qa", body["skill"]!.GetValue<string>());
+        Assert.Equal("quarterly-qa", body["skill"]!.GetValue<string>());
+        Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
+    }
+
+    // AST-P1-013:catalog 帶 additive kind → Platform 原樣代理透傳(舊 consumer 忽略未知欄位仍運作)。
+    [Fact]
+    public async Task Catalog_PassesThroughKind_AdditiveField()
+    {
+        FakeWorkflowService.CatalogOverride = FakeJson.Of(
+            """[{"name":"kb-query","source":"builtin","kind":"flow","required_role":"USER"},"""
+            + """{"name":"sales-helper","source":"custom","kind":"agentic","required_role":"USER"}]""");
+        try
+        {
+            var resp = await _factory.AdminClient().GetAsync("/api/skills/catalog");
+
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var arr = (await resp.ReadJsonAsync()).AsArray();
+            Assert.Equal("flow", arr[0]!["kind"]!.GetValue<string>());
+            Assert.Equal("agentic", arr[1]!["kind"]!.GetValue<string>());
+        }
+        finally
+        {
+            FakeWorkflowService.CatalogOverride = null;
+        }
+    }
+
+    // AST-P1-011(Web 半)/ AST-P1-002:多參 agentic skill 雖不被聊天路由,仍可經 explicit invoke 執行,
+    // 回應維持 {skill, output} 且固定 answer 鍵被帶上(引擎輸出原樣穿透)。
+    [Fact]
+    public async Task Invoke_MultiParamAgenticSkill_Returns200_WithSkillOutputShape()
+    {
+        var resp = await _factory.AdminClient().PostAsJsonAsync(
+            "/api/skills/trip-planner/invoke", new { input = new { origin = "台北", destination = "東京" } });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("trip-planner", body["skill"]!.GetValue<string>());
         Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
     }
 

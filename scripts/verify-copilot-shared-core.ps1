@@ -245,11 +245,11 @@ Invoke-Case 'C-07 workflow/backend shape smoke (real-model shared routing still 
         if ($current.status -eq 'failed') { throw 'document processing failed' }
     }
     Assert-True $ready 'document did not become ready within 60 seconds'
-    $skill = Invoke-JsonRequest POST "$BaseUrl/api/skills/rag_qa/invoke" @{
+    $skill = Invoke-JsonRequest POST "$BaseUrl/api/skills/rag-qa/invoke" @{
         input = @{ question = 'What is the verification marker?' }
     } $tokenA
-    Assert-True ($skill.StatusCode -eq 200) "rag_qa returned $($skill.StatusCode)"
-    Assert-True ($skill.Content -like "*$documentMarker*") 'rag_qa did not retrieve the uploaded marker'
+    Assert-True ($skill.StatusCode -eq 200) "rag-qa returned $($skill.StatusCode)"
+    Assert-True ($skill.Content -like "*$documentMarker*") 'rag-qa did not retrieve the uploaded marker'
 }
 
 Invoke-Case 'C-08 frontend proxy framing (browser timing still required)' {

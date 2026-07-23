@@ -117,7 +117,7 @@ def _compile_nl_probe(output_key: str):
     deps = make_deps({}, llm=llm)
     definition = yaml.safe_dump(
         {
-            "name": "nl_probe",
+            "name": "nl-probe",
             "input_schema": {"query": {"type": "str", "required": True, "min_length": 1}},
             "flow": [
                 {"node": "nl_logic@1.0", "params": {"instruction": "x", "output_key": output_key}}
@@ -162,7 +162,7 @@ def test_nl_logic_skill_validates_and_compiles():
     spec = get_node("nl_logic", "1.0")
     assert spec is not None
     definition = (
-        "name: nl_validate_probe\n"
+        "name: nl-validate-probe\n"
         "input_schema:\n"
         "  query: {type: str, required: true, min_length: 1}\n"
         "flow:\n"
@@ -186,7 +186,7 @@ def test_nl_logic_end_to_end_trace_has_component_version():
     llm = FakeStructuredLLM(outputs={_NlLogicOutput: _NlLogicOutput(result="最終")})
     deps = make_deps({}, llm=llm)
     definition = (
-        "name: nl_e2e_probe\n"
+        "name: nl-e2e-probe\n"
         "input_schema:\n"
         "  query: {type: str, required: true, min_length: 1}\n"
         "flow:\n"
@@ -195,7 +195,7 @@ def test_nl_logic_end_to_end_trace_has_component_version():
         "      instruction: 綜合回答\n"
     )
     skill = skill_mod.parse_source(definition)
-    original = skills.get("kb_query")
+    original = skills.get("kb-query")
     skills._SKILLS["__nl_e2e__"] = original.__class__(
         skill=skill,
         graph=compiler.compile(skill, deps),

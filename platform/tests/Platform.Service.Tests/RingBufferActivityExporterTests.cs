@@ -69,13 +69,13 @@ public sealed class RingBufferActivityExporterTests
         var exporter = new RingBufferActivityExporter();
         Export(exporter, MakeActivity(
             "chat.service",
-            ("skill_name", "rag_qa"),
+            ("skill_name", "rag-qa"),
             ("model", "mock-gpt"),
             ("secret_internal", "leak")));
 
         var span = exporter.GetRecentSpans().Single();
 
-        Assert.Equal("rag_qa", span.Attributes["skill_name"]);
+        Assert.Equal("rag-qa", span.Attributes["skill_name"]);
         Assert.Equal("mock-gpt", span.Attributes["model"]);
         Assert.False(span.Attributes.ContainsKey("secret_internal"));
     }

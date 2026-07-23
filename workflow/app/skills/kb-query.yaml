@@ -1,4 +1,4 @@
-name: kb_query
+name: kb-query
 description: 可驗證可稽核的知識查詢：固定節點＋證據驗證閘門，未通過不輸出實質答案
 required_role: USER
 

@@ -157,7 +157,7 @@ public sealed class FakeWorkflowService : IWorkflowService
     /// <summary>非 null 時 InvokeSkillAsync 回這包輸出;預設回 {skill=name}。</summary>
     public System.Text.Json.JsonElement? SkillOutput { get; set; }
 
-    /// <summary>非 null 時,依 skill 名個別覆寫回應(優先於 SkillOutput);用來模擬同一輪呼叫兩個不同 skill 各回不同輸出(例如 kb_query 棄答兜底打 rag_qa)。</summary>
+    /// <summary>非 null 時,依 skill 名個別覆寫回應(優先於 SkillOutput);用來模擬同一輪呼叫兩個不同 skill 各回不同輸出(例如 kb-query 棄答兜底打 rag-qa)。</summary>
     public Dictionary<string, System.Text.Json.JsonElement>? SkillOutputByName { get; set; }
 
     /// <summary>skill invoke 呼叫序:name + input 字典 + 身分,供斷言。</summary>

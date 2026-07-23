@@ -249,21 +249,21 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
 
         var single = (await (await client.GetAsync("/api/skills/at406_skill")).ReadJsonAsync()).AsObject();
         Assert.Equal(
-            new[] { "created_at", "current_revision", "definition", "description", "enabled", "name", "required_role", "updated_at" },
+            new[] { "created_at", "current_revision", "definition", "description", "enabled", "kind", "name", "required_role", "updated_at" },
             single.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
 
         var item = (await (await client.GetAsync("/api/skills")).ReadJsonAsync()).AsArray()
             .Single(n => n!["name"]!.GetValue<string>() == "at406_skill")!.AsObject();
         // 清單:含 enabled,但刻意不含 definition 內文。
         Assert.Equal(
-            new[] { "created_at", "current_revision", "description", "enabled", "name", "required_role", "updated_at" },
+            new[] { "created_at", "current_revision", "description", "enabled", "kind", "name", "required_role", "updated_at" },
             item.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
         Assert.True(item["enabled"]!.GetValue<bool>());
 
         var rev = (await (await client.GetAsync("/api/skills/at406_skill/revisions")).ReadJsonAsync())
             .AsArray()[0]!.AsObject();
         Assert.Equal(
-            new[] { "created_at", "created_by", "definition", "definition_sha256", "revision" },
+            new[] { "created_at", "created_by", "definition", "definition_sha256", "has_package", "kind", "revision" },
             rev.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
     }
 
@@ -432,13 +432,13 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
     [Theory]
     [InlineData("summarize")]
     [InlineData("triage")]
-    [InlineData("rag_qa")]
-    [InlineData("analyze_report")]
-    [InlineData("kb_query")]
+    [InlineData("rag-qa")]
+    [InlineData("analyze-report")]
+    [InlineData("kb-query")]
     [InlineData("catalog")]
     [InlineData("validate")]
     [InlineData("nodes")]
-    [InlineData("template_infer")]
+    [InlineData("template-infer")]
     public async Task Post_ReservedWorkflowName_Returns409(string name)
     {
         var resp = await Admin().PostAsJsonAsync("/api/skills", Body(Yaml(name)));

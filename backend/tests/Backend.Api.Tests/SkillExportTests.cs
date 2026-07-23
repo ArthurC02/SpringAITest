@@ -8,9 +8,9 @@ using Backend.Api.Skills;
 namespace Backend.Api.Tests;
 
 /// <summary>
-/// Skill 匯出為 Claude Skill 格式 zip(AT2-15 ~ AT2-19 的新模型改寫版)。
-/// 匯出是純字串組裝:zip 恰含 SKILL.md + skill.yaml 兩檔;skill.yaml 逐 byte 等於 DB 的 definition,
-/// 完全不解析/不執行 definition 內容;角色與 GET {name} 一致(USER 可用);跨租戶一律 404。
+/// flow Skill 匯出為 Claude Skill 格式 zip(05 §3.1 自包含版)。zip 恰含一個檔 SKILL.md:
+/// 標準 frontmatter(name+description)+ body 以 fenced ```yaml 區塊嵌入 definition 原文,
+/// 區塊內容逐 byte 等於 DB 的 definition;完全不解析/不執行;角色與 GET {name} 一致(USER 可用);跨租戶一律 404。
 /// </summary>
 public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
 {
@@ -63,19 +63,27 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         return ReadZip(await resp.Content.ReadAsByteArrayAsync());
     }
 
-    // ---- AT2-15:zip 結構 = 恰兩個 entry,無多餘 ----
+    /// <summary>萃取 SKILL.md 的第一個 ```yaml 區塊內容(= 開場 "```yaml\n" 與收場 "\n```" 之間),
+    /// 忠實模擬 workflow 匯入端的抽取。與 exporter 的嵌入格式對稱。</summary>
+    private static string ExtractYamlBlock(string md)
+    {
+        const string open = "```yaml\n";
+        var start = md.IndexOf(open, StringComparison.Ordinal) + open.Length;
+        var end = md.IndexOf("\n```", start, StringComparison.Ordinal);
+        return md[start..end];
+    }
+
+    // ---- AT2-15:flow 匯出 = 恰一個 entry SKILL.md(自包含,無 skill.yaml)----
 
     [Fact]
-    public async Task Export_ZipContainsExactlyTwoEntries()
+    public async Task Export_ZipContainsOnlySkillMd()
     {
         var client = Admin();
         await client.PostAsJsonAsync("/api/skills", Body(Yaml("at215_skill")));
 
         var entries = await ExportZipAsync(client, "at215_skill");
 
-        Assert.Equal(
-            new[] { "SKILL.md", "skill.yaml" },
-            entries.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+        Assert.Equal(new[] { "SKILL.md" }, entries.Keys.ToArray());
     }
 
     // ---- AT2-16:SKILL.md frontmatter 只有 name + description ----
@@ -100,10 +108,10 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
             frontmatter);
     }
 
-    // ---- AT2-17:body 依序含 ## 定義、## 執行 段與固定文字 ----
+    // ---- AT2-17:body 以 fenced ```yaml 區塊嵌入 definition(自包含,不再指向 skill.yaml)----
 
     [Fact]
-    public async Task Export_SkillMd_BodyHasFixedStructure()
+    public async Task Export_SkillMd_EmbedsDefinitionInFencedYamlBlock()
     {
         var client = Admin();
         await client.PostAsJsonAsync("/api/skills", Body(Yaml("at217_skill")));
@@ -111,29 +119,26 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         var entries = await ExportZipAsync(client, "at217_skill");
         var md = Encoding.UTF8.GetString(entries["SKILL.md"]);
 
-        var idxDef = md.IndexOf("## 定義", StringComparison.Ordinal);
-        var idxRun = md.IndexOf("## 執行", StringComparison.Ordinal);
-        Assert.True(idxDef > 0);
-        Assert.True(idxRun > idxDef, "## 執行 必須排在 ## 定義 之後");
-
-        Assert.Contains("本 Skill 為 node-first 引擎的宣告式流程定義，權威內容位於 `skill.yaml`。", md);
-        Assert.Contains(
-            "以引擎 `POST /skills/at217_skill/invoke` 執行，輸入依定義中的 `input_schema`，輸出見 `output_schema`。",
-            md);
+        Assert.Contains("本 Skill 為 node-first 引擎的宣告式流程定義，權威內容即下方 ```yaml 區塊。", md);
+        Assert.Contains("```yaml\n", md);
+        Assert.EndsWith("\n```\n", md);
+        // 嵌入的區塊內容 = definition。
+        Assert.Equal(Yaml("at217_skill"), ExtractYamlBlock(md));
     }
 
-    // ---- AT2-18:skill.yaml 逐 byte 等於 DB 的 definition(含 tab / 中文 / 無結尾換行 / 特殊字元)----
+    // ---- AT2-18:嵌入的 ```yaml 區塊內容逐 byte 等於 DB 的 definition(含 tab / 中文 / 無結尾換行 / 特殊字元)----
 
     [Fact]
-    public async Task Export_SkillYaml_IsByteForByteIdenticalToDefinition()
+    public async Task Export_EmbeddedYaml_IsByteForByteIdenticalToDefinition()
     {
         // 刻意含:tab 縮排、中文、CRLF 與 LF 混用、無結尾換行、特殊字元。
         var definition = "name: at218_skill\r\ndescription: 有\ttab 的描述 <>&\"'\nflow:\n\t- node: x  # 無結尾換行";
         Seed("demo-a", "at218_skill", definition);
 
         var entries = await ExportZipAsync(Admin(), "at218_skill");
+        var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["SKILL.md"]));
 
-        Assert.Equal(Encoding.UTF8.GetBytes(definition), entries["skill.yaml"]);
+        Assert.Equal(Encoding.UTF8.GetBytes(definition), Encoding.UTF8.GetBytes(block));
     }
 
     // ---- AT2-19:匯出不解析 definition — 不是合法 YAML 也照樣原樣打包 ----
@@ -146,8 +151,9 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         Seed("demo-a", "at219_skill", garbage);
 
         var entries = await ExportZipAsync(Admin(), "at219_skill");
+        var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["SKILL.md"]));
 
-        Assert.Equal(Encoding.UTF8.GetBytes(garbage), entries["skill.yaml"]);
+        Assert.Equal(Encoding.UTF8.GetBytes(garbage), Encoding.UTF8.GetBytes(block));
     }
 
     // ---- 角色:USER 也能匯出(與 GET {name} 一致,不掛 SkillAdminOnly)----
@@ -182,5 +188,25 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         var resp = await Admin("demo-b").GetAsync("/api/skills/at215_tenant/export");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    // ---- YAML escaping 修正(03-design §2.4):含 `:`/引號的 description 以雙引號 scalar 並逃脫寫入 ----
+
+    [Fact]
+    public async Task Export_SkillMd_EscapesDescriptionWithSpecialChars()
+    {
+        // 含冒號與雙引號 → 不是 plain-safe → 必須以雙引號包裹並逃脫(舊 POC 未逃脫會產生非法 YAML)。
+        Seed("demo-a", "at220_escape", Yaml("at220_escape"), description: "營收: 100 \"高\"");
+
+        var entries = await ExportZipAsync(Admin(), "at220_escape");
+        var md = Encoding.UTF8.GetString(entries["SKILL.md"]);
+
+        var lines = md.Split('\n');
+        var end = Array.IndexOf(lines, "---", 1);
+        var frontmatter = lines[1..end];
+
+        Assert.Equal(
+            new[] { "name: at220_escape", "description: \"營收: 100 \\\"高\\\"\"" },
+            frontmatter);
     }
 }

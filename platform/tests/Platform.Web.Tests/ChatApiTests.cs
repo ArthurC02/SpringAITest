@@ -176,15 +176,15 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     // 五顆內建可路由 skill(鏡射 workflow GET /skills 真實回應形狀),供以下三個路由目錄端到端測試共用。
     private const string BuiltinCatalog = """
     [
-      { "name":"kb_query", "description":"可稽核的知識查詢", "required_role":"USER", "source":"builtin",
+      { "name":"kb-query", "description":"可稽核的知識查詢", "required_role":"USER", "source":"builtin",
         "input_schema": { "query": { "type":"str", "required":true } } },
-      { "name":"rag_qa", "description":"一般文件知識庫問答", "required_role":"USER", "source":"builtin",
+      { "name":"rag-qa", "description":"一般文件知識庫問答", "required_role":"USER", "source":"builtin",
         "input_schema": { "question": { "type":"str", "required":true } } },
       { "name":"summarize", "description":"文字摘要", "required_role":"USER", "source":"builtin",
         "input_schema": { "text": { "type":"str", "required":true } } },
       { "name":"triage", "description":"問題分流", "required_role":"USER", "source":"builtin",
         "input_schema": { "question": { "type":"str", "required":true } } },
-      { "name":"analyze_report", "description":"分析報告", "required_role":"ADMIN", "source":"builtin",
+      { "name":"analyze-report", "description":"分析報告", "required_role":"ADMIN", "source":"builtin",
         "input_schema": { "topic": { "type":"str", "required":true } } }
     ]
     """;
@@ -204,8 +204,8 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
             var catalog = agent.LastRoutingCatalog!;
             Assert.Equal(4, ToolLineCount(catalog));
-            Assert.Contains("kb_query", catalog);
-            Assert.DoesNotContain("analyze_report", catalog);
+            Assert.Contains("kb-query", catalog);
+            Assert.DoesNotContain("analyze-report", catalog);
         }
         finally
         {
@@ -219,9 +219,9 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     {
         FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse("""
         [
-          { "name":"kb_query", "description":"內建檢索", "required_role":"USER", "source":"builtin",
+          { "name":"kb-query", "description":"內建檢索", "required_role":"USER", "source":"builtin",
             "input_schema": { "query": { "type":"str", "required":true } } },
-          { "name":"tenant_a_private_search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
+          { "name":"tenant-a-private-search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
             "input_schema": { "question_text": { "type":"str", "required":true } } }
         ]
         """).RootElement.Clone();
@@ -236,8 +236,8 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
             var catalog = agent.LastRoutingCatalog!;
             // 單軌後路由目錄恰等於動態 Skill 目錄(builtin + custom),沒有殘留靜態工具混入。
-            Assert.Contains("kb_query", catalog);
-            Assert.Contains("tenant_a_private_search", catalog);
+            Assert.Contains("kb-query", catalog);
+            Assert.Contains("tenant-a-private-search", catalog);
             Assert.Equal(2, ToolLineCount(catalog));
         }
         finally
@@ -261,7 +261,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
             var catalog = agent.LastRoutingCatalog!;
             Assert.Equal(5, ToolLineCount(catalog));
-            Assert.Contains("analyze_report", catalog);
+            Assert.Contains("analyze-report", catalog);
         }
         finally
         {

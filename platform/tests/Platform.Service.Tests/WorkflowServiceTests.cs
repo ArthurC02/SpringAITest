@@ -24,11 +24,11 @@ public sealed class WorkflowServiceTests
     public async Task InvokeSkill_PostsToSkillsPath_SendsFourHeaders_PassesJsonThrough()
     {
         var stub = new StubHttpMessageHandler(_ =>
-            TestHttp.Json(HttpStatusCode.OK, "{\"skill\":\"quarterly_qa\",\"output\":{\"answer\":\"42\",\"trace\":[]}}"));
+            TestHttp.Json(HttpStatusCode.OK, "{\"skill\":\"quarterly-qa\",\"output\":{\"answer\":\"42\",\"trace\":[]}}"));
 
-        var result = await Build(stub).InvokeSkillAsync("quarterly_qa", Input(), Ctx);
+        var result = await Build(stub).InvokeSkillAsync("quarterly-qa", Input(), Ctx);
 
-        Assert.Equal("http://downstream/skills/quarterly_qa/invoke", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("http://downstream/skills/quarterly-qa/invoke", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
@@ -36,7 +36,7 @@ public sealed class WorkflowServiceTests
         Assert.Equal("USER", stub.Header("X-User-Role"));
 
         // 引擎輸出原樣穿透(含 trace 這類代理層不認識的鍵)。
-        Assert.Equal("quarterly_qa", result.GetProperty("skill").GetString());
+        Assert.Equal("quarterly-qa", result.GetProperty("skill").GetString());
         Assert.Equal("42", result.GetProperty("output").GetProperty("answer").GetString());
         Assert.Equal(JsonValueKind.Array, result.GetProperty("output").GetProperty("trace").ValueKind);
 
@@ -99,8 +99,8 @@ public sealed class WorkflowServiceTests
     public async Task GetSkillCatalog_GetsSkillsPath_PassesArrayThrough()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            "[{\"name\":\"kb_query\",\"source\":\"builtin\",\"revision\":null},"
-            + "{\"name\":\"quarterly_qa\",\"source\":\"custom\",\"revision\":3}]"));
+            "[{\"name\":\"kb-query\",\"source\":\"builtin\",\"revision\":null},"
+            + "{\"name\":\"quarterly-qa\",\"source\":\"custom\",\"revision\":3}]"));
 
         var result = await Build(stub).GetSkillCatalogAsync(Ctx);
 
@@ -110,6 +110,50 @@ public sealed class WorkflowServiceTests
         Assert.Equal(2, result.GetArrayLength());
         Assert.Equal("builtin", result[0].GetProperty("source").GetString());
         Assert.Equal("custom", result[1].GetProperty("source").GetString());
+    }
+
+    // AST-P1-013:catalog 帶 additive kind → 原樣穿透(代理層不套 DTO,不吞未知欄位);既有 source 等欄位不變。
+    [Fact]
+    public async Task GetSkillCatalog_PassesThroughKind_AndExistingFields()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """[{"name":"kb-query","source":"builtin","kind":"flow","required_role":"USER"},"""
+            + """{"name":"sales-helper","source":"custom","kind":"agentic","required_role":"USER"}]"""));
+
+        var result = await Build(stub).GetSkillCatalogAsync(Ctx);
+
+        Assert.Equal("flow", result[0].GetProperty("kind").GetString());
+        Assert.Equal("agentic", result[1].GetProperty("kind").GetString());
+        // 既有欄位不因新增 kind 而受影響。
+        Assert.Equal("builtin", result[0].GetProperty("source").GetString());
+        Assert.Equal("custom", result[1].GetProperty("source").GetString());
+    }
+
+    // AST-P1-013:validate 回應的 skill 中繼資料帶 kind → 原樣穿透;既有 valid/errors/skill 形狀不變。
+    [Fact]
+    public async Task ValidateSkill_PassesThroughKind_InSkillMetadata()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"x","required_role":"USER","kind":"agentic"}}"""));
+
+        var result = await Build(stub).ValidateSkillAsync("kind: agentic\n", Ctx);
+
+        Assert.True(result.GetProperty("valid").GetBoolean());
+        Assert.Equal("agentic", result.GetProperty("skill").GetProperty("kind").GetString());
+    }
+
+    // AST-P1-002(Platform half):explicit invoke 一個 agentic skill → {skill, output} 形狀原樣穿透,
+    // 固定的 answer 鍵在 output 內被帶上(引擎輸出鍵由引擎定義,代理層不改寫)。
+    [Fact]
+    public async Task InvokeSkill_AgenticSkill_ReturnsSkillOutputShape_WithAnswerKey()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"skill":"sales-helper","output":{"answer":"本季毛利率 32.8%"}}"""));
+
+        var result = await Build(stub).InvokeSkillAsync("sales-helper", Input(), Ctx);
+
+        Assert.Equal("sales-helper", result.GetProperty("skill").GetString());
+        Assert.Equal("本季毛利率 32.8%", result.GetProperty("output").GetProperty("answer").GetString());
     }
 
     [Fact]

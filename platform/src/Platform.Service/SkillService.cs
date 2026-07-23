@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
@@ -15,6 +16,11 @@ namespace Platform.Service;
 public sealed class SkillService : ISkillService
 {
     private const string FailurePrefix = "Skill 服務呼叫失敗：";
+
+    // 匯入套件的傳輸層上限:Web 層 IFormFile 已把上傳有界緩衝(受 ASP.NET 表單長度限制),
+    // 這裡在轉送前再擋一次明顯過大的 body(受控 400),不把巨大套件推給 backend。
+    // 真正的 archive 限制(~4 MiB 解壓)在 workflow parser;這裡取其上方的寬鬆值。
+    private const int MaxImportBytes = 16 * 1024 * 1024; // 16 MiB
 
     private readonly BackendClient _backend;
 
@@ -34,6 +40,13 @@ public sealed class SkillService : ISkillService
         => _backend.SendForJsonElementAsync(
             _backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}/revisions", ctx), WrapTransport, MapErrorAsync, ct);
 
+    public Task<JsonElement> RestoreRevisionAsync(
+        string name, int revision, UserContext ctx, CancellationToken ct = default)
+        => _backend.SendForJsonElementAsync(
+            _backend.BuildRequest(
+                HttpMethod.Post, $"/api/skills/{name}/revisions/{revision}/restore", ctx),
+            WrapTransport, MapErrorAsync, ct);
+
     public async Task<SkillExport> ExportAsync(string name, UserContext ctx, CancellationToken ct = default)
     {
         using var req = _backend.BuildRequest(HttpMethod.Get, $"/api/skills/{name}/export", ctx);
@@ -48,6 +61,38 @@ public sealed class SkillService : ISkillService
         var content = await resp.Content.ReadAsByteArrayAsync(ct);
         var contentType = resp.Content.Headers.ContentType?.MediaType ?? "application/zip";
         return new SkillExport(content, contentType, $"{name}.zip");
+    }
+
+    public async Task<JsonElement> ImportAsync(
+        string name, byte[] package, string fileName, UserContext ctx, CancellationToken ct = default)
+        => await ImportCoreAsync(
+            $"/api/skills/{name}/import", package, fileName, ctx, ct);
+
+    public async Task<JsonElement> ImportAsync(
+        byte[] package, string fileName, UserContext ctx, CancellationToken ct = default)
+        => await ImportCoreAsync("/api/skills/import", package, fileName, ctx, ct);
+
+    private async Task<JsonElement> ImportCoreAsync(
+        string path, byte[] package, string fileName, UserContext ctx, CancellationToken ct)
+    {
+        if (package.Length > MaxImportBytes)
+        {
+            throw new WorkflowBadInputException(FailurePrefix + $"匯入套件超過上限 {MaxImportBytes} bytes");
+        }
+
+        var req = _backend.BuildRequest(HttpMethod.Post, path, ctx);
+
+        // 用上傳的位元組重建乾淨的 multipart:MultipartFormDataContent 自帶 Content-Type(新 boundary)+ Content-Length
+        //(非 chunked),backend 以 form-binding 讀 Request.Form.Files["package"]。以新 boundary 重新編碼是合法 HTTP —
+        // backend 只需要一個有效的 package 檔位,不需要沿用來源 boundary。
+        var multipart = new MultipartFormDataContent();
+        var filePart = new ByteArrayContent(package);
+        filePart.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        multipart.Add(filePart, "package", string.IsNullOrWhiteSpace(fileName) ? "package.zip" : fileName);
+        req.Content = multipart;
+
+        // 回應原樣穿透:import 回的是 Skill JSON(含 additive kind);錯誤走 export 同一條 MapErrorAsync。
+        return await _backend.SendForJsonElementAsync(req, WrapTransport, MapErrorAsync, ct);
     }
 
     public Task<Skill> CreateAsync(SkillUpsert request, UserContext ctx, CancellationToken ct = default)

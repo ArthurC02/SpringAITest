@@ -1,4 +1,4 @@
-name: template_compare            # __SLOT_name__
+name: template-compare            # __SLOT_name__
 description: 比對排序範本骨架        # __SLOT_description__
 required_role: USER
 

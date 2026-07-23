@@ -72,6 +72,16 @@ public sealed class FakeLlmAgent : ILlmAgent
             throw new InvalidOperationException("串流中途失敗");
         }
 
+        // 路由命中後的摘要輪(HIT 路徑走「裸」ILlmAgent):把工具結果(已由 answer 等 OutputKeys 萃取)原樣吐回,
+        // 讓 Web SSE 測試觀察到「最終內容確實由 answer 鍵萃取而來」(AST-P1-012)。純聊天(MISS)不經此路徑。
+        const string marker = "工具結果：\n";
+        var markerAt = last.IndexOf(marker, StringComparison.Ordinal);
+        if (markerAt >= 0)
+        {
+            yield return last[(markerAt + marker.Length)..];
+            yield break;
+        }
+
         yield return "你好";
         yield return "世界";
     }
@@ -219,7 +229,7 @@ public sealed class FakeWorkflowService : IWorkflowService
         // 引擎一律回 200,結果在 body(不合法不是 HTTP 錯誤)。
         return Task.FromResult(definition.Contains("__invalid__", StringComparison.Ordinal)
             ? Json("""{"valid":false,"errors":[{"code":"unbounded_loop","message":"loop 缺少 max_iterations","line":7}]}""")
-            : Json("""{"valid":true,"errors":[],"skill":{"name":"quarterly_qa","description":"季報問答","required_role":"USER"}}"""));
+            : Json("""{"valid":true,"errors":[],"skill":{"name":"quarterly-qa","description":"季報問答","required_role":"USER"}}"""));
     }
 
     /// <summary>
@@ -238,8 +248,8 @@ public sealed class FakeWorkflowService : IWorkflowService
         }
 
         return Task.FromResult(Json(
-            """[{"name":"kb_query","description":"知識查詢","required_role":"USER","source":"builtin","revision":null},"""
-            + """{"name":"quarterly_qa","description":"季報問答","required_role":"USER","source":"custom","revision":3}]"""));
+            """[{"name":"kb-query","description":"知識查詢","required_role":"USER","source":"builtin","revision":null},"""
+            + """{"name":"quarterly-qa","description":"季報問答","required_role":"USER","source":"custom","revision":3}]"""));
     }
 
     public Task<JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default)
@@ -282,7 +292,7 @@ public sealed class FakeAnalysisService : IAnalysisService
 
 /// <summary>
 /// Skill CRUD 服務 fake(代表 backend :8002)。重現 backend 的錯誤回應:
-/// definition 內含 dup_skill → 409、名稱 ghost → 404、定義含 __invalid__ → 422(引擎錯誤碼)。
+/// definition 內含 dup-skill → 409、名稱 ghost → 404、定義含 __invalid__ → 422(引擎錯誤碼)。
 /// Calls 是靜態的:讓「401 時請求不得抵達 backend」與「catalog 不得走到 CRUD」可被斷言。
 /// </summary>
 public sealed class FakeSkillService : ISkillService
@@ -320,7 +330,7 @@ public sealed class FakeSkillService : ISkillService
     {
         Calls.Add("list");
         return Task.FromResult(FakeJson.Of(
-            """[{"name":"echo_skill","description":"季報問答","required_role":"USER","enabled":true,"current_revision":1,"created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
+            """[{"name":"echo-skill","description":"季報問答","required_role":"USER","enabled":true,"current_revision":1,"created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
     }
 
     public Task<JsonElement> GetAsync(string name, UserContext ctx, CancellationToken ct = default)
@@ -348,6 +358,30 @@ public sealed class FakeSkillService : ISkillService
             """[{"revision":2,"definition":"# r2","definition_sha256":"sha2","created_by":"admin-a","created_at":"2026-07-14T00:00:00Z"},{"revision":1,"definition":"# r1","definition_sha256":"sha1","created_by":"admin-a","created_at":"2026-07-13T00:00:00Z"}]"""));
     }
 
+    public Task<JsonElement> RestoreRevisionAsync(
+        string name, int revision, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add($"restore:{name}:{revision}");
+        if (ctx.Role != "ADMIN")
+        {
+            throw new WorkflowForbiddenException("權限不足，無法存取 Skill");
+        }
+
+        if (name == "ghost")
+        {
+            throw new WorkflowNotFoundException("找不到 Skill：" + name);
+        }
+
+        if (name == "legacy-agentic")
+        {
+            throw new DownstreamConflictException(
+                $"Skill revision {name}#{revision} 建立於 package 快照功能之前，無法安全回復");
+        }
+
+        return Task.FromResult(FakeJson.Of(
+            $$"""{"name":"{{name}}","description":"季報問答","definition":"# restored","required_role":"USER","enabled":true,"current_revision":3,"kind":"flow","created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}"""));
+    }
+
     /// <summary>匯出用的假 zip bytes(內容不必是真 zip — 這層只驗代理原封轉發)。</summary>
     public static readonly byte[] ExportBytes = Encoding.UTF8.GetBytes("PK-fake-zip-bytes");
 
@@ -362,19 +396,56 @@ public sealed class FakeSkillService : ISkillService
         return Task.FromResult(new SkillExport(ExportBytes, "application/zip", $"{name}.zip"));
     }
 
+    /// <summary>
+    /// Agent Skill 匯入的 fake(代表 backend):重現 backend [AdminOnly](非 ADMIN → 403,早於套件驗證)、
+    /// 套件驗證失敗(name=badpkg → 422 帶 forbidden_script)、成功回傳含 additive kind 的 agentic Skill JSON。
+    /// 收到的是已由 Web 層 IFormFile 讀出的位元組(內容不檢查)——這層驗代理與錯誤映射,不驗解壓。
+    /// </summary>
+    public Task<JsonElement> ImportAsync(
+        string name, byte[] package, string fileName, UserContext ctx, CancellationToken ct = default)
+        => ImportCore(name, package, ctx);
+
+    public Task<JsonElement> ImportAsync(
+        byte[] package, string fileName, UserContext ctx, CancellationToken ct = default)
+        => ImportCore("server-derived", package, ctx);
+
+    private static Task<JsonElement> ImportCore(
+        string name, byte[] package, UserContext ctx)
+    {
+        Calls.Add("import:" + name);
+
+        // backend [AdminOnly]:非 ADMIN 一律 403(早於 package 驗證)。
+        if (ctx.Role != "ADMIN")
+        {
+            throw new WorkflowForbiddenException("權限不足，無法存取 Skill");
+        }
+
+        if (name == "badpkg")
+        {
+            throw new SkillValidationFailedException("Skill 套件驗證失敗")
+            {
+                FieldErrors = new Dictionary<string, string> { ["forbidden_script"] = "腳本未通過 AST 掃描" },
+            };
+        }
+
+        // 成功:含 additive kind 的 agentic Skill JSON(原樣穿透,舊 consumer 忽略未知 kind 仍可運作)。
+        return Task.FromResult(FakeJson.Of(
+            $$"""{"name":"{{name}}","description":"匯入的代理技能","definition":"kind: agentic\n...","required_role":"USER","enabled":true,"current_revision":1,"kind":"agentic","created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}"""));
+    }
+
     public Task<Skill> CreateAsync(SkillUpsert request, UserContext ctx, CancellationToken ct = default)
     {
         var name = NameOf(request.Definition!);
         Calls.Add("create:" + name);
         ThrowIfInvalid(request.Definition!);
 
-        if (name == "dup_skill")
+        if (name == "dup-skill")
         {
             // 重現 backend 的 409(同名衝突):訊息原樣往上拋,platform 不改寫。
             throw new DownstreamConflictException("Skill 名稱已存在：" + name);
         }
 
-        if (name == "bad_field")
+        if (name == "bad-field")
         {
             throw new WorkflowBadInputException("輸入驗證失敗") { FieldErrors = BackendFieldErrors };
         }
