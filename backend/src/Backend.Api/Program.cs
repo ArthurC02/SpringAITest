@@ -68,6 +68,14 @@ builder.Services.AddHttpClient("skill-validator", c => c.Timeout = TimeSpan.From
 builder.Services.AddScoped<ISkillValidator>(sp => new WorkflowSkillValidator(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("skill-validator"), workflowBaseUrl, internalToken));
 
+// Agent Business Rule AST 的語意/型別/安全限制同樣只由 Workflow 擁有。Agent validate 與 publish
+// 都經這個 request-time dependency；引擎不可達一律 502 且不得發布。
+builder.Services.AddHttpClient("business-rule-validator", c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddScoped<IBusinessRuleValidator>(sp => new WorkflowBusinessRuleValidator(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient("business-rule-validator"),
+    workflowBaseUrl,
+    internalToken));
+
 // Agent Skill package 驗證(P0):multipart 轉送 zip 給引擎 POST /skills/validate-package(唯一結構/語意權威)。
 builder.Services.AddHttpClient("skill-package-validator", c => c.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddScoped<ISkillPackageValidator>(sp => new WorkflowSkillPackageValidator(

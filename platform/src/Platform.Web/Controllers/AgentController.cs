@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Platform.Service.Abstractions;
+using Platform.Service.Dtos;
 using Platform.Web.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -90,4 +91,28 @@ public sealed class AgentController : ControllerBase
     [HttpPost("{id:guid}/revisions/{revision:int}/restore")]
     public async Task<IActionResult> RestoreRevision(Guid id, int revision, CancellationToken ct)
         => Write(await _agents.RestoreRevisionAsync(id, revision, User.ToUserContext(), ct));
+
+    [HttpGet("catalog/rule-facts")]
+    public async Task<ActionResult<JsonElement>> RuleFacts(
+        [FromServices] IWorkflowService engine, CancellationToken ct)
+        => Ok(await engine.GetBusinessRuleFactsAsync(User.ToUserContext(), ct));
+
+    [HttpGet("catalog/rule-actions")]
+    public async Task<ActionResult<JsonElement>> RuleActions(
+        [FromServices] IWorkflowService engine, CancellationToken ct)
+        => Ok(await engine.GetBusinessRuleActionsAsync(User.ToUserContext(), ct));
+
+    [HttpPost("rules/validate")]
+    public async Task<ActionResult<JsonElement>> ValidateRules(
+        [FromServices] IWorkflowService engine,
+        [FromBody] BusinessRuleValidateRequest request,
+        CancellationToken ct)
+        => Ok(await engine.ValidateBusinessRulesAsync(request, User.ToUserContext(), ct));
+
+    [HttpPost("rules/simulate")]
+    public async Task<ActionResult<JsonElement>> SimulateRules(
+        [FromServices] IWorkflowService engine,
+        [FromBody] BusinessRuleSimulateRequest request,
+        CancellationToken ct)
+        => Ok(await engine.SimulateBusinessRulesAsync(request, User.ToUserContext(), ct));
 }

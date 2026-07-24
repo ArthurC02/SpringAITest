@@ -1,5 +1,6 @@
 using Dapper;
 using Npgsql;
+using System.Text.Json.Nodes;
 
 namespace Backend.Api.Agents;
 
@@ -17,12 +18,6 @@ public sealed class AgentRepository : IAgentRepository
         + " draft_version AS DraftVersion, draft_validated_version AS DraftValidatedVersion,"
         + " published_revision AS PublishedRevision, draft_definition::text AS DraftDefinition,"
         + " draft_definition_sha256 AS DraftDefinitionSha256, created_at AS CreatedAt, updated_at AS UpdatedAt";
-
-    // revision 的可複製欄位(restore 用 INSERT ... SELECT 原封複製舊列)。
-    private const string RevisionCols =
-        "system_prompt, execution_roles, capabilities, output_contract, audience, business_rules,"
-        + " allowed_tools, knowledge_sources, runtime_limits, runtime_workflow_id, runtime_workflow_revision,"
-        + " definition_sha256";
 
     private readonly NpgsqlDataSource _dataSource;
 
@@ -43,9 +38,10 @@ public sealed class AgentRepository : IAgentRepository
     public async Task<Agent?> GetAsync(string tenantId, Guid id, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<Agent>(new CommandDefinition(
+        var agent = await conn.QuerySingleOrDefaultAsync<Agent>(new CommandDefinition(
             $"SELECT {AgentCols} FROM agent WHERE tenant_id = @tenantId AND id = @id",
             new { tenantId, id }, cancellationToken: ct));
+        return WithCanonicalDefinition(agent);
     }
 
     public async Task<Agent?> CreateAsync(
@@ -54,7 +50,7 @@ public sealed class AgentRepository : IAgentRepository
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         // 同 tenant slug 重複 → ON CONFLICT DO NOTHING → 0 列 → null(controller 映射 409)。
-        return await conn.QuerySingleOrDefaultAsync<Agent>(new CommandDefinition(
+        var created = await conn.QuerySingleOrDefaultAsync<Agent>(new CommandDefinition(
             "INSERT INTO agent (tenant_id, slug, name, description, enabled, draft_version,"
             + "  draft_definition, draft_definition_sha256, created_by)"
             + " VALUES (@tenantId, @slug, @name, @description, true, 1, @canonicalDefinition::jsonb, @definitionSha256, @createdBy)"
@@ -62,6 +58,7 @@ public sealed class AgentRepository : IAgentRepository
             + $" RETURNING {AgentCols}",
             new { tenantId, slug, name, description, canonicalDefinition, definitionSha256, createdBy },
             cancellationToken: ct));
+        return WithCanonicalDefinition(created);
     }
 
     public async Task<AgentDraftResult> UpdateDraftAsync(
@@ -80,7 +77,7 @@ public sealed class AgentRepository : IAgentRepository
 
         if (updated is not null)
         {
-            return new AgentDraftResult(AgentWriteStatus.Success, updated);
+            return new AgentDraftResult(AgentWriteStatus.Success, WithCanonicalDefinition(updated));
         }
 
         // 沒更新到:區分「不存在」與「版本不符(stale ETag)」。
@@ -91,13 +88,21 @@ public sealed class AgentRepository : IAgentRepository
             exists ? AgentWriteStatus.VersionConflict : AgentWriteStatus.NotFound, null);
     }
 
-    public async Task<bool> MarkValidatedAsync(string tenantId, Guid id, long version, CancellationToken ct)
+    public async Task<bool> MarkValidatedAsync(
+        string tenantId,
+        Guid id,
+        long version,
+        string canonicalDefinition,
+        string definitionSha256,
+        CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.ExecuteAsync(new CommandDefinition(
-            "UPDATE agent SET draft_validated_version = @version, updated_at = now()"
+            "UPDATE agent SET draft_definition = CAST(@canonicalDefinition AS jsonb),"
+            + " draft_definition_sha256 = @definitionSha256,"
+            + " draft_validated_version = @version, updated_at = now()"
             + " WHERE tenant_id = @tenantId AND id = @id AND draft_version = @version",
-            new { tenantId, id, version }, cancellationToken: ct));
+            new { tenantId, id, version, canonicalDefinition, definitionSha256 }, cancellationToken: ct));
         return rows > 0;
     }
 
@@ -111,7 +116,13 @@ public sealed class AgentRepository : IAgentRepository
     }
 
     public async Task<AgentPublishResult> PublishAsync(
-        string tenantId, Guid id, long expectedVersion, string createdBy, CancellationToken ct)
+        string tenantId,
+        Guid id,
+        long expectedVersion,
+        string canonicalDefinition,
+        string definitionSha256,
+        string createdBy,
+        CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -119,7 +130,7 @@ public sealed class AgentRepository : IAgentRepository
         var state = await conn.QuerySingleOrDefaultAsync<PublishState>(
             new CommandDefinition(
                 "SELECT draft_version AS DraftVersion, draft_validated_version AS Validated,"
-                + " published_revision AS Published, draft_definition::text AS DraftDefinition"
+                + " published_revision AS Published"
                 + " FROM agent WHERE tenant_id = @tenantId AND id = @id FOR UPDATE",
                 new { tenantId, id }, tx, cancellationToken: ct));
 
@@ -135,10 +146,21 @@ public sealed class AgentRepository : IAgentRepository
             return new AgentPublishResult(AgentWriteStatus.VersionConflict, 0);
         }
 
+        // Canonicalization and validated-version consumption belong to this same locked transaction.
+        // A concurrent publisher that arrives after commit sees validated=NULL and cannot revive/publish
+        // the same ETag as another immutable revision.
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE agent SET draft_definition = CAST(@canonicalDefinition AS jsonb),"
+            + " draft_definition_sha256 = @definitionSha256, updated_at = now()"
+            + " WHERE tenant_id = @tenantId AND id = @id",
+            new { tenantId, id, canonicalDefinition, definitionSha256 },
+            tx,
+            cancellationToken: ct));
+
         // Reference resolution 與 pin 都在同一交易，並對 workflow/skill/current revision 加 SHARE lock；
         // Skill disable/update 無法在檢查與 INSERT 之間穿越。
         var resolution = await ResolveReferencesAsync(
-            conn, tx, tenantId, state.DraftDefinition, lockRows: true, ct);
+            conn, tx, tenantId, canonicalDefinition, lockRows: true, ct);
         if (resolution.Errors.Count > 0)
         {
             await tx.RollbackAsync(ct);
@@ -213,8 +235,72 @@ public sealed class AgentRepository : IAgentRepository
             r.CreatedBy, r.CreatedAt)).ToList();
     }
 
+    public async Task<string?> GetRevisionDefinitionAsync(
+        string tenantId, Guid id, int revision, CancellationToken ct)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        var row = await conn.QuerySingleOrDefaultAsync<RestoreDefinitionRow>(new CommandDefinition(
+            "SELECT r.system_prompt AS SystemPrompt, r.execution_roles::text AS ExecutionRoles,"
+            + " r.capabilities::text AS Capabilities, r.output_contract::text AS OutputContract,"
+            + " r.audience::text AS Audience, r.business_rules::text AS BusinessRules,"
+            + " r.allowed_tools::text AS AllowedTools, r.knowledge_sources::text AS KnowledgeSources,"
+            + " r.runtime_limits::text AS RuntimeLimits, r.runtime_workflow_id AS RuntimeWorkflowId,"
+            + " r.runtime_workflow_revision AS RuntimeWorkflowRevision"
+            + " FROM agent_revision r JOIN agent a ON a.id = r.agent_id"
+            + " WHERE a.tenant_id = @tenantId AND r.agent_id = @id AND r.revision = @revision",
+            new { tenantId, id, revision }, cancellationToken: ct));
+        if (row is null)
+        {
+            return null;
+        }
+
+        var bindings = (await conn.QueryAsync<RestoreBindingRow>(new CommandDefinition(
+            "SELECT s.name AS Skill, rs.position AS Position"
+            + " FROM agent_revision_skill rs JOIN skill s ON s.id = rs.skill_id"
+            + " JOIN agent a ON a.id = rs.agent_id"
+            + " WHERE a.tenant_id = @tenantId AND rs.agent_id = @id AND rs.agent_revision = @revision"
+            + " ORDER BY rs.position",
+            new { tenantId, id, revision }, cancellationToken: ct))).AsList();
+
+        var bindingArray = new JsonArray();
+        foreach (var binding in bindings)
+        {
+            bindingArray.Add(new JsonObject
+            {
+                ["skill"] = binding.Skill,
+                ["revision_policy"] = "latest",
+            });
+        }
+
+        var definition = new JsonObject
+        {
+            ["system_prompt"] = row.SystemPrompt,
+            ["execution_roles"] = JsonNode.Parse(row.ExecutionRoles),
+            ["capabilities"] = JsonNode.Parse(row.Capabilities),
+            ["output_contract"] = JsonNode.Parse(row.OutputContract),
+            ["audience"] = JsonNode.Parse(row.Audience),
+            ["allowed_tools"] = JsonNode.Parse(row.AllowedTools),
+            ["skill_bindings"] = bindingArray,
+            ["knowledge_sources"] = JsonNode.Parse(row.KnowledgeSources),
+            ["business_rules"] = JsonNode.Parse(row.BusinessRules),
+            ["runtime_limits"] = JsonNode.Parse(row.RuntimeLimits),
+            ["runtime_workflow"] = new JsonObject
+            {
+                ["id"] = row.RuntimeWorkflowId?.ToString() ?? string.Empty,
+                ["revision"] = row.RuntimeWorkflowRevision ?? 0,
+            },
+        };
+        return AgentCanonicalizer.CanonicalizeDefinition(definition.ToJsonString());
+    }
+
     public async Task<AgentPublishResult> RestoreAsync(
-        string tenantId, Guid id, int revision, string createdBy, CancellationToken ct)
+        string tenantId,
+        Guid id,
+        int revision,
+        string canonicalDefinition,
+        string definitionSha256,
+        string createdBy,
+        CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -245,12 +331,35 @@ public sealed class AgentRepository : IAgentRepository
         var newRevision = (published ?? 0) + 1;
         await SupersedeAsync(conn, tx, id, ct);
 
-        // 舊 revision 快照原封複製成新 revision(不改寫歷史)。
+        // 舊 revision 本身不可變；新 revision 使用 Workflow 本次重新驗證/正規化後的 definition。
+        // pinned bindings 仍在下方從 target 原封複製，不重新解析 latest。
         await conn.ExecuteAsync(new CommandDefinition(
-            $"INSERT INTO agent_revision (agent_id, revision, status, {RevisionCols}, created_by)"
-            + $" SELECT agent_id, @newRevision, 'published', {RevisionCols}, @createdBy"
-            + " FROM agent_revision WHERE agent_id = @id AND revision = @revision",
-            new { id, revision, newRevision, createdBy }, tx, cancellationToken: ct));
+            "WITH normalized AS (SELECT CAST(@canonicalDefinition AS jsonb) AS definition)"
+            + " INSERT INTO agent_revision (agent_id, revision, status, system_prompt, execution_roles,"
+            + "  capabilities, output_contract, audience, business_rules, allowed_tools, knowledge_sources,"
+            + "  runtime_limits, runtime_workflow_id, runtime_workflow_revision, definition_sha256, created_by)"
+            + " SELECT r.agent_id, @newRevision, 'published',"
+            + "  n.definition->>'system_prompt', n.definition->'execution_roles',"
+            + "  n.definition->'capabilities', n.definition->'output_contract',"
+            + "  n.definition->'audience', n.definition->'business_rules',"
+            + "  n.definition->'allowed_tools', n.definition->'knowledge_sources',"
+            + "  n.definition->'runtime_limits',"
+            + "  NULLIF(n.definition->'runtime_workflow'->>'id','')::uuid,"
+            + "  NULLIF(n.definition->'runtime_workflow'->>'revision','')::int,"
+            + "  @definitionSha256, @createdBy"
+            + " FROM agent_revision r CROSS JOIN normalized n"
+            + " WHERE r.agent_id = @id AND r.revision = @revision",
+            new
+            {
+                id,
+                revision,
+                newRevision,
+                canonicalDefinition,
+                definitionSha256,
+                createdBy,
+            },
+            tx,
+            cancellationToken: ct));
 
         // 固定的 skill bindings 一併複製(維持舊 revision 的 pin)。
         await conn.ExecuteAsync(new CommandDefinition(
@@ -281,6 +390,14 @@ public sealed class AgentRepository : IAgentRepository
         => conn.ExecuteAsync(new CommandDefinition(
             "UPDATE agent_revision SET status = 'superseded' WHERE agent_id = @id AND status = 'published'",
             new { id }, tx, cancellationToken: ct));
+
+    private static Agent? WithCanonicalDefinition(Agent? agent)
+        => agent is null
+            ? null
+            : agent with
+            {
+                DraftDefinition = AgentCanonicalizer.CanonicalizeDefinition(agent.DraftDefinition),
+            };
 
     private static async Task InsertBindingsAsync(
         NpgsqlConnection conn, NpgsqlTransaction tx, Guid id, int revision,
@@ -386,11 +503,25 @@ public sealed class AgentRepository : IAgentRepository
     private sealed record BindingRow(
         int AgentRevision, string Skill, int SkillRevision, int Position, bool Enabled);
 
+    private sealed record RestoreDefinitionRow(
+        string SystemPrompt,
+        string ExecutionRoles,
+        string Capabilities,
+        string OutputContract,
+        string Audience,
+        string BusinessRules,
+        string AllowedTools,
+        string KnowledgeSources,
+        string RuntimeLimits,
+        Guid? RuntimeWorkflowId,
+        int? RuntimeWorkflowRevision);
+
+    private sealed record RestoreBindingRow(string Skill, int Position);
+
     private sealed record PublishState(
         long DraftVersion,
         long? Validated,
-        int? Published,
-        string DraftDefinition);
+        int? Published);
 
     private sealed record SkillPinRow(Guid Id, int CurrentRevision);
 

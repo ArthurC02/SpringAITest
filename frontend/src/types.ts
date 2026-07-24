@@ -173,10 +173,179 @@ export interface AgentWorkflowRef {
 
 export type AgentOutputContract = Record<string, unknown>
 
+export type RuleFactType =
+  | 'string'
+  | 'enum'
+  | 'number'
+  | 'integer'
+  | 'decimal'
+  | 'boolean'
+  | 'collection'
+  | string
+
+/** Exact base-10 decimal transported as a JSON string; never parse with Number. */
+export type RuleDecimalString = string
+
+export type RuleGate =
+  | 'preflight'
+  | 'post-context'
+  | 'pre-action'
+  | 'post-action'
+  | 'pre-response'
+  | string
+
+export interface RuleConditionLeaf {
+  fact: string
+  op: string
+  value?: unknown
+}
+
+export interface RuleConditionAll {
+  all: RuleCondition[]
+}
+
+export interface RuleConditionAny {
+  any: RuleCondition[]
+}
+
+export interface RuleConditionNot {
+  not: RuleCondition
+}
+
+export type RuleCondition =
+  | RuleConditionLeaf
+  | RuleConditionAll
+  | RuleConditionAny
+  | RuleConditionNot
+
+export interface RuleAction {
+  action: string
+  [parameter: string]: unknown
+}
+
+export interface AgentBusinessRule {
+  id: string
+  name: string
+  enabled: boolean
+  priority: number
+  when: RuleCondition
+  then: RuleAction[]
+  onUnknown?: RuleAction[]
+}
+
+/** Canonical JSON AST persisted in the Agent draft. */
 export interface AgentBusinessRules {
-  version?: number
-  rules?: unknown[]
+  version: number
+  rules: AgentBusinessRule[]
+}
+
+export interface RuleOperatorCatalogEntry {
+  name: string
+  label?: string
+  value_type?: RuleFactType | 'none' | 'same'
+  value_count?: number
+  description?: string
+  compatibleFactTypes?: RuleFactType[]
+  compatible_fact_types?: RuleFactType[]
+  value?: {
+    kind: 'none' | 'scalar' | 'list' | 'range' | string
+    types?: RuleFactType[]
+  }
+}
+
+export interface RuleFactCatalogEntry {
+  name: string
+  label?: string
+  description?: string
+  type: RuleFactType
+  provenance: string
+  trustTier?: string
+  trust_tier?: string
+  gates: RuleGate[]
+  operators?: Array<string | RuleOperatorCatalogEntry>
+  enumValues?: unknown[]
+  enum_values?: unknown[]
+  values?: unknown[]
+  itemType?: RuleFactType
+  item_type?: RuleFactType
+  visibleValue?: boolean
+  visible_value?: boolean
+  wireFormat?: string
+  wire_format?: string
+}
+
+export interface RuleActionParameter {
+  name: string
+  label?: string
+  type: RuleFactType
+  required?: boolean
+  enumValues?: unknown[]
+  enum_values?: unknown[]
+  values?: unknown[]
+  description?: string
+  maxItems?: number
+  max_items?: number
+}
+
+export interface RuleActionCatalogEntry {
+  name: string
+  label?: string
+  description?: string
+  parameters?: RuleActionParameter[] | Record<string, Omit<RuleActionParameter, 'name'>>
+  decision?: string
+  precedence?: number
+}
+
+export interface RuleCatalogEnvelope<T> {
+  facts?: T[]
+  actions?: T[]
+  operators?: RuleOperatorCatalogEntry[]
+  gates?: RuleGate[]
+  items?: T[]
+  decimalWireFormat?: {
+    type: 'string'
+    format: string
+    allowExponent: boolean
+    maxPrecision: number
+    maxScale: number
+    maxIntegerDigits: number
+  }
+  limits?: {
+    maxDepth?: number
+    maxNodes?: number
+    maxRules?: number
+    maxStringLength?: number
+    maxCollectionItems?: number
+    maxErrors?: number
+    maxDecimalPrecision?: number
+    maxDecimalScale?: number
+    maxDecimalIntegerDigits?: number
+  }
+}
+
+export interface RuleValidationIssue {
+  path: string
+  code?: string
+  message: string
+}
+
+export interface RuleValidationResult {
+  valid: boolean
+  canonicalRuleSet?: AgentBusinessRules
+  canonical_rule_set?: AgentBusinessRules
+  errors: RuleValidationIssue[]
+}
+
+export interface RuleSimulation {
+  decision?: unknown
+  matchedRules?: unknown[]
+  matched_rules?: unknown[]
+  trace?: unknown
   [key: string]: unknown
+}
+
+export interface RuleSimulationResult extends RuleValidationResult {
+  simulation?: RuleSimulation
 }
 
 /** GET /api/tools 的安全作者目錄；不包含 endpoint、token 或其他連線秘密。 */

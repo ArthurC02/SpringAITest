@@ -53,6 +53,7 @@ public sealed class GlobalExceptionHandler : IExceptionHandler
         WorkflowNotFoundException => (StatusCodes.Status404NotFound, ex.Message),
         WorkflowForbiddenException => (StatusCodes.Status403Forbidden, ex.Message),
         WorkflowBadInputException => (StatusCodes.Status400BadRequest, ex.Message),
+        WorkflowPayloadTooLargeException => (StatusCodes.Status413PayloadTooLarge, ex.Message),
         SkillValidationFailedException => (StatusCodes.Status422UnprocessableEntity, ex.Message),
         DocumentNotFoundException => (StatusCodes.Status404NotFound, ex.Message),
         DownstreamConflictException => (StatusCodes.Status409Conflict, ex.Message),

@@ -30,4 +30,18 @@ public interface IWorkflowService
     /// (name/kind/description/risk/returns)，不含 endpoint、token 或 executable implementation。
     /// </summary>
     Task<JsonElement> GetToolCatalogAsync(UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>Business Rule fact catalog filtered from Workflow's single registry-owned catalog response.</summary>
+    Task<JsonElement> GetBusinessRuleFactsAsync(UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>Business Rule action catalog filtered from Workflow's single registry-owned catalog response.</summary>
+    Task<JsonElement> GetBusinessRuleActionsAsync(UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>Validate and canonicalize a typed Rule AST. valid=false remains an HTTP-success body.</summary>
+    Task<JsonElement> ValidateBusinessRulesAsync(
+        BusinessRuleValidateRequest request, UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>Run Workflow's production evaluator with supplied dry-run facts; never calls real tools.</summary>
+    Task<JsonElement> SimulateBusinessRulesAsync(
+        BusinessRuleSimulateRequest request, UserContext ctx, CancellationToken ct = default);
 }

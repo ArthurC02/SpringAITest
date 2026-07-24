@@ -206,6 +206,30 @@ public sealed class FakeWorkflowService : IWorkflowService
 
     public Task<System.Text.Json.JsonElement> GetToolCatalogAsync(UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
+
+    public Task<System.Text.Json.JsonElement> GetBusinessRuleFactsAsync(
+        UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
+
+    public Task<System.Text.Json.JsonElement> GetBusinessRuleActionsAsync(
+        UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
+
+    public Task<System.Text.Json.JsonElement> ValidateBusinessRulesAsync(
+        BusinessRuleValidateRequest request, UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(
+            new { valid = true, canonicalRuleSet = request.RuleSet, errors = Array.Empty<object>() }));
+
+    public Task<System.Text.Json.JsonElement> SimulateBusinessRulesAsync(
+        BusinessRuleSimulateRequest request, UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(
+            new
+            {
+                valid = true,
+                canonicalRuleSet = request.RuleSet,
+                errors = Array.Empty<object>(),
+                simulation = new { decision = "allow", matchedRules = Array.Empty<string>(), trace = Array.Empty<object>() },
+            }));
 }
 
 /// <summary>

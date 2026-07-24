@@ -209,3 +209,228 @@ test('USER cannot see or enter the Agents workspace when the Builder flag is ena
   await expect(page.locator('.agents-workspace')).toHaveCount(0)
   expect(agentApiRequested).toBe(false)
 })
+
+test('Business Rule editor round-trips canonical AST and uses server validation/simulation', async ({
+  page,
+}) => {
+  let currentAgent = structuredClone(agent)
+  let savedRuleSet: unknown = null
+  let simulationFacts: unknown = null
+  let simulationRequests = 0
+  let simulationStarted = false
+  let releaseSimulation: (() => void) | undefined
+  let validationRequests = 0
+  let validationStarted = false
+  let releaseValidation: (() => void) | undefined
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'rule-editor-token',
+        username: 'admin',
+        role: 'ADMIN',
+        tenantCode: 'demo',
+      })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [currentAgent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, currentAgent, { ETag: `"${currentAgent.draft_version}"` })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') {
+      return json(route, {
+        version: 1,
+        gates: ['pre-action'],
+        limits: { maxDepth: 3, maxNodes: 256, maxRules: 100 },
+        facts: [
+          {
+            name: 'context.confidence',
+            type: 'number',
+            provenance: 'LLM-inferred',
+            trustTier: 'inferred',
+            gates: ['pre-action'],
+            operators: ['lt', 'exists'],
+            visibleValue: true,
+          },
+          {
+            name: 'caller.tenant_id',
+            type: 'string',
+            provenance: 'system',
+            trustTier: 'trusted',
+            gates: ['pre-action'],
+            operators: ['eq'],
+            visibleValue: false,
+          },
+          {
+            name: 'action.amount',
+            type: 'decimal',
+            provenance: 'system',
+            trustTier: 'trusted',
+            gates: ['pre-action'],
+            operators: ['gt'],
+            visibleValue: true,
+            wireFormat: 'canonical-decimal-string',
+          },
+        ],
+        operators: [
+          {
+            name: 'lt',
+            compatibleFactTypes: ['number'],
+            value: { kind: 'scalar', types: ['number'] },
+          },
+          {
+            name: 'exists',
+            compatibleFactTypes: ['number'],
+            value: { kind: 'none', types: [] },
+          },
+          {
+            name: 'eq',
+            compatibleFactTypes: ['string'],
+            value: { kind: 'scalar', types: ['string'] },
+          },
+          {
+            name: 'gt',
+            compatibleFactTypes: ['decimal'],
+            value: { kind: 'scalar', types: ['number', 'decimal', 'integer'] },
+          },
+        ],
+      })
+    }
+    if (path === '/api/agents/catalog/rule-actions') {
+      return json(route, {
+        actions: [
+          {
+            name: 'deny',
+            decision: 'deny',
+            precedence: 100,
+            parameters: [{ name: 'reason', type: 'string', required: false }],
+          },
+          {
+            name: 'require_context',
+            decision: 'require_context',
+            precedence: 50,
+            parameters: [],
+          },
+        ],
+      })
+    }
+    if (path === '/api/agents/rules/validate') {
+      validationRequests += 1
+      const body = request.postDataJSON()
+      if (validationRequests === 2) {
+        validationStarted = true
+        await new Promise<void>((resolve) => {
+          releaseValidation = resolve
+        })
+      }
+      return json(route, {
+        valid: true,
+        canonicalRuleSet:
+          validationRequests === 2
+            ? {
+                ...body.ruleSet,
+                rules: body.ruleSet.rules.map((rule: Record<string, unknown>, index: number) =>
+                  index === 0 ? { ...rule, name: 'STALE CANONICAL NAME' } : rule,
+                ),
+              }
+            : body.ruleSet,
+        errors: [],
+      })
+    }
+    if (path === '/api/agents/rules/simulate') {
+      simulationRequests += 1
+      const body = request.postDataJSON()
+      simulationFacts = body.facts
+      if (simulationRequests === 2) {
+        simulationStarted = true
+        await new Promise<void>((resolve) => {
+          releaseSimulation = resolve
+        })
+      }
+      return json(route, {
+        valid: true,
+        errors: [],
+        simulation: {
+          decision: { action: 'require_context' },
+          matchedRules: ['low-confidence'],
+          trace: [{ path: 'rules[0].when', result: true }],
+        },
+      })
+    }
+    if (path === `/api/agents/${agentId}/draft` && request.method() === 'PUT') {
+      const draft = request.postDataJSON()
+      savedRuleSet = draft.business_rules
+      currentAgent = {
+        ...currentAgent,
+        draft_version: currentAgent.draft_version + 1,
+        draft,
+      }
+      return json(route, currentAgent, { ETag: `"${currentAgent.draft_version}"` })
+    }
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agents').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+
+  await page.getByRole('button', { name: '低信心時要求更多 Context' }).click()
+  const card = page.locator('.rule-card').first()
+  await expect(card).toContainText('自然語言摘要（非執行權威）')
+  await card.getByLabel('rules[0].when 類型').selectOption('all')
+  await card.getByRole('button', { name: '＋ 新增條件' }).click()
+  await page.getByText('進階：唯讀 canonical JSON').click()
+  await expect(page.getByLabel('Business Rules canonical JSON')).toContainText('"all"')
+  await expect(page.getByLabel('Business Rules canonical JSON')).toContainText('"onUnknown"')
+
+  await page.getByRole('button', { name: '以正式 Validator 驗證' }).click()
+  await expect(page.getByText('Business Rules 驗證通過。')).toBeVisible()
+
+  await page.getByText('Simulator（使用正式 evaluator，不會呼叫真實工具）').click()
+  await page.getByLabel('提供 context.confidence (number)').check()
+  await page.locator('#sim-context\\.confidence').fill('0.4')
+  await page.getByRole('button', { name: '執行模擬' }).click()
+  await expect(page.locator('.rule-simulation-result')).toContainText('require_context')
+  await expect(page.locator('.rule-simulation-result')).toContainText('low-confidence')
+  expect(simulationFacts).toEqual({ 'context.confidence': 0.4 })
+  await expect(page.locator('#sim-caller\\.tenant_id')).toHaveCount(0)
+
+  await page.getByLabel('提供 action.amount (decimal)').check()
+  await page.locator('#sim-action\\.amount').fill('9007199254740993.01')
+  await expect(page.locator('.rule-simulation-result')).toHaveCount(0)
+  const simulateButton = page.getByRole('button', { name: '執行模擬' })
+  await simulateButton.click()
+  await expect.poll(() => simulationStarted).toBe(true)
+  expect(simulationFacts).toEqual({
+    'context.confidence': 0.4,
+    'action.amount': '9007199254740993.01',
+  })
+  const ruleName = card.locator('.rule-card__identity input').first()
+  await ruleName.fill('Changed during simulation')
+  releaseSimulation?.()
+  await expect(simulateButton).toBeEnabled()
+  await expect(page.locator('.rule-simulation-result')).toHaveCount(0)
+
+  const validateButton = page.locator('.business-rules__actions button').nth(1)
+  await validateButton.click()
+  await expect.poll(() => validationStarted).toBe(true)
+  await ruleName.fill('Changed during validation')
+  releaseValidation?.()
+  await expect(validateButton).toBeEnabled()
+  await expect(page.locator('.business-rules .notice-text')).toHaveCount(0)
+  await expect(ruleName).toHaveValue('Changed during validation')
+
+  await page.getByRole('button', { name: '儲存草稿' }).click()
+  await expect.poll(() => savedRuleSet).not.toBeNull()
+  expect(savedRuleSet).toEqual(currentAgent.draft.business_rules)
+  await expect(page.getByLabel('Business Rules canonical JSON')).toContainText('"all"')
+})

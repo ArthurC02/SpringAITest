@@ -1,6 +1,7 @@
 using Backend.Api.Agents;
 using Backend.Api.Skills;
 using Dapper;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Backend.Api.Tests;
@@ -44,7 +45,7 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
     private static string Def(
         string prompt = "你是研究助手", string[]? roles = null,
         string[]? bindings = null, string[]? allowedTools = null,
-        string? workflowId = null)
+        string? workflowId = null, string? businessRules = null)
     {
         var req = new AgentUpsert(
             Slug: null, Name: null, Description: null,
@@ -56,7 +57,9 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
             AllowedTools: allowedTools,
             SkillBindings: bindings?.Select(b => new AgentSkillBinding(b, "latest")).ToList(),
             KnowledgeSources: null,
-            BusinessRules: null,
+            BusinessRules: businessRules is null
+                ? null
+                : JsonDocument.Parse(businessRules).RootElement.Clone(),
             RuntimeLimits: null,
             RuntimeWorkflow: new AgentWorkflowRef(
                 workflowId ?? AgentDefaults.RuntimeWorkflowId, AgentDefaults.RuntimeWorkflowRevision));
@@ -89,7 +92,8 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
     {
         var agent = await Repo.CreateAsync(tenant, slug, "研究助手", "說明", def, Sha(def), "author", default);
         Assert.NotNull(agent);
-        Assert.True(await Repo.MarkValidatedAsync(tenant, agent!.Id, agent.DraftVersion, default));
+        Assert.True(await Repo.MarkValidatedAsync(
+            tenant, agent!.Id, agent.DraftVersion, def, Sha(def), default));
         return agent;
     }
 
@@ -115,6 +119,56 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
     }
 
     [SkippableFact]
+    public async Task MarkValidated_FullCanonicalHash_IsStableAcrossJsonbRoundTrip()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-canonical-roundtrip";
+        const string draftRules =
+            """{"version":1,"rules":[{"when":{"value":5000,"op":"gt","fact":"action.amount"},"then":[{"action":"deny"}],"id":"stable-rule"}]}""";
+        const string workflowRules =
+            """{"rules":[{"when":{"op":"gt","fact":"action.amount","value":5000},"then":[{"action":"deny"}],"priority":100,"onUnknown":[{"action":"deny"}],"name":"","id":"stable-rule","enabled":true}],"version":1}""";
+        var definition = Def(businessRules: draftRules);
+        var created = await Repo.CreateAsync(
+            tenant,
+            "canonical-roundtrip",
+            "名稱",
+            "說明",
+            definition,
+            Sha(definition),
+            "author",
+            default);
+        Assert.NotNull(created);
+
+        // Dapper Get 會經過 jsonb::text；同一份 Workflow canonicalRuleSet 不可因此得到不同 bytes/hash。
+        var dbRoundTripped = await Repo.GetAsync(tenant, created!.Id, default);
+        using var canonicalDoc = JsonDocument.Parse(workflowRules);
+        var expected = AgentCanonicalizer.WithBusinessRules(
+            definition,
+            canonicalDoc.RootElement);
+        var fromDapper = AgentCanonicalizer.WithBusinessRules(
+            dbRoundTripped!.DraftDefinition,
+            canonicalDoc.RootElement);
+        Assert.Equal(expected, fromDapper);
+        Assert.True(await Repo.MarkValidatedAsync(
+            tenant,
+            created.Id,
+            created.DraftVersion,
+            fromDapper,
+            Sha(fromDapper),
+            default));
+
+        var stored = await Repo.GetAsync(tenant, created.Id, default);
+        Assert.Equal(Sha(expected), stored!.DraftDefinitionSha256);
+        Assert.Equal(expected, stored.DraftDefinition);
+
+        var publish = await Repo.PublishAsync(
+            tenant, created.Id, created.DraftVersion, expected, Sha(expected), "publisher", default);
+        Assert.Equal(AgentWriteStatus.Success, publish.Status);
+        var revision = Assert.Single(await Repo.ListRevisionsAsync(tenant, created.Id, default));
+        Assert.Equal(Sha(expected), revision.DefinitionSha256);
+    }
+
+    [SkippableFact]
     public async Task Create_DuplicateSlug_ReturnsNull_ButOtherTenantSucceeds()
     {
         _fx.SkipIfUnavailable();
@@ -134,11 +188,13 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         const string tenant = "agentrepo-pub";
         await InsertSkillAsync(tenant, "bound-skill", currentRevision: 3);
 
-        var def = Def(bindings: new[] { "bound-skill" }); // allowed_tools 省略 → canonical []
+        const string rules =
+            """{"version":1,"rules":[{"id":"refund","onUnknown":[{"action":"deny"}],"priority":100,"then":[{"action":"require_approval","role":"ADMIN"}],"when":{"fact":"action.amount","op":"gt","value":5000}}]}""";
+        var def = Def(bindings: new[] { "bound-skill" }, businessRules: rules); // allowed_tools 省略 → canonical []
         var agent = await CreateValidatedAsync(tenant, "pub-slug", def);
 
         var result = await Repo.PublishAsync(
-            tenant, agent.Id, agent.DraftVersion, "publisher", default);
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "publisher", default);
 
         Assert.Equal(AgentWriteStatus.Success, result.Status);
         Assert.Equal(1, result.Revision);
@@ -146,6 +202,7 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         await using var conn = await _fx.DataSource!.OpenConnectionAsync();
         var row = await conn.QuerySingleAsync<RevRow>(
             "SELECT status AS Status, system_prompt AS SystemPrompt, allowed_tools::text AS AllowedTools,"
+            + " business_rules::text AS BusinessRules,"
             + " runtime_workflow_id AS RuntimeWorkflowId, runtime_workflow_revision AS RuntimeWorkflowRevision,"
             + " definition_sha256 AS DefinitionSha256"
             + " FROM agent_revision WHERE agent_id = @id AND revision = 1",
@@ -153,6 +210,9 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.Equal("published", row.Status);
         Assert.Equal("你是研究助手", row.SystemPrompt);
         Assert.Equal("[]", row.AllowedTools); // A-DATA-11:空集合 pin 進 revision,非全開
+        Assert.True(JsonNode.DeepEquals(
+            JsonNode.Parse(rules),
+            JsonNode.Parse(row.BusinessRules)));
         Assert.Equal(Guid.Parse(AgentDefaults.RuntimeWorkflowId), row.RuntimeWorkflowId);
         Assert.Equal(AgentDefaults.RuntimeWorkflowRevision, row.RuntimeWorkflowRevision);
         Assert.Equal(Sha(def), row.DefinitionSha256);
@@ -177,8 +237,28 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
 
         // 未 MarkValidated → draft_validated_version != draft_version → 拒絕。
         var result = await Repo.PublishAsync(
-            tenant, agent!.Id, agent.DraftVersion, "p", default);
+            tenant, agent!.Id, agent.DraftVersion, def, Sha(def), "p", default);
         Assert.Equal(AgentWriteStatus.VersionConflict, result.Status);
+    }
+
+    [SkippableFact]
+    public async Task Publish_ConcurrentSameVersion_AppendsExactlyOneRevision()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-concurrent-publish";
+        var def = Def();
+        var agent = await CreateValidatedAsync(tenant, "concurrent-publish", def);
+
+        var first = Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "publisher-1", default);
+        var second = Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "publisher-2", default);
+        var results = await Task.WhenAll(first, second);
+
+        Assert.Single(results, result => result.Status == AgentWriteStatus.Success);
+        Assert.Single(results, result => result.Status == AgentWriteStatus.VersionConflict);
+        var revision = Assert.Single(await Repo.ListRevisionsAsync(tenant, agent.Id, default));
+        Assert.Equal(1, revision.Revision);
     }
 
     [SkippableFact]
@@ -190,7 +270,7 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         var agent = await CreateValidatedAsync(tenant, "bad-workflow", def);
 
         var result = await Repo.PublishAsync(
-            tenant, agent.Id, agent.DraftVersion, "p", default);
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "p", default);
 
         Assert.Equal(AgentWriteStatus.InvalidReference, result.Status);
         Assert.Contains(result.Errors!, e => e.Field == "runtime_workflow");
@@ -218,7 +298,7 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         }
 
         var result = await Repo.PublishAsync(
-            tenant, agent.Id, agent.DraftVersion, "p", default);
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "p", default);
 
         Assert.Equal(AgentWriteStatus.InvalidReference, result.Status);
         Assert.Contains(result.Errors!, e =>
@@ -228,28 +308,49 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
     // ---- restore:原封複製快照 + bindings 成新 revision,不改寫歷史(A-DATA-06)----
 
     [SkippableFact]
-    public async Task Restore_CopiesSnapshotAndBindings_AsNewRevision()
+    public async Task Restore_UsesNewCanonicalDefinition_CopiesBindings_WithoutMutatingSource()
     {
         _fx.SkipIfUnavailable();
         const string tenant = "agentrepo-restore";
         await InsertSkillAsync(tenant, "restore-skill", currentRevision: 2);
 
-        var def1 = Def(prompt: "第一版", bindings: new[] { "restore-skill" });
+        const string originalRules =
+            """{"version":1,"rules":[{"id":"restore-rule","when":{"fact":"action.amount","op":"gt","value":5000},"then":[{"action":"deny"}]}]}""";
+        var def1 = Def(
+            prompt: "第一版",
+            bindings: new[] { "restore-skill" },
+            businessRules: originalRules);
         var agent = await CreateValidatedAsync(tenant, "restore-slug", def1);
         await Repo.PublishAsync(
-            tenant, agent.Id, agent.DraftVersion, "p", default); // revision 1
+            tenant, agent.Id, agent.DraftVersion, def1, Sha(def1), "p", default); // revision 1
 
         // 改 draft 到第二版(無 binding),驗證後發布 → revision 2。
         var def2 = Def(prompt: "第二版");
         var updated = await Repo.UpdateDraftAsync(
             tenant, agent.Id, agent.DraftVersion, "研究助手", "說明", def2, Sha(def2), default);
         Assert.Equal(AgentWriteStatus.Success, updated.Status);
-        await Repo.MarkValidatedAsync(tenant, agent.Id, updated.Agent!.DraftVersion, default);
+        await Repo.MarkValidatedAsync(
+            tenant, agent.Id, updated.Agent!.DraftVersion, def2, Sha(def2), default);
         await Repo.PublishAsync(
-            tenant, agent.Id, updated.Agent.DraftVersion, "p", default);
+            tenant, agent.Id, updated.Agent.DraftVersion, def2, Sha(def2), "p", default);
 
-        // rollback 到 revision 1 → 新 revision 3,快照(hash)與固定 binding 與 rev1 相同。
-        var restore = await Repo.RestoreAsync(tenant, agent.Id, 1, "p", default);
+        // 模擬目前 Workflow validator 為舊 AST 補上新的 canonical default。restore 必須把它寫進
+        // 新 revision，不能修改 source revision；pinned binding 仍要原封複製。
+        var sourceBefore = await Repo.GetRevisionDefinitionAsync(tenant, agent.Id, 1, default);
+        Assert.NotNull(sourceBefore);
+        using var currentRules = JsonDocument.Parse(
+            """{"version":1,"rules":[{"id":"restore-rule","when":{"fact":"action.amount","op":"gt","value":5000},"then":[{"action":"deny"}],"onUnknown":[{"action":"deny"}]}]}""");
+        var restoreDefinition = AgentCanonicalizer.WithBusinessRules(
+            sourceBefore!,
+            currentRules.RootElement);
+        var restore = await Repo.RestoreAsync(
+            tenant,
+            agent.Id,
+            1,
+            restoreDefinition!,
+            Sha(restoreDefinition!),
+            "p",
+            default);
         Assert.Equal(AgentWriteStatus.Success, restore.Status);
         Assert.Equal(3, restore.Revision);
 
@@ -261,8 +362,15 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
 
         var rev3 = revisions[0];
         var rev1 = revisions[2];
-        Assert.Equal(rev1.DefinitionSha256, rev3.DefinitionSha256); // 同一份快照(hash 相同)
-        Assert.Equal(Sha(def1), rev3.DefinitionSha256);
+        Assert.Equal(Sha(def1), rev1.DefinitionSha256);
+        Assert.Equal(Sha(restoreDefinition), rev3.DefinitionSha256);
+        Assert.NotEqual(rev1.DefinitionSha256, rev3.DefinitionSha256);
+        Assert.Equal(
+            sourceBefore,
+            await Repo.GetRevisionDefinitionAsync(tenant, agent.Id, 1, default));
+        Assert.Equal(
+            restoreDefinition,
+            await Repo.GetRevisionDefinitionAsync(tenant, agent.Id, 3, default));
         var pin = Assert.Single(rev3.SkillBindings);
         Assert.Equal("restore-skill", pin.Skill);
         Assert.Equal(2, pin.SkillRevision);
@@ -277,7 +385,8 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         const string tenant = "agentrepo-disable";
         var def = Def();
         var agent = await CreateValidatedAsync(tenant, "disable-slug", def);
-        await Repo.PublishAsync(tenant, agent.Id, agent.DraftVersion, "p", default);
+        await Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "p", default);
 
         Assert.True(await Repo.SetEnabledAsync(tenant, agent.Id, false, default));
         Assert.False((await Repo.GetAsync(tenant, agent.Id, default))!.Enabled);
@@ -299,7 +408,7 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.Equal(AgentWriteStatus.NotFound, draft.Status);
 
         var publish = await Repo.PublishAsync(
-            "agentrepo-iso-b", agent.Id, 1, "p", default);
+            "agentrepo-iso-b", agent.Id, 1, def, Sha(def), "p", default);
         Assert.Equal(AgentWriteStatus.NotFound, publish.Status);
     }
 
@@ -351,7 +460,7 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
     }
 
     private sealed record RevRow(
-        string Status, string SystemPrompt, string AllowedTools,
+        string Status, string SystemPrompt, string AllowedTools, string BusinessRules,
         Guid RuntimeWorkflowId, int RuntimeWorkflowRevision, string DefinitionSha256);
 
     private sealed record BindRow(int SkillRevision, string Name);

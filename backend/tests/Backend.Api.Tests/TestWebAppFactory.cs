@@ -54,6 +54,9 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
             services.RemoveAll<ISkillValidator>();
             services.AddSingleton<ISkillValidator, FakeSkillValidator>();
 
+            services.RemoveAll<IBusinessRuleValidator>();
+            services.AddSingleton<IBusinessRuleValidator, FakeBusinessRuleValidator>();
+
             // Agent Skill package 驗證同樣不打真 workflow;fake 依 expected_name 腳本化 valid/invalid/unreachable。
             services.RemoveAll<ISkillPackageValidator>();
             services.AddSingleton<ISkillPackageValidator, FakeSkillPackageValidator>();

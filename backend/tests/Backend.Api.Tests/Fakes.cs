@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Backend.Api.Agents;
 using Backend.Api.Common;
 using Backend.Api.Skills;
 
@@ -74,6 +77,193 @@ public sealed class FakeSkillValidator : ISkillValidator
             .Where(line => line.StartsWith(key + ":", StringComparison.Ordinal))
             .Select(line => line[(key.Length + 1)..].Trim())
             .FirstOrDefault(v => v.Length > 0);
+}
+
+/// <summary>
+/// Agent Business Rule validator fake。rule id=invalid-rule 回定位錯誤；engine-down 模擬 request-time
+/// dependency 失敗。所有呼叫都記錄 gate/identity，釘住 Agent validate/publish 皆用 pre-action。
+/// </summary>
+public sealed class FakeBusinessRuleValidator : IBusinessRuleValidator
+{
+    public sealed record Call(
+        string Gate,
+        JsonElement RuleSet,
+        BusinessRuleReferenceCatalog ReferenceCatalog,
+        string TenantId,
+        string? UserId,
+        string? Role);
+
+    public List<Call> Calls { get; } = new();
+    private int _invalidOnPublishCalls;
+    private int _invalidOnRestoreCalls;
+    private int _engineDownOnRestoreCalls;
+    private int _canonicalOnPublishCalls;
+    private int _canonicalOnRestoreCalls;
+    private ValidationRendezvous? _nextCalls;
+
+    public void CoordinateNextCalls(int participants)
+    {
+        if (participants < 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(participants));
+        }
+
+        if (Interlocked.CompareExchange(
+                ref _nextCalls, new ValidationRendezvous(participants), null) is not null)
+        {
+            throw new InvalidOperationException("A Business Rule validation rendezvous is already active.");
+        }
+    }
+
+    public Task<BusinessRuleValidationResult> ValidateAsync(
+        string gate,
+        JsonElement ruleSet,
+        BusinessRuleReferenceCatalog referenceCatalog,
+        string tenantId,
+        string? userId,
+        string? role,
+        CancellationToken ct)
+    {
+        lock (Calls)
+        {
+            Calls.Add(new Call(gate, ruleSet.Clone(), referenceCatalog, tenantId, userId, role));
+        }
+
+        var raw = ruleSet.GetRawText();
+        if (raw.Contains("\"engine-down\"", StringComparison.Ordinal))
+        {
+            throw new ApiException(502, "Business Rule 驗證服務呼叫失敗：連線被拒");
+        }
+
+        if (raw.Contains("\"invalid-rule\"", StringComparison.Ordinal))
+        {
+            return CompleteAsync(Invalid(), ct);
+        }
+
+        if (raw.Contains("\"invalid-on-publish\"", StringComparison.Ordinal)
+            && Interlocked.Increment(ref _invalidOnPublishCalls) > 1)
+        {
+            return CompleteAsync(Invalid(), ct);
+        }
+
+        if (raw.Contains("\"invalid-on-restore\"", StringComparison.Ordinal)
+            && Interlocked.Increment(ref _invalidOnRestoreCalls) > 2)
+        {
+            return CompleteAsync(Invalid(), ct);
+        }
+
+        if (raw.Contains("\"engine-down-on-restore\"", StringComparison.Ordinal)
+            && Interlocked.Increment(ref _engineDownOnRestoreCalls) > 2)
+        {
+            throw new ApiException(502, "Business Rule 驗證服務呼叫失敗：連線被拒");
+        }
+
+        if (raw.Contains("\"canonical-on-publish\"", StringComparison.Ordinal)
+            && Interlocked.Increment(ref _canonicalOnPublishCalls) > 1)
+        {
+            var canonical = JsonNode.Parse(raw)!.AsObject();
+            canonical["rules"]![0]!["onUnknown"] = new JsonArray(
+                new JsonObject { ["action"] = "deny" });
+            using var doc = JsonDocument.Parse(canonical.ToJsonString());
+            return CompleteAsync(new BusinessRuleValidationResult(
+                true,
+                doc.RootElement.Clone(),
+                Array.Empty<BusinessRuleValidationError>()), ct);
+        }
+
+        if (raw.Contains("\"canonical-on-restore\"", StringComparison.Ordinal)
+            && Interlocked.Increment(ref _canonicalOnRestoreCalls) > 2)
+        {
+            var canonical = JsonNode.Parse(raw)!.AsObject();
+            canonical["rules"]![0]!["onUnknown"] = new JsonArray(
+                new JsonObject { ["action"] = "deny" });
+            using var doc = JsonDocument.Parse(canonical.ToJsonString());
+            return CompleteAsync(new BusinessRuleValidationResult(
+                true,
+                doc.RootElement.Clone(),
+                Array.Empty<BusinessRuleValidationError>()), ct);
+        }
+
+        if (raw.Contains("\"needs-canonical-default\"", StringComparison.Ordinal))
+        {
+            var canonical = JsonNode.Parse(raw)!.AsObject();
+            canonical["rules"]![0]!["onUnknown"] = "deny";
+            using var doc = JsonDocument.Parse(canonical.ToJsonString());
+            return CompleteAsync(new BusinessRuleValidationResult(
+                true,
+                doc.RootElement.Clone(),
+                Array.Empty<BusinessRuleValidationError>()), ct);
+        }
+
+        return CompleteAsync(new BusinessRuleValidationResult(
+            true,
+            ruleSet.Clone(),
+            Array.Empty<BusinessRuleValidationError>()), ct);
+    }
+
+    private Task<BusinessRuleValidationResult> CompleteAsync(
+        BusinessRuleValidationResult result, CancellationToken ct)
+    {
+        var rendezvous = Volatile.Read(ref _nextCalls);
+        if (rendezvous is null)
+        {
+            return Task.FromResult(result);
+        }
+
+        if (rendezvous.Arrive())
+        {
+            Interlocked.CompareExchange(ref _nextCalls, null, rendezvous);
+        }
+
+        return AwaitReleaseAsync(rendezvous, result, ct);
+    }
+
+    private static async Task<BusinessRuleValidationResult> AwaitReleaseAsync(
+        ValidationRendezvous rendezvous,
+        BusinessRuleValidationResult result,
+        CancellationToken ct)
+    {
+        await rendezvous.Released.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        return result;
+    }
+
+    private static BusinessRuleValidationResult Invalid()
+        => new(
+            false,
+            null,
+            new[]
+            {
+                new BusinessRuleValidationError(
+                    "$.ruleSet.rules[0].when",
+                    "operator_type_mismatch",
+                    "number fact 不可使用 string operator"),
+            });
+
+    private sealed class ValidationRendezvous
+    {
+        private int _remaining;
+
+        public ValidationRendezvous(int participants) => _remaining = participants;
+
+        public TaskCompletionSource Released { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Arrive()
+        {
+            var remaining = Interlocked.Decrement(ref _remaining);
+            if (remaining < 0)
+            {
+                throw new InvalidOperationException("Too many validation calls reached the rendezvous.");
+            }
+            if (remaining != 0)
+            {
+                return false;
+            }
+
+            Released.TrySetResult();
+            return true;
+        }
+    }
 }
 
 /// <summary>

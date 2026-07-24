@@ -109,7 +109,13 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         }
     }
 
-    public Task<bool> MarkValidatedAsync(string tenantId, Guid id, long version, CancellationToken ct)
+    public Task<bool> MarkValidatedAsync(
+        string tenantId,
+        Guid id,
+        long version,
+        string canonicalDefinition,
+        string definitionSha256,
+        CancellationToken ct)
     {
         lock (_gate)
         {
@@ -119,6 +125,8 @@ public sealed class InMemoryAgentRepository : IAgentRepository
                 return Task.FromResult(false);
             }
 
+            entry.DraftDefinition = canonicalDefinition;
+            entry.DraftDefinitionSha256 = definitionSha256;
             entry.DraftValidatedVersion = version;
             entry.UpdatedAt = Now();
             return Task.FromResult(true);
@@ -136,7 +144,13 @@ public sealed class InMemoryAgentRepository : IAgentRepository
     }
 
     public Task<AgentPublishResult> PublishAsync(
-        string tenantId, Guid id, long expectedVersion, string createdBy, CancellationToken ct)
+        string tenantId,
+        Guid id,
+        long expectedVersion,
+        string canonicalDefinition,
+        string definitionSha256,
+        string createdBy,
+        CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -160,16 +174,20 @@ public sealed class InMemoryAgentRepository : IAgentRepository
                         AgentWriteStatus.VersionConflict, 0));
                 }
 
-                var resolution = ResolveReferencesUnsafe(tenantId, entry.DraftDefinition);
+                var resolution = ResolveReferencesUnsafe(tenantId, canonicalDefinition);
                 if (resolution.Errors.Count > 0)
                 {
                     return Task.FromResult(new AgentPublishResult(
                         AgentWriteStatus.InvalidReference, 0, resolution.Errors));
                 }
 
-                var (wfId, wfRev) = WorkflowRefOf(entry.DraftDefinition);
+                entry.DraftDefinition = canonicalDefinition;
+                entry.DraftDefinitionSha256 = definitionSha256;
+                entry.UpdatedAt = Now();
+
+                var (wfId, wfRev) = WorkflowRefOf(canonicalDefinition);
                 var revision = AppendRevisionUnsafe(
-                    entry, entry.DraftDefinition, entry.DraftDefinitionSha256, wfId, wfRev,
+                    entry, canonicalDefinition, definitionSha256, wfId, wfRev,
                     resolution.Bindings
                         .Select(b => new AgentRevisionSkillInfo(
                             b.SkillName, b.SkillRevision, b.Position, true))
@@ -194,9 +212,31 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         }
     }
 
-    public Task<AgentPublishResult> RestoreAsync(
-        string tenantId, Guid id, int revision, string createdBy, CancellationToken ct)
+    public Task<string?> GetRevisionDefinitionAsync(
+        string tenantId, Guid id, int revision, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var definition = Find(tenantId, id)?.Revisions
+                .FirstOrDefault(r => r.Revision == revision)?
+                .DefinitionSnapshot;
+            return Task.FromResult(definition is null
+                ? null
+                : AgentCanonicalizer.CanonicalizeDefinition(definition));
+        }
+    }
+
+    public Task<AgentPublishResult> RestoreAsync(
+        string tenantId,
+        Guid id,
+        int revision,
+        string canonicalDefinition,
+        string definitionSha256,
+        string createdBy,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
             var entry = Find(tenantId, id);
@@ -211,10 +251,12 @@ public sealed class InMemoryAgentRepository : IAgentRepository
                 return Task.FromResult(new AgentPublishResult(AgentWriteStatus.NotFound, 0));
             }
 
-            // 舊 revision 的快照(含固定 bindings)重新發布成新 revision — 歷史不動。
+            // 舊 revision 與 pinned bindings 保持不可變；新 revision 使用 Workflow 本次重新
+            // 驗證/正規化後的 definition/hash。
+            var (workflowId, workflowRevision) = WorkflowRefOf(canonicalDefinition);
             var newRevision = AppendRevisionUnsafe(
-                entry, target.DefinitionSnapshot, target.DefinitionSha256,
-                target.RuntimeWorkflowId, target.RuntimeWorkflowRevision,
+                entry, canonicalDefinition, definitionSha256,
+                workflowId, workflowRevision,
                 target.Bindings.Select(b => b with { }).ToList(),
                 createdBy);
             return Task.FromResult(new AgentPublishResult(AgentWriteStatus.Success, newRevision));

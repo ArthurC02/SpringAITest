@@ -189,6 +189,7 @@ public sealed class FakeWorkflowService : IWorkflowService
 
     /// <summary>記錄引擎端的呼叫,用來斷言「catalog 走引擎、不走 backend CRUD」。</summary>
     public static readonly List<string> EngineCalls = new();
+    public static UserContext? LastRuleContext { get; private set; }
 
     /// <summary>
     /// 補 G5(copilot-shared-core 04-acceptance-test.md §4.4):IWorkflowService 在 DI 是 Scoped,
@@ -264,6 +265,40 @@ public sealed class FakeWorkflowService : IWorkflowService
         EngineCalls.Add("tools");
         return Task.FromResult(Json(
             """[{"name":"backend.retrieval_search","kind":"http","description":"在目前租戶已授權的知識庫中進行向量檢索","risk":"read","returns":"list[chunk]"}]"""));
+    }
+
+    public Task<JsonElement> GetBusinessRuleFactsAsync(UserContext ctx, CancellationToken ct = default)
+    {
+        EngineCalls.Add("rule-facts");
+        LastRuleContext = ctx;
+        return Task.FromResult(Json(
+            """{"version":1,"gates":["pre-action"],"limits":{"maxDepth":8},"operators":[{"name":"gt"}],"facts":[{"name":"action.amount","type":"decimal","provenance":"system","trustTier":"trusted","gates":["pre-action"]}]}"""));
+    }
+
+    public Task<JsonElement> GetBusinessRuleActionsAsync(UserContext ctx, CancellationToken ct = default)
+    {
+        EngineCalls.Add("rule-actions");
+        LastRuleContext = ctx;
+        return Task.FromResult(Json(
+            """{"version":1,"gates":["pre-action"],"limits":{"maxDepth":8},"actions":[{"name":"deny","precedence":100},{"name":"require_approval","precedence":90}]}"""));
+    }
+
+    public Task<JsonElement> ValidateBusinessRulesAsync(
+        BusinessRuleValidateRequest request, UserContext ctx, CancellationToken ct = default)
+    {
+        EngineCalls.Add("rule-validate:" + request.Gate);
+        LastRuleContext = ctx;
+        return Task.FromResult(Json(
+            """{"valid":true,"canonicalRuleSet":{"version":1,"rules":[]},"errors":[]}"""));
+    }
+
+    public Task<JsonElement> SimulateBusinessRulesAsync(
+        BusinessRuleSimulateRequest request, UserContext ctx, CancellationToken ct = default)
+    {
+        EngineCalls.Add("rule-simulate:" + request.Gate);
+        LastRuleContext = ctx;
+        return Task.FromResult(Json(
+            """{"valid":true,"canonicalRuleSet":{"version":1,"rules":[]},"errors":[],"simulation":{"decision":"allow","matchedRules":[],"trace":[]}}"""));
     }
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();

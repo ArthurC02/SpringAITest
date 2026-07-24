@@ -1542,3 +1542,188 @@ cpk-thread-inspector {
   color: var(--text-h);
   font-size: 13px;
 }
+
+/* ── Business Rules 公式編輯器（D2）────────────────────────────────────── */
+.business-rules__head,
+.business-rules__actions,
+.rule-card__head,
+.rule-condition__toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.business-rules__head > label {
+  min-width: min(240px, 100%);
+}
+.business-rules__head label > span,
+.rule-card label > span,
+.rule-action label > span,
+.rule-simulator__facts label > span,
+.rule-condition__row label > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+  font-size: 12px;
+}
+.rule-templates {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 14px;
+}
+.rule-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.rule-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--bg);
+}
+.rule-card h5 {
+  margin: 14px 0 6px;
+}
+.rule-card__identity {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(180px, 2fr) minmax(180px, 1fr) minmax(90px, 0.5fr);
+  gap: 8px;
+}
+.rule-condition {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--code-bg);
+}
+.rule-condition--group {
+  margin: 0;
+}
+.rule-condition legend {
+  padding: 0 6px;
+  color: var(--text-h);
+  font-size: 13px;
+  font-weight: 600;
+}
+.rule-condition__kind {
+  width: auto;
+}
+.rule-condition__row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.3fr) minmax(140px, 0.8fr) minmax(180px, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+.rule-condition__children,
+.rule-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.rule-condition__meta {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+.rule-value-pair {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rule-action {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  align-items: end;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+.rule-action > .btn {
+  justify-self: end;
+}
+.rule-summary {
+  margin: 14px 0 0;
+  border-left: 3px solid var(--accent);
+  padding: 8px 10px;
+  background: var(--code-bg);
+  font-size: 13px;
+}
+.business-rules__actions {
+  justify-content: flex-start;
+  margin: 12px 0;
+}
+.rule-validation-list code {
+  overflow-wrap: anywhere;
+}
+.rule-advanced,
+.rule-simulator {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.rule-advanced > summary,
+.rule-simulator > summary {
+  cursor: pointer;
+  color: var(--text-h);
+  font-weight: 600;
+}
+.rule-advanced pre,
+.rule-simulator pre {
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--code-bg);
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.rule-simulator__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+.rule-simulator__fact {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.rule-simulation-result {
+  margin-top: 10px;
+  border: 1px solid var(--success);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--success);
+}
+.rule-simulation-result dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.rule-simulation-result dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .rule-card__identity,
+  .rule-condition__row {
+    grid-template-columns: 1fr;
+  }
+  .rule-value-pair {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

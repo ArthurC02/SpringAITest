@@ -26,6 +26,15 @@ public sealed class WorkflowBadInputException : Exception
 }
 
 /// <summary>
+/// The caller-controlled Business Rule payload exceeded Workflow's bounded body/depth limits.
+/// This remains HTTP 413 at the public boundary rather than being misclassified as an outage.
+/// </summary>
+public sealed class WorkflowPayloadTooLargeException : Exception
+{
+    public WorkflowPayloadTooLargeException(string message) : base(message) { }
+}
+
+/// <summary>
 /// 呼叫下游工作流/文件服務失敗(5xx、網路錯誤、逾時、回應無法解析等)。
 /// 全域處理對應 HTTP 502。文件服務的失敗也復用此例外(僅訊息前綴不同)。
 /// </summary>

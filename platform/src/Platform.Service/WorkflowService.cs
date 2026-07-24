@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -75,6 +76,83 @@ public sealed class WorkflowService : IWorkflowService
 
     public Task<JsonElement> GetToolCatalogAsync(UserContext ctx, CancellationToken ct = default)
         => GetCatalogAsync("/tools", ctx, ct);
+
+    public Task<JsonElement> GetBusinessRuleFactsAsync(UserContext ctx, CancellationToken ct = default)
+        => GetBusinessRuleCatalogPartAsync("facts", ctx, ct);
+
+    public Task<JsonElement> GetBusinessRuleActionsAsync(UserContext ctx, CancellationToken ct = default)
+        => GetBusinessRuleCatalogPartAsync("actions", ctx, ct);
+
+    public Task<JsonElement> ValidateBusinessRulesAsync(
+        BusinessRuleValidateRequest request, UserContext ctx, CancellationToken ct = default)
+        => PostBusinessRulesAsync(
+            "/business-rules/validate",
+            new { gate = request.Gate, ruleSet = request.RuleSet },
+            ctx,
+            ct);
+
+    public Task<JsonElement> SimulateBusinessRulesAsync(
+        BusinessRuleSimulateRequest request, UserContext ctx, CancellationToken ct = default)
+        => PostBusinessRulesAsync(
+            "/business-rules/simulate",
+            new { gate = request.Gate, ruleSet = request.RuleSet, facts = request.Facts },
+            ctx,
+            ct);
+
+    private async Task<JsonElement> GetBusinessRuleCatalogPartAsync(
+        string property, UserContext ctx, CancellationToken ct)
+    {
+        var catalog = await GetCatalogAsync("/business-rules/catalog", ctx, ct);
+        if (catalog.ValueKind != JsonValueKind.Object
+            || !catalog.TryGetProperty(property, out var part)
+            || part.ValueKind != JsonValueKind.Array)
+        {
+            throw new WorkflowInvocationException(
+                FailurePrefix + $"Business Rule catalog 缺少 {property} 陣列");
+        }
+
+        // Public API has separate facts/actions routes, while Workflow owns one versioned catalog envelope.
+        // Remove only the opposite collection and preserve version/gates/limits/operators plus additive future
+        // metadata so the UI never needs to hardcode engine capabilities.
+        var opposite = property == "facts" ? "actions" : "facts";
+        var split = new JsonObject();
+        foreach (var item in catalog.EnumerateObject())
+        {
+            if (!string.Equals(item.Name, opposite, StringComparison.Ordinal))
+            {
+                split[item.Name] = JsonNode.Parse(item.Value.GetRawText());
+            }
+        }
+
+        using var document = JsonDocument.Parse(split.ToJsonString());
+        return document.RootElement.Clone();
+    }
+
+    /// <summary>
+    /// Rule validate/simulate 的正常結果(包含 valid=false)原樣穿透。Pydantic request 422 映射成乾淨
+    /// 的對外 400；其他 HTTP/傳輸/壞 JSON 錯誤收斂成 502，不洩漏 Workflow body。
+    /// </summary>
+    private async Task<JsonElement> PostBusinessRulesAsync(
+        string path, object body, UserContext ctx, CancellationToken ct)
+    {
+        using var req = BuildRequest(HttpMethod.Post, BaseUrl + path, ctx, body);
+        using var resp = await SendAsync(req, FailurePrefix, ct);
+        if ((int)resp.StatusCode == 413)
+        {
+            throw new WorkflowPayloadTooLargeException(
+                "Business Rule request exceeds the allowed size or nesting depth");
+        }
+        if (resp.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
+        {
+            throw await MapBadInputAsync("Business Rule", resp, ct);
+        }
+        if (!resp.IsSuccessStatusCode)
+        {
+            throw new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
+        }
+
+        return await ReadJsonAsync(resp, ct);
+    }
 
     /// <summary>目錄類 GET:任何失敗(含 4xx/5xx)都當成呼叫失敗。</summary>
     private async Task<JsonElement> GetCatalogAsync(string path, UserContext ctx, CancellationToken ct)

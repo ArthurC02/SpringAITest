@@ -4,9 +4,10 @@ using System.Text.Json.Nodes;
 namespace Backend.Api.Agents;
 
 /// <summary>
-/// Agent 定義的 canonicalize 與(D1 最小)驗證。所有集合欄位缺席/null/空 → 明確空陣列
-/// (fail closed,禁止 null=unrestricted,02-spec §2.1/§7.2);business_rules 本期一律存 canonical
-/// 空 AST(忽略輸入,D2 才引入 rule 編輯);key 以固定順序輸出 → canonical 文字可重現、可雜湊。
+/// Agent 定義的 canonicalize 與最小結構驗證。所有集合欄位缺席/null/空 → 明確空陣列
+/// (fail closed,禁止 null=unrestricted,02-spec §2.1/§7.2);business_rules 保留呼叫端 AST，
+/// 並和其他 JSON 欄位一樣遞迴排序 object key；完整 Rule AST 語意仍只由 Workflow 驗證。
+/// key 以固定順序輸出 → canonical 文字可重現、可雜湊。
 /// name/description/slug 是 agent 欄位而非定義內容,不入 canonical 定義。
 /// </summary>
 public static class AgentCanonicalizer
@@ -27,12 +28,12 @@ public static class AgentCanonicalizer
             ["allowed_tools"] = ToSetArray(req.AllowedTools),
             ["skill_bindings"] = ToBindings(req.SkillBindings),
             ["knowledge_sources"] = ToSetArray(req.KnowledgeSources),
-            // 本期固定 canonical 空 AST(忽略 req.BusinessRules)。
-            ["business_rules"] = JsonNode.Parse(AgentDefaults.EmptyBusinessRules),
+            ["business_rules"] = CanonicalizeNode(ToNode(req.BusinessRules))
+                                 ?? JsonNode.Parse(AgentDefaults.EmptyBusinessRules),
             ["runtime_limits"] = ToLimits(req.RuntimeLimits),
             ["runtime_workflow"] = ToWorkflow(req.RuntimeWorkflow),
         };
-        return obj.ToJsonString();
+        return CanonicalizeDefinition(obj.ToJsonString());
     }
 
     /// <summary>由 canonical 定義取出已固定(去重、依序)的 skill binding 名稱清單(供 publish 解析為 revision)。</summary>
@@ -57,6 +58,22 @@ public static class AgentCanonicalizer
         return result;
     }
 
+    /// <summary>Read the canonical Agent direct-tool allowlist used to constrain Rule action references.</summary>
+    public static IReadOnlyList<string> AllowedToolsOf(string canonicalDefinition)
+    {
+        var node = JsonNode.Parse(canonicalDefinition)?["allowed_tools"]?.AsArray();
+        if (node is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        return node
+            .Select(item => item?.GetValue<string>())
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Select(item => item!)
+            .ToList();
+    }
+
     /// <summary>由 canonical definition 取出 pinned Agent-Runtime Workflow reference。</summary>
     public static AgentWorkflowRef WorkflowOf(string canonicalDefinition)
     {
@@ -65,6 +82,26 @@ public static class AgentCanonicalizer
             node?["id"]?.GetValue<string>(),
             node?["revision"]?.GetValue<int>() ?? 0);
     }
+
+    /// <summary>
+    /// 將 Workflow 驗證器回傳的 canonicalRuleSet 寫回完整 Agent definition。Backend 不解讀 AST，
+    /// 只保存引擎正規化結果，讓後續 hash/publish/restore 都以同一份 canonical bytes 為準。
+    /// </summary>
+    public static string WithBusinessRules(string canonicalDefinition, JsonElement canonicalRuleSet)
+    {
+        var definition = JsonNode.Parse(canonicalDefinition)!.AsObject();
+        definition["business_rules"] = CanonicalizeNode(ToNode(canonicalRuleSet))
+                                       ?? JsonNode.Parse(AgentDefaults.EmptyBusinessRules);
+        return CanonicalizeDefinition(definition.ToJsonString());
+    }
+
+    /// <summary>
+    /// 對完整 definition 遞迴排序 object key。Dapper 從 jsonb::text 讀回時不保證保留 C# 的
+    /// insertion order；所有會進 hash 的 bytes 都必須先經此處，才能和 in-memory provider 一致。
+    /// Array 順序保留，因為 rules、bindings 等陣列順序具有語意。
+    /// </summary>
+    public static string CanonicalizeDefinition(string definition)
+        => CanonicalizeNode(JsonNode.Parse(definition))!.ToJsonString();
 
     /// <summary>D1 最小驗證:system_prompt 非空、execution_roles 非空且皆屬 {worker,verifier}、runtime_workflow.id 為合法 uuid。</summary>
     public static IReadOnlyList<AgentValidationError> Validate(string canonicalDefinition)

@@ -33,8 +33,18 @@ public interface IAgentRepository
         string tenantId, Guid id, long expectedVersion, string name, string description,
         string canonicalDefinition, string definitionSha256, CancellationToken ct);
 
-    /// <summary>把「version 這個 draft 已驗證」記下(僅當 draft_version 仍==version);draft 之後再改會清空它。</summary>
-    Task<bool> MarkValidatedAsync(string tenantId, Guid id, long version, CancellationToken ct);
+    /// <summary>
+    /// 原子保存 Workflow 正規化後的 canonical definition/hash，並把「version 這個 draft 已驗證」記下。
+    /// 僅當 draft_version 仍==version 才成功；不增加 version，因為 canonicalization 是同一份使用者
+    /// draft 的確定性表示，不是另一筆 author edit。draft 之後再改仍會清空 validated version。
+    /// </summary>
+    Task<bool> MarkValidatedAsync(
+        string tenantId,
+        Guid id,
+        long version,
+        string canonicalDefinition,
+        string definitionSha256,
+        CancellationToken ct);
 
     /// <summary>
     /// 驗證 draft 的外部 references：Workflow 必須為 tenant/system 可見、enabled、agent-runtime 且
@@ -46,19 +56,41 @@ public interface IAgentRepository
 
     /// <summary>
     /// 發布:同一交易確認 draft_version==expectedVersion 且 draft_validated_version==expectedVersion,
-    /// 建立不可變 revision(status=published,舊 published → superseded),固定 skill bindings 與 definition hash。
+    /// 寫入 Workflow 本次重新驗證的 canonical definition/hash，建立不可變 revision
+    /// (status=published,舊 published → superseded)，並消耗 validated version。
     /// 版本不符或未驗證 → VersionConflict(不發布未驗證/漂移的內容,A-DATA-09)。
     /// </summary>
     Task<AgentPublishResult> PublishAsync(
-        string tenantId, Guid id, long expectedVersion, string createdBy, CancellationToken ct);
+        string tenantId,
+        Guid id,
+        long expectedVersion,
+        string canonicalDefinition,
+        string definitionSha256,
+        string createdBy,
+        CancellationToken ct);
 
     Task<IReadOnlyList<AgentRevisionInfo>> ListRevisionsAsync(string tenantId, Guid id, CancellationToken ct);
 
     /// <summary>
-    /// rollback:把指定舊 revision 的快照(含固定的 skill bindings)重新發布為一個**新** revision,
-    /// 不改寫歷史(A-DATA-06)。舊 published → superseded。Agent 或 revision 不存在 → NotFound。
+    /// 取回指定 immutable revision 的完整 canonical definition（含由 pinned rows 重建的 skill_bindings）。
+    /// restore 在建立新 revision 前用它呼叫 Workflow Rule validator；不存在或跨租戶回 null。
     /// </summary>
-    Task<AgentPublishResult> RestoreAsync(string tenantId, Guid id, int revision, string createdBy, CancellationToken ct);
+    Task<string?> GetRevisionDefinitionAsync(
+        string tenantId, Guid id, int revision, CancellationToken ct);
+
+    /// <summary>
+    /// rollback:用 Workflow 重新驗證/正規化後的 definition 建立一個**新** revision，並原封複製
+    /// 指定舊 revision 的 pinned skill bindings；不改寫歷史(A-DATA-06)。舊 published → superseded。
+    /// Agent 或 revision 不存在 → NotFound。
+    /// </summary>
+    Task<AgentPublishResult> RestoreAsync(
+        string tenantId,
+        Guid id,
+        int revision,
+        string canonicalDefinition,
+        string definitionSha256,
+        string createdBy,
+        CancellationToken ct);
 
     /// <summary>軟停用/啟用;不存在(含跨租戶)回 false。</summary>
     Task<bool> SetEnabledAsync(string tenantId, Guid id, bool enabled, CancellationToken ct);

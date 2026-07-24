@@ -34,6 +34,7 @@ import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useConfirm } from './ConfirmDialog'
 import { runWithToast, useToast } from './Toast'
+import BusinessRuleEditor from './BusinessRuleEditor'
 
 interface Props {
   /** null = 建立模式；有值 = 編輯既有 Agent。 */
@@ -212,7 +213,7 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
 
   const fetchAgent = useCallback(
     async (spinner: boolean) => {
-      if (!agentId) return
+      if (!agentId) return false
       if (spinner) setLoading(true)
       setLoadError(null)
       try {
@@ -233,8 +234,10 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
         setValidation(null)
         setValidatedVersion(null)
         setConflict(false)
+        return true
       } catch (e) {
         setLoadError((e as Error).message)
+        return false
       } finally {
         if (spinner) setLoading(false)
       }
@@ -356,6 +359,7 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
     hasConcurrencyToken &&
     validatedForCurrent &&
     validation?.valid === true &&
+    !loadError &&
     !hasInvalidBinding &&
     !hasUnverifiedBindings &&
     missingTools.length === 0 &&
@@ -404,6 +408,10 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
     setBusy(true)
     try {
       const v = await validateAgent(agentId, etag)
+      if (!(await fetchAgent(false))) {
+        toast('規則已在伺服器驗證，但無法重載 canonical 草稿；請重新整理後再發布。', 'error')
+        return
+      }
       setValidation(v)
       setValidatedVersion(draftVersion)
       toast(v.valid ? '驗證通過' : '驗證發現問題,請依欄位提示修正。', v.valid ? 'success' : 'error')
@@ -859,6 +867,12 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
               </span>
             )}
           </section>
+
+          <BusinessRuleEditor
+            value={form.business_rules}
+            disabled={locked}
+            onChange={(business_rules) => patch({ business_rules })}
+          />
 
           {/* ── Runtime limits / Harness pin ── */}
           <section className="agent-block">

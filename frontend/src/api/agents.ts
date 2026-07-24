@@ -6,6 +6,13 @@ import type {
   AgentSummary,
   AgentToolCatalogEntry,
   AgentValidation,
+  AgentBusinessRules,
+  RuleActionCatalogEntry,
+  RuleCatalogEnvelope,
+  RuleFactCatalogEntry,
+  RuleGate,
+  RuleSimulationResult,
+  RuleValidationResult,
 } from '../types'
 
 /** GET /api/features（camelCase）。false 或請求失敗 → 呼叫端 fail-closed 隱藏 Agents 入口。 */
@@ -20,6 +27,43 @@ export function getFeatures(): Promise<FeatureFlags> {
 /** 安全的 Tool 作者目錄；server 不回傳 endpoint/token。失敗由 UI fail-closed 顯示空清單。 */
 export function listAgentToolCatalog(): Promise<AgentToolCatalogEntry[]> {
   return apiFetch<AgentToolCatalogEntry[]>('/api/tools')
+}
+
+export type RuleFactCatalogResponse =
+  | RuleFactCatalogEntry[]
+  | RuleCatalogEnvelope<RuleFactCatalogEntry>
+
+export type RuleActionCatalogResponse =
+  | RuleActionCatalogEntry[]
+  | RuleCatalogEnvelope<RuleActionCatalogEntry>
+
+export function listRuleFacts(): Promise<RuleFactCatalogResponse> {
+  return apiFetch<RuleFactCatalogResponse>('/api/agents/catalog/rule-facts')
+}
+
+export function listRuleActions(): Promise<RuleActionCatalogResponse> {
+  return apiFetch<RuleActionCatalogResponse>('/api/agents/catalog/rule-actions')
+}
+
+export function validateBusinessRules(
+  gate: RuleGate,
+  ruleSet: AgentBusinessRules,
+): Promise<RuleValidationResult> {
+  return apiFetch<RuleValidationResult>('/api/agents/rules/validate', {
+    method: 'POST',
+    body: JSON.stringify({ gate, ruleSet }),
+  })
+}
+
+export function simulateBusinessRules(
+  gate: RuleGate,
+  ruleSet: AgentBusinessRules,
+  facts: Record<string, unknown>,
+): Promise<RuleSimulationResult> {
+  return apiFetch<RuleSimulationResult>('/api/agents/rules/simulate', {
+    method: 'POST',
+    body: JSON.stringify({ gate, ruleSet, facts }),
+  })
 }
 
 export function listAgents(): Promise<AgentSummary[]> {

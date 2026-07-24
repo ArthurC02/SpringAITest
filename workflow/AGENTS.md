@@ -32,6 +32,29 @@ New Skill Engine endpoints (all require `X-Internal-Token` and identity headers)
 - `POST /skills/validate` — validate a Skill YAML definition (syntax + schema check).
 - `POST /skills/{name}/invoke` — execute a skill, return `{skill, output}`.
 
+Business Rule runtime endpoints (internal .NET integration contract; all require
+`X-Internal-Token` plus identity headers):
+
+- `GET /business-rules/catalog` — versioned fact/operator/action metadata,
+  supported gates, and resource limits. The request gate is context and is not
+  persisted in the RuleSet AST.
+- `POST /business-rules/validate` — body `{gate, ruleSet}`; always returns
+  `{valid, canonicalRuleSet, errors:[{path,code,message}]}` for semantic
+  validation. A valid empty AST still returns
+  `canonicalRuleSet: {version:1,rules:[]}`. Callers may add an optional
+  `referenceCatalog: {skills?,tools?,roles?,facts?}`; omitted categories preserve
+  backward compatibility, while present categories make action references
+  fail closed against that allowlist.
+- `POST /business-rules/simulate` — body `{gate, ruleSet, facts}`; validates and
+  canonicalizes first, then invokes the same pure evaluator used at runtime.
+  It never calls tools, network, files, or databases.
+
+Business Rule POST bodies are capped at the catalog's `maxRequestBytes` and
+`maxJsonDepth` before JSON decoding. Validation also bounds object fields,
+reported errors, nodes, strings, and collections. The evaluator independently
+rechecks fact availability at the requested gate; unavailable facts become
+`unknown` and follow the rule's explicit fail-closed policy.
+
 ## Gotchas
 
 - **Skill engine + node registry** — nodes are first-class citizens via `@node` decorators; skills are declarative YAML compiled to LangGraph graphs at load/invoke time. Custom skills are fetched from backend and merged with built-ins. There is no separate named-workflow mechanism any more (the retired `app/workflows/` directory and the `/workflows` API contained hand-written graphs that have been superseded by declarative Skill YAML equivalents); every workflow is now a Skill.
@@ -39,7 +62,7 @@ New Skill Engine endpoints (all require `X-Internal-Token` and identity headers)
 - LLM goes through LiteLLM (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` envs; `mock-gpt` for keyless testing). Langfuse LangChain callback is toggled by `LANGFUSE_ENABLED`.
 - `langfuse.langchain.CallbackHandler` imports `langchain` internally — the full `langchain` package is required, `langchain-core` alone is not enough (already pinned in `pyproject.toml`).
 - Host port is `:8001` (container `:8000`) because mem0 occupies host `:8000`.
-- Test suite: 665 pytest tests.
+- Test suite: 702 pytest tests.
 - **Backend HTTP client:** shared `httpx.AsyncClient` singleton (module-level `_client`, lifespan-managed) for all backend callables (`app/backend_http.py`) — avoids per-call TCP/TLS overhead. `get_client()` returns the singleton (lazy-creates if needed), and `aclose_client()` closes it at shutdown; tests using `TestClient` fall back to lazy creation.
 - **invoke input filtering:** `_clean_skill_input()` strips ENGINE_KEYS (`fatal_error`, `trace`, `errors`) plus RESERVED_KEYS (identity/immutable/seed) and `__` prefixed keys from the invoke input before building the skill state — prevents callers from injecting forged error frames or bypassing fatal-error short-circuit. Invoke then seeds `tenant_id`/`user_id`/`role` into the state from the caller's real identity headers (the only trusted injection point — ToolContext reads them from state).
 - **Script authoring gate (validate-time only):** `POST /skills/validate` passes the caller's role as `author_role`; a non-ADMIN author submitting a definition with script steps gets a `forbidden_script` validation error. `custom.load` and invoke call `validate_source` without `author_role` (gate off) — existing USER+script skills in the DB keep loading and running; `required_role` (who may *invoke*) is untouched.

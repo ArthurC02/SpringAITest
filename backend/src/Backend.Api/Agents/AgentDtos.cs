@@ -8,7 +8,8 @@ namespace Backend.Api.Agents;
 // 集合欄位缺席/null/空一律 canonicalize 成空集合(fail closed,禁止 null=unrestricted,02-spec §2.1/§7.2)。
 
 /// <summary>建立/更新 draft 的請求 body。POST 用 slug + name + 定義欄位;PUT draft 忽略 slug(slug 不可改)。
-/// 集合欄位可空(缺席/null)→ canonicalize 成空陣列。business_rules 本期一律存 canonical 空 AST(忽略輸入)。</summary>
+/// 集合欄位可空(缺席/null)→ canonicalize 成空陣列。business_rules 缺席/null → canonical 空 AST，
+/// 非空 AST 保留並遞迴 canonicalize；語意驗證由 Workflow 擁有。</summary>
 public sealed record AgentUpsert(
     [property: JsonPropertyName("slug")] string? Slug,
     [property: JsonPropertyName("name")] string? Name,
@@ -128,7 +129,9 @@ public sealed record AgentValidationResponse(
 
 public sealed record AgentValidationError(
     [property: JsonPropertyName("field")] string Field,
-    [property: JsonPropertyName("message")] string Message);
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("code")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Code = null);
 
 /// <summary>publish/restore 寫入結果狀態。</summary>
 public enum AgentWriteStatus

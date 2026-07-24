@@ -1,10 +1,28 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app import backend_http, skills, tracing
+from app.business_rules.catalog import catalog_response as business_rule_catalog
+from app.business_rules.http_limits import BusinessRuleRequestLimitMiddleware
+from app.business_rules.models import (
+    RuleCatalogResponse,
+    RuleSimulationRequest,
+    RuleSimulationResponse,
+    RuleValidationRequest,
+    RuleValidationResponse,
+)
+from app.business_rules.simulator import simulate as simulate_business_rules
+from app.business_rules.validator import (
+    canonical_to_json as canonical_business_rule_set,
+    validate_simulation_facts,
+    validate_rule_set,
+)
 from app.engine import compiler, node_registry, package, tool_registry
 from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
 from app.engine.skill import ValidationResult, validate_source
@@ -166,6 +184,29 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
+app.add_middleware(BusinessRuleRequestLimitMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def bounded_business_rule_request_error(
+    request: Request, exc: RequestValidationError
+):
+    """Do not reflect unbounded Pydantic errors or attacker-controlled inputs."""
+    if request.url.path not in {
+        "/business-rules/validate",
+        "/business-rules/simulate",
+    }:
+        return await request_validation_exception_handler(request, exc)
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "error": "business_rule_request_invalid",
+                "message": "Business Rule request body is invalid.",
+                "field_errors": {"request": "Check the request schema and types."},
+            }
+        },
+    )
 
 
 @app.get("/health")
@@ -203,6 +244,90 @@ async def list_tools(ctx: RequestContext = Depends(get_context)) -> list[ToolInf
         )
         for spec in tool_registry.all_specs()
     ]
+
+
+@app.get("/business-rules/catalog", response_model=RuleCatalogResponse)
+async def get_business_rule_catalog(
+    ctx: RequestContext = Depends(get_context),
+) -> RuleCatalogResponse:
+    """Business Rule editor catalog.
+
+    This internal route is the sole source of fact/operator/action semantics for
+    .NET and the frontend.  The request gate is deliberately not persisted in a
+    RuleSet; consumers pass it to validate/simulate for the intended policy gate.
+    """
+    return RuleCatalogResponse.model_validate(business_rule_catalog())
+
+
+@app.post(
+    "/business-rules/validate",
+    response_model=RuleValidationResponse,
+)
+async def validate_business_rules(
+    req: RuleValidationRequest,
+    ctx: RequestContext = Depends(get_context),
+) -> RuleValidationResponse:
+    """Validate and canonicalize a RuleSet without evaluating or persisting it."""
+    outcome = validate_rule_set(
+        req.gate,
+        req.rule_set,
+        (
+            req.reference_catalog.model_dump()
+            if req.reference_catalog is not None
+            else None
+        ),
+    )
+    return RuleValidationResponse(
+        valid=outcome.valid,
+        canonicalRuleSet=(
+            canonical_business_rule_set(outcome.canonical_rule_set)
+            if outcome.canonical_rule_set is not None
+            else None
+        ),
+        errors=list(outcome.errors),
+    )
+
+
+@app.post(
+    "/business-rules/simulate",
+    response_model=RuleSimulationResponse,
+)
+async def simulate_business_rule_set(
+    req: RuleSimulationRequest,
+    ctx: RequestContext = Depends(get_context),
+) -> RuleSimulationResponse:
+    """Dry-run using the exact production evaluator.
+
+    The simulator has no adapter or dependency injection hook through which it
+    could reach a tool, network, file, or database.
+    """
+    outcome = validate_rule_set(
+        req.gate,
+        req.rule_set,
+        (
+            req.reference_catalog.model_dump()
+            if req.reference_catalog is not None
+            else None
+        ),
+    )
+    if outcome.canonical_rule_set is None:
+        return RuleSimulationResponse(valid=False, errors=list(outcome.errors))
+    canonical = canonical_business_rule_set(outcome.canonical_rule_set)
+    fact_errors = validate_simulation_facts(req.facts)
+    if fact_errors:
+        return RuleSimulationResponse(
+            valid=False,
+            canonicalRuleSet=canonical,
+            errors=list(fact_errors),
+        )
+    return RuleSimulationResponse(
+        valid=True,
+        canonicalRuleSet=canonical,
+        errors=[],
+        simulation=simulate_business_rules(
+            req.gate, outcome.canonical_rule_set, req.facts
+        ),
+    )
 
 
 @app.get("/skills", response_model=list[SkillInfo])

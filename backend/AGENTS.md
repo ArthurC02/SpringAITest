@@ -4,7 +4,7 @@ Area-specific guidance. Cross-service contracts (X-Internal-Token + identity hea
 
 ## Layout
 
-Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config, Skills, **Agents** — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM; in lite mode can switch to in-memory repositories (singleton per-request snapshots, no persistence across restarts). `Common/ApiErrors.cs` is the centralized 404 message factory for consistency across endpoints. Tests in `tests/Backend.Api.Tests` (xUnit, 326 tests, hand-written fakes, in-memory fixtures).
+Solution `Backend.sln`, single project `src/Backend.Api` organized by feature folders — Auth, Conversations, Files, Retrieval, Analysis, Config, Skills, **Agents** — with no layered dependencies. Data access is Dapper 2.x + Npgsql 9.x directly against appdb (PostgreSQL with pgvector), no ORM; in lite mode can switch to in-memory repositories (singleton per-request snapshots, no persistence across restarts). `Common/ApiErrors.cs` is the centralized 404 message factory for consistency across endpoints. Tests in `tests/Backend.Api.Tests` (xUnit, 349 discovered tests: 304 pass without PostgreSQL and 45 DB-dependent tests skip; hand-written fakes, in-memory fixtures).
 
 ## Commands (run from `backend/`)
 

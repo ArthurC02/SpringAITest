@@ -10,6 +10,7 @@ namespace Platform.Web.Tests;
 /// (c) backend 的狀態碼、body 與 ETag/If-Match 原樣穿透(含 409/428/404)。
 /// backend 代理的身分 header/If-Match 轉發細節由 AgentServiceTests 以 stub handler 驗(此處下游是 fake service)。
 /// </summary>
+[Collection("EngineCalls")]
 public sealed class AgentApiTests : IDisposable
 {
     private const string ExistingId = FakeAgentService.ExistingIdText;
@@ -347,5 +348,96 @@ public sealed class AgentApiTests : IDisposable
 
         var deactivate = await client.DeleteAsync(ExistingPath);
         Assert.Equal(HttpStatusCode.NoContent, deactivate.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/agents/catalog/rule-facts")]
+    [InlineData("GET", "/api/agents/catalog/rule-actions")]
+    [InlineData("POST", "/api/agents/rules/validate")]
+    [InlineData("POST", "/api/agents/rules/simulate")]
+    public async Task RuleEndpoints_FlagOff_Return404BeforeAuthOrWorkflow(string method, string path)
+    {
+        using var flagOff = new TestWebAppFactory(agentBuilderEnabled: false);
+        var calls = FakeWorkflowService.EngineCalls.Count;
+
+        var response = await flagOff.CreateClient().SendAsync(Req(
+            method,
+            path,
+            body: method == "POST"
+                ? new { gate = "pre-action", ruleSet = new { version = 1, rules = Array.Empty<object>() }, facts = new { } }
+                : null));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(calls, FakeWorkflowService.EngineCalls.Count);
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/agents/catalog/rule-facts")]
+    [InlineData("POST", "/api/agents/rules/validate")]
+    public async Task RuleEndpoints_RequireAuthenticationAndAdmin(string method, string path)
+    {
+        var anonymous = await _factory.CreateClient().SendAsync(Req(
+            method,
+            path,
+            body: method == "POST"
+                ? new { gate = "pre-action", ruleSet = new { version = 1, rules = Array.Empty<object>() } }
+                : null));
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+
+        var calls = FakeWorkflowService.EngineCalls.Count;
+        var user = _factory.CreateClient().WithToken(_factory.IssueToken("user-a", "USER", "demo-a"));
+        var forbidden = await user.SendAsync(Req(
+            method,
+            path,
+            body: method == "POST"
+                ? new { gate = "pre-action", ruleSet = new { version = 1, rules = Array.Empty<object>() } }
+                : null));
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        Assert.Equal(calls, FakeWorkflowService.EngineCalls.Count);
+    }
+
+    [Fact]
+    public async Task RuleCatalogs_Admin_ReturnRegistryMetadataOnly()
+    {
+        var client = _factory.AdminClient();
+
+        var facts = await client.GetAsync("/api/agents/catalog/rule-facts");
+        var actions = await client.GetAsync("/api/agents/catalog/rule-actions");
+
+        Assert.Equal(HttpStatusCode.OK, facts.StatusCode);
+        Assert.Equal(
+            "action.amount",
+            (await facts.ReadJsonAsync())["facts"]![0]!["name"]!.GetValue<string>());
+        Assert.Equal(HttpStatusCode.OK, actions.StatusCode);
+        Assert.Equal(
+            "deny",
+            (await actions.ReadJsonAsync())["actions"]![0]!["name"]!.GetValue<string>());
+        Assert.Equal("demo-a", FakeWorkflowService.LastRuleContext!.TenantCode);
+        Assert.Equal("admin-a", FakeWorkflowService.LastRuleContext.UserId);
+        Assert.Equal("ADMIN", FakeWorkflowService.LastRuleContext.Role);
+    }
+
+    [Fact]
+    public async Task RuleValidateAndSimulate_Admin_PassWorkflowBodiesThrough()
+    {
+        var client = _factory.AdminClient();
+        var request = new
+        {
+            gate = "pre-action",
+            ruleSet = new { version = 1, rules = Array.Empty<object>() },
+            facts = new Dictionary<string, object> { ["action.amount"] = 9000 },
+        };
+
+        var validate = await client.PostAsJsonAsync("/api/agents/rules/validate", request);
+        var simulate = await client.PostAsJsonAsync("/api/agents/rules/simulate", request);
+
+        Assert.Equal(HttpStatusCode.OK, validate.StatusCode);
+        Assert.True((await validate.ReadJsonAsync())["valid"]!.GetValue<bool>());
+        Assert.Equal(HttpStatusCode.OK, simulate.StatusCode);
+        Assert.Equal(
+            "allow",
+            (await simulate.ReadJsonAsync())["simulation"]!["decision"]!.GetValue<string>());
+        Assert.Contains("rule-validate:pre-action", FakeWorkflowService.EngineCalls);
+        Assert.Contains("rule-simulate:pre-action", FakeWorkflowService.EngineCalls);
     }
 }

@@ -197,6 +197,118 @@ public sealed class WorkflowServiceTests
         Assert.False(result[0].TryGetProperty("token", out _));
     }
 
+    [Fact]
+    public async Task BusinessRuleCatalog_SplitsFactsAndActions_FromRegistryOwnedResponse()
+    {
+        const string catalog =
+            """{"version":1,"gates":["pre-action"],"limits":{"maxDepth":8},"facts":[{"name":"action.amount","type":"decimal"}],"operators":[{"name":"gt"}],"actions":[{"name":"deny","precedence":100}]}""";
+
+        var factsStub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, catalog));
+        var facts = await Build(factsStub).GetBusinessRuleFactsAsync(Ctx);
+        Assert.Equal("http://downstream/business-rules/catalog", factsStub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("action.amount", facts.GetProperty("facts")[0].GetProperty("name").GetString());
+        Assert.Equal("gt", facts.GetProperty("operators")[0].GetProperty("name").GetString());
+        Assert.Equal(8, facts.GetProperty("limits").GetProperty("maxDepth").GetInt32());
+        Assert.False(facts.TryGetProperty("actions", out _));
+
+        var actionsStub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, catalog));
+        var actions = await Build(actionsStub).GetBusinessRuleActionsAsync(Ctx);
+        Assert.Equal("deny", actions.GetProperty("actions")[0].GetProperty("name").GetString());
+        Assert.Equal(100, actions.GetProperty("actions")[0].GetProperty("precedence").GetInt32());
+        Assert.False(actions.TryGetProperty("facts", out _));
+    }
+
+    [Fact]
+    public async Task ValidateBusinessRules_PostsExactContract_AndPassesInvalidResultThrough()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"valid":false,"errors":[{"path":"$.rules[0].when","code":"operator_type_mismatch","message":"型別不符"}]}"""));
+        var ruleSet = JsonDocument.Parse("""{"version":1,"rules":[]}""").RootElement.Clone();
+
+        var result = await Build(stub).ValidateBusinessRulesAsync(
+            new BusinessRuleValidateRequest("pre-action", ruleSet), Ctx);
+
+        Assert.Equal("http://downstream/business-rules/validate", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("tok", stub.Header("X-Internal-Token"));
+        Assert.False(result.GetProperty("valid").GetBoolean());
+        Assert.Equal("operator_type_mismatch", result.GetProperty("errors")[0].GetProperty("code").GetString());
+        using var sent = JsonDocument.Parse(stub.LastBody!);
+        Assert.Equal("pre-action", sent.RootElement.GetProperty("gate").GetString());
+        Assert.Equal(1, sent.RootElement.GetProperty("ruleSet").GetProperty("version").GetInt32());
+        Assert.Equal(2, sent.RootElement.EnumerateObject().Count());
+    }
+
+    [Fact]
+    public async Task SimulateBusinessRules_PassesDecisionTraceThrough()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"valid":true,"canonicalRuleSet":{"version":1,"rules":[]},"errors":[],"simulation":{"decision":"deny","matchedRules":["r1"],"trace":[{"ruleId":"r1","outcome":"true"}]},"futureField":{"kept":true}}"""));
+        var ruleSet = JsonDocument.Parse("""{"version":1,"rules":[]}""").RootElement.Clone();
+        var facts = JsonDocument.Parse("""{"action.amount":9000}""").RootElement.Clone();
+
+        var result = await Build(stub).SimulateBusinessRulesAsync(
+            new BusinessRuleSimulateRequest("pre-action", ruleSet, facts), Ctx);
+
+        Assert.Equal("http://downstream/business-rules/simulate", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("deny", result.GetProperty("simulation").GetProperty("decision").GetString());
+        Assert.Equal("r1", result.GetProperty("simulation").GetProperty("matchedRules")[0].GetString());
+        Assert.True(result.GetProperty("futureField").GetProperty("kept").GetBoolean());
+        using var sent = JsonDocument.Parse(stub.LastBody!);
+        Assert.Equal(9000, sent.RootElement.GetProperty("facts").GetProperty("action.amount").GetInt32());
+        Assert.Equal(3, sent.RootElement.EnumerateObject().Count());
+    }
+
+    [Fact]
+    public async Task BusinessRuleMalformedCatalogOrDownstreamFailure_MapsSafely()
+    {
+        var malformed = Build(new StubHttpMessageHandler(_ =>
+            TestHttp.Json(HttpStatusCode.OK, """{"facts":"not-an-array"}""")));
+        await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => malformed.GetBusinessRuleFactsAsync(Ctx));
+
+        var downstream = Build(new StubHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+        var ruleSet = JsonDocument.Parse("""{"version":1,"rules":[]}""").RootElement.Clone();
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() =>
+            downstream.SimulateBusinessRulesAsync(
+                new BusinessRuleSimulateRequest("pre-action", ruleSet, null), Ctx));
+    }
+
+    [Fact]
+    public async Task BusinessRuleRequest422_MapsToSanitizedBadInput()
+    {
+        var service = Build(new StubHttpMessageHandler(_ => TestHttp.Json(
+            HttpStatusCode.UnprocessableEntity,
+            """{"detail":{"message":"gate 欄位不合法","field_errors":{"gate":"不支援的 gate"}}}""")));
+        var ruleSet = JsonDocument.Parse("""{"version":1,"rules":[]}""").RootElement.Clone();
+
+        var error = await Assert.ThrowsAsync<WorkflowBadInputException>(() =>
+            service.ValidateBusinessRulesAsync(
+                new BusinessRuleValidateRequest("bad-gate", ruleSet), Ctx));
+
+        Assert.Equal("gate 欄位不合法", error.Message);
+        Assert.Equal("不支援的 gate", error.FieldErrors!["gate"]);
+        Assert.DoesNotContain("detail", error.Message);
+    }
+
+    [Fact]
+    public async Task BusinessRuleRequest413_RemainsPayloadTooLarge()
+    {
+        var service = Build(new StubHttpMessageHandler(_ => TestHttp.Json(
+            (HttpStatusCode)413,
+            """{"detail":{"error":"request_too_large","message":"internal detail"}}""")));
+        var ruleSet = JsonDocument.Parse("""{"version":1,"rules":[]}""").RootElement.Clone();
+
+        var error = await Assert.ThrowsAsync<WorkflowPayloadTooLargeException>(() =>
+            service.ValidateBusinessRulesAsync(
+                new BusinessRuleValidateRequest("pre-action", ruleSet), Ctx));
+
+        Assert.Equal(
+            "Business Rule request exceeds the allowed size or nesting depth",
+            error.Message);
+        Assert.DoesNotContain("internal detail", error.Message);
+    }
+
     // AST-P1-013:validate 回應的 skill 中繼資料帶 kind → 原樣穿透;既有 valid/errors/skill 形狀不變。
     [Fact]
     public async Task ValidateSkill_PassesThroughKind_InSkillMetadata()

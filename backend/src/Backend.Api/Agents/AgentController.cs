@@ -1,6 +1,7 @@
 using Backend.Api.Common;
 using Backend.Api.Skills;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 namespace Backend.Api.Agents;
 
@@ -17,9 +18,17 @@ namespace Backend.Api.Agents;
 [AdminOnly(Message)]
 public sealed class AgentController : ControllerBase
 {
+    // Agent Rule AST v1 沒有 persisted gate；D2 以 action/tool policy 最保守且可執行的 gate 驗證。
+    // 若 D3 需要同一 Agent 保存多 gate rules，必須升 AST version，不可偷加未版本化欄位。
+    private const string AgentRuleGate = "pre-action";
     private readonly IAgentRepository _repo;
+    private readonly IBusinessRuleValidator _ruleValidator;
 
-    public AgentController(IAgentRepository repo) => _repo = repo;
+    public AgentController(IAgentRepository repo, IBusinessRuleValidator ruleValidator)
+    {
+        _repo = repo;
+        _ruleValidator = ruleValidator;
+    }
 
     /// <summary>列出本租戶所有 Agent(含已停用;enabled 欄位區分狀態)。</summary>
     [HttpGet]
@@ -97,9 +106,17 @@ public sealed class AgentController : ControllerBase
 
         var errors = AgentCanonicalizer.Validate(agent.DraftDefinition).ToList();
         errors.AddRange(await _repo.ValidateReferencesAsync(tenantId, agent.DraftDefinition, ct));
+        var ruleValidation = await ValidateBusinessRulesAsync(agent.DraftDefinition, tenantId, ct);
+        errors.AddRange(ruleValidation.Errors);
         if (errors.Count == 0)
         {
-            if (!await _repo.MarkValidatedAsync(tenantId, id, expectedVersion, ct))
+            if (!await _repo.MarkValidatedAsync(
+                    tenantId,
+                    id,
+                    expectedVersion,
+                    ruleValidation.CanonicalDefinition,
+                    SkillHash.Sha256(ruleValidation.CanonicalDefinition),
+                    ct))
             {
                 throw VersionConflict();
             }
@@ -143,8 +160,21 @@ public sealed class AgentController : ControllerBase
                 StatusCodes.Status409Conflict, "draft 尚未重新驗證,無法發布(請先呼叫 validate)");
         }
 
+        // Workflow 的 registry/validator 可能在 validate 與 publish 之間升級；publish 必須再次以正式
+        // evaluator contract fail closed，而不能只相信先前的 validated_version。
+        var ruleValidation = await ValidateBusinessRulesAsync(agent.DraftDefinition, tenantId, ct);
+        if (ruleValidation.Errors.Count > 0)
+        {
+            throw InvalidBusinessRules(ruleValidation.Errors);
+        }
         var result = await _repo.PublishAsync(
-            tenantId, id, expectedVersion, Request.UserIdOrEmpty(), ct);
+            tenantId,
+            id,
+            expectedVersion,
+            ruleValidation.CanonicalDefinition,
+            SkillHash.Sha256(ruleValidation.CanonicalDefinition),
+            Request.UserIdOrEmpty(),
+            ct);
 
         return result.Status switch
         {
@@ -164,14 +194,34 @@ public sealed class AgentController : ControllerBase
         return Ok(await _repo.ListRevisionsAsync(tenantId, id, ct));
     }
 
-    /// <summary>rollback:把指定舊 revision 重新發布為新 revision(不改寫歷史,A-DATA-06)。</summary>
+    /// <summary>
+    /// rollback:把指定舊 revision 經目前 Workflow Rule contract 重新驗證/正規化後發布為新 revision。
+    /// 舊 revision 永不改寫；Workflow 不可達或舊 AST 已不合法時 fail closed。
+    /// </summary>
     [HttpPost("{id:guid}/revisions/{revision:int}/restore")]
     public async Task<ActionResult<AgentResponse>> Restore(Guid id, int revision, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
         _ = await _repo.GetAsync(tenantId, id, ct) ?? throw NotFound(id);
+        var sourceDefinition = await _repo.GetRevisionDefinitionAsync(tenantId, id, revision, ct)
+                               ?? throw new ApiException(
+                                   StatusCodes.Status404NotFound,
+                                   $"找不到 Agent revision：{id}#{revision}");
 
-        var result = await _repo.RestoreAsync(tenantId, id, revision, Request.UserIdOrEmpty(), ct);
+        var ruleValidation = await ValidateBusinessRulesAsync(sourceDefinition, tenantId, ct);
+        if (ruleValidation.Errors.Count > 0)
+        {
+            throw InvalidBusinessRules(ruleValidation.Errors);
+        }
+
+        var result = await _repo.RestoreAsync(
+            tenantId,
+            id,
+            revision,
+            ruleValidation.CanonicalDefinition,
+            SkillHash.Sha256(ruleValidation.CanonicalDefinition),
+            Request.UserIdOrEmpty(),
+            ct);
         if (result.Status == AgentWriteStatus.NotFound)
         {
             throw new ApiException(StatusCodes.Status404NotFound, $"找不到 Agent revision：{id}#{revision}");
@@ -253,4 +303,63 @@ public sealed class AgentController : ControllerBase
                 .ToDictionary(g => g.Key, g => g.First().Message, StringComparer.Ordinal),
         };
     }
+
+    private async Task<AgentRuleValidation> ValidateBusinessRulesAsync(
+        string canonicalDefinition,
+        string tenantId,
+        CancellationToken ct)
+    {
+        using var definition = System.Text.Json.JsonDocument.Parse(canonicalDefinition);
+        var ruleSet = definition.RootElement.GetProperty("business_rules").Clone();
+        var result = await _ruleValidator.ValidateAsync(
+            AgentRuleGate,
+            ruleSet,
+            new BusinessRuleReferenceCatalog(
+                AgentCanonicalizer.SkillBindingsOf(canonicalDefinition)
+                    .Select(binding => binding.Skill!)
+                    .ToList(),
+                AgentCanonicalizer.AllowedToolsOf(canonicalDefinition)),
+            tenantId,
+            Request.UserIdOrEmpty(),
+            Request.UserRole(),
+            ct);
+
+        var errors = result.Errors.Select(error => new AgentValidationError(
+            BusinessRulePath(error.Path),
+            error.Message,
+            error.Code)).ToList();
+        var normalizedDefinition = result.Valid && result.CanonicalRuleSet is JsonElement canonicalRuleSet
+            ? AgentCanonicalizer.WithBusinessRules(canonicalDefinition, canonicalRuleSet)
+            : canonicalDefinition;
+        return new AgentRuleValidation(normalizedDefinition, errors);
+    }
+
+    private static string BusinessRulePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path == "$")
+        {
+            return "business_rules";
+        }
+
+        var suffix = path.StartsWith("$.", StringComparison.Ordinal) ? path[2..] : path.TrimStart('.');
+        if (suffix.StartsWith("ruleSet.", StringComparison.Ordinal))
+        {
+            suffix = suffix["ruleSet.".Length..];
+        }
+        return suffix.StartsWith("business_rules", StringComparison.Ordinal)
+            ? suffix
+            : "business_rules." + suffix;
+    }
+
+    private static ApiException InvalidBusinessRules(IReadOnlyList<AgentValidationError> errors)
+        => new(StatusCodes.Status422UnprocessableEntity, "Business Rule 驗證失敗")
+        {
+            FieldErrors = errors
+                .GroupBy(e => e.Field, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First().Message, StringComparer.Ordinal),
+        };
+
+    private sealed record AgentRuleValidation(
+        string CanonicalDefinition,
+        IReadOnlyList<AgentValidationError> Errors);
 }

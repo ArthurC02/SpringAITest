@@ -40,6 +40,27 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
             },
         };
 
+    private static JsonObject BodyWithRule(string slug, string ruleId)
+    {
+        var body = ValidBody(slug);
+        body["business_rules"] = new JsonObject
+        {
+            ["version"] = 1,
+            ["rules"] = new JsonArray(new JsonObject
+            {
+                ["id"] = ruleId,
+                ["when"] = new JsonObject
+                {
+                    ["fact"] = "action.amount",
+                    ["op"] = "gt",
+                    ["value"] = 5000,
+                },
+                ["then"] = new JsonArray(new JsonObject { ["action"] = "deny" }),
+            }),
+        };
+        return body;
+    }
+
     private async Task<(string Id, string ETag)> CreateAsync(HttpClient client, JsonObject body)
     {
         var resp = await client.PostAsJsonAsync("/api/agents", body);
@@ -475,6 +496,81 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task Restore_RevalidatesRules_AndDoesNotAppendWhenCurrentContractRejectsThem()
+    {
+        var client = Admin();
+        var (id, _) = await CreateAsync(
+            client,
+            BodyWithRule("restore-invalid-rules", "invalid-on-restore"));
+        await ValidateAsync(client, id);
+        await PublishAsync(client, id, 1);
+
+        var restore = await client.PostAsync($"/api/agents/{id}/revisions/1/restore", null);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, restore.StatusCode);
+        var error = await restore.ReadJsonAsync();
+        Assert.Equal(
+            "number fact 不可使用 string operator",
+            error["fieldErrors"]!["business_rules.rules[0].when"]!.GetValue<string>());
+        var revisions = (await (await client.GetAsync($"/api/agents/{id}/revisions")).ReadJsonAsync()).AsArray();
+        var only = Assert.Single(revisions)!;
+        Assert.Equal(1, only["revision"]!.GetValue<int>());
+        Assert.Equal("published", only["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Restore_WhenRuleEngineUnavailable_FailsClosedWithoutAppendingRevision()
+    {
+        var client = Admin();
+        var (id, _) = await CreateAsync(
+            client,
+            BodyWithRule("restore-engine-down", "engine-down-on-restore"));
+        await ValidateAsync(client, id);
+        await PublishAsync(client, id, 1);
+
+        var restore = await client.PostAsync($"/api/agents/{id}/revisions/1/restore", null);
+
+        Assert.Equal(HttpStatusCode.BadGateway, restore.StatusCode);
+        var revisions = (await (await client.GetAsync($"/api/agents/{id}/revisions")).ReadJsonAsync()).AsArray();
+        Assert.Single(revisions);
+    }
+
+    [Fact]
+    public async Task Restore_PersistsNewCanonicalRulesAndHash_WithoutMutatingSourceRevision()
+    {
+        var client = Admin();
+        var (id, _) = await CreateAsync(
+            client,
+            BodyWithRule("restore-new-canonical", "canonical-on-restore"));
+        await ValidateAsync(client, id);
+        await PublishAsync(client, id, 1);
+        var repo = _factory.Fake<IAgentRepository>();
+        var agentId = Guid.Parse(id);
+        var sourceBefore = await repo.GetRevisionDefinitionAsync("demo-a", agentId, 1, default);
+        Assert.NotNull(sourceBefore);
+
+        var restore = await client.PostAsync($"/api/agents/{id}/revisions/1/restore", null);
+
+        Assert.Equal(HttpStatusCode.OK, restore.StatusCode);
+        var sourceAfter = await repo.GetRevisionDefinitionAsync("demo-a", agentId, 1, default);
+        var restored = await repo.GetRevisionDefinitionAsync("demo-a", agentId, 2, default);
+        Assert.Equal(sourceBefore, sourceAfter);
+        Assert.NotNull(restored);
+        Assert.Equal(
+            "deny",
+            JsonNode.Parse(restored!)!["business_rules"]!["rules"]![0]!["onUnknown"]![0]!["action"]!
+                .GetValue<string>());
+
+        var revisions = (await (await client.GetAsync($"/api/agents/{id}/revisions")).ReadJsonAsync()).AsArray();
+        var rev2 = Assert.Single(revisions, r => r!["revision"]!.GetValue<int>() == 2)!;
+        var rev1 = Assert.Single(revisions, r => r!["revision"]!.GetValue<int>() == 1)!;
+        Assert.Equal(SkillHash.Sha256(restored!), rev2["definition_sha256"]!.GetValue<string>());
+        Assert.NotEqual(
+            rev1["definition_sha256"]!.GetValue<string>(),
+            rev2["definition_sha256"]!.GetValue<string>());
+    }
+
     // ---- A-DATA-11:集合欄位缺席/null/空 → canonicalize 成空陣列(fail closed,禁止 null=unrestricted)----
 
     [Theory]
@@ -502,21 +598,206 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
-    public async Task Create_BusinessRules_AlwaysCanonicalEmptyAst()
+    public async Task Create_BusinessRules_PreservesAndCanonicalizesRealAst()
     {
         var client = Admin();
         var body = ValidBody("a11-rules");
-        // 即使送入非空 rules,本期一律存 canonical 空 AST。
         body["business_rules"] = new JsonObject
         {
             ["version"] = 1,
-            ["rules"] = new JsonArray(new JsonObject { ["id"] = "x" }),
+            ["rules"] = new JsonArray(new JsonObject
+            {
+                ["priority"] = 100,
+                ["id"] = "refund-approval",
+                ["when"] = new JsonObject
+                {
+                    ["fact"] = "action.amount",
+                    ["value"] = 5000,
+                    ["op"] = "gt",
+                },
+                ["then"] = new JsonArray(new JsonObject
+                {
+                    ["role"] = "ADMIN",
+                    ["action"] = "require_approval",
+                }),
+            }),
         };
         var (id, _) = await CreateAsync(client, body);
 
         var draft = (await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync())["draft"]!.AsObject();
-        Assert.Empty(draft["business_rules"]!["rules"]!.AsArray());
+        var rule = Assert.Single(draft["business_rules"]!["rules"]!.AsArray())!;
+        Assert.Equal("refund-approval", rule["id"]!.GetValue<string>());
+        Assert.Equal("gt", rule["when"]!["op"]!.GetValue<string>());
+        Assert.Equal("require_approval", rule["then"]![0]!["action"]!.GetValue<string>());
         Assert.Equal(1, draft["business_rules"]!["version"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task Validate_BusinessRuleError_IsLocatedAndCoded_WithoutMarkingDraft()
+    {
+        var client = Admin();
+        var body = ValidBody("rule-invalid-api");
+        body["business_rules"] = new JsonObject
+        {
+            ["version"] = 1,
+            ["rules"] = new JsonArray(new JsonObject { ["id"] = "invalid-rule" }),
+        };
+        var (id, _) = await CreateAsync(client, body);
+
+        var response = await ValidateAsync(client, id);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.ReadJsonAsync();
+        Assert.False(result["valid"]!.GetValue<bool>());
+        var error = Assert.Single(result["errors"]!.AsArray())!;
+        Assert.Equal("business_rules.rules[0].when", error["field"]!.GetValue<string>());
+        Assert.Equal("operator_type_mismatch", error["code"]!.GetValue<string>());
+        Assert.Null((await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync())["draft_validated_version"]);
+
+        var call = Assert.Single(
+            _factory.Fake<IBusinessRuleValidator>() is FakeBusinessRuleValidator fake
+                ? fake.Calls.Where(c => c.RuleSet.GetRawText().Contains("invalid-rule", StringComparison.Ordinal))
+                : Array.Empty<FakeBusinessRuleValidator.Call>());
+        Assert.Equal("pre-action", call.Gate);
+        Assert.Equal("demo-a", call.TenantId);
+        Assert.Equal("admin-a", call.UserId);
+        Assert.Equal("ADMIN", call.Role);
+        Assert.Empty(call.ReferenceCatalog.Skills);
+        Assert.Empty(call.ReferenceCatalog.Tools);
+    }
+
+    [Fact]
+    public async Task Validate_ForwardsAgentSkillAndToolAllowlistsToRuleEngine()
+    {
+        var client = Admin();
+        var skill = await CreateSkillAsync(client, "rule-reference-skill");
+        var body = BodyWithRule("rule-reference-catalog", "reference-catalog-forwarded");
+        body["skill_bindings"] = new JsonArray(
+            new JsonObject { ["skill"] = skill, ["revision_policy"] = "latest" });
+        body["allowed_tools"] = new JsonArray("z-read-tool", "a-read-tool");
+        var (id, _) = await CreateAsync(client, body);
+
+        var response = await ValidateAsync(client, id);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var fake = Assert.IsType<FakeBusinessRuleValidator>(_factory.Fake<IBusinessRuleValidator>());
+        var call = Assert.Single(
+            fake.Calls,
+            c => c.RuleSet.GetRawText()
+                .Contains("reference-catalog-forwarded", StringComparison.Ordinal));
+        Assert.Equal(new[] { skill }, call.ReferenceCatalog.Skills);
+        Assert.Equal(new[] { "a-read-tool", "z-read-tool" }, call.ReferenceCatalog.Tools);
+    }
+
+    [Fact]
+    public async Task ConcurrentPublish_SameEtag_AppendsExactlyOneRevision()
+    {
+        var client = Admin();
+        var body = BodyWithRule("rule-concurrent-publish", "concurrent-publish");
+        var (id, _) = await CreateAsync(client, body);
+        Assert.True((await (await ValidateAsync(client, id)).ReadJsonAsync())["valid"]!.GetValue<bool>());
+
+        var fake = Assert.IsType<FakeBusinessRuleValidator>(_factory.Fake<IBusinessRuleValidator>());
+        fake.CoordinateNextCalls(2);
+
+        var first = PublishAsync(client, id, 1);
+        var second = PublishAsync(client, id, 1);
+        var responses = await Task.WhenAll(first, second);
+
+        Assert.Single(responses, response => response.StatusCode == HttpStatusCode.OK);
+        Assert.Single(responses, response => response.StatusCode == HttpStatusCode.Conflict);
+        var revisions = (await (await client.GetAsync($"/api/agents/{id}/revisions")).ReadJsonAsync()).AsArray();
+        Assert.Single(revisions);
+        Assert.Equal(1, revisions[0]!["revision"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task Publish_AtomicallyPersistsLatestWorkflowCanonicalRulesAndHash()
+    {
+        var client = Admin();
+        var body = BodyWithRule("rule-canonical-on-publish", "canonical-on-publish");
+        var (id, _) = await CreateAsync(client, body);
+        Assert.True((await (await ValidateAsync(client, id)).ReadJsonAsync())["valid"]!.GetValue<bool>());
+
+        var publish = await PublishAsync(client, id, 1);
+
+        Assert.Equal(HttpStatusCode.OK, publish.StatusCode);
+        var stored = (await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync())["draft"]!;
+        Assert.Equal(
+            "deny",
+            stored["business_rules"]!["rules"]![0]!["onUnknown"]![0]!["action"]!
+                .GetValue<string>());
+        var revision = Assert.Single(
+            (await (await client.GetAsync($"/api/agents/{id}/revisions")).ReadJsonAsync()).AsArray())!;
+        Assert.Equal(SkillHash.Sha256(stored.ToJsonString()), revision["definition_sha256"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Validate_PersistsWorkflowCanonicalRuleSet_AndPublishHashesIt()
+    {
+        var client = Admin();
+        var body = ValidBody("rule-canonical-persist");
+        body["business_rules"] = new JsonObject
+        {
+            ["version"] = 1,
+            ["rules"] = new JsonArray(new JsonObject
+            {
+                ["id"] = "needs-canonical-default",
+                ["when"] = new JsonObject { ["fact"] = "action.amount", ["op"] = "gt", ["value"] = 5000 },
+                ["then"] = new JsonArray(new JsonObject { ["action"] = "deny" }),
+            }),
+        };
+        var (id, _) = await CreateAsync(client, body);
+
+        Assert.True((await (await ValidateAsync(client, id)).ReadJsonAsync())["valid"]!.GetValue<bool>());
+        var stored = (await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync())["draft"]!;
+        Assert.Equal(
+            "deny",
+            stored["business_rules"]!["rules"]![0]!["onUnknown"]!.GetValue<string>());
+        var canonicalHash = SkillHash.Sha256(stored.ToJsonString());
+
+        Assert.Equal(HttpStatusCode.OK, (await PublishAsync(client, id, 1)).StatusCode);
+        var revisions = await (await client.GetAsync($"/api/agents/{id}/revisions")).ReadJsonAsync();
+        Assert.Equal(canonicalHash, revisions![0]!["definition_sha256"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Publish_RevalidatesBusinessRules_AndFailsClosed()
+    {
+        var client = Admin();
+        var body = ValidBody("rule-publish-recheck");
+        body["business_rules"] = new JsonObject
+        {
+            ["version"] = 1,
+            ["rules"] = new JsonArray(new JsonObject { ["id"] = "invalid-on-publish" }),
+        };
+        var (id, _) = await CreateAsync(client, body);
+        Assert.True((await (await ValidateAsync(client, id)).ReadJsonAsync())["valid"]!.GetValue<bool>());
+
+        var publish = await PublishAsync(client, id, 1);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, publish.StatusCode);
+        var error = await publish.ReadJsonAsync();
+        Assert.Equal(
+            "number fact 不可使用 string operator",
+            error["fieldErrors"]!["business_rules.rules[0].when"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Validate_WhenRuleEngineUnavailable_Returns502_AndDoesNotMarkDraft()
+    {
+        var client = Admin();
+        var body = ValidBody("rule-engine-down-api");
+        body["business_rules"] = new JsonObject
+        {
+            ["version"] = 1,
+            ["rules"] = new JsonArray(new JsonObject { ["id"] = "engine-down" }),
+        };
+        var (id, _) = await CreateAsync(client, body);
+
+        var response = await ValidateAsync(client, id);
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Null((await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync())["draft_validated_version"]);
     }
 
     // ---- validate:決策表兩半(valid → 記錄 validated;invalid → 200 errors,不記錄)----
@@ -716,6 +997,15 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
             ["z"] = new JsonObject { ["b"] = 2, ["a"] = 1 },
             ["a"] = true,
         };
+        left["business_rules"] = new JsonObject
+        {
+            ["rules"] = new JsonArray(new JsonObject
+            {
+                ["when"] = new JsonObject { ["value"] = 2, ["fact"] = "action.amount", ["op"] = "gt" },
+                ["id"] = "canonical-rule",
+            }),
+            ["version"] = 1,
+        };
 
         var right = ValidBody("canonical-right");
         right["allowed_tools"] = new JsonArray("a", "z");
@@ -723,6 +1013,15 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         {
             ["a"] = true,
             ["z"] = new JsonObject { ["a"] = 1, ["b"] = 2 },
+        };
+        right["business_rules"] = new JsonObject
+        {
+            ["version"] = 1,
+            ["rules"] = new JsonArray(new JsonObject
+            {
+                ["id"] = "canonical-rule",
+                ["when"] = new JsonObject { ["fact"] = "action.amount", ["op"] = "gt", ["value"] = 2 },
+            }),
         };
 
         var leftRequest = JsonSerializer.Deserialize<AgentUpsert>(left.ToJsonString())!;
@@ -732,6 +1031,16 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(leftCanonical, rightCanonical);
         Assert.Equal(SkillHash.Sha256(leftCanonical), SkillHash.Sha256(rightCanonical));
+
+        // 模擬 jsonb::text 以不同 object key order 讀回；完整 definition 再 canonicalize 後
+        // 必須和 in-memory 原文/雜湊一致。
+        var reordered = new JsonObject(
+            JsonNode.Parse(leftCanonical)!.AsObject()
+                .Reverse()
+                .Select(p => KeyValuePair.Create(p.Key, p.Value?.DeepClone())));
+        var afterJsonbRoundTrip = AgentCanonicalizer.CanonicalizeDefinition(reordered.ToJsonString());
+        Assert.Equal(leftCanonical, afterJsonbRoundTrip);
+        Assert.Equal(SkillHash.Sha256(leftCanonical), SkillHash.Sha256(afterJsonbRoundTrip));
     }
 
     [Fact]
