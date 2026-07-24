@@ -13,6 +13,7 @@ import { fmtDate } from '../format'
 import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
+import { useConfirm } from './ConfirmDialog'
 import { runWithToast, useToast } from './Toast'
 
 /** 編輯中的組（id=null 代表新建）。draft 為各鍵的字串草稿（未填 = 不覆寫）。 */
@@ -25,6 +26,7 @@ type Editing = { id: string | null; name: string; draft: Record<string, string> 
  */
 export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
   const toast = useToast()
+  const confirm = useConfirm()
   const { data, loading, error: loadError, reload } = useResource(listConfigurationSets)
   const sets = data ?? []
   const [editing, setEditing] = useState<Editing | null>(null)
@@ -61,7 +63,8 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
   }
 
   async function onDelete(id: string, name: string) {
-    if (!window.confirm(`刪除參數組「${name}」？此動作無法復原。`)) return
+    if (!(await confirm(`刪除參數組「${name}」？此動作無法復原。`, { danger: true, confirmLabel: '刪除' })))
+      return
     await runWithToast(toast, () => deleteConfigurationSet(id), {
       success: '已刪除',
       onSuccess: () => {

@@ -23,6 +23,7 @@ import SkillHistory from './SkillHistory'
 import SkillRunPanel from './SkillRunPanel'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
+import { useConfirm } from './ConfirmDialog'
 import { runWithToast, useToast } from './Toast'
 
 const SOURCE_LABEL: Record<'custom' | 'builtin', string> = { custom: '自訂', builtin: '內建' }
@@ -50,6 +51,7 @@ type Selected = Pick<Row, 'name' | 'source' | 'schema' | 'kind' | 'revision'> | 
  */
 export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
   const toast = useToast()
+  const confirm = useConfirm()
   const [selected, setSelected] = useState<Selected>(null)
   const [sub, setSub] = useState<Sub>('edit')
   const [creating, setCreating] = useState(false)
@@ -177,7 +179,12 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
   }
 
   async function onDisable(name: string) {
-    if (!window.confirm(`停用 Skill「${name}」？停用後不再出現在執行清單，歷史 revision 仍保留。`))
+    if (
+      !(await confirm(
+        `停用 Skill「${name}」？停用後不再出現在執行清單，歷史 revision 仍保留。`,
+        { danger: true, confirmLabel: '停用' },
+      ))
+    )
       return
     await runWithToast(toast, () => deleteSkill(name), {
       success: '已停用',

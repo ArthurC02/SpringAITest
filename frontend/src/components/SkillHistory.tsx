@@ -6,6 +6,7 @@ import { useResource } from '../hooks/useResource'
 import { canRestoreRevision, isActiveSkillRequest } from '../skills/revision'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
+import { useConfirm } from './ConfirmDialog'
 import { useToast } from './Toast'
 
 interface Props {
@@ -29,6 +30,7 @@ export default function SkillHistory({
   onRestorePendingChange,
 }: Props) {
   const toast = useToast()
+  const confirm = useConfirm()
   const fetchRevisions = useCallback(() => listSkillRevisions(name), [name])
   const { data: revisions, error, reload } = useResource(fetchRevisions)
   const [busy, setBusy] = useState(false)
@@ -44,7 +46,12 @@ export default function SkillHistory({
   }, [])
 
   async function revert(r: SkillRevision) {
-    if (!window.confirm(`回溯到 r${r.revision}？將以該版內容產生一個新的 revision，歷史不會被改寫。`))
+    if (
+      !(await confirm(
+        `回溯到 r${r.revision}？將以該版內容產生一個新的 revision，歷史不會被改寫。`,
+        { confirmLabel: '回溯' },
+      ))
+    )
       return
     const generation = ++restoreGenerationRef.current
     const isActive = () => isActiveSkillRequest(

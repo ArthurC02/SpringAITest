@@ -2,6 +2,7 @@ import { useState, type ChangeEvent, type FormEvent } from 'react'
 import type { useDocuments } from '../hooks/useDocuments'
 import { fmtDate } from '../format'
 import ErrorText from './ErrorText'
+import { useConfirm } from './ConfirmDialog'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
 
@@ -20,6 +21,7 @@ interface Props {
 export default function DocumentsView({ documents }: Props) {
   const { docs, loading, error, timedOut, create, remove } = documents
   const toast = useToast()
+  const confirm = useConfirm()
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
   const [titleErr, setTitleErr] = useState('')
@@ -76,7 +78,7 @@ export default function DocumentsView({ documents }: Props) {
   }
 
   async function onDelete(id: string, t: string) {
-    if (!window.confirm(`刪除文件「${t}」?`)) return
+    if (!(await confirm(`刪除文件「${t}」?`, { danger: true, confirmLabel: '刪除' }))) return
     try {
       await remove(id)
       toast('已刪除', 'success')

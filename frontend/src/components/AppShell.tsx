@@ -4,6 +4,7 @@ import { CopilotSidebar } from '@copilotkit/react-ui'
 import type { Session } from '../types'
 import { useDocuments } from '../hooks/useDocuments'
 import { invokeSkill } from '../api/skills'
+import { ConfirmProvider } from './ConfirmDialog'
 import { ToastProvider } from './Toast'
 import ErrorBoundary from './ErrorBoundary'
 import ChatView from './ChatView'
@@ -162,6 +163,7 @@ export default function AppShell({ session, onLogout }: Props) {
 
   return (
     <ToastProvider>
+      <ConfirmProvider>
       <div className="shell">
         <aside className="shell__sidebar">
           <h1 className="shell__brand">資料分析平台</h1>
@@ -231,6 +233,7 @@ export default function AppShell({ session, onLogout }: Props) {
           />
         </div>
       </div>
+      </ConfirmProvider>
     </ToastProvider>
   )
 }
