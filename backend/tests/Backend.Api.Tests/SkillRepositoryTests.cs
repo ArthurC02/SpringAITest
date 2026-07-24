@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.IO.Compression;
 using Backend.Api.Data;
 using Backend.Api.Skills;
@@ -236,6 +237,76 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         var (defSha, revPkgSha) = await DbRevisionShaAsync(t, name, 1);
         Assert.Equal(SkillHash.Sha256(canonical), defSha);
         Assert.Null(revPkgSha);
+    }
+
+    // ---- B3:simple_form 的真 SQL 語意(手寫 fake 背書不了 jsonb::text/COALESCE/DO UPDATE 保留) ----
+
+    private static Skill FormMeta(string name, string definition, string? simpleForm)
+        => new(name, "銷售小幫手", definition, "USER", Enabled: true, CurrentRevision: 0,
+            CreatedAt: default, UpdatedAt: default, Kind: "flow", Package: null, SimpleForm: simpleForm);
+
+    [SkippableFact] // create 帶 simple_form → jsonb 落地,GetAsync 以 ::text 讀回原文;update 不帶 → COALESCE 保留。
+    public async Task Create_StoresSimpleForm_AndUpdateWithoutIt_Preserves()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-sfcreate";
+        const string name = "sf_skill";
+        var form = "{\"templateId\": \"template-stats\", \"form\": {\"topK\": \"50\"}}";
+
+        var created = await Repo.CreateAsync(t, FormMeta(name, "name: sf_skill\nflow: v1\n", form), "admin-a", default);
+        Assert.NotNull(created!.SimpleForm);
+        // jsonb round-trip:語意等值(以解析後比較,避免空白/鍵序差異)。
+        Assert.Equal("template-stats", JsonDocument.Parse(created.SimpleForm!).RootElement
+            .GetProperty("templateId").GetString());
+        Assert.Equal("template-stats", JsonDocument.Parse(
+            (await Repo.GetAsync(t, name, default))!.SimpleForm!).RootElement.GetProperty("templateId").GetString());
+
+        // 進階編輯器 update(simpleForm = null)→ 保留既有(COALESCE 半邊)。
+        var updated = await Repo.UpdateAsync(
+            t, name, FormMeta(name, "name: sf_skill\nflow: v2\n", simpleForm: null), "admin-a", default);
+        Assert.NotNull(updated!.SimpleForm);
+        Assert.Equal("template-stats", JsonDocument.Parse(updated.SimpleForm!).RootElement
+            .GetProperty("templateId").GetString());
+    }
+
+    [SkippableFact] // update 帶新 simple_form → 覆寫(COALESCE 的另半邊,決策表收尾)。
+    public async Task Update_WithNewSimpleForm_Overwrites()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-sfupd";
+        const string name = "sf_upd";
+        await Repo.CreateAsync(
+            t, FormMeta(name, "name: sf_upd\nflow: v1\n", "{\"templateId\": \"template-stats\"}"), "admin-a", default);
+
+        var updated = await Repo.UpdateAsync(
+            t, name, FormMeta(name, "name: sf_upd\nflow: v2\n", "{\"templateId\": \"template-compare\"}"),
+            "admin-a", default);
+
+        Assert.Equal("template-compare", JsonDocument.Parse(updated!.SimpleForm!).RootElement
+            .GetProperty("templateId").GetString());
+    }
+
+    [SkippableFact] // import 建立品 simple_form 為 NULL;import 覆寫既有(帶 simple_form)不清空(不帶不清)。
+    public async Task Import_LeavesSimpleFormNull_OnCreate_AndPreserves_OnOverwrite()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-sfimp";
+
+        // (i) 全新 import → NULL。
+        var pkg = Encoding.UTF8.GetBytes("zip");
+        var imported = await Repo.ImportAsync(
+            t, Meta("sf_import_new", "kind: agentic\n", kind: "agentic"),
+            pkg, SkillHash.Sha256(pkg), "admin-a", default);
+        Assert.Null(imported!.SimpleForm);
+
+        // (ii) 既有 flow skill(帶 simple_form)被 import 覆寫 → 保留表單狀態。
+        const string name = "sf_import_keep";
+        await Repo.CreateAsync(
+            t, FormMeta(name, $"name: {name}\nflow: v1\n", "{\"templateId\": \"template-stats\"}"), "admin-a", default);
+        var overwritten = await Repo.ImportAsync(
+            t, Meta(name, "kind: agentic\n", kind: "agentic"), pkg, SkillHash.Sha256(pkg), "admin-a", default);
+        Assert.Equal("template-stats", JsonDocument.Parse(overwritten!.SimpleForm!).RootElement
+            .GetProperty("templateId").GetString());
     }
 
     // ---- 05 §5:DbBootstrap 遷移把自訂底線名就地改連字號,skill_revision 歷史零遺失 + 冪等 ----

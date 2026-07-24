@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Backend.Api.Common;
 using Microsoft.AspNetCore.Mvc;
 
@@ -130,7 +131,8 @@ public sealed class SkillController : ControllerBase
         }
 
         var created = await _repo.CreateAsync(
-            tenantId, ToSkill(meta, request.Definition!), Request.UserIdOrEmpty(), ct);
+            tenantId, ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+            Request.UserIdOrEmpty(), ct);
         if (created is null)
         {
             throw new ApiException(StatusCodes.Status409Conflict, "Skill 名稱已存在：" + meta.Name);
@@ -172,7 +174,8 @@ public sealed class SkillController : ControllerBase
         }
 
         var updated = await _repo.UpdateAsync(
-            tenantId, name, ToSkill(meta, request.Definition!), Request.UserIdOrEmpty(), ct);
+            tenantId, name, ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+            Request.UserIdOrEmpty(), ct);
         if (updated is null)
         {
             throw NotFound(name);
@@ -417,8 +420,16 @@ public sealed class SkillController : ControllerBase
 
     private static ApiException NotFound(string name) => ApiErrors.NotFound(" Skill", name);
 
-    /// <summary>DB 列 = 引擎中繼資料 + definition(flow=YAML 原文、agentic=canonical 投影)。enabled/revision/時間戳由 DB 決定。</summary>
-    private static Skill ToSkill(SkillMetadata meta, string definition) => new(
+    /// <summary>
+    /// request.SimpleForm(選填)→ 可存的原始 JSON 文字。缺席或顯式 null(含 JSON null 值)→ null,
+    /// 寫入層 COALESCE 保留既有值。backend 不解析/不驗證表單內容,原樣落 jsonb。
+    /// </summary>
+    private static string? SimpleFormText(JsonElement? form)
+        => form is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } e ? e.GetRawText() : null;
+
+    /// <summary>DB 列 = 引擎中繼資料 + definition(flow=YAML 原文、agentic=canonical 投影)。enabled/revision/時間戳由 DB 決定。
+    /// simpleForm 只在 Create/Update 帶入(Import/Restore 留 null → 寫入層不動該欄)。</summary>
+    private static Skill ToSkill(SkillMetadata meta, string definition, string? simpleForm = null) => new(
         meta.Name,
         meta.Description,
         definition,
@@ -427,5 +438,6 @@ public sealed class SkillController : ControllerBase
         CurrentRevision: 0,
         CreatedAt: default,
         UpdatedAt: default,
-        Kind: meta.Kind);
+        Kind: meta.Kind,
+        SimpleForm: simpleForm);
 }

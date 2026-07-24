@@ -5,8 +5,11 @@ required_role: USER
 input_schema:
   query: {type: str, required: true, min_length: 1}
 
-# 同 compare,但檢索筆數預設較高(讓聚合看到全集)。retrieve 用通用 retrieve@1.0,
-# 檢索筆數由純量槽顯式帶(不經 deps,見 template_compare 的說明)。
+# 同 compare,但檢索筆數預設較高(讓聚合看到全集)。薄檢索後接 nl_logic:把檢索到的 docs
+# 餵給 LLM,由使用者的自然語言規則(instruction)解讀並做統計聚合,結果寫回 business_result。
+# retrieve 用通用 retrieve@1.0,檢索筆數由純量槽顯式帶(不經 deps,見 template_compare 的說明)。
+# 商業邏輯槽現為自然語言規則(nl_logic 的 instruction);舊 script 槽(要作者寫 Python)已廢,
+# metric/period 純量槽隨之刪除(它們是 script 內的 Python 區域變數,無 script 即無意義)。
 flow:
   - node: query_intake@1.0
   - node: retrieve@1.0
@@ -14,10 +17,10 @@ flow:
       query_key: query
       top_k: 50                   # __SLOT_topK__
 
-  # 商業邏輯槽(script):metric/period 是可覆寫的聚合設定(骨架給合法預設,規則可直接
-  # 引用該區域變數);規則槽獨佔一行、位於 block literal(|)內,compose 期整行換成聚合規則。
-  # 三行都是合法、可編譯的 no-op,骨架載入即 valid。
-  - script: |
-      metric = "count"  # __SLOT_metric__
-      period = "all"  # __SLOT_period__
-      # __RULE_SLOT__
+  # 商業邏輯槽(nl_logic):input_keys 把檢索結果 docs 餵進 LLM。
+  # 規則槽獨佔一行、位於 block literal(|)內,compose 期整行換成統計聚合規則。
+  - node: nl_logic@1.0
+    params:
+      input_keys: [docs]
+      instruction: |
+        __RULE_SLOT__

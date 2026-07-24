@@ -162,6 +162,7 @@ def _final_text(result: dict) -> str:
     name="agent_skill_runner",
     version="1.0",
     description="受 Harness 管理的 agentic runner：以 create_react_agent 執行 package instruction，只寫 answer",
+    reads=["tenant_id", "user_id", "role"],  # 執行期讀身分三鍵建 ToolContext（server-injected）
     writes=[ANSWER_KEY],
     deps=[],  # reader / model / 身分容器由 compiler 以 params 注入（見 compiler agentic 分派）
     requires_tools=[],

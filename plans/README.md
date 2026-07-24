@@ -15,7 +15,7 @@ This directory records the evolution of the Skill platform. Source code and exec
 
 ## How To Read The Records
 
-- `chat-skill-routing` and `node-first-skill-engine` are delivered design records. Their proposed implementation steps are historical; use the code locations above for current contracts.
+- `chat-skill-routing` and `node-first-skill-engine` are delivered design records. Their proposed implementation steps are historical; use the code locations above for current contracts. For `node-first-skill-engine`, the most recent implementation completion is detailed in [05-contract-hardening-and-authoring-ux.md](node-first-skill-engine/05-contract-hardening-and-authoring-ux.md), which covers reads enforcement, skill UX refinements, and cross-service error handling.
 - `settings-skill-redesign` is the current product-design record for the settings experience. Its initial phases have been delivered; remaining work must be derived from an observed code or test gap.
 - `skill-authoring` is archived. Its UI scope was folded into `settings-skill-redesign`; it must not be used to create a second editor, schema, or runtime.
 - `copilot-shared-core` is the only forward-looking record here: nothing in it has shipped. It supersedes the `P4 / 非目標` row in [chat-skill-routing/03-design.md](chat-skill-routing/03-design.md) §10, which deferred wiring server-side Skill tools into the AG-UI copilot. Its findings correct two claims in that record — the copilot has no server-side memory at all, and native function calling is reliable for UI-action tools even though it was disabled for numeric Skills.

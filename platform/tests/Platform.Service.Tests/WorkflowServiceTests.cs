@@ -61,6 +61,55 @@ public sealed class WorkflowServiceTests
         Assert.IsType(expected, ex);
     }
 
+    // 422 契約:解析 detail.message + detail.field_errors,填進 WorkflowBadInputException(對外 ApiError.fieldErrors)。
+    [Fact]
+    public async Task InvokeSkill_422WithFieldErrors_ParsesCleanMessageAndFieldErrors()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
+            """{"detail":{"error":"workflow_input_invalid","message":"輸入資料有 2 個欄位需要修正","field_errors":{"query":"「query」為必填。","top_k":"「top_k」必須是整數。"}}}"""));
+
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+
+        // message = detail.message,乾淨且不含原始 body。
+        Assert.Equal("輸入資料有 2 個欄位需要修正", ex.Message);
+        Assert.DoesNotContain("detail", ex.Message);
+        Assert.DoesNotContain("{", ex.Message);
+        // field_errors(snake_case)逐鍵映入 FieldErrors,鍵沿用引擎欄位名。
+        Assert.NotNull(ex.FieldErrors);
+        Assert.Equal(2, ex.FieldErrors!.Count);
+        Assert.Equal("「query」為必填。", ex.FieldErrors["query"]);
+        Assert.Equal("「top_k」必須是整數。", ex.FieldErrors["top_k"]);
+    }
+
+    // 回落:舊版 workflow(裸字串 detail)/ 非 JSON / 缺 field_errors → 固定文案,無例外、不外洩原始 body。
+    [Theory]
+    [InlineData("{\"detail\":\"1 validation error for InputModel\\nquery field required\"}")] // 舊 pydantic 字串 detail
+    [InlineData("plain text, not json")]                                                        // 非 JSON
+    [InlineData("{\"detail\":{\"error\":\"x\"}}")]                                               // detail 物件但缺 message/field_errors
+    public async Task InvokeSkill_422UnexpectedBody_FallsBackToFixedMessage_NoRawBodyLeak(string body)
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422, body));
+
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+
+        Assert.Equal("Skill 輸入不符合規範", ex.Message);
+        Assert.Null(ex.FieldErrors);
+    }
+
+    // 缺 message 但有 field_errors:訊息回落固定文案,fieldErrors 仍帶上(不因缺 message 整組丟棄)。
+    [Fact]
+    public async Task InvokeSkill_422MissingMessageButHasFieldErrors_FallsBackMessage_KeepsFieldErrors()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
+            """{"detail":{"field_errors":{"query":"「query」為必填。"}}}"""));
+
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+
+        Assert.Equal("Skill 輸入不符合規範", ex.Message);
+        Assert.NotNull(ex.FieldErrors);
+        Assert.Equal("「query」為必填。", ex.FieldErrors!["query"]);
+    }
+
     [Fact]
     public async Task InvokeSkill_TransportFailure_ThrowsWorkflowInvocation()
     {

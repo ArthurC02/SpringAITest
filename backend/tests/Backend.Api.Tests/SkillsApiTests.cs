@@ -495,4 +495,100 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
         Assert.Equal("ADMIN", (await resp.ReadJsonAsync())["required_role"]!.GetValue<string>());
     }
+
+    // ---- simpleForm(B3):簡單模式表單狀態,opaque JSON 存取(camelCase 屬性) ----
+
+    /// <summary>{ templateId, form:{...} };form 值全為字串(前端表單原值),backend 不解析。</summary>
+    private static JsonObject SimpleForm(string templateId, string topK)
+        => new()
+        {
+            ["templateId"] = templateId,
+            ["form"] = new JsonObject
+            {
+                ["name"] = "名稱", ["description"] = "描述", ["rule"] = "規則", ["topK"] = topK,
+            },
+        };
+
+    private static JsonObject BodyWithForm(string definition, JsonObject simpleForm)
+        => new() { ["definition"] = definition, ["simpleForm"] = simpleForm };
+
+    // (a) create 帶 simpleForm → 存進 DB,單筆 GET 與清單都讀得回原樣 JSON 物件。
+    [Fact]
+    public async Task Post_WithSimpleForm_IsStored_AndReturnedOnGetAndList()
+    {
+        var client = Admin();
+        var resp = await client.PostAsJsonAsync(
+            "/api/skills", BodyWithForm(Yaml("at_sf_create"), SimpleForm("template-stats", "50")));
+        Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+
+        // 單筆 GET:simpleForm 是 JSON 物件(不是被逃脫的字串),內容逐欄可讀。
+        var single = (await (await client.GetAsync("/api/skills/at_sf_create")).ReadJsonAsync()).AsObject();
+        var form = single["simpleForm"]!.AsObject();
+        Assert.Equal("template-stats", form["templateId"]!.GetValue<string>());
+        Assert.Equal("50", form["form"]!["topK"]!.GetValue<string>());
+
+        // 清單項目也帶 simpleForm。
+        var item = (await (await client.GetAsync("/api/skills")).ReadJsonAsync()).AsArray()
+            .Single(n => n!["name"]!.GetValue<string>() == "at_sf_create")!.AsObject();
+        Assert.Equal("template-stats", item["simpleForm"]!["templateId"]!.GetValue<string>());
+    }
+
+    // 無 simpleForm 的 skill:欄位省略(不出現 null 鍵),不影響既有回應形狀。
+    [Fact]
+    public async Task Get_WithoutSimpleForm_OmitsField()
+    {
+        var client = Admin();
+        await CreateAsync(client, "at_sf_absent");
+
+        var single = (await (await client.GetAsync("/api/skills/at_sf_absent")).ReadJsonAsync()).AsObject();
+        Assert.False(single.ContainsKey("simpleForm"));
+    }
+
+    // (b) 進階編輯器的 update(body 無 simpleForm)→ 保留既有值,不清空。
+    [Fact]
+    public async Task Put_WithoutSimpleForm_PreservesExisting()
+    {
+        var client = Admin();
+        await client.PostAsJsonAsync(
+            "/api/skills", BodyWithForm(Yaml("at_sf_preserve"), SimpleForm("template-stats", "50")));
+
+        var put = await client.PutAsJsonAsync(
+            "/api/skills/at_sf_preserve", Body(Yaml("at_sf_preserve", description: "進階手改")));
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var single = (await (await client.GetAsync("/api/skills/at_sf_preserve")).ReadJsonAsync()).AsObject();
+        Assert.Equal("進階手改", single["description"]!.GetValue<string>()); // definition 有更新
+        Assert.Equal("template-stats", single["simpleForm"]!["templateId"]!.GetValue<string>()); // 表單狀態保留
+        Assert.Equal("50", single["simpleForm"]!["form"]!["topK"]!.GetValue<string>());
+    }
+
+    // 決策表另一半:update 帶新 simpleForm → 覆寫(簡單模式重存)。
+    [Fact]
+    public async Task Put_WithSimpleForm_Overwrites()
+    {
+        var client = Admin();
+        await client.PostAsJsonAsync(
+            "/api/skills", BodyWithForm(Yaml("at_sf_overwrite"), SimpleForm("template-stats", "50")));
+
+        await client.PutAsJsonAsync(
+            "/api/skills/at_sf_overwrite", BodyWithForm(Yaml("at_sf_overwrite"), SimpleForm("template-compare", "8")));
+
+        var single = (await (await client.GetAsync("/api/skills/at_sf_overwrite")).ReadJsonAsync()).AsObject();
+        Assert.Equal("template-compare", single["simpleForm"]!["templateId"]!.GetValue<string>());
+        Assert.Equal("8", single["simpleForm"]!["form"]!["topK"]!.GetValue<string>());
+    }
+
+    // (e) 租戶隔離:A 帶 simpleForm 的 skill,B 一律 404(讀不到 skill,自然讀不到其表單狀態)。
+    [Fact]
+    public async Task SimpleForm_IsTenantScoped()
+    {
+        await Admin("demo-a").PostAsJsonAsync(
+            "/api/skills", BodyWithForm(Yaml("at_sf_tenant"), SimpleForm("template-stats", "50")));
+
+        Assert.Equal(
+            HttpStatusCode.NotFound, (await Admin("demo-b").GetAsync("/api/skills/at_sf_tenant")).StatusCode);
+        Assert.DoesNotContain(
+            (await (await Admin("demo-b").GetAsync("/api/skills")).ReadJsonAsync()).AsArray(),
+            n => n!["name"]!.GetValue<string>() == "at_sf_tenant");
+    }
 }

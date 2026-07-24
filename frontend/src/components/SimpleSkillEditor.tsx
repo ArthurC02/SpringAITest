@@ -1,21 +1,19 @@
-import { Suspense, lazy, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ApiError } from '../api/http'
-import { createSkill, listSkillCatalog, validateSkill } from '../api/skills'
+import { createSkill, listSkillCatalog, updateSkill, validateSkill } from '../api/skills'
 import type { SkillInputField, SkillValidation } from '../types'
 import { compose } from '../skills/compose'
 import { TEMPLATES, type SkillForm, type SkillTemplate } from '../skills/templates'
-import { CODE_LABEL, blockingErrors } from '../skills/validationLabels'
+import { CODE_LABEL, WARN_CODES, blockingErrors } from '../skills/validationLabels'
 import { NAME_RULE_MESSAGE, isValidSkillName, slugifySkillName } from '../skills/skillName'
 import ErrorText from './ErrorText'
-import Skeleton from './Skeleton'
 import SkillRunPanel from './SkillRunPanel'
 
-// CodeMirror 只在切到 Python 時才動態載入（不進首屏 bundle，SSR-P2C-001）。
-const PythonEditor = lazy(() => import('./PythonEditor'))
-
 interface Props {
-  // ponytail: 只服務「新增」——既有 custom 的編輯改走 AdvancedSkillEditor 保真（SkillHome），
-  // 簡單模式無法反解 YAML，留 edit 分支只會靜默重建、丟原定義（設計 §10 偏差②）。
+  // create 模式（無 initial）：從範本起手。
+  // edit 模式（有 initial）：讀回已存的 simpleForm 重填——只有簡單模式建立品有這份表單狀態，
+  // 故不會靜默重建、丟原定義；範本與名稱鎖定，存檔依表單重跑 compose 覆蓋 definition。
+  initial?: { name: string; templateId: string; form: SkillForm }
   onSaved: (name: string) => void
   onAdvanced: (definition: string) => void
   onClose: () => void
@@ -31,7 +29,7 @@ function saveErrorMessage(e: unknown): string {
 }
 
 // 額外開放欄位（name/description/rule 有專屬區塊，這裡只放工作流程參數）。
-const EXTRA_FIELDS: (keyof SkillForm)[] = ['topK', 'sortBy', 'metric', 'period']
+const EXTRA_FIELDS: (keyof SkillForm)[] = ['topK']
 
 /** 驗證錯誤翻人話：只給 CODE_LABEL 人話，避開行號與 node/state 術語（SSR-P2B-007）。 */
 function humanErrors(v: SkillValidation): string[] {
@@ -44,10 +42,13 @@ function humanErrors(v: SkillValidation): string[] {
  * 簡單模式（雙門其一）：四塊零術語外殼（範本/名稱/描述/我的規則）＋ 存後試 ＋ 版本。
  * 不揭露流程/node/state/YAML。未選範本不可存、永不從空白 YAML 起手（SSR-P2B-001）。
  */
-export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Props) {
-  const [templateId, setTemplateId] = useState<SkillTemplate['id'] | null>(null)
-  const [form, setForm] = useState<SkillForm>({})
-  const [ruleLang, setRuleLang] = useState<'nl' | 'python'>('nl')
+export default function SimpleSkillEditor({ initial, onSaved, onAdvanced, onClose }: Props) {
+  const editing = !!initial
+  // 編輯模式：以 basedOn（存下的 templateId）反查範本；查不到 → 引導改用進階（見掛載 effect）。
+  const initialTemplate = initial ? TEMPLATES.find((t) => t.basedOn === initial.templateId) ?? null : null
+
+  const [templateId, setTemplateId] = useState<SkillTemplate['id'] | null>(initialTemplate?.id ?? null)
+  const [form, setForm] = useState<SkillForm>(initial?.form ?? {})
   const [baseDefinition, setBaseDefinition] = useState<string | null>(null)
   const [storedSchema, setStoredSchema] = useState<Record<string, SkillInputField> | null>(null)
   const [validation, setValidation] = useState<SkillValidation | null>(null)
@@ -57,10 +58,8 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
 
   const template = templateId ? TEMPLATES.find((t) => t.id === templateId)! : null
 
-  // 選範本 → 從 catalog 取骨架原文（唯一事實來源，取不到就擋存，不 fallback 前端 skeleton）。
-  async function pickTemplate(t: SkillTemplate) {
-    setTemplateId(t.id)
-    setRuleLang(t.slotKind === 'script' ? 'python' : 'nl')
+  // 從 catalog 取骨架原文（唯一事實來源，取不到就擋存，不 fallback 前端 skeleton）。不動 form/templateId。
+  async function loadSkeleton(t: SkillTemplate) {
     setBaseDefinition(null)
     setError(null)
     setValidation(null)
@@ -78,13 +77,29 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
     }
   }
 
+  function pickTemplate(t: SkillTemplate) {
+    setTemplateId(t.id)
+    void loadSkeleton(t)
+  }
+
+  // 編輯模式掛載：範本查得到就自動載骨架；查不到 → 顯示一句錯誤並引導改用進階編輯，不崩。
+  useEffect(() => {
+    if (!initial) return
+    if (!initialTemplate) {
+      setError('找不到這個 Skill 使用的範本，無法用簡單模式編輯。請改用清單的「編輯」（進階編輯器）。')
+      return
+    }
+    void loadSkeleton(initialTemplate)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在掛載跑一次；initial 由呼叫端固定。
+  }, [])
+
   function setField(field: keyof SkillForm, value: string) {
     setForm((f) => ({ ...f, [field]: value }))
   }
 
   function composed(): string | null {
     if (!template || !baseDefinition) return null
-    return compose(template, form, baseDefinition)
+    return compose(form, baseDefinition)
   }
 
   async function onSave() {
@@ -110,13 +125,21 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
     setError(null)
     setValidation(null)
     try {
-      const def = compose(template, form, baseDefinition)
+      const def = compose(form, baseDefinition)
       const v = await validateSkill(def)
       if (!v.valid && blockingErrors(v).length > 0) {
         setValidation(v)
         return
       }
-      await createSkill(def)
+      // 存下範本身分＋表單原值，讓此 skill 日後可重回簡單模式（templateId 用 basedOn）。
+      const simpleForm = { templateId: template.basedOn, form }
+      if (editing) {
+        await updateSkill(name, def, simpleForm)
+      } else {
+        await createSkill(def, simpleForm)
+      }
+      // 存檔成功。保留 validation 以便顯示非阻擋的資料流警告（不阻擋存檔，只提醒試跑）。
+      setValidation(v)
       setSavedName(name)
       onSaved(name)
     } catch (e) {
@@ -135,6 +158,10 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
   const errorLabels = validation ? humanErrors(validation) : []
   const showField = (f: keyof SkillForm) => template?.openFields.includes(f)
 
+  // 存檔成功後的非阻擋警告：只彙總成一句人話（來自 validationLabels 的警告碼），不逐條、
+  // 不顯示引擎原文（含 node/state 術語）—— 逐條渲染是進階編輯器的事。
+  const warnCount = validation ? validation.errors.filter((e) => WARN_CODES.has(e.code)).length : 0
+
   // 名稱即時 slug 驗證(存檔前擋);不合規時給一個可一鍵套用的建議 slug。
   const nameTrimmed = form.name?.trim() ?? ''
   const nameError = nameTrimmed !== '' && !isValidSkillName(nameTrimmed) ? NAME_RULE_MESSAGE : null
@@ -143,7 +170,7 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
   return (
     <div className="simple-skill">
       <div className="skill-editor__head">
-        <h3 className="skill-editor__title">新增 Skill</h3>
+        <h3 className="skill-editor__title">{editing ? '簡單模式編輯' : '新增 Skill'}</h3>
         <div className="skill-editor__actions">
           <button
             className="btn"
@@ -159,25 +186,38 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
         </div>
       </div>
 
+      {/* 編輯模式常駐警告：簡單模式存檔會依表單重建定義，覆蓋任何進階編輯器的手改。 */}
+      {editing && (
+        <p className="simple-skill__warn" role="note">
+          以簡單模式儲存會依表單重建定義；若曾在進階編輯器手動修改，這些修改將被覆蓋。
+        </p>
+      )}
+
       {/* ① 從範本開始 */}
       <section className="simple-skill__block">
         <h4 className="simple-skill__block-title">① 從範本開始</h4>
-        <div className="simple-skill__templates" role="radiogroup" aria-label="範本">
-          {TEMPLATES.map((t) => (
-            <label
-              key={t.id}
-              className={`simple-skill__template${templateId === t.id ? ' simple-skill__template--on' : ''}`}
-            >
-              <input
-                type="radio"
-                name="template"
-                checked={templateId === t.id}
-                onChange={() => pickTemplate(t)}
-              />
-              {t.label}
-            </label>
-          ))}
-        </div>
+        {editing ? (
+          <p className="muted">
+            範本：{template ? template.label : initial!.templateId}（編輯模式不可更換）
+          </p>
+        ) : (
+          <div className="simple-skill__templates" role="radiogroup" aria-label="範本">
+            {TEMPLATES.map((t) => (
+              <label
+                key={t.id}
+                className={`simple-skill__template${templateId === t.id ? ' simple-skill__template--on' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="template"
+                  checked={templateId === t.id}
+                  onChange={() => pickTemplate(t)}
+                />
+                {t.label}
+              </label>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* ② 名稱 */}
@@ -189,8 +229,11 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
             value={form.name ?? ''}
             placeholder="例如：sales-rule"
             aria-invalid={!!nameError}
+            // 名稱是 skill 識別，改名等於另建 → 編輯模式鎖定。
+            disabled={editing}
             onChange={(e) => setField('name', e.target.value)}
           />
+          {editing && <p className="muted">名稱是 Skill 的識別碼，無法在編輯模式變更。</p>}
           {nameError && (
             <span className="field-error" role="alert">
               {nameError}
@@ -246,26 +289,12 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
       {template && showField('rule') && (
         <section className="simple-skill__block">
           <h4 className="simple-skill__block-title">⑤ {template.labels.rule ?? '我的規則'}</h4>
-          <label className="simple-skill__toggle">
-            <input
-              type="checkbox"
-              checked={ruleLang === 'python'}
-              onChange={(e) => setRuleLang(e.target.checked ? 'python' : 'nl')}
-            />
-            進階：改用 Python 編輯規則
-          </label>
-          {ruleLang === 'python' ? (
-            <Suspense fallback={<Skeleton rows={3} />}>
-              <PythonEditor value={form.rule ?? ''} onChange={(v) => setField('rule', v)} />
-            </Suspense>
-          ) : (
-            <textarea
-              className="textarea"
-              value={form.rule ?? ''}
-              placeholder="用中文寫就好，可留空"
-              onChange={(e) => setField('rule', e.target.value)}
-            />
-          )}
+          <textarea
+            className="textarea"
+            value={form.rule ?? ''}
+            placeholder="用中文寫就好，可留空"
+            onChange={(e) => setField('rule', e.target.value)}
+          />
         </section>
       )}
 
@@ -291,6 +320,13 @@ export default function SimpleSkillEditor({ onSaved, onAdvanced, onClose }: Prop
           {busy ? '儲存中…' : '儲存'}
         </button>
       </div>
+
+      {/* 存檔成功後的非阻擋資料流警告：一句彙總、role="status"（非 alert，不阻擋）。 */}
+      {savedName && warnCount > 0 && (
+        <p className="simple-skill__warn" role="status">
+          已儲存。有 {warnCount} 個欄位可能取不到資料，建議先在下方試跑確認。
+        </p>
+      )}
 
       {/* ⑥ 試一下（存後試：未存停用，存後走正式 invoke） */}
       <section className="simple-skill__block">

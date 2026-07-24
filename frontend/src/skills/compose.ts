@@ -1,24 +1,18 @@
-import type { SkillForm, SkillTemplate } from './templates'
+import type { SkillForm } from './templates'
 
 // 純字串 patch，不 parse/emit YAML（縫①：前端無 YAML 庫）。骨架用兩種 sentinel：
-//   1. 規則注入槽：block literal（`|`）內獨佔一行的 __RULE_SLOT__。
-//   2. 白名單純量覆寫：帶尾註 `# __SLOT_<field>__` 的行。
+//   1. 規則注入槽：block literal（`|`）內獨佔一行的 __RULE_SLOT__。規則槽現在一律是
+//      nl_logic 的 instruction block literal，故只會出現在區塊純量內。
+//   2. 白名單純量覆寫：帶尾註 `# __SLOT_<field>__` 的行（純量槽用 YAML `key: value`）。
 // compose 只做定點字串替換，骨架本身是啟動即合法/可載入的 YAML。
 
 /** 只有這些 field 允許被簡單模式覆寫；topK 走數字，其餘走字串。 */
-const WHITELIST: (keyof SkillForm)[] = [
-  'name',
-  'description',
-  'topK',
-  'sortBy',
-  'metric',
-  'period',
-]
+const WHITELIST: (keyof SkillForm)[] = ['name', 'description', 'topK']
 const NUMERIC_FIELDS = new Set<keyof SkillForm>(['topK'])
 
-/** rule 留空時的安全 no-op：NL 照原樣回答；script 用 pass（皆保持骨架 valid）。 */
-function emptyRule(kind: SkillTemplate['slotKind']): string {
-  return kind === 'script' ? 'pass' : '照原樣回答'
+/** rule 留空時的安全 no-op：nl_logic 照原樣回答（保持骨架 valid）。 */
+function emptyRule(): string {
+  return '照原樣回答'
 }
 
 function indentOf(line: string): string {
@@ -35,17 +29,13 @@ function toScalar(field: keyof SkillForm, value: string): string {
   return JSON.stringify(value)
 }
 
-export function compose(
-  template: SkillTemplate,
-  form: SkillForm,
-  baseDefinition: string,
-): string {
+export function compose(form: SkillForm, baseDefinition: string): string {
   const out: string[] = []
   for (const line of baseDefinition.split('\n')) {
     // 1) 規則注入槽：整行換成 rule，逐行套骨架 slot 行的縮排（區塊純量對多行內容字面安全）。
     if (line.includes('__RULE_SLOT__')) {
       const indent = indentOf(line)
-      const rawRule = (form.rule ?? '').trim() === '' ? emptyRule(template.slotKind) : form.rule!
+      const rawRule = (form.rule ?? '').trim() === '' ? emptyRule() : form.rule!
       out.push(
         rawRule
           .split('\n')
@@ -61,8 +51,8 @@ export function compose(
       const value = form[field]
       if (value == null || value === '') continue
       if (!patched.includes(`__SLOT_${field}__`)) continue
-      // 分隔符認冒號（YAML `key: value`）或等號（script slot 的 Python 賦值 `x = value`）。
-      const re = new RegExp(`^(\\s*[^:=\\n]+[:=]\\s*)(.*?)(\\s*#\\s*__SLOT_${field}__.*)$`)
+      // 分隔符只認冒號（YAML `key: value`）；純量槽全是 YAML 賦值，無 Python `=` 槽。
+      const re = new RegExp(`^(\\s*[^:\\n]+:\\s*)(.*?)(\\s*#\\s*__SLOT_${field}__.*)$`)
       patched = patched.replace(re, `$1${toScalar(field, value)}$3`)
     }
     out.push(patched)

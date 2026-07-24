@@ -200,6 +200,26 @@ def test_invoke_invalid_input_returns_422(input_body):
     assert resp.json()["detail"]["error"] == "workflow_input_invalid"
 
 
+def test_invoke_422_body_is_humanized_field_errors():
+    """B1-py: 422 body 為人話化的 field_errors,不外洩 pydantic 原文/URL/model 名。"""
+    resp = client.post(
+        "/skills/kb-query/invoke", json={"input": {}}, headers=_headers()
+    )
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "workflow_input_invalid"
+    assert detail["message"] == "輸入資料有 1 個欄位需要修正"
+    assert "query" in detail["field_errors"]
+    assert "必填" in detail["field_errors"]["query"]
+    # 紅線(§6-4):不得含 pydantic model 名／validation error 原文／errors.pydantic.dev URL
+    blob = str(detail).lower()
+    assert "pydantic" not in blob
+    assert "validation error for" not in blob
+    assert "errors.pydantic.dev" not in blob
+    assert "kbqueryinput" not in blob
+
+
 def test_invoke_admin_skill_forbidden_for_user_role():
     """required_role: ADMIN 的 skill 被 USER 呼叫 → 403（順序上先於 422：input 是空的）。"""
     loaded = skills.get("kb-query")

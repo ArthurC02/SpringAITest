@@ -93,11 +93,62 @@ public sealed class WorkflowService : IWorkflowService
         {
             404 => new WorkflowNotFoundException($"找不到{kind}：{name}"),
             403 => new WorkflowForbiddenException($"權限不足，無法執行{kind}：{name}"),
-            // 下游 422 → 本服務 400;訊息帶上下游回應 body 字串。
-            422 => new WorkflowBadInputException(
-                $"{kind}輸入不符合規範：" + await resp.Content.ReadAsStringAsync(ct)),
+            // 下游 422 → 本服務 400;解析 detail 帶出乾淨訊息與 fieldErrors(見 MapBadInputAsync)。
+            422 => await MapBadInputAsync(kind, resp, ct),
             _ => new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode),
         };
+
+    /// <summary>
+    /// 下游 422 body 契約:<c>{ detail: { error, message, field_errors } }</c>。
+    /// 解析 <c>detail.message</c> 與 <c>detail.field_errors</c>(snake_case)填進對外 ApiError
+    /// (<c>fieldErrors</c> camelCase 容器,鍵沿用引擎給的欄位名)。body 非預期形狀(舊版 workflow、
+    /// 非 JSON、缺 field_errors)→ 回落到 detail.message,取不到再用固定文案;
+    /// 絕不把原始 body 字串拼進 message(那正是要修掉的行為)。
+    /// </summary>
+    private static async Task<Exception> MapBadInputAsync(
+        string kind, HttpResponseMessage resp, CancellationToken ct)
+    {
+        var message = $"{kind} 輸入不符合規範";
+        Dictionary<string, string>? fieldErrors = null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            if (doc.RootElement.TryGetProperty("detail", out var detail)
+                && detail.ValueKind == JsonValueKind.Object)
+            {
+                if (detail.TryGetProperty("message", out var msg)
+                    && msg.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(msg.GetString()))
+                {
+                    message = msg.GetString()!;
+                }
+
+                if (detail.TryGetProperty("field_errors", out var fe)
+                    && fe.ValueKind == JsonValueKind.Object)
+                {
+                    fieldErrors = new Dictionary<string, string>();
+                    foreach (var prop in fe.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.String)
+                        {
+                            fieldErrors[prop.Name] = prop.Value.GetString()!;
+                        }
+                    }
+                    if (fieldErrors.Count == 0)
+                    {
+                        fieldErrors = null;
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // 非 JSON / 壞 body → 維持固定文案回落,不外洩原始 body。
+        }
+
+        return new WorkflowBadInputException(message) { FieldErrors = fieldErrors };
+    }
 
     /// <summary>原樣穿透下游 JSON(引擎的欄位由引擎定義,代理層不套 DTO 以免靜默吃掉新欄位)。</summary>
     private static async Task<JsonElement> ReadJsonAsync(HttpResponseMessage resp, CancellationToken ct)

@@ -27,7 +27,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                 .OrderBy(s => s.Name, StringComparer.Ordinal)
                 .Select(s => new SkillInfo(
                     s.Name, s.Description, s.RequiredRole, s.Enabled, s.CurrentRevision,
-                    s.CreatedAt, s.UpdatedAt, s.Kind))
+                    s.CreatedAt, s.UpdatedAt, s.Kind, s.SimpleForm))
                 .ToList());
         }
     }
@@ -59,6 +59,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                 }
 
                 // 軟刪的名字可以重用:同一列復活,稽核鏈不斷號。
+                // simple_form 忠實模擬 COALESCE(EXCLUDED, skill):復活不帶 simpleForm → 保留軟刪前的值。
                 var revived = skill with
                 {
                     Kind = "flow",
@@ -67,6 +68,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                     Enabled = true,
                     CreatedAt = existing.CreatedAt,
                     UpdatedAt = now,
+                    SimpleForm = skill.SimpleForm ?? existing.SimpleForm,
                 };
                 _store[(tenantId, skill.Name)] = revived;
                 AddRevisionUnsafe(tenantId, revived, createdBy);
@@ -95,6 +97,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
             }
 
             // definition-only PUT 建立新的 flow 作者來源，舊匯入 package 已與新 definition 不一致，必須清除。
+            // simple_form 忠實模擬 COALESCE(@SimpleForm, simple_form):進階編輯器不帶 → 保留既有,不清空。
             var stored = skill with
             {
                 Name = name,
@@ -104,6 +107,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                 CreatedAt = existing.CreatedAt,
                 UpdatedAt = Now(),
                 Package = null,
+                SimpleForm = skill.SimpleForm ?? existing.SimpleForm,
             };
             _store[(tenantId, name)] = stored;
             AddRevisionUnsafe(tenantId, stored, updatedBy);
@@ -121,6 +125,8 @@ public sealed class InMemorySkillRepository : ISkillRepository
     {
         lock (_gate)
         {
+            // simple_form 不帶不清:import 與 restore 都不動表單狀態(對映 SQL 不列入該欄)。
+            // 新建 → NULL;覆寫既有 → 保留既有值(忽略傳入 skill.SimpleForm,匯入品無表單狀態)。
             var now = Now();
             if (_store.TryGetValue((tenantId, skill.Name), out var existing))
             {
@@ -131,6 +137,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                     Enabled = true,
                     CreatedAt = existing.CreatedAt,
                     UpdatedAt = now,
+                    SimpleForm = existing.SimpleForm,
                 };
                 _store[(tenantId, skill.Name)] = updated;
                 AddRevisionUnsafe(tenantId, updated, createdBy, packageSha256);
@@ -141,6 +148,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
             {
                 Package = package?.ToArray(), CurrentRevision = 1, Enabled = true,
                 CreatedAt = now, UpdatedAt = now,
+                SimpleForm = null,
             };
             _store[(tenantId, skill.Name)] = stored;
             AddRevisionUnsafe(tenantId, stored, createdBy, packageSha256);

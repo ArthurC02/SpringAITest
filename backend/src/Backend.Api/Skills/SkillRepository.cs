@@ -18,7 +18,7 @@ public sealed class SkillRepository : ISkillRepository
         "name AS Name, description AS Description, definition AS Definition,"
         + " required_role AS RequiredRole, enabled AS Enabled,"
         + " current_revision AS CurrentRevision, created_at AS CreatedAt, updated_at AS UpdatedAt,"
-        + " kind AS Kind, package AS Package";
+        + " kind AS Kind, package AS Package, simple_form::text AS SimpleForm";
 
     // skill_revision 稽核列插入片段(Create/Update/Import 共用):{0}=主 CTE 名、{1}=寫入者參數名。
     // 每版都 snapshot definition/kind/package；package bytes 不公開，但 restore 必須能還原完整作者輸入。
@@ -40,7 +40,8 @@ public sealed class SkillRepository : ISkillRepository
         var rows = await conn.QueryAsync<SkillInfo>(new CommandDefinition(
             "SELECT name AS Name, description AS Description, required_role AS RequiredRole,"
             + " enabled AS Enabled, current_revision AS CurrentRevision,"
-            + " created_at AS CreatedAt, updated_at AS UpdatedAt, kind AS Kind"
+            + " created_at AS CreatedAt, updated_at AS UpdatedAt, kind AS Kind,"
+            + " simple_form::text AS SimpleForm"
             + " FROM skill WHERE tenant_id = @tenantId AND enabled ORDER BY name",
             new { tenantId }, cancellationToken: ct));
         return rows.AsList();
@@ -66,14 +67,18 @@ public sealed class SkillRepository : ISkillRepository
         //   - 名字還活著 → WHERE 不成立 → 0 列 → 回 null → controller 409(且不多寫 revision);
         //   - 名字已軟刪 → 復活,current_revision 接著加(稽核鏈不斷號),enabled 回 true。
         // revision 取 RETURNING 回來的真值(不是寫死的 1)—— 復活時是 N+1,新建時就是 1。
+        // simple_form:新建落 @SimpleForm(null → NULL);復活時 COALESCE(新值, 既有)——
+        // 進階編輯器復活不帶 simpleForm 則保留軟刪前的表單狀態(缺席/顯式 null 皆保留)。
         return await ExecuteWriteCteAsync(conn, "ins",
             "INSERT INTO skill (tenant_id, name, description, definition, required_role, enabled,"
-            + "  created_by, current_revision)"
-            + " VALUES (@tenantId, @Name, @Description, @Definition, @RequiredRole, true, @createdBy, 1)"
+            + "  created_by, current_revision, simple_form)"
+            + " VALUES (@tenantId, @Name, @Description, @Definition, @RequiredRole, true, @createdBy, 1,"
+            + "  @SimpleForm::jsonb)"
             + " ON CONFLICT (tenant_id, name) DO UPDATE SET"
             + "  description = EXCLUDED.description, definition = EXCLUDED.definition,"
             + "  required_role = EXCLUDED.required_role, enabled = true,"
             + "  kind = 'flow', package = NULL,"
+            + "  simple_form = COALESCE(EXCLUDED.simple_form, skill.simple_form),"
             + "  current_revision = skill.current_revision + 1, updated_at = now()"
             + " WHERE NOT skill.enabled",
             "createdBy",
@@ -84,6 +89,7 @@ public sealed class SkillRepository : ISkillRepository
                 skill.Description,
                 skill.Definition,
                 skill.RequiredRole,
+                skill.SimpleForm,
                 createdBy,
                 sha = SkillHash.Sha256(skill.Definition),
                 packageSha = (string?)null,
@@ -97,9 +103,12 @@ public sealed class SkillRepository : ISkillRepository
 
         // current_revision +1 後,把「新的 revision 值」與新定義一起落一筆稽核列。
         // AND enabled:已軟刪的 skill 不可經 PUT 復活(規格沒有復用/復活端點)。
+        // simple_form:COALESCE(新值, 既有)——進階編輯器的 update 不帶 simpleForm(缺席/null)→ 保留既有值,
+        // 不清空(計畫拍板:UI 端負責警告「簡單模式重存會覆蓋手改」,backend 不做聰明清除)。
         return await ExecuteWriteCteAsync(conn, "upd",
             "UPDATE skill SET description = @Description, definition = @Definition,"
             + "  required_role = @RequiredRole, kind = 'flow', package = NULL,"
+            + "  simple_form = COALESCE(@SimpleForm::jsonb, simple_form),"
             + "  current_revision = current_revision + 1, updated_at = now()"
             + " WHERE tenant_id = @tenantId AND name = @name AND enabled",
             "updatedBy",
@@ -110,6 +119,7 @@ public sealed class SkillRepository : ISkillRepository
                 skill.Description,
                 skill.Definition,
                 skill.RequiredRole,
+                skill.SimpleForm,
                 updatedBy,
                 sha = SkillHash.Sha256(skill.Definition),
                 packageSha = (string?)null,
@@ -136,6 +146,7 @@ public sealed class SkillRepository : ISkillRepository
     /// ON CONFLICT DO UPDATE **無 WHERE 條件** — 對仍啟用的 skill 也直接覆寫(import 是作者的權威動作)。
     /// flow 與 agentic 匯入都保存原始 package；definition-only flow 才使用 null。
     /// definition + package + 兩個 hash 於同一交易的同一 CTE 內落地(稽核完整性)。
+    /// simple_form 刻意不列入(不帶不清):新建 → 欄位預設 NULL;覆寫既有 → DO UPDATE SET 不含它 → 保留既有值。
     /// </summary>
     public async Task<Skill?> ImportAsync(
         string tenantId, Skill skill, byte[]? package, string? packageSha256, string createdBy, CancellationToken ct)

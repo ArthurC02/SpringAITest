@@ -2,7 +2,6 @@
 
 - 單元:以手寫 recording fake LLM 驗 instruction→system、input_keys→user 組裝、
   空 input_keys 的 normalized_query→query→空字串 fallback、None→空字串。
-- Harness 整合:output_key 非 business_result 被靜態 writes 剝除(印證 v1 動態 writes 未開放)。
 - 註冊/trace:GET /nodes 含 nl_logic@1.0;含 nl_logic 的 skill invoke → business_result +
   trace 有該節點 + 非空 component_version(LLM 版本)。
 
@@ -108,39 +107,26 @@ def test_nl_logic_returns_empty_string_when_llm_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# SSR-P3-005:output_key on/off point —— Harness 依靜態 writes 剝除
+# SSR-P3-005:business_result 固定寫回(output_key 死參數已於 P2 移除)
 # ---------------------------------------------------------------------------
 
 
-def _compile_nl_probe(output_key: str):
+def test_nl_logic_writes_fixed_business_result():
+    """節點固定回 {business_result: result};compile→invoke 後保留該鍵。"""
     llm = FakeStructuredLLM(outputs={_NlLogicOutput: _NlLogicOutput(result="V")})
     deps = make_deps({}, llm=llm)
     definition = yaml.safe_dump(
         {
             "name": "nl-probe",
             "input_schema": {"query": {"type": "str", "required": True, "min_length": 1}},
-            "flow": [
-                {"node": "nl_logic@1.0", "params": {"instruction": "x", "output_key": output_key}}
-            ],
+            "flow": [{"node": "nl_logic@1.0", "params": {"instruction": "x"}}],
         },
         allow_unicode=True,
     )
     skill = skill_mod.parse_source(definition)
     graph = compiler.compile(skill, deps)
-    return compiler.public_output(asyncio.run(graph.ainvoke({"query": "q", "tenant_id": "t"})))
-
-
-def test_nl_logic_output_key_business_result_is_kept():
-    """on-point:output_key == business_result(宣告過的 writes)→ 保留。"""
-    out = _compile_nl_probe("business_result")
+    out = compiler.public_output(asyncio.run(graph.ainvoke({"query": "q", "tenant_id": "t"})))
     assert out["business_result"] == "V"
-
-
-def test_nl_logic_output_key_other_is_stripped_by_harness():
-    """off-point:output_key == other(未宣告)→ 被 Harness 剝除,證明 v1 動態 writes 未開放。"""
-    out = _compile_nl_probe("other")
-    assert "other" not in out
-    assert "business_result" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +141,7 @@ def test_nodes_catalog_lists_nl_logic():
     assert ("nl_logic", "1.0") in by_name
     spec = by_name[("nl_logic", "1.0")]
     assert spec["writes"] == ["business_result"]
-    assert spec["reads"] == []
+    assert spec["reads"] == ["normalized_query", "query"]
 
 
 def test_nl_logic_skill_validates_and_compiles():

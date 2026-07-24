@@ -27,7 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.engine import expressions, script_runner, skill as skill_mod, tool_registry
-from app.engine.harness import describe, harnessed
+from app.engine.harness import IDENTITY_KEYS, describe, harnessed
 from app.engine.node_registry import NodeSpec
 from app.engine.script_runner import (
     RestrictedInProcessRunner,
@@ -247,6 +247,25 @@ def _safe_eval(expr: str, state: dict, key: str, *, on_error: bool, where: str) 
         }
 
 
+def _node_reads(spec: NodeSpec, params: dict) -> set[str]:
+    """node 步驟餵給 harnessed 的 effective_reads（reads 契約強制化的建置點）。
+
+    = spec.reads ∪ dynamic_reads 經該步驟 params 解析（值為 str 取單鍵、list 取全部 str
+    元素、其他型別忽略）∪（run_on_fatal 節點加 ENGINE_KEYS —— answer_composer/audit_feedback
+    宣告了 trace/errors/fatal_error 為 reads，此處保底重複無害）。
+    """
+    reads: set[str] = set(spec.reads)
+    for param in spec.dynamic_reads:
+        value = params.get(param)
+        if isinstance(value, str):
+            reads.add(value)
+        elif isinstance(value, list):
+            reads.update(v for v in value if isinstance(v, str))
+    if spec.run_on_fatal:
+        reads |= skill_mod.ENGINE_KEYS
+    return reads
+
+
 class _Builder:
     def __init__(self, graph: StateGraph, deps: Any, allowed_tools: set[str]):
         self.g = graph
@@ -286,6 +305,11 @@ class _Builder:
                 # 呼叫 LLM 的節點（deps 含 llm）才在 trace 記模型版本
                 component_version=self.llm_version if "llm" in spec.deps else "",
                 writes=spec.writes,
+                # 空 effective_reads（節點 reads=() 且無 dynamic_reads 解析、非 run_on_fatal）
+                # → 傳 None（不過濾）。reads 在 @node 是可選、預設 ()（writes 才是必填），故
+                # 空 reads 契約＝「未宣告」，比照 harnessed 的 reads=None 慣例不強制，避免把
+                # 「沒宣告 read 契約」誤當成「宣告讀零鍵」而餓死節點的整個 state 視圖。
+                reads=_node_reads(spec, params) or None,
             ),
         )
         return node_id
@@ -508,6 +532,11 @@ def _build_agentic_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
     )
     # runner 呼叫 get_llm() → 與 flow LLM 節點一致，trace 記模型版本（觀測性，非行為）
     llm_version = str(getattr(getattr(deps, "llm", None), "version", "") or "")
+    # runner 不經 add_node_step，effective_reads 必須顯式傳：身分三鍵（建 ToolContext）
+    # ∪ runner 宣告的 reads ∪ input_schema（build_user_message 要讀使用者輸入，漏了就收不到）
+    runner_reads = (
+        set(IDENTITY_KEYS) | set(runner_spec.reads) | set(skill.input_schema)
+    )
     g.add_node(
         AGENT_RUNNER_NODE,
         harnessed(
@@ -516,6 +545,7 @@ def _build_agentic_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
             run_on_fatal=runner_spec.run_on_fatal,
             component_version=llm_version,
             writes=runner_spec.writes,
+            reads=runner_reads,
         ),
     )
     g.add_edge(START, AGENT_RUNNER_NODE)

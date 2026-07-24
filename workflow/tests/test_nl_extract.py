@@ -112,7 +112,7 @@ def test_nodes_catalog_lists_nl_extract():
     assert ("nl_extract", "1.0") in by_name
     spec = by_name[("nl_extract", "1.0")]
     assert spec["writes"] == ["extracted"]
-    assert spec["reads"] == []
+    assert spec["reads"] == ["normalized_query", "query"]
 
 
 # ---------------------------------------------------------------------------

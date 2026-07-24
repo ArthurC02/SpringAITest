@@ -22,19 +22,18 @@ class _NlLogicOutput(BaseModel):
     name="nl_logic",
     version="1.0",
     description="以自然語言 instruction 當商業邏輯,執行期呼叫 LLM 解讀並寫回 business_result",
-    reads=[],  # 固定讀取鍵:無(要餵什麼由 params.input_keys 決定)
+    reads=["normalized_query", "query"],  # input_keys 為空時 _llm_input 回落讀這兩鍵
     dynamic_reads=["input_keys"],  # 比照 retrieve 的 query_key:params 指定要餵 LLM 的 state 鍵
-    writes=["business_result"],  # 靜態宣告;output_key v1 鎖死於此(見下)
+    writes=["business_result"],
     deps=["llm"],
     requires_tools=[],
 )
-def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="business_result"):
+def make_nl_logic_node(llm, *, instruction: str, input_keys=()):
     """建立 nl_logic 節點函式。
 
     - instruction:使用者的自然語言規則,原樣當成 LLM 的 system 提示。
     - input_keys:要餵給 LLM 的 state 鍵,依序組成 user 訊息;組裝規則見
       app.nodes._llm_input.build_user_message。
-    - output_key:見下方 ponytail 註解,v1 只有 business_result 會存活。
     """
 
     async def nl_logic(state: dict) -> dict:
@@ -42,9 +41,6 @@ def make_nl_logic_node(llm, *, instruction: str, input_keys=(), output_key="busi
         result = await structured_field(
             llm, system=instruction, user=user, schema=_NlLogicOutput, field="result"
         )
-        # ponytail: output_key 照傳、照寫,但 @node.writes 靜態鎖死 business_result →
-        # Harness 剝除未宣告的鍵,等於 v1 output_key 只能落在 business_result。要真開放
-        # 需引擎「動態 writes」(讓 writes 隨 params 變),YAGNI,之後有人要再談。
-        return {output_key: result}
+        return {"business_result": result}
 
     return nl_logic

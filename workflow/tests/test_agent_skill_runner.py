@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.engine import compiler, tool_registry
 from app.engine.harness import harnessed
@@ -470,6 +471,48 @@ def test_bundle_scripts_are_stored_but_disabled():
     assert "scripts/probe.py" in pkg.scripts  # 有存下來
     with pytest.raises(ValueError):
         read_resource(pkg, "scripts/probe.py")  # 但讀不到、也沒有對應 tool
+
+
+# ---------------------------------------------------------------------------
+# A2 reads 契約強制化：過濾不得吃掉使用者輸入（input_schema 的鍵必在 runner 視圖內）
+# ---------------------------------------------------------------------------
+
+
+class _EchoChatModel(BaseChatModel):
+    """把收到的最後一則 user message 原文回傳（不是固定字串）→ 驗過濾沒吃掉使用者輸入。"""
+
+    @property
+    def _llm_type(self) -> str:
+        return "echo"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        user_texts = [m.content for m in messages if getattr(m, "type", "") == "human"]
+        echoed = user_texts[-1] if user_texts else ""
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=echoed))]
+        )
+
+
+def test_reads_filter_preserves_user_input_for_agentic_runner():
+    """runner 的 harness reads 過濾必須含 input_schema：回顯 model 的 answer 帶得出 query 值。"""
+    skill = make_agentic_skill(uses_tools=[])
+    pkg = make_package(skill, instruction="Be helpful.")
+    reader = MemoryPackageReader()
+    reader.put("demo-a", pkg)
+    echo = _EchoChatModel()
+    deps = make_agentic_deps(reader, lambda: echo)
+
+    out = run_agentic(skill, deps, query="MAGIC-VALUE-42")
+
+    # answer = 回顯的 user message；build_user_message 把 input_schema 的 query 組進去。
+    # 若過濾吃掉 query，回顯就不會含 MAGIC-VALUE-42（現有固定字串 fake 抓不到此縫）。
+    assert "MAGIC-VALUE-42" in out["answer"]
 
 
 # ---------------------------------------------------------------------------

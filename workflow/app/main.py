@@ -71,18 +71,53 @@ def _require_role(required_role: str | None, ctx: RequestContext, name: str) -> 
         )
 
 
+def _humanize_input_error(err: dict) -> str:
+    """把單條 pydantic 錯誤翻成使用者看得懂的中文;絕不外洩 model 名／pydantic.dev URL／
+    python 型別字樣。未知 type 給通用「格式不正確」。"""
+    loc = err.get("loc") or ()
+    field = str(loc[0]) if loc else "輸入"
+    etype = err.get("type", "")
+    ctx = err.get("ctx") or {}
+    if etype == "missing":
+        return f"「{field}」為必填。"
+    if etype == "string_too_short":
+        return f"「{field}」至少需 {ctx.get('min_length')} 個字。"
+    if etype in ("int_parsing", "int_type"):
+        return f"「{field}」必須是整數。"
+    if etype in ("float_parsing", "float_type"):
+        return f"「{field}」必須是數字。"
+    if etype in ("bool_parsing", "bool_type"):
+        return f"「{field}」必須是是/否。"
+    if etype == "list_type":
+        return f"「{field}」必須是清單（JSON 陣列）。"
+    if etype == "dict_type":
+        return f"「{field}」必須是 JSON 物件。"
+    return f"「{field}」格式不正確。"
+
+
 def _validate_input(model, raw: dict, name: str) -> None:
-    """422 input schema 檢查。model 為 None 時不驗證。"""
+    """422 input schema 檢查。model 為 None 時不驗證。
+
+    422 body 為人話化的 field_errors（snake_case 欄位鍵；platform 端會映成 camelCase
+    fieldErrors），不再回吐 pydantic 原始多行英文 dump。
+    """
     if model is None:
         return
     try:
         model.model_validate(raw)
     except ValidationError as e:
+        errs = e.errors()
+        field_errors: dict[str, str] = {}
+        for err in errs:
+            loc = err.get("loc") or ()
+            field = str(loc[0]) if loc else "輸入"
+            field_errors[field] = _humanize_input_error(err)
         raise HTTPException(
             status_code=422,
             detail={
                 "error": "workflow_input_invalid",
-                "message": str(e),
+                "message": f"輸入資料有 {len(errs)} 個欄位需要修正",
+                "field_errors": field_errors,
             },
         )
 

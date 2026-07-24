@@ -15,7 +15,7 @@ import re
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 # 標準 name 規則（agentskills.io）：小寫英數 + 連字號;不可首尾連字號;可數字開頭;1–64 字。
 # `--` 的排除在 field_validator 內另做（pydantic v2 rust-regex 不支援負向前瞻）。
@@ -73,6 +73,15 @@ class InputField(BaseModel):
     required: bool = False
     min_length: int | None = None
     default: Any = None
+
+    @model_validator(mode="after")
+    def _check_min_length_type(self) -> "InputField":
+        # min_length 只有 str/list/dict 有「至少 N 個字／項」語意。掛在 int/float/bool 上
+        # pydantic 無法套用，寫入期看似合法、每次 invoke 卻必炸（死欄位）——寫入期就擋掉，
+        # 經 validate_definition 的 ValidationError 分流成 invalid_schema 阻擋級錯誤。
+        if self.min_length is not None and self.type in ("int", "float", "bool"):
+            raise ValueError("min_length 只適用於 str/list/dict 型別")
+        return self
 
 
 class Skill(BaseModel):
@@ -321,18 +330,27 @@ def _check_node(step: dict, ref: Any, v: _Validator, available: set[str]) -> Non
             )
     for param in spec.dynamic_reads:
         key = params.get(param)
-        if not isinstance(key, str):
+        # dynamic_reads 的值可能是單鍵（retrieve 的 query_key）或鍵清單（nl_logic/nl_extract
+        # 的 input_keys: [docs]）——list[str] 逐項做資料流檢查，str 維持單鍵檢查，其他型別
+        # （None、非 str 元素…）才報「未指定」。
+        if isinstance(key, str):
+            keys = [key]
+        elif isinstance(key, list) and all(isinstance(k, str) for k in key):
+            keys = key
+        else:
             v.add(
                 DATAFLOW_ERROR,
                 f"節點 {spec.name} 需要 params.{param} 指定要讀取的 state 鍵",
                 token=str(ref),
             )
-        elif key not in known:
-            v.add(
-                DATAFLOW_ERROR,
-                f"節點 {spec.name} 讀取的鍵 '{key}'（來自 params.{param}）無前置步驟寫入",
-                token=str(ref),
-            )
+            continue
+        for k in keys:
+            if k not in known:
+                v.add(
+                    DATAFLOW_ERROR,
+                    f"節點 {spec.name} 讀取的鍵 '{k}'（來自 params.{param}）無前置步驟寫入",
+                    token=str(ref),
+                )
     available.update(spec.writes)
 
 

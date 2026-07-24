@@ -1,10 +1,28 @@
+using System;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Backend.Api.Common;
 
 namespace Backend.Api.Skills;
 
+/// <summary>
+/// simple_form 在 DB 邊界以「原始 JSON 文字」流動(jsonb::text ↔ string),但對外/對內都必須是 JSON 物件
+/// 而非被逃脫的字串。此 converter 讓 string 屬性序列化為原文 JSON、反序列化回原文 JSON 文字(不解析內容)。
+/// </summary>
+public sealed class RawJsonConverter : JsonConverter<string>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.TokenType == JsonTokenType.Null
+            ? null
+            : JsonDocument.ParseValue(ref reader).RootElement.GetRawText();
+
+    public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+        => writer.WriteRawValue(value);
+}
+
 /// <summary>Skill 清單項目。JSON snake_case:{ name, description, required_role, enabled, current_revision, created_at, updated_at }
-/// (刻意不含 definition — 內文只在單筆查詢回傳)。清單只列 enabled=true 的 skill,但欄位仍在。</summary>
+/// (刻意不含 definition — 內文只在單筆查詢回傳)。清單只列 enabled=true 的 skill,但欄位仍在。
+/// simpleForm 例外用 camelCase(對齊 auth/config 命名側;skills CRUD 是 backend 自有 API),無則省略。</summary>
 public sealed record SkillInfo(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("description")] string Description,
@@ -13,7 +31,11 @@ public sealed record SkillInfo(
     [property: JsonPropertyName("current_revision")] int CurrentRevision,
     [property: JsonPropertyName("created_at")] DateTime CreatedAt,
     [property: JsonPropertyName("updated_at")] DateTime UpdatedAt,
-    [property: JsonPropertyName("kind")] string Kind = "flow");
+    [property: JsonPropertyName("kind")] string Kind = "flow",
+    [property: JsonPropertyName("simpleForm")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [property: JsonConverter(typeof(RawJsonConverter))]
+    string? SimpleForm = null);
 
 /// <summary>
 /// Skill 完整內容(含 definition 原文)。JSON snake_case。
@@ -32,7 +54,13 @@ public sealed record Skill(
     [property: JsonPropertyName("kind")] string Kind = "flow",
     // 匯入 package 的原始 zip bytes(flow/agentic 都可有；definition-only flow 為 null)。
     // **永不序列化**：package 不得出現在任何公開 JSON。export 與內部 package 端點讀它。
-    [property: JsonIgnore] byte[]? Package = null);
+    [property: JsonIgnore] byte[]? Package = null,
+    // 簡單模式表單狀態(opaque JSON:{ templateId, form })。UI 便利欄,非權威定義(權威仍是 definition YAML);
+    // backend 不解析/不驗證內容,整包當 jsonb 原樣存取。只有 Create/Update 帶入;Import/Restore 不帶不清。無則省略。
+    [property: JsonPropertyName("simpleForm")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [property: JsonConverter(typeof(RawJsonConverter))]
+    string? SimpleForm = null);
 
 /// <summary>
 /// 建立/更新 Skill 的請求 body — **只有 definition 一個欄位**(YAML 原文)。
@@ -40,7 +68,10 @@ public sealed record Skill(
 /// </summary>
 public sealed record SkillUpsert(
     [NotBlank(ErrorMessage = "definition 不可為空")]
-    string? Definition);
+    string? Definition,
+    // 選填:簡單模式表單狀態(opaque JSON)。backend 不解析內容;缺席或顯式 null 皆保留既有值
+    // (寫入層 COALESCE / ?? 保留 — 前端永遠帶完整值,清空語意不由 backend 聰明推斷)。
+    [property: JsonPropertyName("simpleForm")] JsonElement? SimpleForm = null);
 
 /// <summary>skill_revision 的一列(唯讀稽核歷史)。JSON snake_case;軟刪的 skill 其 revision 仍查得到。</summary>
 public sealed record SkillRevisionInfo(

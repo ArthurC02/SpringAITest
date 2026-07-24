@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { deleteSkill, exportSkill, getSkill, importSkill, listSkillCatalog, listSkills } from '../api/skills'
-import type { Skill, SkillCatalogEntry, SkillInfo, SkillInputField, SkillKind } from '../types'
+import type {
+  Skill,
+  SkillCatalogEntry,
+  SkillInfo,
+  SkillInputField,
+  SkillKind,
+  SkillSimpleForm,
+} from '../types'
+import type { SkillForm } from '../skills/templates'
 import { isAgenticDefinition } from '../skills/agenticPackage'
 import {
   isActiveSkillRequest,
@@ -29,6 +37,8 @@ interface Row {
   enabled: boolean
   schema: Record<string, SkillInputField> | null
   kind: SkillKind
+  /** 簡單模式建立品才有；有值才顯示「簡單編輯」入口。 */
+  simpleForm: SkillSimpleForm | null
 }
 
 type Sub = 'edit' | 'run' | 'history'
@@ -43,6 +53,9 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
   const [selected, setSelected] = useState<Selected>(null)
   const [sub, setSub] = useState<Sub>('edit')
   const [creating, setCreating] = useState(false)
+  const [simpleEdit, setSimpleEdit] = useState<
+    { name: string; templateId: string; form: SkillForm } | null
+  >(null)
   const [advanced, setAdvanced] = useState<{ mode: AdvancedMode; def: string; saved?: Skill | null } | null>(
     null,
   )
@@ -77,6 +90,7 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
       enabled: s.enabled,
       schema: schemaOf(s.name),
       kind: kindOf(s.name, s.kind),
+      simpleForm: s.simpleForm ?? null,
     }))
     // 內建：全部列出（唯讀）；template-* 骨架一律排除（縫④）——只在 compose 依 basedOn 精確取用。
     const builtinRows: Row[] = catalog
@@ -90,6 +104,7 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
         enabled: true,
         schema: c.input_schema ?? null,
         kind: c.kind ?? 'flow',
+        simpleForm: null, // 內建骨架無簡單模式表單狀態
       }))
     return [...customRows, ...builtinRows]
   }, [])
@@ -101,6 +116,7 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
     if (restorePendingRef.current) return
     skillRequestGenerationRef.current += 1
     setCreating(false)
+    setSimpleEdit(null)
     setAdvanced(null)
     setAgentEdit(null)
     setSelected({
@@ -118,8 +134,20 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
     skillRequestGenerationRef.current += 1
     setSelected(null)
     setCreating(false)
+    setSimpleEdit(null)
     setAdvanced(null)
     setAgentEdit(null)
+  }
+
+  // 有 simpleForm 的 custom skill 才進得來：讀回存下的範本身分＋表單值，掛簡單編輯器。
+  function openSimpleEdit(row: Row) {
+    if (restorePendingRef.current || !row.simpleForm) return
+    skillRequestGenerationRef.current += 1
+    setSelected(null)
+    setCreating(false)
+    setAdvanced(null)
+    setAgentEdit(null)
+    setSimpleEdit({ name: row.name, templateId: row.simpleForm.templateId, form: row.simpleForm.form })
   }
 
   function navigateSub(next: Sub) {
@@ -338,6 +366,21 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
     )
   }
 
+  // ---- 簡單模式編輯既有 skill（重跑 compose 更新 definition + simple_form；進階可交棒） ----
+  if (simpleEdit) {
+    return (
+      <SimpleSkillEditor
+        initial={simpleEdit}
+        onSaved={() => reload()}
+        onAdvanced={(def) => {
+          setAdvanced({ mode: { kind: 'edit', name: simpleEdit.name }, def })
+          setSimpleEdit(null)
+        }}
+        onClose={() => setSimpleEdit(null)}
+      />
+    )
+  }
+
   // ---- 新增 Skill（簡單模式，進階可交棒） ----
   if (creating) {
     return (
@@ -494,6 +537,12 @@ export default function SkillHome({ isAdmin }: { isAdmin: boolean }) {
                           編輯
                         </button>
                       )
+                    )}
+                    {/* 簡單模式建立品（有 simpleForm）才給零術語的簡單編輯入口；純 YAML／package 匯入品維持進階編輯。 */}
+                    {r.source === 'custom' && isAdmin && r.simpleForm && (
+                      <button className="btn" onClick={() => openSimpleEdit(r)}>
+                        簡單編輯
+                      </button>
                     )}
                     <button className="btn" onClick={() => open(r, 'run')}>
                       試跑

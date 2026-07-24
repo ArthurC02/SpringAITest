@@ -229,6 +229,28 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         Assert.Equal($"name: \"{name}\"", lines[1]);
     }
 
+    // ---- B3:simpleForm 是 UI 便利欄,非可攜 skill 內容 — export zip 一律不含它 ----
+
+    [Fact]
+    public async Task Export_DoesNotIncludeSimpleForm()
+    {
+        const string name = "at_sf_export";
+        await Repo.CreateAsync(
+            "demo-a",
+            new Skill(name, "季報問答", Yaml(name), "USER", true, 0, default, default,
+                SimpleForm: "{\"templateId\":\"template-stats\",\"form\":{\"topK\":\"50\"}}"),
+            "admin-a", CancellationToken.None);
+
+        var entries = await ExportZipAsync(Admin(), name);
+
+        // 只有 SKILL.md,沒有任何攜帶表單狀態的額外 entry。
+        Assert.Equal(new[] { $"{name}/SKILL.md" }, entries.Keys.ToArray());
+        var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
+        Assert.DoesNotContain("simpleForm", md);
+        Assert.DoesNotContain("templateId", md);
+        Assert.DoesNotContain("template-stats", md);
+    }
+
     [Fact]
     public async Task Export_SkillMd_EscapesDescriptionWithSpecialChars()
     {

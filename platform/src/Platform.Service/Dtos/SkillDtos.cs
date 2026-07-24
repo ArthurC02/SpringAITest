@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Platform.Service.Validation;
 
@@ -27,7 +28,12 @@ public sealed record Skill(
 public sealed record SkillUpsert(
     [property: JsonPropertyName("definition")]
     [NotBlank(ErrorMessage = "definition 不可為空")]
-    string? Definition);
+    string? Definition,
+    // 選填:簡單模式表單狀態(opaque JSON)。platform 不解析,原樣穿透給 backend 存取
+    // (強型別 DTO 若不含此欄會靜默吃掉它)。無則省略,不送 null。
+    [property: JsonPropertyName("simpleForm")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    JsonElement? SimpleForm = null);
 
 /// <summary>
 /// Skill 匯出成 Claude Skill 格式 zip 的結果 — 原封來自 backend 的 bytes(不反序列化)。

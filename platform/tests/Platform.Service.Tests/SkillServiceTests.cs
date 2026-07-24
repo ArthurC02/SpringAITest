@@ -147,6 +147,22 @@ public sealed class SkillServiceTests
         Assert.Equal(Yaml, property.Value.GetString());
     }
 
+    [Fact] // B3:選填 simpleForm 必須穿透強型別 DTO,原樣轉發給 backend(否則簡單模式表單狀態被吃掉)。
+    public async Task Create_ForwardsSimpleForm_WhenPresent()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created, SkillJson));
+        var simpleForm = JsonSerializer.Deserialize<JsonElement>(
+            """{"templateId":"template-stats","form":{"topK":"50"}}""");
+
+        await Build(stub).CreateAsync(new SkillUpsert(Yaml, simpleForm), AdminCtx);
+
+        using var doc = JsonDocument.Parse(stub.LastBody!);
+        Assert.Equal(Yaml, doc.RootElement.GetProperty("definition").GetString());
+        var form = doc.RootElement.GetProperty("simpleForm");
+        Assert.Equal("template-stats", form.GetProperty("templateId").GetString());
+        Assert.Equal("50", form.GetProperty("form").GetProperty("topK").GetString());
+    }
+
     [Fact]
     public async Task Update_PutsToNamedPath_SendsDefinition()
     {

@@ -91,6 +91,9 @@ public static class DbBootstrap
         ALTER TABLE skill_revision ADD COLUMN IF NOT EXISTS package bytea;
         ALTER TABLE skill ADD COLUMN IF NOT EXISTS kind text;
         ALTER TABLE skill_revision ADD COLUMN IF NOT EXISTS kind text;
+        -- 簡單模式表單狀態(opaque JSON:{ templateId, form }),讓非技術使用者建完 skill 後可重回簡單模式。
+        -- 只 skill 有此欄(不做版本化,skill_revision 不加);NULL = 無表單狀態(只能進階編輯)。
+        ALTER TABLE skill ADD COLUMN IF NOT EXISTS simple_form jsonb;
         -- 只對新增欄位為 NULL 的舊資料做一次性分類；之後 flow package 非 NULL 也不會被誤判 agentic。
         UPDATE skill
         SET kind = CASE

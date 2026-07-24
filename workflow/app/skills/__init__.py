@@ -4,7 +4,8 @@
 理由是 fail fast：YAML 打錯字（節點名、條件式）要在服務啟動當下就炸，而不是等到
 第一個使用者呼叫 invoke 才 500。
 
-依賴注入：節點不碰全域 settings，deps 由這裡按 skill 名字組好傳給 compiler。
+依賴注入：節點不碰全域 settings。唯一例外是 `retrieve` 的 top_k 最終回落（優先序:
+config seed > 建構參數 > 全域 settings）。deps 由這裡按 skill 名字組好傳給 compiler。
 P2 只有 kb_query 一個內建 skill，直接沿用 deps.py 已經組好的正式依賴
 （同一份依賴組合不重寫第二遍）；自訂 skill（P4，來自 backend）走同一條路徑。
 """

@@ -57,6 +57,15 @@ export interface ConfigEntry {
   updatedAt: string
 }
 
+/**
+ * 簡單模式的表單狀態（存於 skill.simple_form，camelCase 契約，可重回簡單模式編輯）。
+ * templateId = 範本骨架名（basedOn，如 `template-stats`）；form 值全為表單原字串。
+ */
+export interface SkillSimpleForm {
+  templateId: string
+  form: Partial<Record<'name' | 'description' | 'rule' | 'topK', string>>
+}
+
 /** Skill 清單一列（此端點契約為 snake_case，比照 workflows/documents）。 */
 export interface SkillInfo {
   name: string
@@ -68,6 +77,8 @@ export interface SkillInfo {
   enabled: boolean
   /** 未攜帶時是舊 server，相容視為 flow。 */
   kind?: SkillKind
+  /** 簡單模式建立/更新才有（camelCase）；package 匯入品、純 YAML 手寫品為 null/缺席。 */
+  simpleForm?: SkillSimpleForm | null
 }
 
 /** 單筆 Skill；definition = Skill YAML 原文（權威格式，見規格書 §3）。 */

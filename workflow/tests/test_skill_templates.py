@@ -4,9 +4,13 @@ SSR-P4-013 topK 縫⑦）。
 這是把「組出的 YAML 過不過得了 workflow 驗證/編譯/執行」就地驗掉（設計 §8：不在瀏覽器
 重做）。前端 compose 只是純字串 patch，這裡以同一格式 patch 骨架後跑真 compiler/Harness：
 - 冷啟動五支全載入編譯成功、GET /skills 帶回非空 definition；
-- 逐支把規則槽 patch 成一句規則(nl_logic)/一段 Python(script)後 validate 仍 valid、
-  invoke 得到 business_result(三支 NL)/精確排序聚合(兩支 script)；
+- 逐支把規則槽 patch 成一句自然語言規則(nl_logic)後 validate 仍 valid、
+  invoke 得到 business_result；
 - compare/stats 的檢索筆數槽 patch 後，通用 retrieve 實收覆寫值（不誤讀模組全域）。
+
+B2-py 後五支骨架皆為 nl_logic 形狀（compare/stats 由 script 槽遷至 nl_logic）：驗的是
+資料流與槽機制（規則進 system、docs 進 user message、business_result 落地、topK 槽生效），
+不驗 LLM 行為（不試圖讓 nl_logic 真的排序/聚合）。
 
 拿掉任一 template 的 deps mapping（縫③）或 app/skills/__init__.py 的 nl_logic/retrieve
 import（縫⑥）→ 冷啟動 _load_builtin 編譯失敗、本檔轉紅（真護欄）。main.py 的 nl_logic
@@ -27,7 +31,13 @@ from app.engine import skill as skill_mod
 from app.main import app
 from app.nodes.nl_logic import _NlLogicOutput
 from tests.conftest import FakeBackendResponse, auth_headers
-from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch, FakeStructuredLLM, make_deps
+from tests.kbquery_fakes import (
+    TEXT_2025Q3,
+    FakeSearch,
+    FakeStructuredLLM,
+    RecordingLLM,
+    make_deps,
+)
 
 client = TestClient(app)
 
@@ -38,8 +48,18 @@ TEMPLATE_NAMES = (
     "template-infer",
     "template-inspire",
 )
-NL_TEMPLATES = ("template-retrieval", "template-infer", "template-inspire")
-SCRIPT_TEMPLATES = ("template-compare", "template-stats")
+# B2-py 後五支骨架的商業邏輯槽全是 nl_logic 的 instruction（compare/stats 由 script 遷入），
+# 分類塌成單一 NL 類。
+NL_TEMPLATES = TEMPLATE_NAMES
+# 這兩支由 script 骨架遷至 nl_logic（B2-py）——舊 SCRIPT_TEMPLATES 的成員,遷移後併入 NL。
+SCRIPT_TEMPLATES_MIGRATED = ("template-compare", "template-stats")
+# 遷移後與 infer/inspire 同形狀的 thin-retrieval NL 骨架（query_intake → retrieve → nl_logic）
+NL_THIN_RETRIEVAL_TEMPLATES = (
+    "template-infer",
+    "template-inspire",
+    "template-compare",
+    "template-stats",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,23 +91,10 @@ def patch_topk(raw: str, value: int) -> str:
     return "\n".join(out) + "\n"
 
 
-# 排序 docs → 標題(依 score 遞減);sandbox 無 lambda,以 for 建 tuple list 再 sorted
-COMPARE_RULE = """pairs = []
-for d in state["docs"]:
-    pairs = pairs + [(d["score"], d["title"])]
-ranked = sorted(pairs, reverse=True)
-titles = []
-for p in ranked:
-    titles = titles + [p[1]]
-state["business_result"] = titles"""
-
-# 聚合:筆數 + score 總和
-STATS_RULE = """total = 0.0
-n = 0
-for d in state["docs"]:
-    total = total + d["score"]
-    n = n + 1
-state["business_result"] = {"count": n, "total": total}"""
+# B2-py:規則槽現為自然語言(nl_logic 的 instruction),不再是 Python script。
+# 驗的是資料流(規則進 system、docs 進 user、business_result 落地),不試圖讓 nl_logic 真的排序。
+COMPARE_NL_RULE = "依 score 由高到低比較 docs,列出標題排序"
+STATS_NL_RULE = "統計 docs 的筆數與 score 總和"
 
 DOCS = [
     {"document_id": "a", "title": "A", "content": "x", "score": 0.3},
@@ -189,12 +196,22 @@ def test_nl_rule_slot_is_in_nl_logic_instruction_block(name):
     assert nl_steps[0]["params"]["instruction"].strip() == "__RULE_SLOT__"
 
 
-@pytest.mark.parametrize("name", SCRIPT_TEMPLATES)
-def test_script_rule_slot_is_in_script_block(name):
+@pytest.mark.parametrize("name", SCRIPT_TEMPLATES_MIGRATED)
+def test_migrated_compare_stats_rule_slot_is_in_nl_logic_block(name):
+    """B2-py:compare/stats 的規則槽已從 script block 遷至 nl_logic 的 instruction block。
+
+    決策表另一半 —— 舊 test_script_rule_slot_is_in_script_block 驗「規則在 script block」;
+    遷移後改驗「規則在 nl_logic instruction block、且 flow 內不再有任何 script 步驟」。
+    """
     data = yaml.safe_load(skills.get(name).definition)
-    script_steps = [s for s in data["flow"] if isinstance(s, dict) and "script" in s]
-    assert len(script_steps) == 1
-    assert "__RULE_SLOT__" in script_steps[0]["script"]
+    assert not any(isinstance(s, dict) and "script" in s for s in data["flow"])
+    nl_steps = [
+        s
+        for s in data["flow"]
+        if isinstance(s, dict) and str(s.get("node", "")).startswith("nl_logic")
+    ]
+    assert len(nl_steps) == 1
+    assert nl_steps[0]["params"]["instruction"].strip() == "__RULE_SLOT__"
 
 
 @pytest.mark.parametrize("name", TEMPLATE_NAMES)
@@ -222,7 +239,7 @@ def test_patched_retrieval_invoke_produces_business_result():
     assert out["trace"][-1].node_name == "audit_feedback"
 
 
-@pytest.mark.parametrize("name", ("template-infer", "template-inspire"))
+@pytest.mark.parametrize("name", NL_THIN_RETRIEVAL_TEMPLATES)
 def test_patched_nl_thin_retrieval_invoke_produces_business_result(name, monkeypatch):
     raw = skills.get(name).definition
     patched = patch_rule(raw, "根據 docs 推論一句話")
@@ -238,27 +255,37 @@ def test_patched_nl_thin_retrieval_invoke_produces_business_result(name, monkeyp
     assert "retrieve" in node_names and "nl_logic" in node_names
 
 
-def test_patched_compare_invoke_sorts_docs_by_score(monkeypatch):
-    raw = skills.get("template-compare").definition
-    patched = patch_rule(raw, COMPARE_RULE)
+@pytest.mark.parametrize(
+    "name, rule",
+    [
+        ("template-compare", COMPARE_NL_RULE),
+        ("template-stats", STATS_NL_RULE),
+    ],
+)
+def test_patched_migrated_invoke_flows_docs_through_nl_logic(name, rule, monkeypatch):
+    """B2-py:compare/stats 遷至 nl_logic 後,規則進 system、docs 進 user、business_result 落地。
+
+    NL 規則語意（不試圖讓 nl_logic 真的排序/聚合）:用 RecordingLLM 回傳可控值,驗資料流與槽機制。
+    """
+    raw = skills.get(name).definition
+    patched = patch_rule(raw, rule)
     assert skill_mod.validate_source(patched).valid is True
 
     _install_fake_retrieve(monkeypatch)
-    out = _invoke(patched, make_deps({}), query="比較")
+    llm = RecordingLLM(output=_NlLogicOutput(result="規則結果"))
+    out = _invoke(patched, make_deps({}, llm=llm), query="q")
 
-    # 依 score 遞減:B(0.9) > C(0.6) > A(0.3)
-    assert out["business_result"] == ["B", "C", "A"]
-
-
-def test_patched_stats_invoke_aggregates(monkeypatch):
-    raw = skills.get("template-stats").definition
-    patched = patch_rule(raw, STATS_RULE)
-    assert skill_mod.validate_source(patched).valid is True
-
-    _install_fake_retrieve(monkeypatch)
-    out = _invoke(patched, make_deps({}), query="統計")
-
-    assert out["business_result"] == {"count": 3, "total": pytest.approx(1.8)}
+    # business_result = nl_logic 落地的 LLM 結果
+    assert out["business_result"] == "規則結果"
+    # 規則進 system、docs（input_keys:[docs]）進 user message
+    call = llm.calls[-1]
+    assert call["schema"] is _NlLogicOutput
+    assert call["system"].strip() == rule
+    assert call["user"].startswith("docs:")  # build_user_message 以 input_keys 組裝
+    assert "B" in call["user"]  # docs 的內容（title）確實餵進 user message
+    # 資料流:retrieve → nl_logic 皆跑過
+    node_names = [t.node_name for t in out["trace"]]
+    assert "retrieve" in node_names and "nl_logic" in node_names
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +304,9 @@ def test_topk_slot_default_is_carried_to_retrieve(name, default_top_k, monkeypat
     assert settings.retrieval_top_k != default_top_k  # 骨架值刻意不同於全域,才驗得出縫⑦
     captured: dict = {}
     _install_fake_retrieve(monkeypatch, captured=captured)
-    patched = patch_rule(skills.get(name).definition, COMPARE_RULE)
-    _invoke(patched, make_deps({}), query="q")
+    patched = patch_rule(skills.get(name).definition, COMPARE_NL_RULE)
+    llm = RecordingLLM(output=_NlLogicOutput(result="x"))
+    _invoke(patched, make_deps({}, llm=llm), query="q")
     assert captured["json"]["top_k"] == default_top_k
 
 
@@ -288,7 +316,8 @@ def test_topk_slot_override_is_carried_to_retrieve(monkeypatch):
     _install_fake_retrieve(monkeypatch, captured=captured)
     raw = skills.get("template-compare").definition
     patched = patch_topk(raw, 17)
-    patched = patch_rule(patched, COMPARE_RULE)
+    patched = patch_rule(patched, COMPARE_NL_RULE)
     assert skill_mod.validate_source(patched).valid is True
-    _invoke(patched, make_deps({}), query="q")
+    llm = RecordingLLM(output=_NlLogicOutput(result="x"))
+    _invoke(patched, make_deps({}, llm=llm), query="q")
     assert captured["json"]["top_k"] == 17

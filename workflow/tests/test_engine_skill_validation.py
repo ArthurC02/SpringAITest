@@ -20,6 +20,7 @@ from app.engine.skill import (
 
 # import 觸發節點註冊（驗證器要查 registry）
 from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes import nl_logic as _nl_logic  # noqa: F401
 from app.nodes import retrieve as _retrieve_node  # noqa: F401
 
 HEAD = """
@@ -306,6 +307,46 @@ def test_retrieve_dynamic_reads_resolved_from_params():
 
     supplied = _validate("flow:\n  - node: retrieve\n    params: {query_key: query}\n")
     assert _codes(supplied) == []  # query 來自 input_schema
+
+
+def test_nl_logic_list_input_keys_dataflow_check():
+    """P0-c：dynamic_reads 的 list 值（input_keys: [...]）逐項做資料流檢查，
+    不再因 list 型別整包誤報「需要 params.input_keys 指定要讀取的 state 鍵」。"""
+    # off-point：list 指向未寫入的鍵 → 該鍵逐項報 dataflow_error
+    missing = _validate(
+        "flow:\n  - node: nl_logic\n    params: {instruction: r, input_keys: [nowhere]}\n"
+    )
+    assert DATAFLOW_ERROR in _codes(missing)
+    assert any("nowhere" in e.message for e in missing.errors)
+    # on-point：list 指向 input_schema 的 query → 既不誤報「需指定」，該鍵也不報「無前置」
+    supplied = _validate(
+        "flow:\n  - node: nl_logic\n    params: {instruction: r, input_keys: [query]}\n"
+    )
+    assert not any("需要 params.input_keys" in e.message for e in supplied.errors)
+    assert not any(
+        "'query'" in e.message and "input_keys" in e.message for e in supplied.errors
+    )
+
+
+def test_min_length_on_numeric_type_rejected_at_write_time():
+    """B1-py：int/float/bool + min_length 是執行期必炸的死欄位 → 寫入期即以
+    invalid_schema 阻擋（valid=false）。決策表另一半：str + min_length 仍合法。"""
+    bad = validate_source(
+        "name: probe-skill\n"
+        "input_schema:\n"
+        "  count: {type: int, min_length: 2}\n"
+        "flow:\n  - node: query_intake\n"
+    )
+    assert bad.valid is False
+    assert INVALID_SCHEMA in _codes(bad)
+
+    ok = validate_source(
+        "name: probe-skill\n"
+        "input_schema:\n"
+        "  query: {type: str, required: true, min_length: 2}\n"
+        "flow:\n  - node: query_intake\n"
+    )
+    assert INVALID_SCHEMA not in _codes(ok)
 
 
 # ---------------------------------------------------------------------------

@@ -124,6 +124,63 @@ def test_harness_short_circuits_after_fatal_and_records_skipped():
     assert out["trace"][0].status == "skipped"
 
 
+# ---------------------------------------------------------------------------
+# A2 reads 契約強制化：只把宣告過的鍵餵給節點函式
+# ---------------------------------------------------------------------------
+
+
+def test_harness_filters_state_to_declared_reads():
+    """reads=['a'] → 節點函式收到的 dict 只含 a，看不到 state 的 b。"""
+    seen: dict = {}
+
+    async def _peek(state: dict) -> dict:
+        seen.update({"keys": set(state), "a": state.get("a")})
+        return {}
+
+    _run(harnessed("peek", _peek, writes=[], reads=["a"]), {"a": 1, "b": 2})
+
+    assert seen["a"] == 1
+    assert seen["keys"] == {"a"}  # b 被過濾（reads 未宣告）
+
+
+def test_harness_without_reads_declaration_sees_full_state():
+    """reads=None（未宣告契約）→ 不過濾，維持原行為（與 writes=None 對稱）。"""
+    seen: dict = {}
+
+    async def _peek(state: dict) -> dict:
+        seen["keys"] = set(state)
+        return {}
+
+    _run(harnessed("peek", _peek, writes=[]), {"a": 1, "b": 2})
+
+    assert seen["keys"] == {"a", "b"}
+
+
+def test_harness_reads_missing_key_is_absent_not_error():
+    """宣告了 reads 但 state 缺該鍵 → 表現同「前置未寫入」，不 raise。"""
+    seen: dict = {}
+
+    async def _peek(state: dict) -> dict:
+        seen["keys"] = set(state)
+        return {}
+
+    out = _run(harnessed("peek", _peek, writes=[], reads=["a", "missing"]), {"a": 1})
+
+    assert seen["keys"] == {"a"}  # missing 不在 state → 不進視圖、不炸
+    assert out["trace"][0].status == "ok"
+
+
+def test_harness_trace_uses_full_state_not_filtered_view():
+    """過濾只作用於傳入 fn 的視圖；trace 的 input_summary 仍看原始完整 state。"""
+
+    async def _peek(state: dict) -> dict:
+        return {}
+
+    out = _run(harnessed("peek", _peek, writes=[], reads=["a"]), {"a": 1, "b": 2})
+
+    assert out["trace"][0].input_summary == "a,b"  # b 仍入 trace 摘要
+
+
 def test_harness_runs_run_on_fatal_nodes_after_fatal():
     """【AT1-06】run_on_fatal 的節點（answer_composer / audit_feedback）fatal 後照樣執行。"""
     executed = []

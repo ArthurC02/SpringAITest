@@ -1257,16 +1257,18 @@ cpk-thread-inspector {
   border-color: var(--accent);
   background: var(--accent-bg, transparent);
 }
-.simple-skill__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--text);
-  margin-bottom: 8px;
-}
 .simple-skill__errors {
   border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+/* 存檔成功後的非阻擋資料流警告：沿用警告 token，不新造顏色。 */
+.simple-skill__warn {
+  border: 1px solid var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
   border-radius: 8px;
   padding: 8px 12px;
   margin-top: 12px;
@@ -1276,14 +1278,4 @@ cpk-thread-inspector {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
-}
-
-/* CodeMirror Python 編輯器容器（動態載入）。 */
-.cm-python {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.cm-python .cm-editor {
-  max-height: 360px;
 }

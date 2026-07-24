@@ -406,6 +406,43 @@ def test_http_tool_passes_tenant_from_context_not_from_args():
     assert result["chunks"][0]["document_id"] == "doc-fin-2025q3"
 
 
+def test_tool_step_receives_nonempty_identity_after_reads_hardening():
+    """A2 守門：tool 步驟不套 reads 過濾 → ToolContext 拿到非空租戶、$state 引用正確解析。
+
+    A2 把 node/agentic 步驟的 state 視圖收斂成宣告的 reads；tool 步驟刻意不過濾（身分由
+    引擎自建的 run_tool 閉包從 state 讀）。若誤把 tool 也過濾，ctx.tenant_id 會是空字串 →
+    多租戶隔離破功。此測直接捕獲 ctx 斷言非空。
+    """
+    captured: dict = {}
+
+    @tool_registry.tool(
+        name="local.identity_probe", kind="local", args_schema={"formula": str}
+    )
+    async def _probe(ctx: ToolContext, formula: str = "") -> dict:
+        captured.update({"tenant": ctx.tenant_id, "formula": formula})
+        return {"ok": True}
+
+    try:
+        _run(
+            {
+                "input_schema": {"formula": {"type": "str", "required": True}},
+                "flow": [
+                    {
+                        "tool": "local.identity_probe",
+                        "args": {"formula": "$state.formula"},
+                        "save_as": "probe_out",
+                    }
+                ],
+            },
+            {"formula": "2 * 21"},
+        )
+    finally:
+        tool_registry._REGISTRY.pop("local.identity_probe", None)
+
+    assert captured["tenant"] == "t-test"  # 非空、來自 ToolContext
+    assert captured["formula"] == "2 * 21"  # $state.formula 解析正確
+
+
 def test_local_glossary_tool_wraps_existing_port():
     """local.glossary 只是既有 GlossaryPort 的包裝（ports.py 的介面不變）。"""
     out = asyncio.run(

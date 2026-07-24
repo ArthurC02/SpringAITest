@@ -222,6 +222,43 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         Assert.DoesNotContain("package", single.Select(p => p.Key));
     }
 
+    // ---- B3:import 建立品無表單狀態(simple_form 為 NULL → 回應省略);import 覆寫既有不清表單狀態 ----
+
+    [Fact]
+    public async Task Import_CreatesSkill_WithoutSimpleForm()
+    {
+        const string name = "imp_no_form";
+        SetupAgentic(name, "kind: agentic\nname: imp_no_form\n");
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await ImportAsync(Admin(), name, Zip(("SKILL.md", Encoding.UTF8.GetBytes("x"))))).StatusCode);
+
+        var single = (await (await Admin().GetAsync($"/api/skills/{name}")).ReadJsonAsync()).AsObject();
+        Assert.False(single.ContainsKey("simpleForm"));
+    }
+
+    [Fact] // 不帶不清:對已有 simpleForm 的 skill 匯入,保留其表單狀態(匯入的是 definition/package,非表單)。
+    public async Task Import_OverSkillWithSimpleForm_PreservesForm()
+    {
+        const string name = "imp-keep-form";
+        // 先以簡單模式建立 flow skill(帶 simpleForm)。走 FakeSkillValidator 的 flow 驗證。
+        var createBody = new JsonObject
+        {
+            ["definition"] = Yaml(name),
+            ["simpleForm"] = new JsonObject { ["templateId"] = "template-stats" },
+        };
+        Assert.Equal(HttpStatusCode.Created,
+            (await Admin().PostAsJsonAsync("/api/skills", createBody)).StatusCode);
+
+        // 匯入 agentic package 覆寫同名。
+        SetupAgentic(name, $"kind: agentic\nname: {name}\n");
+        Assert.Equal(HttpStatusCode.OK,
+            (await ImportAsync(Admin(), name, Zip(("SKILL.md", Encoding.UTF8.GetBytes("y"))))).StatusCode);
+
+        var single = (await (await Admin().GetAsync($"/api/skills/{name}")).ReadJsonAsync()).AsObject();
+        Assert.Equal("template-stats", single["simpleForm"]!["templateId"]!.GetValue<string>());
+    }
+
     [Fact] // AST-P0-009:內部 package GET → 正確 token/tenant zip、錯 token 401、tenant-b 404;flow 無 package → 404。
     public async Task PackageEndpoint_Zip_401WrongToken_404CrossTenantAndFlow()
     {

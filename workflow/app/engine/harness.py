@@ -94,9 +94,17 @@ def harnessed(
     run_on_fatal: bool = False,
     component_version: str = "",
     writes: Iterable[str] | None = None,
+    reads: Iterable[str] | None = None,
 ) -> Callable[[dict], Awaitable[dict]]:
-    """包裝節點函式：fatal 後短路、例外轉 fatal_error、寫入 TraceEntry、剝除未宣告的鍵。"""
+    """包裝節點函式：fatal 後短路、例外轉 fatal_error、寫入 TraceEntry、剝除未宣告的鍵。
+
+    reads 契約強制化（與 writes 對稱）：reads=None → 不過濾（未宣告契約，例如既有測試直接
+    包裝的匿名節點函式）；顯式提供 → 傳給 fn 的 state 換成只含宣告鍵的 plain dict（缺鍵表現
+    同「前置未寫入」，不 raise）。過濾只作用於傳入 fn 的視圖；Harness 自己的 trace（input_summary
+    等）、fatal 短路、writes 剝除、IMMUTABLE_KEYS 防護一律仍看原始完整 state。
+    """
     allowed: set[str] | None = None if writes is None else set(writes)
+    readable: set[str] | None = None if reads is None else set(reads)
 
     async def wrapper(state: dict[str, Any]) -> dict:
         # fatal 後短路：只有 answer_composer / audit_feedback（run_on_fatal=True）例外
@@ -118,8 +126,14 @@ def harnessed(
         t0 = time.perf_counter()
         step = _Step()
         token = _CURRENT.set(step)
+        # reads 契約：只把宣告過的鍵餵給節點函式（trace 仍用原始 state）
+        fn_state = (
+            state
+            if readable is None
+            else {k: state[k] for k in readable if k in state}
+        )
         try:
-            out = await fn(state) or {}
+            out = await fn(fn_state) or {}
         except Exception as e:
             # 不可恢復錯誤 → 設 fatal_error，走安全 ABSTAIN + 稽核路徑
             entry = _build_entry(
