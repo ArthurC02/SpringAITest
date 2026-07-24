@@ -1,6 +1,6 @@
 # Agent Skills 標準對齊 — 遷移規格（M 系列）
 
-> 狀態：**執行中。** 承接 01–04。決策：完整對齊 agentskills.io/specification，現有資料一併遷移。
+> 狀態：**已交付。** Agent Skills 標準格式、既有資料遷移與 conformance 已落地；外部 scripts 仍保持不可執行。
 > 本檔是這次遷移的**單一事實來源**：改名對照表、目標 frontmatter 形狀、安全護欄、階段順序。各 subagent 一律依此，不得自行解讀。
 
 ## 0. 官方標準（權威，逐字）

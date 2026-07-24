@@ -1,6 +1,6 @@
 # Agent Skill 標準格式支援 — 計畫
 
-> 狀態：規劃中，尚未實作。
+> 狀態：P0–P2 已交付；P3 production script isolation 延後。本檔保留為歷史交付計畫，現況以程式碼與 AGENTS.md 為準。
 
 ## 目標
 

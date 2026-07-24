@@ -1,6 +1,6 @@
 # 驗收測試 — Agent Skill 標準格式支援
 
-> 狀態：**規劃中。** 依據 [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md) 與 [03-design.md](03-design.md)。本檔以可觀察行為驗收，不以 private method、特定 class 或 prompt 字串作為通過條件。
+> 狀態：**P0–P2 已交付；P3 延後。** 本檔保留為歷史驗收規格；現況以測試與程式碼為準。
 
 ## 1. 原則與環境
 
