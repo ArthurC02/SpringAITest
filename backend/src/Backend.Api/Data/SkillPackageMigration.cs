@@ -57,7 +57,9 @@ internal static partial class SkillPackageMigration
         {
             using var input = new ZipArchive(
                 new MemoryStream(package, writable: false), ZipArchiveMode.Read);
-            var entry = input.GetEntry("SKILL.md");
+            var name = SelectSkillMdName(
+                input.Entries.Select(e => e.FullName).ToList(), targetName);
+            var entry = name is null ? null : input.Entries.First(e => e.FullName == name);
             if (entry is null)
             {
                 return true;
@@ -87,8 +89,9 @@ internal static partial class SkillPackageMigration
     {
         using var input = new ZipArchive(new MemoryStream(package, writable: false), ZipArchiveMode.Read);
         var entries = input.Entries.Select(ReadEntry).ToList();
-        var skillMd = entries.SingleOrDefault(e => e.Name == "SKILL.md")
+        var skillMdName = SelectSkillMdName(entries.Select(e => e.Name).ToList(), targetName)
             ?? throw new InvalidDataException("既有 Skill package 缺少 root SKILL.md");
+        var skillMd = entries.First(e => e.Name == skillMdName);
         var source = Utf8Strict.GetString(skillMd.Bytes);
 
         string rewritten;
@@ -513,6 +516,21 @@ internal static partial class SkillPackageMigration
         var yaml = Serializer.Serialize(map).Replace("\r\n", "\n", StringComparison.Ordinal);
         return yaml.EndsWith('\n') ? yaml : yaml + "\n";
     }
+
+    /// <summary>
+    /// package 內 SKILL.md 的兩種合法位置(與匯入端一致):標準佈局為單一頂層資料夾下的
+    /// `{name}/SKILL.md`,舊格式則直接在 zip root。匯入端只要求「所有 entry 共用單一頂層資料夾」,
+    /// 因此前綴底下仍可能有 `examples/SKILL.md` 之類的資源檔 —— 只認深度 1,並在多個候選時
+    /// 優先取 `{targetName}/SKILL.md`,絕不靠 central directory 順序決定。
+    /// </summary>
+    internal static string? SelectSkillMdName(IReadOnlyList<string> names, string targetName)
+        => names.FirstOrDefault(n => n == "SKILL.md")
+            ?? names.FirstOrDefault(n => n == $"{targetName}/SKILL.md")
+            ?? names.FirstOrDefault(IsSkillMd);
+
+    private static bool IsSkillMd(string fullName)
+        => fullName.EndsWith("/SKILL.md", StringComparison.Ordinal)
+            && fullName.IndexOf('/') == fullName.Length - "/SKILL.md".Length;
 
     private sealed class StoredEntry
     {

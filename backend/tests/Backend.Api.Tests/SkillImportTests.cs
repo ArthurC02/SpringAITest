@@ -430,14 +430,14 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         await repo.CreateAsync(
             "demo-a", new Skill(name, "d", definition, "USER", true, 0, default, default), "admin-a", default);
 
-        // export1:flow 匯出為自包含 SKILL.md,definition 嵌在 ```yaml 區塊。
+        // export1:flow 匯出為自包含 {name}/SKILL.md,definition 嵌在 ```yaml 區塊。
         var zip1 = await (await Admin().GetAsync($"/api/skills/{name}/export")).Content.ReadAsByteArrayAsync();
-        var yaml1 = ExtractYamlBlock(ReadZip(zip1)["SKILL.md"]);
+        var yaml1 = ExtractYamlBlock(ReadZip(zip1)[$"{name}/SKILL.md"]);
 
-        // import(fake 依上傳 zip 的 SKILL.md 抽第一個 ```yaml 區塊當 canonical,kind=flow — 對齊引擎抽取契約)。
+        // import(fake 剝除單一頂層資料夾後抽 SKILL.md 的第一個 ```yaml 區塊當 canonical,kind=flow — 對齊引擎抽取契約)。
         Pkg.Setup(name, uploaded =>
         {
-            var skillYaml = Encoding.UTF8.GetString(ExtractYamlBlock(ReadZip(uploaded)["SKILL.md"]));
+            var skillYaml = Encoding.UTF8.GetString(ExtractYamlBlock(ReadZip(uploaded)[$"{name}/SKILL.md"]));
             return new SkillPackageValidationResult(
                 true, Array.Empty<SkillValidationError>(),
                 new SkillMetadata(name, "d", "USER", "flow"), skillYaml);
@@ -449,8 +449,8 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
 
         // export2:嵌入的 definition bytes 完全相同。
         var zip2 = await (await Admin().GetAsync($"/api/skills/{name}/export")).Content.ReadAsByteArrayAsync();
-        Assert.Equal(yaml1, ExtractYamlBlock(ReadZip(zip2)["SKILL.md"]));
-        Assert.Equal(Encoding.UTF8.GetBytes(definition), ExtractYamlBlock(ReadZip(zip2)["SKILL.md"]));
+        Assert.Equal(yaml1, ExtractYamlBlock(ReadZip(zip2)[$"{name}/SKILL.md"]));
+        Assert.Equal(Encoding.UTF8.GetBytes(definition), ExtractYamlBlock(ReadZip(zip2)[$"{name}/SKILL.md"]));
     }
 
     [Fact]

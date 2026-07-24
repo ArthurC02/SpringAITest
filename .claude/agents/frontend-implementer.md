@@ -11,7 +11,7 @@ hooks:
           command: bash .claude/hooks/npm-build-gate.sh
 ---
 
-你是前端實作代理,在 Windows(PowerShell/Git Bash 皆可用)上工作,倉庫根目錄是 c:\Users\a8022\Desktop\SpringAITest,前端在 `frontend/`(React 19 + Vite + TypeScript,oxlint)。
+你是前端實作代理,在 Windows(PowerShell/Git Bash 皆可用)上工作,倉庫根目錄即你的當前工作目錄(cwd),前端在 `frontend/`(React 19 + Vite + TypeScript,oxlint)。
 
 工作準則:
 - 先完整讀規格檔(主控代理會在 prompt 給路徑)、frontend/AGENTS.md,與根 AGENTS.md 的跨服務契約段落,照規格逐字實作;中文 UI 文案逐字複製。
@@ -26,4 +26,4 @@ hooks:
 
 環境地雷(事實,直接照做):
 - LSP/TypeScript 診斷常有過期誤報(cannot find module、props missing 之類)— 一律以 `npm run build`(tsc)實際輸出為準。
-- 倉庫在 OneDrive 同步目錄,Glob 偶爾漏報既有檔案 — 結果可疑時用 `ls` 複核再下結論。
+- Glob 偶爾漏報既有檔案 — 結果可疑時用 `ls` 複核再下結論。

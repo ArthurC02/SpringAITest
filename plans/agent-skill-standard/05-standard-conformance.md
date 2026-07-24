@@ -72,16 +72,19 @@ metadata:
 - **`license` / `compatibility`**：選填,儲存與 round-trip 保留;引擎目前不據以行為。
 - canonical definition（backend 儲存的投影）仍由 workflow 產生;確保 `skills-ref validate`-friendly（頂層只有標準欄位）。
 
-### 3.1 flow package = 單一自足 SKILL.md（**取消獨立 skill.yaml**）
+### 3.1 flow package = 單一自足 SKILL.md（**頂層資料夾，取消獨立 skill.yaml**）
 
-使用者要求:下載的 zip 不應有獨立 `.yaml`;flow 定義應內嵌進 SKILL.md。這更貼近標準(標準 skill 就是單一 SKILL.md + 選配資源,沒有第二個「權威檔」)。
+使用者要求:下載的 zip 不應有獨立 `.yaml`;flow 定義應內嵌進 SKILL.md。這更貼近標準(標準 skill 就是單一 SKILL.md + 選配資源,沒有第二個「權威檔」)。zip 匯出必須包含恰好一個頂層資料夾,名稱等於 skill `name`。
 
-- **export（backend `SkillExporter`）**:flow 匯出**只產一個 `SKILL.md`**,**不再寫 `skill.yaml`**。
+- **export（backend `SkillExporter`）**:flow 匯出在 zip 內產生**單一頂層資料夾** `{name}/`,內含 `SKILL.md`(+ 選配 `{name}/scripts/` 等)。
+  - zip 結構: `<name>.zip` → `{name}/SKILL.md`（+ 選配資源）。解壓自動得到正確命名的資料夾。
   - frontmatter:標準 `name` + `description`(YAML-safe)。
   - body:一段 fenced code block ` ```yaml … ``` `,內容為 flow 定義原文(= `skill.Definition`,**逐 byte 保留於圍籬內**)。可搭配一兩句人話說明,但權威定義就是那個 yaml 區塊。
-- **import 解析（workflow）**:flow package 從 SKILL.md body 的**第一個 ` ```yaml ` 圍籬區塊**萃取定義原文(圍籬內 byte 原樣),以既有 YAML validator 驗證;name 須等於 route/frontmatter name。**不再要求或讀取 `skill.yaml`**;若舊 zip 仍含 `skill.yaml` 可相容接受(擇一路徑,並以測試固定;優先讀 SKILL.md 內嵌區塊)。
+- **import 解析（workflow）**:若 zip root 無 `SKILL.md`,且所有 entry 共用單一頂層資料夾,則剝除該前綴;前綴名**須等於** frontmatter `name`,不符則以錯誤碼 `folder_name_mismatch` 拒絕。剝除後流程同下:從 SKILL.md body 的**第一個 ` ```yaml ` 圍籬區塊**萃取定義原文(圍籬內 byte 原樣),以既有 YAML validator 驗證;name 須等於 route/frontmatter name。**不再要求或讀取 `skill.yaml`**;若舊 zip 仍含 `skill.yaml` 可相容接受(擇一路徑,並以測試固定;優先讀 SKILL.md 內嵌區塊)。**舊的根層 `SKILL.md` 結構相容接受**,無需資料夾層級。
 - markdown body 允許內嵌任意語言 code block(```python 等);引擎只認 flow 的 ` ```yaml ` 區塊為定義,其餘視為說明文字。
-- round-trip:export→import→export 後,萃取出的定義原文須與原 `skill.Definition` 逐 byte 相同(圍籬內容穩定)。zip 內只有 SKILL.md(+ 使用者自帶的額外資源,若有)。
+- round-trip:export→import→export 後,萃取出的定義原文須與原 `skill.Definition` 逐 byte 相同(圍籬內容穩定)。`{name}/` 層級與內容完整往返。
+- **安全護欄順序**:路徑驗證(`.`, `/`, drive, 空段, 正規化重複, symlink-like)與 `LIMITS` 檢查在前綴剝除**之後**執行;前綴本身亦跑同樣驗證,不可穿越。
+- **行為變化**: `{name}/scripts/*.py` 現進 AST 掃描不安全模式(舊格式下該路徑因不以 `scripts/` 開頭而被當惰性 resource)。巢狀 `{name}/sub/SKILL.md` 僅作唯讀 resource;root `SKILL.md` 是權威定義。
 
 agentic package 不受本節影響(其 SKILL.md 本就是 prose,無獨立 yaml)。
 
@@ -90,10 +93,10 @@ agentic package 不受本節影響(其 SKILL.md 本就是 prose,無獨立 yaml)�
 parser 由「只收 SKILL.md + scripts/references/assets/」改為**接受任意額外檔案/資料夾**,但**安全護欄一律維持**:
 
 - 仍拒：路徑穿越 `..`、絕對路徑、drive path、空路徑、正規化重複、symlink-like entry、超過檔案數/單檔/總解壓/壓縮比上限（`LIMITS` 單一來源）。
-- `SKILL.md` 仍必須存在於 root。
-- `scripts/*.py` 仍過 AST scan、仍**只存不執行**（P3 之前不變）。
+- 單一頂層資料夾剝除後,`SKILL.md` 須存在於 root；舊的根層直接放 `SKILL.md` 佈局亦相容。
+- `scripts/*.py` 及 `{name}/scripts/*.py` 均過 AST scan、仍**只存不執行**（P3 之前不變）。
 - 其餘額外檔案:**當唯讀 resource 儲存,永不執行/解讀**;resource 讀取工具的 path-normalize 白名單維持（讀取仍限 package 內、擋 `..`/絕對/`scripts/`）。
-- round-trip 必須保留所有 entry 的 bytes（含新允許的額外檔案）。
+- round-trip 必須保留所有 entry 的 bytes（含新允許的額外檔案和資料夾層級）。
 
 ## 5. 資料遷移（DB）
 

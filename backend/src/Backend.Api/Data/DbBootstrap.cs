@@ -13,6 +13,8 @@ public static class DbBootstrap
 {
     private const string DefaultPassword = "password123";
 
+    private const string RowSavepoint = "skill_migration_row";
+
     private const string Ddl = """
         CREATE EXTENSION IF NOT EXISTS vector;
         CREATE TABLE IF NOT EXISTS tenants (
@@ -125,7 +127,7 @@ public static class DbBootstrap
         {
             await using var conn = await dataSource.OpenConnectionAsync(ct);
             await conn.ExecuteAsync(new CommandDefinition(Ddl, cancellationToken: ct));
-            await MigrateSkillPackagesAndNamesAsync(conn, ct);
+            await MigrateSkillPackagesAndNamesAsync(conn, logger, ct);
             await SeedAsync(conn, ct);
         }
         catch (Exception ex)
@@ -142,7 +144,7 @@ public static class DbBootstrap
     /// metadata/allowed-tools frontmatter；其他 zip entry bytes 保留。
     /// </summary>
     private static async Task MigrateSkillPackagesAndNamesAsync(
-        NpgsqlConnection conn, CancellationToken ct)
+        NpgsqlConnection conn, ILogger logger, CancellationToken ct)
     {
         await using var tx = await conn.BeginTransactionAsync(ct);
         var rows = (await conn.QueryAsync<SkillMigrationRow>(new CommandDefinition(
@@ -153,133 +155,158 @@ public static class DbBootstrap
 
         foreach (var row in rows)
         {
-            var targetName = row.Name.Replace('_', '-');
-            if (!SkillNameRules.IsStandard(targetName))
+            // 遷移是一次性 legacy 升級,不是 request-time validator:某一列的資料形狀壞掉
+            // (例如 package 內找不到可解析的 SKILL.md)不得讓整個服務起不來。savepoint 讓
+            // 失敗的列整列回捲後跳過,其餘列照常升級。名稱衝突/無法標準化仍維持 fail fast。
+            await tx.SaveAsync(RowSavepoint, ct);
+            try
             {
-                throw new InvalidOperationException(
-                    $"無法把既有 Skill 名稱遷移為標準格式：tenant={row.TenantId}, name={row.Name}, target={targetName}");
+                await MigrateSkillRowAsync(conn, tx, row, ct);
+                await tx.ReleaseAsync(RowSavepoint, ct);
             }
-
-            if (!string.Equals(targetName, row.Name, StringComparison.Ordinal))
+            catch (Exception ex)
+                when (ex is not (InvalidOperationException or OperationCanceledException))
             {
-                var collision = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-                    "SELECT EXISTS(SELECT 1 FROM skill"
-                    + " WHERE tenant_id = @TenantId AND name = @targetName AND id <> @Id)",
-                    new { row.TenantId, targetName, row.Id }, tx, cancellationToken: ct));
-                if (collision)
-                {
-                    throw new InvalidOperationException(
-                        $"Skill 名稱遷移發生衝突：tenant={row.TenantId}, old={row.Name}, target={targetName}");
-                }
+                // ROLLBACK TO 不銷毀 savepoint:不 RELEASE 的話每跳過一列就多疊一層子交易,
+                // 巢狀深度隨壞列數無界成長並累積後端資源。(RELEASE 不會回收已配發的 subxid —
+                // 那些要到頂層交易 commit 才不再列入 PGPROC->subxids。)rollback 後 savepoint 仍在 → 必成功。
+                await tx.RollbackAsync(RowSavepoint, ct);
+                await tx.ReleaseAsync(RowSavepoint, ct);
+                logger.LogWarning(ex,
+                    "略過無法遷移的 Skill：tenant={TenantId}, name={Name}", row.TenantId, row.Name);
             }
-
-            var nameChanged = !string.Equals(targetName, row.Name, StringComparison.Ordinal);
-            var packageNeedsRewrite = row.Package is not null
-                && SkillPackageMigration.PackageNeedsRewrite(row.Package, targetName, row.Kind);
-            var definitionNeedsRewrite =
-                !SkillPackageMigration.DefinitionNameMatches(row.Definition, targetName)
-                || (string.Equals(row.Kind, "agentic", StringComparison.Ordinal)
-                    && !SkillPackageMigration.IsStandardAgenticCanonical(row.Definition, targetName));
-            var definition = row.Definition;
-            if (nameChanged || definitionNeedsRewrite || packageNeedsRewrite)
-            {
-                definition = string.Equals(row.Kind, "agentic", StringComparison.Ordinal)
-                    ? SkillPackageMigration.RewriteAgenticCanonical(row.Definition, targetName)
-                    : SkillPackageMigration.RewriteDefinitionName(row.Definition, targetName);
-            }
-
-            byte[]? package = row.Package;
-            string? packageSha = null;
-            if (package is not null)
-            {
-                if (packageNeedsRewrite)
-                {
-                    var migrated = SkillPackageMigration.Rewrite(
-                        package, targetName, row.Kind, row.Definition);
-                    package = migrated.Bytes;
-                    if (migrated.CanonicalDefinition is not null)
-                    {
-                        definition = migrated.CanonicalDefinition;
-                    }
-                }
-
-                packageSha = SkillHash.Sha256(package);
-            }
-
-            var revisions = (await conn.QueryAsync<SkillRevisionMigrationRow>(new CommandDefinition(
-                "SELECT revision AS Revision, definition AS Definition, kind AS Kind,"
-                + " package AS Package, package_sha256 AS PackageSha256"
-                + " FROM skill_revision WHERE skill_id = @Id ORDER BY revision",
-                new { row.Id }, tx, cancellationToken: ct))).AsList();
-
-            foreach (var revision in revisions)
-            {
-                var revisionDefinition = revision.Definition;
-                var revisionNeedsDefinitionRewrite =
-                    nameChanged
-                    || !SkillPackageMigration.DefinitionNameMatches(revision.Definition, targetName)
-                    || (string.Equals(revision.Kind, "agentic", StringComparison.Ordinal)
-                        && !SkillPackageMigration.IsStandardAgenticCanonical(
-                            revision.Definition, targetName));
-                if (revisionNeedsDefinitionRewrite)
-                {
-                    revisionDefinition =
-                        string.Equals(revision.Kind, "agentic", StringComparison.Ordinal)
-                            ? SkillPackageMigration.RewriteAgenticCanonical(
-                                revision.Definition, targetName)
-                            : SkillPackageMigration.RewriteDefinitionName(
-                                revision.Definition, targetName);
-                }
-                var revisionPackage = revision.Package;
-                var revisionPackageSha = revision.PackageSha256;
-                if (revisionPackage is not null
-                    && SkillPackageMigration.PackageNeedsRewrite(
-                        revisionPackage, targetName, revision.Kind))
-                {
-                    var migrated = SkillPackageMigration.Rewrite(
-                        revisionPackage, targetName, revision.Kind, revision.Definition);
-                    revisionPackage = migrated.Bytes;
-                    revisionPackageSha = SkillHash.Sha256(revisionPackage);
-                    if (migrated.CanonicalDefinition is not null)
-                    {
-                        revisionDefinition = migrated.CanonicalDefinition;
-                    }
-                }
-
-                // 舊 schema 只在 skill 保存 current package：把它補進 current revision snapshot。
-                if (revision.Revision == row.CurrentRevision && revisionPackage is null && package is not null)
-                {
-                    revisionPackage = package;
-                    revisionPackageSha = packageSha;
-                    revisionDefinition = definition;
-                }
-
-                await conn.ExecuteAsync(new CommandDefinition(
-                    "UPDATE skill_revision SET definition = @revisionDefinition,"
-                    + " definition_sha256 = @definitionSha, kind = @Kind,"
-                    + " package = @revisionPackage, package_sha256 = @revisionPackageSha"
-                    + " WHERE skill_id = @Id AND revision = @Revision",
-                    new
-                    {
-                        row.Id,
-                        revision.Revision,
-                        revisionDefinition,
-                        definitionSha = SkillHash.Sha256(revisionDefinition),
-                        revision.Kind,
-                        revisionPackage,
-                        revisionPackageSha,
-                    }, tx, cancellationToken: ct));
-            }
-
-            await conn.ExecuteAsync(new CommandDefinition(
-                "UPDATE skill SET name = @targetName, definition = @definition,"
-                + " package = @package, kind = @Kind"
-                + " WHERE id = @Id",
-                new { row.Id, targetName, definition, package, row.Kind },
-                tx, cancellationToken: ct));
         }
 
         await tx.CommitAsync(ct);
+    }
+
+    private static async Task MigrateSkillRowAsync(
+        NpgsqlConnection conn, NpgsqlTransaction tx, SkillMigrationRow row, CancellationToken ct)
+    {
+        var targetName = row.Name.Replace('_', '-');
+        if (!SkillNameRules.IsStandard(targetName))
+        {
+            throw new InvalidOperationException(
+                $"無法把既有 Skill 名稱遷移為標準格式：tenant={row.TenantId}, name={row.Name}, target={targetName}");
+        }
+
+        if (!string.Equals(targetName, row.Name, StringComparison.Ordinal))
+        {
+            var collision = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
+                "SELECT EXISTS(SELECT 1 FROM skill"
+                + " WHERE tenant_id = @TenantId AND name = @targetName AND id <> @Id)",
+                new { row.TenantId, targetName, row.Id }, tx, cancellationToken: ct));
+            if (collision)
+            {
+                throw new InvalidOperationException(
+                    $"Skill 名稱遷移發生衝突：tenant={row.TenantId}, old={row.Name}, target={targetName}");
+            }
+        }
+
+        var nameChanged = !string.Equals(targetName, row.Name, StringComparison.Ordinal);
+        var packageNeedsRewrite = row.Package is not null
+            && SkillPackageMigration.PackageNeedsRewrite(row.Package, targetName, row.Kind);
+        var definitionNeedsRewrite =
+            !SkillPackageMigration.DefinitionNameMatches(row.Definition, targetName)
+            || (string.Equals(row.Kind, "agentic", StringComparison.Ordinal)
+                && !SkillPackageMigration.IsStandardAgenticCanonical(row.Definition, targetName));
+        var definition = row.Definition;
+        if (nameChanged || definitionNeedsRewrite || packageNeedsRewrite)
+        {
+            definition = string.Equals(row.Kind, "agentic", StringComparison.Ordinal)
+                ? SkillPackageMigration.RewriteAgenticCanonical(row.Definition, targetName)
+                : SkillPackageMigration.RewriteDefinitionName(row.Definition, targetName);
+        }
+
+        byte[]? package = row.Package;
+        string? packageSha = null;
+        if (package is not null)
+        {
+            if (packageNeedsRewrite)
+            {
+                var migrated = SkillPackageMigration.Rewrite(
+                    package, targetName, row.Kind, row.Definition);
+                package = migrated.Bytes;
+                if (migrated.CanonicalDefinition is not null)
+                {
+                    definition = migrated.CanonicalDefinition;
+                }
+            }
+
+            packageSha = SkillHash.Sha256(package);
+        }
+
+        var revisions = (await conn.QueryAsync<SkillRevisionMigrationRow>(new CommandDefinition(
+            "SELECT revision AS Revision, definition AS Definition, kind AS Kind,"
+            + " package AS Package, package_sha256 AS PackageSha256"
+            + " FROM skill_revision WHERE skill_id = @Id ORDER BY revision",
+            new { row.Id }, tx, cancellationToken: ct))).AsList();
+
+        foreach (var revision in revisions)
+        {
+            var revisionDefinition = revision.Definition;
+            var revisionNeedsDefinitionRewrite =
+                nameChanged
+                || !SkillPackageMigration.DefinitionNameMatches(revision.Definition, targetName)
+                || (string.Equals(revision.Kind, "agentic", StringComparison.Ordinal)
+                    && !SkillPackageMigration.IsStandardAgenticCanonical(
+                        revision.Definition, targetName));
+            if (revisionNeedsDefinitionRewrite)
+            {
+                revisionDefinition =
+                    string.Equals(revision.Kind, "agentic", StringComparison.Ordinal)
+                        ? SkillPackageMigration.RewriteAgenticCanonical(
+                            revision.Definition, targetName)
+                        : SkillPackageMigration.RewriteDefinitionName(
+                            revision.Definition, targetName);
+            }
+            var revisionPackage = revision.Package;
+            var revisionPackageSha = revision.PackageSha256;
+            if (revisionPackage is not null
+                && SkillPackageMigration.PackageNeedsRewrite(
+                    revisionPackage, targetName, revision.Kind))
+            {
+                var migrated = SkillPackageMigration.Rewrite(
+                    revisionPackage, targetName, revision.Kind, revision.Definition);
+                revisionPackage = migrated.Bytes;
+                revisionPackageSha = SkillHash.Sha256(revisionPackage);
+                if (migrated.CanonicalDefinition is not null)
+                {
+                    revisionDefinition = migrated.CanonicalDefinition;
+                }
+            }
+
+            // 舊 schema 只在 skill 保存 current package：把它補進 current revision snapshot。
+            if (revision.Revision == row.CurrentRevision && revisionPackage is null && package is not null)
+            {
+                revisionPackage = package;
+                revisionPackageSha = packageSha;
+                revisionDefinition = definition;
+            }
+
+            await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE skill_revision SET definition = @revisionDefinition,"
+                + " definition_sha256 = @definitionSha, kind = @Kind,"
+                + " package = @revisionPackage, package_sha256 = @revisionPackageSha"
+                + " WHERE skill_id = @Id AND revision = @Revision",
+                new
+                {
+                    row.Id,
+                    revision.Revision,
+                    revisionDefinition,
+                    definitionSha = SkillHash.Sha256(revisionDefinition),
+                    revision.Kind,
+                    revisionPackage,
+                    revisionPackageSha,
+                }, tx, cancellationToken: ct));
+        }
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE skill SET name = @targetName, definition = @definition,"
+            + " package = @package, kind = @Kind"
+            + " WHERE id = @Id",
+            new { row.Id, targetName, definition, package, row.Kind },
+            tx, cancellationToken: ct));
     }
 
     private sealed record SkillMigrationRow(

@@ -12,6 +12,10 @@ zip 是外部作者提交的二進位資料，信任邊界從「已解析的 YAM
 - 路徑安全（§4）：**接受任意額外檔案/資料夾**，但一律拒 `..`／`.`、絕對路徑、drive path、
   空路徑、正規化重複、symlink-like entry 與四維上限（`LIMITS` 單一來源）。`SKILL.md` 仍必須
   在 root；額外檔案當唯讀 resource 儲存，永不執行/解讀。
+- 頂層資料夾前綴：標準要求 `name` 須等於資料夾名，故 zip 常是 `{name}/SKILL.md`。若 root 沒有
+  `SKILL.md` 而所有 entry 都在同一個頂層資料夾下，就剝除該前綴再判定，且前綴須等於 frontmatter
+  `name`（否則 `folder_name_mismatch`）。剝除發生在既有路徑驗證**之後**（前綴本身已通過同一套
+  檢查），只影響相對路徑呈現，不影響任何上限計算 —— 不得成為繞過路徑檢查的新縫。
 - frontmatter 是 agentic metadata 的**唯一**來源：標準欄位在頂層（name/description/license?/
   compatibility?/allowed-tools?），引擎專屬需求收進 `metadata`（§3），經既有 Skill schema 驗證。
 - `allowed-tools`（空白分隔）重用既有 `tool_registry` 的 `unknown_tool` 檢查；`scripts/*.py`
@@ -50,6 +54,7 @@ INVALID_PACKAGE = "invalid_package"  # zip 壞、path traversal、drive、dup、
 MISSING_SKILL_MD = "missing_skill_md"
 INVALID_FRONTMATTER = "invalid_frontmatter"  # 無 frontmatter、壞 YAML、schema 失敗、非 agentic kind
 NAME_MISMATCH = "name_mismatch"
+FOLDER_NAME_MISMATCH = "folder_name_mismatch"  # 頂層資料夾名 ≠ frontmatter name（標準 §0）
 UNKNOWN_TOOL = "unknown_tool"  # = skill.UNKNOWN_TOOL（frontmatter uses_tools 未註冊）
 FORBIDDEN_SCRIPT = "forbidden_script"  # = skill.FORBIDDEN_SCRIPT（scripts/*.py 未過 AST scan）
 
@@ -495,6 +500,25 @@ def _read_entries(raw: bytes, limits: PackageLimits) -> dict[str, bytes]:
         zf.close()
 
 
+def _strip_single_root_folder(
+    entries: dict[str, bytes],
+) -> tuple[dict[str, bytes], str | None]:
+    """所有 entry 都在同一個頂層資料夾下 → 回 (剝除前綴的 entries, 前綴)；否則原樣回 (entries, None)。
+
+    只在 root 沒有 `SKILL.md` 時呼叫，且必須在 `_read_entries` 的路徑驗證**之後**：前綴是已通過
+    `_validate_entry_path` 的路徑第一段，這裡再驗一次讓「前綴自身也過同一套檢查」是程式碼上的
+    事實而非推論。剝除純粹是相對路徑的呈現，上限計算早已在 `_read_entries` 完成。
+    """
+    prefixes = {path.split("/", 1)[0] for path in entries}
+    if len(prefixes) != 1:
+        return entries, None
+    prefix = _validate_entry_path(next(iter(prefixes)))
+    if not all(path.startswith(f"{prefix}/") for path in entries):
+        return entries, None  # 有與資料夾同名的 root 檔案 → 不是單一頂層資料夾結構
+    cut = len(prefix) + 1
+    return {path[cut:]: data for path, data in entries.items()}, prefix
+
+
 # ---------------------------------------------------------------------------
 # frontmatter 解析（agentic）
 # ---------------------------------------------------------------------------
@@ -854,12 +878,16 @@ def parse_package(
 ) -> ValidatedPackage:
     """解析上傳的 package zip → ValidatedPackage；任何違規 raise PackageError（零副作用）。
 
-    單一 SKILL.md（root 必要）：frontmatter `metadata.kind: agentic` → agentic；否則 → flow
-    （定義嵌在 body 的 ```yaml 區塊，§3.1）。expected_name 是 optional transport guard：
-    None 時由 SKILL.md 唯一決定名稱；有值時嚴格核對。sha256 為原始 zip bytes 的雜湊。
+    單一 SKILL.md（root 必要，或在單一 `{name}/` 頂層資料夾下）：frontmatter
+    `metadata.kind: agentic` → agentic；否則 → flow（定義嵌在 body 的 ```yaml 區塊，§3.1）。
+    expected_name 是 optional transport guard：None 時由 SKILL.md 唯一決定名稱；有值時嚴格核對。
+    sha256 為原始 zip bytes 的雜湊。
     """
     sha256 = hashlib.sha256(raw).hexdigest()
     entries = _read_entries(raw, limits)
+    folder: str | None = None
+    if SKILL_MD not in entries:
+        entries, folder = _strip_single_root_folder(entries)
     if SKILL_MD not in entries:
         raise PackageError.of(MISSING_SKILL_MD, f"package 缺少根目錄 {SKILL_MD}")
 
@@ -874,6 +902,13 @@ def parse_package(
         raise PackageError.of(INVALID_FRONTMATTER, f"frontmatter YAML 解析失敗: {e}")
     if not isinstance(meta, dict):
         raise PackageError.of(INVALID_FRONTMATTER, "frontmatter 必須是 YAML 對應（mapping）")
+
+    # 標準 §0：`name` 須等於資料夾名。name 缺漏/非字串留給 frontmatter 驗證報更精準的錯。
+    if folder is not None and isinstance(meta.get("name"), str) and meta["name"] != folder:
+        raise PackageError.of(
+            FOLDER_NAME_MISMATCH,
+            f"zip 頂層資料夾名 '{folder}' 須與 SKILL.md 的 name '{meta['name']}' 相同",
+        )
 
     # 所有 package 種類共用 scripts AST 安全閘門；掃描只解析、絕不執行。
     scripts, resources = _scan_package_files(entries)

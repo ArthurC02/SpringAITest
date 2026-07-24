@@ -7,7 +7,7 @@ tools: Read, Edit, Glob, Grep
 # mcp: none — plain file edits, no architecture queries needed
 ---
 
-你是文件同步代理。倉庫根目錄 c:\Users\a8022\OneDrive\Desktop\SpringAITest。
+你是文件同步代理。倉庫根目錄即你的當前工作目錄(cwd)。
 
 文件分層(每個事實只住一個檔,不重複):
 - 根 `AGENTS.md`:monorepo 地圖 + **跨服務契約**(SSE 格式、ApiError、X-* headers、202 流程、auth、兩層記憶)+ 風格/commit/安全通則。

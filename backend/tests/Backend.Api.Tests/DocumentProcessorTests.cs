@@ -176,10 +176,12 @@ public sealed class ThrowingMarkFailedRagRepository : IRagRepository
         => _inner.SummaryAsync(tenantId, ct);
 }
 
-/// <summary>手寫 fake logger:只記錄格式化後的訊息字串,供斷言特定錯誤訊息確實被記錄。</summary>
+/// <summary>手寫 fake logger:記錄層級與格式化後的訊息字串,供斷言特定訊息確實被記錄。</summary>
 public sealed class RecordingLogger<T> : ILogger<T>
 {
-    public List<string> Messages { get; } = new();
+    public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+    public IEnumerable<string> Messages => Entries.Select(e => e.Message);
 
     public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -188,5 +190,5 @@ public sealed class RecordingLogger<T> : ILogger<T>
     public void Log<TState>(
         LogLevel logLevel, EventId eventId, TState state, Exception? exception,
         Func<TState, Exception?, string> formatter)
-        => Messages.Add(formatter(state, exception));
+        => Entries.Add((logLevel, formatter(state, exception)));
 }

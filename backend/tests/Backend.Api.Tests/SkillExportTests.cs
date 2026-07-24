@@ -8,7 +8,8 @@ using Backend.Api.Skills;
 namespace Backend.Api.Tests;
 
 /// <summary>
-/// flow Skill 匯出為 Claude Skill 格式 zip(05 §3.1 自包含版)。zip 恰含一個檔 SKILL.md:
+/// flow Skill 匯出為 Claude Skill 格式 zip(05 §3.1 自包含版)。zip 恰含一個 entry `{name}/SKILL.md`
+/// (05 §0:頂層資料夾名須等於 name):
 /// 標準 frontmatter(name+description)+ body 以 fenced ```yaml 區塊嵌入 definition 原文,
 /// 區塊內容逐 byte 等於 DB 的 definition;完全不解析/不執行;角色與 GET {name} 一致(USER 可用);跨租戶一律 404。
 /// </summary>
@@ -73,7 +74,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         return md[start..end];
     }
 
-    // ---- AT2-15:flow 匯出 = 恰一個 entry SKILL.md(自包含,無 skill.yaml)----
+    // ---- AT2-15:flow 匯出 = 恰一個 entry {name}/SKILL.md(自包含,無 skill.yaml)----
 
     [Fact]
     public async Task Export_ZipContainsOnlySkillMd()
@@ -83,7 +84,23 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
 
         var entries = await ExportZipAsync(client, "at215_skill");
 
-        Assert.Equal(new[] { "SKILL.md" }, entries.Keys.ToArray());
+        Assert.Equal(new[] { "at215_skill/SKILL.md" }, entries.Keys.ToArray());
+    }
+
+    // ---- 05 §0:頂層資料夾名 = frontmatter name = skill.Name(解壓後資料夾名不再由工具決定)----
+
+    [Fact]
+    public async Task Export_TopLevelFolder_EqualsSkillNameAndFrontmatterName()
+    {
+        const string name = "year-compare";
+        Seed("demo-a", name, Yaml(name));
+
+        var entries = await ExportZipAsync(Admin(), name);
+
+        var entryPath = Assert.Single(entries.Keys);
+        Assert.Equal($"{name}/SKILL.md", entryPath);
+        Assert.Equal(name, entryPath[..entryPath.IndexOf('/')]);
+        Assert.Contains($"name: {name}\n", Encoding.UTF8.GetString(entries[entryPath]));
     }
 
     // ---- AT2-16:SKILL.md frontmatter 只有 name + description ----
@@ -95,7 +112,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         await client.PostAsJsonAsync("/api/skills", Body(Yaml("at216_skill", description: "季度營收問答")));
 
         var entries = await ExportZipAsync(client, "at216_skill");
-        var md = Encoding.UTF8.GetString(entries["SKILL.md"]);
+        var md = Encoding.UTF8.GetString(entries["at216_skill/SKILL.md"]);
 
         // frontmatter = 第一組 --- 與第二個 --- 之間的行。
         var lines = md.Split('\n');
@@ -117,7 +134,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         await client.PostAsJsonAsync("/api/skills", Body(Yaml("at217_skill")));
 
         var entries = await ExportZipAsync(client, "at217_skill");
-        var md = Encoding.UTF8.GetString(entries["SKILL.md"]);
+        var md = Encoding.UTF8.GetString(entries["at217_skill/SKILL.md"]);
 
         Assert.Contains("本 Skill 為 node-first 引擎的宣告式流程定義，權威內容即下方 ```yaml 區塊。", md);
         Assert.Contains("```yaml\n", md);
@@ -136,7 +153,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         Seed("demo-a", "at218_skill", definition);
 
         var entries = await ExportZipAsync(Admin(), "at218_skill");
-        var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["SKILL.md"]));
+        var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["at218_skill/SKILL.md"]));
 
         Assert.Equal(Encoding.UTF8.GetBytes(definition), Encoding.UTF8.GetBytes(block));
     }
@@ -151,7 +168,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         Seed("demo-a", "at219_skill", garbage);
 
         var entries = await ExportZipAsync(Admin(), "at219_skill");
-        var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["SKILL.md"]));
+        var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["at219_skill/SKILL.md"]));
 
         Assert.Equal(Encoding.UTF8.GetBytes(garbage), Encoding.UTF8.GetBytes(block));
     }
@@ -192,6 +209,26 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
 
     // ---- YAML escaping 修正(03-design §2.4):含 `:`/引號的 description 以雙引號 scalar 並逃脫寫入 ----
 
+    // ---- name 也必須是 YAML-safe scalar:YAML 1.1 隱式 token(no/on/true)與純數字裸寫會被
+    // 匯入端解成 bool/int,frontmatter name 不再是字串 → 匯出的 zip 無法再匯入。----
+
+    [Theory]
+    [InlineData("no")]
+    [InlineData("007")]
+    [InlineData("0x1f")]  // YAML 1.1 hex → int 31
+    [InlineData("0b101")] // YAML 1.1 binary → int 5
+    public async Task Export_SkillMd_QuotesYamlImplicitTypedName(string name)
+    {
+        Seed("demo-a", name, Yaml(name));
+
+        var entries = await ExportZipAsync(Admin(), name);
+        var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
+
+        var lines = md.Split('\n');
+        // 資料夾名仍是裸名(= skill.Name),與 frontmatter 的字串值相等。
+        Assert.Equal($"name: \"{name}\"", lines[1]);
+    }
+
     [Fact]
     public async Task Export_SkillMd_EscapesDescriptionWithSpecialChars()
     {
@@ -199,7 +236,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         Seed("demo-a", "at220_escape", Yaml("at220_escape"), description: "營收: 100 \"高\"");
 
         var entries = await ExportZipAsync(Admin(), "at220_escape");
-        var md = Encoding.UTF8.GetString(entries["SKILL.md"]);
+        var md = Encoding.UTF8.GetString(entries["at220_escape/SKILL.md"]);
 
         var lines = md.Split('\n');
         var end = Array.IndexOf(lines, "---", 1);

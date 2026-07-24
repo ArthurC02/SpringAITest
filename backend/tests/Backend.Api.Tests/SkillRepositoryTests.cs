@@ -3,6 +3,7 @@ using System.IO.Compression;
 using Backend.Api.Data;
 using Backend.Api.Skills;
 using Dapper;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Backend.Api.Tests;
@@ -352,8 +353,11 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         }
     }
 
+    // ---- 遷移是一次性 legacy 升級,不是 request-time validator:單列資料形狀壞掉只跳過該列
+    // (savepoint 回捲、記 warning),不得讓服務永久起不來,也不得連累其他可遷移的列。----
+
     [SkippableFact]
-    public async Task Migration_MissingRootName_FailsFastAndRollsBackTransaction()
+    public async Task Migration_MissingRootName_SkipsRowAndStillMigratesOthers()
     {
         _fx.SkipIfUnavailable();
         const string tenant = "skillrepo-yamlbad";
@@ -362,36 +366,41 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         await Repo.CreateAsync(
             tenant, Meta("missing_name", "description: no name\nflow: []\n"), "admin-a", default);
 
-        var error = await Assert.ThrowsAsync<InvalidDataException>(
-            () => DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance));
+        // 跳過的唯一安全網是 warning 紀錄 → 用會擷取的 logger 驗證它真的留下可查紀錄。
+        var logger = new RecordingLogger<SkillRepositoryTests>();
+        await DbBootstrap.RunAsync(_fx.DataSource!, logger);
 
-        Assert.Contains("恰有一個 name scalar", error.Message);
-        // good_name 即使排序較前並先被處理，也必須隨同一 transaction rollback。
-        Assert.NotNull(await Repo.GetAsync(tenant, "good_name", default));
-        Assert.Null(await Repo.GetAsync(tenant, "good-name", default));
+        // 壞掉那列原封不動留著(名稱仍是底線)；健康的列照常升級。
+        var skipped = await Repo.GetAsync(tenant, "missing_name", default);
+        Assert.NotNull(skipped);
+        Assert.Equal("description: no name\nflow: []\n", skipped!.Definition);
+        Assert.NotNull(await Repo.GetAsync(tenant, "good-name", default));
+        Assert.Null(await Repo.GetAsync(tenant, "good_name", default));
+        Assert.Contains(
+            logger.Entries,
+            e => e.Level == LogLevel.Warning
+                && e.Message.Contains(tenant, StringComparison.Ordinal)
+                && e.Message.Contains("missing_name", StringComparison.Ordinal));
     }
 
     [SkippableFact]
-    public async Task Migration_DuplicateRootName_FailsFastWithoutChoosingOne()
+    public async Task Migration_DuplicateRootName_SkipsRowWithoutChoosingOne()
     {
         _fx.SkipIfUnavailable();
         const string tenant = "skillrepo-yamldup";
-        await Repo.CreateAsync(
-            tenant,
-            Meta("duplicate_name", "name: duplicate_name\n'name': duplicate_name\nflow: []\n"),
-            "admin-a",
-            default);
+        const string definition = "name: duplicate_name\n'name': duplicate_name\nflow: []\n";
+        await Repo.CreateAsync(tenant, Meta("duplicate_name", definition), "admin-a", default);
 
-        var error = await Assert.ThrowsAsync<InvalidDataException>(
-            () => DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance));
+        await DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance);
 
-        Assert.Contains("實際 2 個", error.Message);
-        Assert.NotNull(await Repo.GetAsync(tenant, "duplicate_name", default));
+        var kept = await Repo.GetAsync(tenant, "duplicate_name", default);
+        Assert.NotNull(kept);
+        Assert.Equal(definition, kept!.Definition); // 兩個候選都不選:原封未動
         Assert.Null(await Repo.GetAsync(tenant, "duplicate-name", default));
     }
 
     [SkippableFact]
-    public async Task Migration_LegacyAgenticWithoutDerivableDescription_FailsAndKeepsOriginal()
+    public async Task Migration_LegacyAgenticWithoutDerivableDescription_SkipsRowAndKeepsOriginal()
     {
         _fx.SkipIfUnavailable();
         const string tenant = "skillrepo-agentbad";
@@ -405,12 +414,40 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
             tenant, Meta(oldName, canonical, kind: "agentic"),
             package, SkillHash.Sha256(package), "admin-a", default);
 
-        var error = await Assert.ThrowsAsync<InvalidDataException>(
-            () => DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance));
+        await DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance);
 
-        Assert.Contains("description", error.Message);
-        Assert.NotNull(await Repo.GetAsync(tenant, oldName, default));
+        var kept = await Repo.GetAsync(tenant, oldName, default);
+        Assert.NotNull(kept);
+        Assert.Equal(canonical, kept!.Definition);
+        Assert.Equal(package, kept.Package);
         Assert.Null(await Repo.GetAsync(tenant, "missing-description", default));
+    }
+
+    // ---- 跳過必須是「整列」回捲:同一列較早的 revision 已寫入,後面的 revision 才爆掉時,
+    // 前面那些 UPDATE 不得被 commit(否則 revision 1 被改名、skill 名稱卻仍是舊的 → 稽核鏈自相矛盾)。
+    // 這條就是 savepoint 的承重測試:拿掉 SaveAsync/RollbackAsync 會紅。----
+
+    [SkippableFact]
+    public async Task Migration_BrokenLaterRevision_RollsBackEarlierRevisionWritesOfSameRow()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "skillrepo-revrollback";
+        const string name = "two_rev";
+        const string revision1Definition = "name: two_rev\nflow: v1\n";
+        await Repo.CreateAsync(tenant, Meta(name, revision1Definition), "admin-a", default); // rev 1 可遷移
+        await Repo.UpdateAsync(
+            tenant, name, Meta(name, "description: no name\nflow: v2\n"), "admin-a", default); // rev 2 缺 name
+        // skill.definition 修回可解析 → 該列會先成功改寫 revision 1,才在 revision 2 爆掉。
+        await ForceDefinitionAsync(tenant, name, "name: two_rev\nflow: v2\n");
+
+        await DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance);
+
+        // revision 1 逐 byte 未變(沒有 savepoint 時會變成 name: two-rev + 新 hash)。
+        var revision1 = await Repo.GetRevisionAsync(tenant, name, 1, default);
+        Assert.NotNull(revision1);
+        Assert.Equal(revision1Definition, revision1!.Definition);
+        Assert.Equal(SkillHash.Sha256(revision1Definition), revision1.DefinitionSha256);
+        Assert.Null(await Repo.GetAsync(tenant, "two-rev", default));
     }
 
     [SkippableFact]
@@ -490,6 +527,33 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         var once = migrated.Package!.ToArray();
         await DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance);
         Assert.Equal(once, (await Repo.GetAsync(tenant, newName, default))!.Package);
+    }
+
+    // ---- 05 §0 標準佈局:SKILL.md 在單一頂層資料夾下(= 本服務匯出的形狀)也要認得,遷移不得誤判為缺檔 ----
+
+    [SkippableFact]
+    public async Task Migration_PackageWithTopLevelFolder_IsRecognizedAndLeftUnchanged()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "skillrepo-folderpkg";
+        const string name = "foldered-skill";
+        var definition = $"name: {name}\ndescription: d\nflow:\n  - node: query_intake\n";
+        var package = Zip(
+            ($"{name}/SKILL.md",
+             Encoding.UTF8.GetBytes($"---\nname: {name}\ndescription: d\n---\n\n```yaml\n{definition}\n```\n")),
+            ($"{name}/docs/guide.bin", Encoding.UTF8.GetBytes("資源\0bytes")));
+        await Repo.ImportAsync(
+            tenant, Meta(name, definition), package, SkillHash.Sha256(package), "admin-a", default);
+
+        await DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance);
+
+        // 已符合標準 → 完全 no-op:bytes 逐位元不變(不是「找不到 SKILL.md 就重寫/爆掉」)。
+        var migrated = await Repo.GetAsync(tenant, name, default);
+        Assert.NotNull(migrated);
+        Assert.Equal(package, migrated!.Package);
+        Assert.Equal(
+            new[] { $"{name}/SKILL.md", $"{name}/docs/guide.bin" },
+            ReadZip(migrated.Package!).Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
     }
 
     /// <summary>繞過 repo 語意,直接把某 skill 的 definition 覆寫成指定字串(模擬遷移前殘狀態)。</summary>

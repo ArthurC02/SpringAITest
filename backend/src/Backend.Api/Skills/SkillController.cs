@@ -64,8 +64,10 @@ public sealed class SkillController : ControllerBase
               ?? throw NotFound(name));
 
     /// <summary>
-    /// 匯出為 zip。flow:SkillExporter 組自含式 SKILL.md(定義值內嵌 ```yaml block、無獨立 skill.yaml;與 GET {name} 同資料,只是打包)。
+    /// 匯出為 zip。flow:SkillExporter 組自含式 `{name}/SKILL.md`(定義值內嵌 ```yaml block、無獨立 skill.yaml;與 GET {name} 同資料,只是打包)。
     /// agentic:原封回傳已儲存的 package bytes。角色 = USER(不掛 [AdminOnly]);租戶過濾靠 RequireTenant → 跨租戶 404。
+    /// 兩者結構不對稱是刻意的:已存 package 一律 byte-identical round-trip(含其原有的 entry 佈局),
+    /// 不重組、不補頂層資料夾;只有「沒有 package 的 definition-only flow」才由 SkillExporter 現場組出標準佈局。
     /// </summary>
     [HttpGet("{name}/export")]
     public async Task<IActionResult> Export(string name, CancellationToken ct)

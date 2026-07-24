@@ -3,6 +3,7 @@
 > 狀態: **核心能力已交付；以下是設計與驗收記錄。** Registry、harness、compiler、script runner、tool registry、Skill 驗證與執行都在現行程式碼中。
 > 現況與測試入口見 [plans README](../README.md)。設定頁與作者體驗的後續需求統一記錄在 [settings-skill-redesign](../settings-skill-redesign/01-plan.md)。
 > 相關文件: [規格書](02-spec.md)、[設計文稿](03-design.md)、[驗收案例](04-acceptance-tests.md)。
+> 第二階段(reads 契約強制化 × 作者/執行 UX)規劃於 [05-contract-hardening-and-authoring-ux.md](05-contract-hardening-and-authoring-ux.md)。
 
 ## 1. 背景與問題
 

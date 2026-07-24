@@ -5,11 +5,13 @@ namespace Backend.Api.Skills;
 
 /// <summary>
 /// 把一個 flow Skill 打包成 Claude Skill 格式的 zip(純字串組裝,不解析/不執行 definition 內容)。
-/// zip 內恰一個檔 SKILL.md,自包含(05 §3.1):
+/// zip 內恰一個 entry `{name}/SKILL.md` — 頂層資料夾名 = frontmatter name(05 §0:name 須等於資料夾名),
+/// 解壓後才會得到與 name 相符的資料夾,而非由解壓工具決定。內容自包含(05 §3.1):
 ///   frontmatter 只有標準欄位 name + description;body 以 fenced ```yaml 區塊嵌入 definition 原文。
 /// definition 逐 byte 嵌入開場 ```yaml 行與收場 ``` 行之間 — 不再序列化、不做任何換行正規化,
 /// workflow 匯入端萃取「第一個 ```yaml 區塊」即取回 skill.Definition 本身(byte-for-byte 契約)。
 /// name 已受標準規則約束(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`、1–64、無連續 `--`;純 ASCII),
+/// 故當資料夾前綴用不含任何路徑穿越字元(無 `/`、`\`、`.`、`:`);
 /// description 以 YAML-safe scalar 寫入 frontmatter(skills-ref validate friendly)。
 /// agentic export 不走這裡(controller 直接回存好的 package bytes)。
 /// </summary>
@@ -23,7 +25,7 @@ public static class SkillExporter
         using var buffer = new MemoryStream();
         using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
         {
-            WriteEntry(archive, "SKILL.md", Utf8NoBom.GetBytes(BuildManifest(skill)));
+            WriteEntry(archive, $"{skill.Name}/SKILL.md", Utf8NoBom.GetBytes(BuildManifest(skill)));
         }
 
         return buffer.ToArray();
@@ -40,7 +42,7 @@ public static class SkillExporter
     // ponytail: 不逃脫 definition 內部的 ``` — flow YAML 定義不含三反引號;若日後允許,改用長圍欄(````)。
     private static string BuildManifest(Skill skill) =>
         "---\n"
-        + $"name: {skill.Name}\n"
+        + $"name: {YamlScalar(skill.Name)}\n"
         + $"description: {YamlScalar(skill.Description)}\n"
         + "---\n"
         + "\n"
@@ -81,9 +83,33 @@ public static class SkillExporter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// YAML 1.1 隱式型別 token:裸寫會被匯入端(PyYAML)解成 bool/null/value/merge 而非字串,
+    /// 讓 `name: no` 這種合法 skill 名稱匯出後無法再匯入(frontmatter name 必須是字串)。
+    /// `=`(value)與 `<<`(merge)只有在 description 整串恰好是它時才可達 —— 名稱規則不含這些字元。
+    /// </summary>
+    private static readonly HashSet<string> ImplicitNonStrings = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "y", "n", "yes", "no", "true", "false", "on", "off", "null", "~", "=", "<<",
+    };
+
     private static bool IsPlainSafe(string s)
     {
         if (s.Length == 0 || char.IsWhiteSpace(s[0]) || char.IsWhiteSpace(s[^1]))
+        {
+            return false;
+        }
+
+        // 隱式 bool/null 一律改引號,確保解析結果是字串。
+        if (ImplicitNonStrings.Contains(s))
+        {
+            return false;
+        }
+
+        // 數值起手式(數字/`.`/`+`;`-` 已由下方開頭指示字元涵蓋)一律改引號 —— 一次收掉 YAML 1.1 的
+        // decimal、前導零八進位(007)、hex(0x1f)、binary(0b101)、float、sexagesimal,
+        // 不必逐一列舉 token。名稱允許數字開頭,多包一層引號無害。
+        if (char.IsAsciiDigit(s[0]) || s[0] is '.' or '+')
         {
             return false;
         }
