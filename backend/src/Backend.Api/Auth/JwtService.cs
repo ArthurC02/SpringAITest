@@ -21,12 +21,18 @@ public sealed class JwtService
         _expiration = expiration;
     }
 
-    public string Issue(string username, string role, string tenantCode)
+    public string Issue(
+        string username, string role, string tenantCode,
+        IReadOnlyCollection<string>? capabilities = null)
     {
         var now = DateTime.UtcNow;
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secret));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
+        // 既有 4 個 claim(sub/role/tenantCode/iat)名稱與順序**位元相容**:platform 只驗不簽,
+        // 舊 token 一位元都不能變。capabilities(如 workflow.manage,02-spec §9)只在使用者實際具備時
+        // 才**附加在最後**(空/無 → 不加任何欄位 → token 與過去逐位元相同);tenant ADMIN 不自動取得 —
+        // 呼叫端只在 principal 真正持有該 capability 時才傳入。多值以重複 claim 名輸出成 JSON 陣列。
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, username),
@@ -36,6 +42,18 @@ public sealed class JwtService
                 new DateTimeOffset(now).ToUnixTimeSeconds().ToString(),
                 ClaimValueTypes.Integer64),
         };
+
+        if (capabilities is not null)
+        {
+            foreach (var capability in capabilities
+                         .Where(c => !string.IsNullOrWhiteSpace(c))
+                         .Select(c => c.Trim())
+                         .Distinct(StringComparer.Ordinal)
+                         .OrderBy(c => c, StringComparer.Ordinal))
+            {
+                claims.Add(new Claim("capabilities", capability));
+            }
+        }
 
         var token = new JwtSecurityToken(
             claims: claims,

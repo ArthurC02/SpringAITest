@@ -132,12 +132,24 @@ async def _entry(ctx: RequestContext, info: dict) -> dict:
     except Exception as e:  # 取不到／壞 YAML／schema 不合 —— 一筆的問題不該炸整份清單
         logger.warning("自訂 skill %s 的 input_schema 取得失敗: %s", info.get("name"), e)
 
+    raw_revision = info.get("current_revision")
+    revision = (
+        raw_revision
+        if isinstance(raw_revision, int)
+        and not isinstance(raw_revision, bool)
+        and raw_revision > 0
+        else None
+    )
+
     return {
         "name": info["name"],
         "description": info.get("description") or "",
         "required_role": info.get("required_role") or "USER",
         "source": "custom",
-        "revision": int(info.get("current_revision") or 1),
+        "revision": revision,
+        # 只有 backend 明確證明存在正整數 current_revision 的 persisted custom Skill
+        # 才能固定到 Agent revision；缺失/0/壞值一律 fail closed。
+        "bindable": revision is not None,
         "kind": kind,
         "input_schema": schema,
     }

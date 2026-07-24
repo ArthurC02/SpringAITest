@@ -73,6 +73,38 @@ def _codes(result) -> list[str]:
     return [e.code for e in result.errors]
 
 
+def test_tool_risk_defaults_to_privileged_and_rejects_unknown_value():
+    default_name = "local.default-risk-probe"
+
+    @tool_registry.tool(name=default_name, kind="local")
+    async def default_risk(ctx: ToolContext) -> None:
+        return None
+
+    try:
+        assert tool_registry.get(default_name).risk == "privileged"
+    finally:
+        tool_registry._REGISTRY.pop(default_name, None)
+
+    with pytest.raises(ValueError, match="risk 必須是"):
+
+        @tool_registry.tool(name="local.invalid-risk-probe", kind="local", risk="safe")
+        async def invalid_risk(ctx: ToolContext) -> None:
+            return None
+
+
+def test_all_production_tools_have_explicit_expected_risk():
+    assert {
+        spec.name: spec.risk
+        for spec in tool_registry.all_specs()
+        if spec.name != PROBE_TOOL
+    } == {
+        "backend.retrieval_search": "read",
+        "local.calculator": "low",
+        "local.glossary": "read",
+        "local.rerank": "low",
+    }
+
+
 # ---------------------------------------------------------------------------
 # AT3-15 tool 呼叫入 trace（tool 名／耗時／狀態），args 不落值
 # ---------------------------------------------------------------------------

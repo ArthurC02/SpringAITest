@@ -4,6 +4,7 @@ import { CopilotSidebar } from '@copilotkit/react-ui'
 import type { Session } from '../types'
 import { useDocuments } from '../hooks/useDocuments'
 import { invokeSkill } from '../api/skills'
+import { getFeatures } from '../api/agents'
 import { ConfirmProvider } from './ConfirmDialog'
 import { ToastProvider } from './Toast'
 import ErrorBoundary from './ErrorBoundary'
@@ -11,9 +12,11 @@ import ChatView from './ChatView'
 import DocumentsView from './DocumentsView'
 import AnalysisView from './AnalysisView'
 import ConfigView from './ConfigView'
+import AgentsView from './AgentsView'
 
-type View = 'chat' | 'documents' | 'analysis' | 'config'
+type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agents'
 
+// copilot 的 switchView 只認四個原視圖(不含 agents,副駕不涉入 Agent Builder)。
 const VIEWS: View[] = ['chat', 'documents', 'analysis', 'config']
 
 const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
@@ -23,6 +26,9 @@ const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
   { id: 'config', icon: '🔧', label: '系統設定', adminOnly: true },
 ]
 
+// Agents 入口只在 features flag 為 true 且使用者為 ADMIN 時加入(fail-closed)。
+const AGENTS_NAV = { id: 'agents' as const, icon: '🧑‍💼', label: 'Agents' }
+
 interface Props {
   session: Session
   onLogout: () => void
@@ -31,8 +37,25 @@ interface Props {
 /** 已登入外殼：左側欄導覽 + 頂欄身分 + 右主內容區（useState 切視圖，不用 router）。 */
 export default function AppShell({ session, onLogout }: Props) {
   const [view, setView] = useState<View>('chat')
+  const [agentBuilderEnabled, setAgentBuilderEnabled] = useState(false)
   const isAdmin = session.role === 'ADMIN'
   const items = NAV.filter((n) => !n.adminOnly || isAdmin)
+  const navItems = agentBuilderEnabled && isAdmin ? [...items, AGENTS_NAV] : items
+
+  // features flag:失敗或 false 一律 fail-closed(不顯示 Agents 入口)。登入即取一次。
+  useEffect(() => {
+    let cancelled = false
+    getFeatures()
+      .then((f) => {
+        if (!cancelled) setAgentBuilderEnabled(!!f.agentBuilderEnabled)
+      })
+      .catch(() => {
+        if (!cancelled) setAgentBuilderEnabled(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // useDocuments 提升到此層：AppShell 的 copilot action(建立/刪除)與 DocumentsView 共用
   // 同一份狀態,避免兩處各自實例化造成雙重輪詢(見契約)。DocumentsView 改吃 props。
@@ -40,7 +63,8 @@ export default function AppShell({ session, onLogout }: Props) {
 
   // 分頁標題隨視圖更新（沿用 NAV 的中文 label，不另建映射）。
   useEffect(() => {
-    const label = NAV.find((n) => n.id === view)?.label ?? ''
+    const label =
+      view === 'agents' ? AGENTS_NAV.label : NAV.find((n) => n.id === view)?.label ?? ''
     document.title = `${label} — 資料分析平台`
   }, [view])
 
@@ -168,7 +192,7 @@ export default function AppShell({ session, onLogout }: Props) {
         <aside className="shell__sidebar">
           <h1 className="shell__brand">資料分析平台</h1>
           <nav aria-label="主選單">
-            {items.map((n) => (
+            {navItems.map((n) => (
               <button
                 key={n.id}
                 className={`shell__nav${view === n.id ? ' shell__nav--active' : ''}`}
@@ -203,6 +227,7 @@ export default function AppShell({ session, onLogout }: Props) {
               {view === 'documents' && <DocumentsView documents={documents} />}
               {view === 'analysis' && <AnalysisView />}
               {view === 'config' && <ConfigView isAdmin={isAdmin} />}
+              {view === 'agents' && isAdmin && <AgentsView isAdmin />}
             </ErrorBoundary>
           </main>
         </div>

@@ -148,8 +148,8 @@ public sealed class WorkflowServiceTests
     public async Task GetSkillCatalog_GetsSkillsPath_PassesArrayThrough()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            "[{\"name\":\"kb-query\",\"source\":\"builtin\",\"revision\":null},"
-            + "{\"name\":\"quarterly-qa\",\"source\":\"custom\",\"revision\":3}]"));
+            "[{\"name\":\"kb-query\",\"source\":\"builtin\",\"revision\":null,\"bindable\":false},"
+            + "{\"name\":\"quarterly-qa\",\"source\":\"custom\",\"revision\":3,\"bindable\":true}]"));
 
         var result = await Build(stub).GetSkillCatalogAsync(Ctx);
 
@@ -158,7 +158,9 @@ public sealed class WorkflowServiceTests
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
         Assert.Equal(2, result.GetArrayLength());
         Assert.Equal("builtin", result[0].GetProperty("source").GetString());
+        Assert.False(result[0].GetProperty("bindable").GetBoolean());
         Assert.Equal("custom", result[1].GetProperty("source").GetString());
+        Assert.True(result[1].GetProperty("bindable").GetBoolean());
     }
 
     // AST-P1-013:catalog 帶 additive kind → 原樣穿透(代理層不套 DTO,不吞未知欄位);既有 source 等欄位不變。
@@ -176,6 +178,23 @@ public sealed class WorkflowServiceTests
         // 既有欄位不因新增 kind 而受影響。
         Assert.Equal("builtin", result[0].GetProperty("source").GetString());
         Assert.Equal("custom", result[1].GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public async Task GetToolCatalog_GetsToolsPath_PassesSafeMetadataThrough()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """[{"name":"document_search","kind":"read","description":"搜尋租戶文件","risk":"low","returns":"SearchResult[]"}]"""));
+
+        var result = await Build(stub).GetToolCatalogAsync(Ctx);
+
+        Assert.Equal("http://downstream/tools", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Get, stub.LastRequest!.Method);
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.Equal("document_search", result[0].GetProperty("name").GetString());
+        Assert.Equal("low", result[0].GetProperty("risk").GetString());
+        Assert.False(result[0].TryGetProperty("endpoint", out _));
+        Assert.False(result[0].TryGetProperty("token", out _));
     }
 
     // AST-P1-013:validate 回應的 skill 中繼資料帶 kind → 原樣穿透;既有 valid/errors/skill 形狀不變。
@@ -229,6 +248,7 @@ public sealed class WorkflowServiceTests
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.GetSkillCatalogAsync(Ctx));
         await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.GetNodeCatalogAsync(Ctx));
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.GetToolCatalogAsync(Ctx));
     }
 
     [Fact] // 下游回了 200 但 body 不是 JSON → 受控的 502,不是未捕捉的解析例外。

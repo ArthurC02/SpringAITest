@@ -145,6 +145,8 @@ services:
       RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672   # 檔案處理佇列（發佈端）
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
+      # Agent Builder 是管理面功能；預設關閉，明確 opt-in 才暴露 /api/agents*。
+      AGENT_BUILDER_ENABLED: ${AGENT_BUILDER_ENABLED:-false}
       # 只信任 frontend nginx 所在的隔離網段；不得改成共用 default network。
       TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-10.253.254.0/28}
 

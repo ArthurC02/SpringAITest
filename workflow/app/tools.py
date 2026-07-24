@@ -23,9 +23,10 @@ def _dep(ctx: ToolContext, name: str) -> Any:
 @tool(
     name="backend.retrieval_search",
     kind="http",
-    description="租戶向量檢索（backend /api/retrieval/search，自動帶 X-Internal-Token + 租戶標頭）",
+    description="在目前租戶已授權的知識庫中進行向量檢索",
     args_schema={"query": str, "top_k": int},
     returns="list[chunk]",
+    risk="read",
 )
 async def retrieval_search(ctx: ToolContext, query: str, top_k: int = 4) -> list[dict]:
     """租戶邊界由 ctx.tenant_id 決定，不由 args 決定：script 偽造不了租戶。"""
@@ -42,6 +43,7 @@ async def retrieval_search(ctx: ToolContext, query: str, top_k: int = 4) -> list
     description="確定性計算器（AST 白名單求值，取代 LLM 心算）",
     args_schema={"expression": str, "inputs": dict},
     returns="float",
+    risk="low",
 )
 async def calculate(
     ctx: ToolContext, expression: str, inputs: dict | None = None
@@ -55,6 +57,7 @@ async def calculate(
     description="業務詞彙字典：canonical 指標、同義詞、易混淆指標",
     args_schema={"text": str},
     returns="dict",
+    risk="read",
 )
 async def glossary_lookup(ctx: ToolContext, text: str) -> dict:
     glossary = _dep(ctx, "glossary") or StaticGlossary()
@@ -72,6 +75,7 @@ async def glossary_lookup(ctx: ToolContext, text: str) -> dict:
     description="確定性重排（留下 score breakdown 供稽核）",
     args_schema={"query": str, "sources": list, "context": dict},
     returns="list[source]",
+    risk="low",
 )
 async def rerank(
     ctx: ToolContext,

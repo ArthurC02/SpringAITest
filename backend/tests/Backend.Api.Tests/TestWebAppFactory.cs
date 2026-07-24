@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json.Nodes;
+using Backend.Api.Agents;
 using Backend.Api.Auth;
 using Backend.Api.Common;
 using Backend.Api.Config;
@@ -29,7 +30,7 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IAuthRepository>();
-            services.AddScoped<IAuthRepository, FakeAuthRepository>();
+            services.AddSingleton<IAuthRepository, FakeAuthRepository>();
 
             services.RemoveAll<IConversationRepository>();
             services.AddSingleton<IConversationRepository, FakeConversationRepository>();
@@ -45,6 +46,9 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IConfigurationSetRepository>();
             services.AddSingleton<IConfigurationSetRepository, FakeConfigurationSetRepository>();
+
+            services.RemoveAll<IAgentRepository>();
+            services.AddSingleton<IAgentRepository, FakeAgentRepository>();
 
             // Skill 驗證不打真的 workflow(:8001)。
             services.RemoveAll<ISkillValidator>();

@@ -24,6 +24,8 @@ from app.engine.models import TraceEntry
 from pydantic import computed_field
 
 ToolKind = Literal["http", "local"]
+ToolRisk = Literal["low", "read", "write", "privileged"]
+VALID_TOOL_RISKS = frozenset({"low", "read", "write", "privileged"})
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class ToolSpec:
     args_schema: dict[str, type]
     returns: str
     fn: Callable[..., Awaitable[Any]]
+    # 未明示時採最保守分類，避免新工具在 Builder 被錯標成低風險。
+    risk: ToolRisk = "privileged"
 
 
 class ToolError(RuntimeError):
@@ -83,6 +87,7 @@ def tool(
     description: str = "",
     args_schema: dict[str, type] | None = None,
     returns: str = "",
+    risk: ToolRisk = "privileged",
 ):
     """裝飾器：把 tool 函式登記進註冊表，函式本身原樣回傳（簽名不變）。
 
@@ -93,6 +98,10 @@ def tool(
     def decorator(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         if name in _REGISTRY:
             raise ValueError(f"duplicate tool: name={name}")
+        if risk not in VALID_TOOL_RISKS:
+            raise ValueError(
+                f"tool {name} 的 risk 必須是 {sorted(VALID_TOOL_RISKS)}，收到：{risk}"
+            )
         _REGISTRY[name] = ToolSpec(
             name=name,
             kind=kind,
@@ -100,6 +109,7 @@ def tool(
             args_schema=dict(args_schema or {}),
             returns=returns,
             fn=fn,
+            risk=risk,
         )
         return fn
 

@@ -371,7 +371,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     // ---- 引擎端點:catalog / nodes / validate / invoke ----
 
     [Fact]
-    public async Task Catalog_Returns200_MergedListWithSourceBadge()
+    public async Task Catalog_Returns200_MergedListWithSourceAndBindableMetadata()
     {
         var resp = await _factory.AdminClient().GetAsync("/api/skills/catalog");
 
@@ -379,7 +379,9 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         var arr = (await resp.ReadJsonAsync()).AsArray();
         Assert.Equal(2, arr.Count);
         Assert.Equal("builtin", arr[0]!["source"]!.GetValue<string>());
+        Assert.False(arr[0]!["bindable"]!.GetValue<bool>());
         Assert.Equal("custom", arr[1]!["source"]!.GetValue<string>());
+        Assert.True(arr[1]!["bindable"]!.GetValue<bool>());
     }
 
     // 路由優先序:字面段 catalog 勝過參數段 {name}。

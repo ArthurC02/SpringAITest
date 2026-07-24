@@ -1,6 +1,8 @@
 # Agent 平台重整 — 驗收測試
 
-> 狀態：規劃中。每期先建立跨服務契約測試，再完成實作。
+> 狀態：分期交付中。D1 已覆蓋 A-DATA-01~09、11、14、15 與 A-UI-01~07；
+> A-UI-08 目前只有 audience authoring/storage，published catalog 與 run-time enforcement
+> 分別在 D6/D3 驗收。其餘條目仍是後續里程碑的 release gate。
 
 ## 1. P0：資料與契約
 
@@ -28,7 +30,7 @@
 | --- | --- | --- |
 | A-UI-01 | ADMIN 建立 Agent | 可輸入名稱、說明、System Prompt，儲存 draft |
 | A-UI-02 | USER 進入 Agent 設定 | 不可建立、修改或發布 |
-| A-UI-03 | Skill picker | 只顯示同 tenant、enabled、驗證通過的 Skills |
+| A-UI-03 | Skill picker | 只有同 tenant、enabled、驗證通過且具 persisted immutable revision 的 Skills 可選；catalog-only builtin 可唯讀顯示，但必須標成不可綁並說明原因 |
 | A-UI-04 | Tool picker | 顯示描述與風險分類，不顯示內部 token/endpoint |
 | A-UI-05 | Agent draft 有失效 Skill | 顯示定位錯誤，禁止發布 |
 | A-UI-06 | 發布預覽 | 顯示固定的 Agent revision、Skill revisions、工具與規則摘要 |

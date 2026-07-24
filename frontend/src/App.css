@@ -1338,3 +1338,207 @@ cpk-thread-inspector {
   justify-content: flex-end;
   margin-top: 16px;
 }
+
+/* ── Agent Builder（D1）：清單在 .view/.table 內；以下為編輯器/精靈。 ─────────── */
+.agent-editor {
+  margin-top: 4px;
+}
+.agent-block {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.agent-block__title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--text-h);
+}
+/* 併發衝突橫幅：沿用 danger token，不新造顏色。 */
+.agent-conflict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 12px 0;
+  font-size: 14px;
+}
+/* 空集合＝無權限的明確提示（fail-closed 語意），沿用警告 token。 */
+.agent-set__hint {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+.agent-set__empty {
+  border: 1px solid var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+.agent-set__chips {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.agent-set__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 6px 3px 10px;
+  font-size: 13px;
+  background: var(--code-bg);
+}
+.agent-set__chip-label {
+  font-family: var(--mono);
+}
+.agent-set__chip-x {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.agent-set__add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.agent-set__add .input {
+  width: auto;
+  flex: 1;
+}
+.agent-roles {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.agent-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.agent-skills {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-skills__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.agent-skills__name {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.agent-skills__desc {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.code-textarea {
+  min-height: 150px;
+  font-family: var(--mono);
+}
+.agent-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+.agent-errors {
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--danger);
+}
+.agent-errors ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.agent-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+}
+.agent-rev__bindings {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+.agent-preview__list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-preview__list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+.agent-preview {
+  width: min(760px, 100%);
+  max-height: min(88vh, 900px);
+  overflow-y: auto;
+}
+.agent-preview__heading {
+  margin: 18px 0 6px;
+  color: var(--text-h);
+  font-size: 14px;
+}
+.agent-preview__summary {
+  margin: 10px 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.agent-preview__summary > div {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.agent-preview__summary dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.agent-preview__summary dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-h);
+  font-size: 13px;
+}

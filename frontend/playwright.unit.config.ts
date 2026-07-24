@@ -1,0 +1,17 @@
+import { defineConfig } from '@playwright/test'
+
+/** 無瀏覽器、無外部服務的 Agent Builder model/API contract tests。 */
+export default defineConfig({
+  testDir: './tests',
+  fullyParallel: true,
+  reporter: 'line',
+  use: {
+    baseURL: 'http://127.0.0.1:4174',
+  },
+  webServer: {
+    command: 'npm run dev -- --host 127.0.0.1 --port 4174',
+    url: 'http://127.0.0.1:4174',
+    reuseExistingServer: true,
+    timeout: 30_000,
+  },
+})

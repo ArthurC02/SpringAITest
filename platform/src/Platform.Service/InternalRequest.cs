@@ -13,11 +13,17 @@ namespace Platform.Service;
 /// </summary>
 public static class InternalRequest
 {
-    /// <summary>內部信任邊界的憑證 header;後三個是上游如實轉發的身分 header。</summary>
+    /// <summary>內部信任邊界的憑證 header;後續是上游如實轉發的身分 header。</summary>
     public const string InternalTokenHeader = "X-Internal-Token";
     public const string TenantIdHeader = "X-Tenant-Id";
     public const string UserIdHeader = "X-User-Id";
     public const string UserRoleHeader = "X-User-Role";
+
+    /// <summary>
+    /// 使用者的 capability tags(取自 JWT capabilities claim,例如 workflow.manage);
+    /// 空白分隔。無 capability 時「不帶」此 header(fail-closed:缺席即無授權,絕不代表全部)。
+    /// </summary>
+    public const string UserCapabilitiesHeader = "X-User-Capabilities";
 
     /// <summary>
     /// 組一個帶 X-Internal-Token 的下游請求;<paramref name="ctx"/> 非 null 時再帶 3 個身分 header;可選 JSON body。
@@ -38,6 +44,10 @@ public static class InternalRequest
             req.Headers.TryAddWithoutValidation(TenantIdHeader, ctx.TenantCode);
             req.Headers.TryAddWithoutValidation(UserIdHeader, ctx.UserId);
             req.Headers.TryAddWithoutValidation(UserRoleHeader, ctx.Role);
+            if (ctx.Capabilities is { Count: > 0 } capabilities)
+            {
+                req.Headers.TryAddWithoutValidation(UserCapabilitiesHeader, string.Join(' ', capabilities));
+            }
         }
 
         if (body is not null)

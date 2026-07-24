@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
 
 from app import backend_http, skills, tracing
-from app.engine import compiler, node_registry, package
+from app.engine import compiler, node_registry, package, tool_registry
 from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
 from app.engine.skill import ValidationResult, validate_source
 from app.skills import config_apply, custom
@@ -35,6 +35,7 @@ from app.schemas import (
     SkillInfo,
     SkillInvokeResponse,
     SkillValidateRequest,
+    ToolInfo,
     ValidatePackageResult,
 )
 from app.security import RequestContext, get_context
@@ -189,6 +190,21 @@ async def list_nodes(ctx: RequestContext = Depends(get_context)) -> list[NodeInf
     ]
 
 
+@app.get("/tools", response_model=list[ToolInfo])
+async def list_tools(ctx: RequestContext = Depends(get_context)) -> list[ToolInfo]:
+    """安全 Tool 目錄：供 Agent Builder picker 使用，registry 是唯一事實來源。"""
+    return [
+        ToolInfo(
+            name=spec.name,
+            kind=spec.kind,
+            description=spec.description,
+            risk=spec.risk,
+            returns=spec.returns,
+        )
+        for spec in tool_registry.all_specs()
+    ]
+
+
 @app.get("/skills", response_model=list[SkillInfo])
 async def list_skills(ctx: RequestContext = Depends(get_context)) -> list[SkillInfo]:
     """Skill 清單：內建（repo 的 skills/*.yaml）+ 本租戶自訂（來自 backend），以 source 區分。
@@ -203,6 +219,7 @@ async def list_skills(ctx: RequestContext = Depends(get_context)) -> list[SkillI
             required_role=loaded.skill.required_role,
             source=loaded.source,
             revision=loaded.skill.revision,
+            bindable=False,
             kind=loaded.skill.kind,
             input_schema=loaded.skill.input_schema or None,
             # 內建骨架帶原文供前端 compose patch;custom 不帶（catalog dict 無此鍵 → None）

@@ -81,43 +81,45 @@ issues[]
 
 ## 5. Rollout 階段
 
-### R0：Shadow validation
+D1–D7 交付切分定義見 01-plan §6.1;每個 D 里程碑結束時系統皆為可部署、flag 外零變化的可用狀態。
+
+### R0：Shadow validation (對應 D1–D2)
 
 - Agent/Orchestrator/Workflow CRUD、publish、rules 與 snapshots 上線，但不接正式 chat。
 - Designer 先以 published Workflow 唯讀 visualization 與 simulated trace overlay 上線；真實 root/child trace 留到 R2/P4。
 - 用 production-like fixtures 驗證 tenant、revision、Graph、binding 與 policy。
 
-### R1：SYSTEM_ADMIN Designer 與 test console
+### R1：SYSTEM_ADMIN Designer 與 test console (對應 D3–D4)
 
 - 只允許 `workflow.manage` 對 Orchestrator/Workflow draft validate/simulate/publish；tenant ADMIN 不自動取得權限。
 - Agent ADMIN 可對 draft/published Agent 測試。
 - 工具限 read-only；不執行外部 scripts。
 - 收集 node validation、Context loop、Skill load、token、latency 與 clarification 指標。
 
-### R2：多 Agent shadow/canary run
+### R2：多 Agent shadow/canary run (對應 D5)
 
 - 少數 tenant 以獨立 API 執行 Root Workflow，啟用 bounded Worker dispatch + Verifier，不接正式 chat。
 - 比較 task decomposition、child results、verifier/aggregation 與 legacy final answer。
 - shadow 對照不得執行寫入型動作。
 
-### R3：Tenant canary chat
+### R3：Tenant canary chat (對應 D6)
 
 - 少數 tenant/user 顯式使用 Orchestrator。
 - 未選 Orchestrator 繼續 legacy。
 - 同步比較 legacy/new 的成功率、成本與延遲，不將同一使用者 turn 同時執行兩套有副作用 runtime。
 
-### R4：Default Orchestrator
+### R4：Default Orchestrator (對應 D6)
 
 - canary 通過後，已完成安全遷移的 tenant 對未傳 `orchestratorId` 的 client 解析到 Default Orchestrator；其他 tenant 保持 legacy。
 - 保留快速回切 legacy flag。
 - Chat 與 AG-UI 必須同時通過 shared-brain gate，不能只遷其中一條後宣稱完成。
 
-### R5：Write tools
+### R5：Write tools (對應 D7)
 
 - 完成人工確認、idempotency、resume、取消與稽核後才開。
 - 先按 tool capability allowlist，再擴 tenant。
 
-### R6：Legacy deprecation
+### R6：Legacy deprecation (對應 D7)
 
 - 觀測到 legacy 使用量低於門檻且新 runtime 達標後，停止一般使用者建立 flow YAML。
 - Advanced/legacy editor 改唯讀前提供匯出與人工遷移指引。

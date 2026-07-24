@@ -55,6 +55,10 @@ var jwtOptions = new JwtOptions
     Secret = cfg["JWT_SECRET"] ?? "dev-jwt-secret-change-me-0123456789abcdef",
 };
 
+// Agent Builder feature flag(D1):預設 false。關閉時整個 /api/agents* fail-closed 回 404(見下方中介軟體);
+// GET /api/features 只暴露這個布林旗標(AllowAnonymous)供前端決定是否顯示入口。
+var agentBuilderEnabled = string.Equals(cfg["AGENT_BUILDER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+
 builder.Services.AddSingleton(llmOptions);
 builder.Services.AddSingleton(mem0Options);
 builder.Services.AddSingleton(workflowOptions);
@@ -83,6 +87,7 @@ builder.Services.AddScoped<IAnalysisService, AnalysisService>();
 builder.Services.AddScoped<IConfigService, ConfigService>();
 builder.Services.AddScoped<ISkillService, SkillService>();
 builder.Services.AddScoped<IConfigurationSetService, ConfigurationSetService>();
+builder.Services.AddScoped<IAgentService, AgentService>();
 
 // 供 agent pipeline(P1+)取得本次請求的登入身分與記憶 key;Platform.Service 不能引用 ASP.NET Core。
 builder.Services.AddHttpContextAccessor();
@@ -273,7 +278,17 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             },
         };
     });
-builder.Services.AddAuthorization();
+// workflow.manage capability policy(D1):識別 JWT 的 capabilities claim(見 ClaimsPrincipalExtensions)。
+// 本期無端點消費此 policy —— 只落地 policy + 測試,SYSTEM_ADMIN UI 之後才接。fail-closed:缺 claim 即拒絕,
+// 單純 tenant ADMIN 不自動取得(不新增可繞過 tenant/policy 的隱含超級角色,02-spec §9)。
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("workflow.manage", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.RequireAssertion(context => context.User.HasCapability("workflow.manage"));
+    });
+});
 
 // nginx 只追加一個 forwarding hop；限制為單一 hop並要求 X-Forwarded-For / Proto 對稱。
 // 只信任明確設定的 frontend-platform 專用網段；主機模式未設定或 CIDR 無效時信任集合為空。
@@ -394,6 +409,23 @@ if (rateLimitingEnabled)
     app.UseRateLimiter();
 }
 
+// Agent Builder feature flag(D1):關閉時整個 /api/agents* fail-closed 回 404,且置於認證之前 ——
+// 匿名或已登入一律看不到端點存在(不洩漏「這裡有個需要授權的功能」)。開啟時直接放行,交由 controller 的
+// [Authorize]/backend 角色把關。回應維持 ApiError 形狀。
+if (!agentBuilderEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/agents"))
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "找不到資源");
+            return;
+        }
+
+        await next();
+    });
+}
+
 // 刻意不用 UseHttpsRedirection:容器內對外是 http(:8080)。
 app.UseAuthentication();
 app.UseAuthorization();
@@ -402,6 +434,10 @@ app.MapControllers();
 
 // 健康檢查:供容器探針;AllowAnonymous、免 token。OTel filter 過濾的正是這條路徑。
 app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAnonymous();
+
+// Feature flags(D1):AllowAnonymous、只暴露布林旗標,供前端決定是否顯示 Agent Builder 入口。
+// 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
+app.MapGet("/api/features", () => Results.Ok(new { agentBuilderEnabled })).AllowAnonymous();
 
 // ---------------------------------------------------------------------------
 // AG-UI 端點:CopilotKit 前端經此與「操作助理」對話(HTTP POST + SSE)。

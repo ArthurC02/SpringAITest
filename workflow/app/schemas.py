@@ -18,7 +18,10 @@ class SkillInfo(BaseModel):
     description: str
     required_role: str
     source: str
-    revision: int
+    revision: int | None
+    # Agent publish 必須固定到 backend 的 immutable skill_revision。builtin 目前只有
+    # Workflow repo 內的檔案，沒有可固定的 persisted revision，因此不可假裝能綁 Agent。
+    bindable: bool = False
     # additive contract：舊的內部 producer/fake 未帶 kind 時仍視為 flow；FastAPI response
     # 會把預設值序列化，因此 catalog 對外一律明確輸出 kind。
     kind: Literal["flow", "agentic"] = "flow"
@@ -80,3 +83,13 @@ class NodeInfo(BaseModel):
     reads: list[str]
     writes: list[str]
     requires_tools: list[str]
+
+
+class ToolInfo(BaseModel):
+    """Agent Builder 可用的安全 Tool 目錄；不暴露 endpoint、token 或 callable 細節。"""
+
+    name: str
+    kind: Literal["http", "local"]
+    description: str
+    risk: Literal["low", "read", "write", "privileged"]
+    returns: str

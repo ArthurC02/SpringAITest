@@ -1,3 +1,4 @@
+using Backend.Api.Agents;
 using Backend.Api.Analysis;
 using Backend.Api.Auth;
 using Backend.Api.Common;
@@ -41,6 +42,7 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IConfigRepository, InMemoryConfigRepository>();
     builder.Services.AddSingleton<ISkillRepository, InMemorySkillRepository>();
     builder.Services.AddSingleton<IConfigurationSetRepository, InMemoryConfigurationSetRepository>();
+    builder.Services.AddSingleton<IAgentRepository, InMemoryAgentRepository>();
 }
 else
 {
@@ -51,6 +53,7 @@ else
     builder.Services.AddScoped<IConfigRepository, ConfigRepository>();
     builder.Services.AddScoped<ISkillRepository, SkillRepository>();
     builder.Services.AddScoped<IConfigurationSetRepository, ConfigurationSetRepository>();
+    builder.Services.AddScoped<IAgentRepository, AgentRepository>();
 }
 
 // ---------------------------------------------------------------------------

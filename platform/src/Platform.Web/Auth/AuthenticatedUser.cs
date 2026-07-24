@@ -19,13 +19,34 @@ public static class ClaimsPrincipalExtensions
 
     /// <summary>
     /// 組出傳給下游的 UserContext。注意順序與 AuthResult 不同:(userId, tenantCode, role);
-    /// 且 userId = username(不是數字 id)。
+    /// 且 userId = username(不是數字 id)。capabilities 取自 JWT claim,無則為 null(下游不帶 header)。
     /// </summary>
     public static UserContext ToUserContext(this ClaimsPrincipal principal)
     {
         var user = principal.ToAuthenticatedUser();
-        return new UserContext(user.Username, user.TenantCode, user.Role);
+        return new UserContext(user.Username, user.TenantCode, user.Role, principal.GetCapabilities());
     }
+
+    /// <summary>
+    /// 解析 backend 簽發的 capabilities claim(例如 workflow.manage)。
+    /// backend 以「每個 capability 一個同名 claim」簽發（JWT payload 是 JSON 陣列）；
+    /// 每個 claim 必須是單一、無空白的 tag，格式不符即忽略，不能把一個 grant 擴張成多個權限。
+    /// 無 capability 回 null(不是空集合)——讓 UserContext 與純三段身分的等值語意一致,下游也不帶 header。
+    /// 這一份解析是 platform 對 backend capabilities claim 契約的單一事實來源(改格式兩端同步)。
+    /// </summary>
+    public static IReadOnlyList<string>? GetCapabilities(this ClaimsPrincipal principal)
+    {
+        var caps = principal.FindAll("capabilities")
+            .Select(c => c.Value)
+            .Where(value => !string.IsNullOrWhiteSpace(value) && !value.Any(char.IsWhiteSpace))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        return caps.Length == 0 ? null : caps;
+    }
+
+    /// <summary>principal 是否具備某個 capability(fail-closed:缺 claim 即 false)。</summary>
+    public static bool HasCapability(this ClaimsPrincipal principal, string capability)
+        => principal.GetCapabilities()?.Contains(capability, StringComparer.Ordinal) ?? false;
 
     /// <summary>
     /// 取得可作為聊天記憶、持久化與租戶隔離邊界的身分。JWT 通過簽章驗證不代表其身分 claims

@@ -24,4 +24,10 @@ public interface IWorkflowService
 
     /// <summary>節點目錄(唯讀):名稱/版本/reads/writes/requires_tools 契約。</summary>
     Task<JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>
+    /// 工具目錄(唯讀):Workflow Tool Registry 的安全 authoring metadata
+    /// (name/kind/description/risk/returns)，不含 endpoint、token 或 executable implementation。
+    /// </summary>
+    Task<JsonElement> GetToolCatalogAsync(UserContext ctx, CancellationToken ct = default);
 }

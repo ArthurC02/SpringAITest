@@ -177,6 +177,8 @@ def test_list_skills_merges_builtin_and_custom(backend, fake_deps):
     assert resp.status_code == 200
     body = {item["name"]: item for item in resp.json()}
     assert body["kb-query"]["source"] == "builtin"
+    assert body["kb-query"]["bindable"] is False
+    assert body["quarterly-qa"]["bindable"] is True
     assert body["kb-query"]["revision"] == 1
     assert body["quarterly-qa"]["source"] == "custom"
     assert body["quarterly-qa"]["revision"] == 3
@@ -189,6 +191,18 @@ def test_list_skills_merges_builtin_and_custom(backend, fake_deps):
     assert body["kb-query"]["input_schema"]["query"]["required"] is True
     # 出站請求帶了內部密鑰與租戶標頭（fake 內已 assert token；這裡釘住租戶）
     assert all(h["X-Tenant-Id"] == "demo-a" for _, h in fake.calls)
+
+
+@pytest.mark.parametrize("revision", [None, 0, -1, True, 1.5, "3"])
+def test_custom_catalog_without_positive_persisted_revision_is_not_bindable(
+    backend, fake_deps, revision
+):
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA, revision=revision)]})
+
+    body = {item["name"]: item for item in client.get("/skills", headers=_headers()).json()}
+
+    assert body["quarterly-qa"]["revision"] is None
+    assert body["quarterly-qa"]["bindable"] is False
 
 
 def test_custom_catalog_declares_flow_and_agentic_kind(backend, fake_deps):

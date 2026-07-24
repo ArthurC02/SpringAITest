@@ -22,9 +22,9 @@ SpringAITest/
 │   ├── Backend.sln              .NET 方案檔
 │   ├── Dockerfile              選用：容器模式用到
 │   ├── src/
-│   │   └── Backend.Api/         單一專案（feature folders：Auth、Conversations、Files、Retrieval、Analysis、Skills、Config）
-│   └── tests/                  xUnit 測試專案 252 個（Backend.Api.Tests）
-├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、分析、系統設定四視圖）
+│   │   └── Backend.Api/         單一專案（feature folders：Auth、Conversations、Files、Retrieval、Analysis、Skills、Config、Agents）
+│   └── tests/                  xUnit 測試專案 326 個（Backend.Api.Tests）
+├── frontend/                   前端：React 19 + Vite + TypeScript（登入入口 + 聊天、文件、分析、系統設定、Agents 工作區）
 │   ├── vite.config.ts          dev 時把 /api proxy 到 :8080（免 CORS）
 │   ├── Dockerfile / nginx.conf 正式：多階段 build → nginx 靜態檔 + /api 反代（SSE 關緩衝）
 │   └── src/                    api/{http,auth,chat,documents,skills,analysis,config}.ts、hooks/{useAuth,useChat,useDocuments}.ts、components/{AuthPage,AppShell,ChatView,...}.tsx
@@ -47,10 +47,10 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 431 個（Service 266 + Web 165）+ 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能與 appdb 永久儲存;測試用 xUnit 252 個、手寫 fake repository（未引入 mocking 套件）。
-- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定）。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint（lint）+ vite build（type check + bundle）。
-- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 643 個。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、**Agent Registry proxy**、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 509 個（Service 294 + Web 215）+ 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能、**Agent Registry CRUD/publish/revisions**、appdb 永久儲存;測試用 xUnit 326 個、手寫 fake repository（未引入 mocking 套件）。
+- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定），`AGENT_BUILDER_ENABLED` 開啟時提供 ADMIN-only Agents workspace。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint + vite build + Agent Builder Playwright regression tests。
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、安全 Skill/Tool catalogs、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 665 個。
 
 > .NET 後端需 .NET SDK 10 以上才能建置（`dotnet --version` 應顯示 `10.x`）。
 
@@ -221,7 +221,7 @@ workflow                                  Skill 引擎層
 | ---- | ----------- | --------------------- | --------------------------------------------------------------------------------------------- |
 | 平台 | Service     | `ChatServiceTests`    | xUnit + 手寫 fake HttpMessageHandler（BackendClient 代理行為）                                |
 | 平台 | Web         | `ChatControllerTests` | xUnit + WebApplicationFactory（整合測試）                                                     |
-| 核心 | Backend.Api | 252 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking 等單元測試 |
+| 核心 | Backend.Api | 326 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking、Agent Registry 等單元測試 |
 
 ## 可觀測性架構（LiteLLM 閘道 + Langfuse）
 

@@ -1,5 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.IdentityModel.Tokens.Jwt;
+using Backend.Api.Auth;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Backend.Api.Tests;
 
@@ -104,6 +107,39 @@ public sealed class AuthApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("user-a", body["username"]!.GetValue<string>());
         Assert.Equal("USER", body["role"]!.GetValue<string>());
         Assert.Equal("demo-a", body["tenantCode"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Login_SignsOnlyPersistedUserCapabilities_NotAdminRole()
+    {
+        var client = _factory.CreateInternalClient();
+
+        var managerResponse = await client.PostAsJsonAsync(
+            "/api/auth/login",
+            new { username = "admin-a", password = "password123" });
+        Assert.Equal(HttpStatusCode.OK, managerResponse.StatusCode);
+        var managerToken = (await managerResponse.ReadJsonAsync())["token"]!.GetValue<string>();
+        var managerJwt = new JwtSecurityTokenHandler().ReadJwtToken(managerToken);
+        Assert.Contains(
+            managerJwt.Claims,
+            c => c.Type == "capabilities" && c.Value == "workflow.manage");
+
+        var repository = _factory.Services.GetRequiredService<IAuthRepository>();
+        await repository.AddUserAsync(
+            "plain-admin",
+            BCrypt.Net.BCrypt.HashPassword("password123"),
+            "ADMIN",
+            tenantId: 1,
+            default);
+
+        var plainResponse = await client.PostAsJsonAsync(
+            "/api/auth/login",
+            new { username = "plain-admin", password = "password123" });
+        Assert.Equal(HttpStatusCode.OK, plainResponse.StatusCode);
+        var plainToken = (await plainResponse.ReadJsonAsync())["token"]!.GetValue<string>();
+        var plainJwt = new JwtSecurityTokenHandler().ReadJwtToken(plainToken);
+        Assert.Equal("ADMIN", plainJwt.Claims.Single(c => c.Type == "role").Value);
+        Assert.DoesNotContain(plainJwt.Claims, c => c.Type == "capabilities");
     }
 
     [Fact]

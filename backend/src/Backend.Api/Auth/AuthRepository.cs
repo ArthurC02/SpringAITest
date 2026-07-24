@@ -52,7 +52,8 @@ public sealed class AuthRepository : IAuthRepository
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<UserRow>(
             new CommandDefinition(
-                "SELECT u.username, u.password_hash AS PasswordHash, u.role, t.code AS TenantCode"
+                "SELECT u.username, u.password_hash AS PasswordHash, u.role, t.code AS TenantCode,"
+                + " to_json(u.capabilities)::text AS CapabilitiesJson"
                 + " FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.username = @username",
                 new { username }, cancellationToken: ct));
     }

@@ -18,6 +18,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
     private readonly bool _enableRateLimiting;
     private readonly bool _removeSessionIsolationProvider;
     private readonly bool _useDevelopmentEnvironment;
+    private readonly bool _agentBuilderEnabled;
     private readonly IMem0Client? _mem0Override;
 
     public TestWebAppFactory()
@@ -26,11 +27,12 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
 
     internal TestWebAppFactory(
         bool enableRateLimiting = false, bool removeSessionIsolationProvider = false,
-        bool useDevelopmentEnvironment = false, IMem0Client? mem0Override = null)
+        bool useDevelopmentEnvironment = false, bool agentBuilderEnabled = false, IMem0Client? mem0Override = null)
     {
         _enableRateLimiting = enableRateLimiting;
         _removeSessionIsolationProvider = removeSessionIsolationProvider;
         _useDevelopmentEnvironment = useDevelopmentEnvironment;
+        _agentBuilderEnabled = agentBuilderEnabled;
         _mem0Override = mem0Override;
     }
 
@@ -42,6 +44,8 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseEnvironment(_useDevelopmentEnvironment
             ? "Development"
             : _enableRateLimiting ? "RateLimitingTesting" : "Testing");
+        // Agent Builder feature flag(D1):預設關閉(fail-closed);需要走 /api/agents* 代理的測試以此開啟。
+        builder.UseSetting("AGENT_BUILDER_ENABLED", _agentBuilderEnabled ? "true" : "false");
         builder.ConfigureTestServices(services =>
         {
             // B-P1-06:移除 SessionIsolationKeyProvider 註冊,證明 Strict=true 的 fail-closed 真的開著——
@@ -95,10 +99,15 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IConfigurationSetService>();
             services.AddScoped<IConfigurationSetService, FakeConfigurationSetService>();
+
+            services.RemoveAll<IAgentService>();
+            services.AddScoped<IAgentService, FakeAgentService>();
         });
     }
 
     /// <summary>簽出一個與 backend 位元相容、可通過 Bearer 中介軟體的測試 token。</summary>
-    public string IssueToken(string username = "user-a", string role = "USER", string tenantCode = "demo-a")
-        => TestTokens.Mint(username, role, tenantCode);
+    public string IssueToken(
+        string username = "user-a", string role = "USER", string tenantCode = "demo-a",
+        IReadOnlyCollection<string>? capabilities = null)
+        => TestTokens.Mint(username, role, tenantCode, capabilities: capabilities);
 }

@@ -73,6 +73,9 @@ public sealed class WorkflowService : IWorkflowService
     public Task<JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default)
         => GetCatalogAsync("/nodes", ctx, ct);
 
+    public Task<JsonElement> GetToolCatalogAsync(UserContext ctx, CancellationToken ct = default)
+        => GetCatalogAsync("/tools", ctx, ct);
+
     /// <summary>目錄類 GET:任何失敗(含 4xx/5xx)都當成呼叫失敗。</summary>
     private async Task<JsonElement> GetCatalogAsync(string path, UserContext ctx, CancellationToken ct)
     {

@@ -43,6 +43,7 @@ def test_list_skills_returns_builtin_kb_query():
     assert "kb-query" in body
     item = body["kb-query"]
     assert item["source"] == "builtin"
+    assert item["bindable"] is False
     assert item["required_role"] == "USER"
     assert item["description"]
     assert isinstance(item["revision"], int)

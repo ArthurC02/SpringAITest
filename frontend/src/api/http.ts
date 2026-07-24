@@ -102,6 +102,20 @@ export async function apiFetch<T = unknown>(
   return (await res.json().catch(() => null)) as T
 }
 
+/**
+ * 同 apiFetch，但一併回傳 `ETag` response header——供 Agent draft 的 If-Match 樂觀併發。
+ * apiFetch 只吐 JSON，拿不到 header，故 GET 需要 ETag 的端點走這支。
+ */
+export async function apiFetchWithEtag<T = unknown>(
+  path: string,
+  options: RequestInit = {},
+): Promise<{ data: T; etag: string | null }> {
+  const res = await request(path, options)
+  const etag = res.headers.get('ETag')
+  const data = (res.status === 204 ? undefined : await res.json().catch(() => null)) as T
+  return { data, etag }
+}
+
 /** 同 apiFetch，但回傳二進位 body（檔案下載，例：skill export zip）。 */
 export async function apiFetchBlob(
   path: string,

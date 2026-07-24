@@ -27,7 +27,8 @@ uv run uvicorn app.main:app --port 8000
 New Skill Engine endpoints (all require `X-Internal-Token` and identity headers):
 
 - `GET /nodes` — list all registered nodes with their I/O contracts.
-- `GET /skills` — list all skills (built-in + custom) with `input_schema`/`output_schema`.
+- `GET /tools` — safe Agent Builder tool catalog (`name`/`kind`/`description`/`risk`/`returns`; no endpoint, token, args schema, or callable).
+- `GET /skills` — list all skills (built-in + custom) with `input_schema`/`output_schema` and fail-closed `bindable`; builtin is false, custom is true only with a positive persisted `current_revision`.
 - `POST /skills/validate` — validate a Skill YAML definition (syntax + schema check).
 - `POST /skills/{name}/invoke` — execute a skill, return `{skill, output}`.
 
@@ -38,7 +39,7 @@ New Skill Engine endpoints (all require `X-Internal-Token` and identity headers)
 - LLM goes through LiteLLM (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` envs; `mock-gpt` for keyless testing). Langfuse LangChain callback is toggled by `LANGFUSE_ENABLED`.
 - `langfuse.langchain.CallbackHandler` imports `langchain` internally — the full `langchain` package is required, `langchain-core` alone is not enough (already pinned in `pyproject.toml`).
 - Host port is `:8001` (container `:8000`) because mem0 occupies host `:8000`.
-- Test suite: 655 pytest tests.
+- Test suite: 665 pytest tests.
 - **Backend HTTP client:** shared `httpx.AsyncClient` singleton (module-level `_client`, lifespan-managed) for all backend callables (`app/backend_http.py`) — avoids per-call TCP/TLS overhead. `get_client()` returns the singleton (lazy-creates if needed), and `aclose_client()` closes it at shutdown; tests using `TestClient` fall back to lazy creation.
 - **invoke input filtering:** `_clean_skill_input()` strips ENGINE_KEYS (`fatal_error`, `trace`, `errors`) plus RESERVED_KEYS (identity/immutable/seed) and `__` prefixed keys from the invoke input before building the skill state — prevents callers from injecting forged error frames or bypassing fatal-error short-circuit. Invoke then seeds `tenant_id`/`user_id`/`role` into the state from the caller's real identity headers (the only trusted injection point — ToolContext reads them from state).
 - **Script authoring gate (validate-time only):** `POST /skills/validate` passes the caller's role as `author_role`; a non-ADMIN author submitting a definition with script steps gets a `forbidden_script` validation error. `custom.load` and invoke call `validate_source` without `author_role` (gate off) — existing USER+script skills in the DB keep loading and running; `required_role` (who may *invoke*) is untouched.

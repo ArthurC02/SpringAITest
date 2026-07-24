@@ -45,4 +45,32 @@ public sealed class AuthRepositoryTests : IClassFixture<PostgresFixture>
             await conn.ExecuteAsync("DELETE FROM users WHERE username = @username", new { username });
         }
     }
+
+    [SkippableFact]
+    public async Task Capabilities_ArePersistedPerUser_AndAdminRoleDoesNotGrantThem()
+    {
+        _fx.SkipIfUnavailable();
+        var repo = new AuthRepository(_fx.DataSource!);
+
+        var manager = await repo.FindUserByUsernameAsync("admin-a", default);
+        Assert.NotNull(manager);
+        Assert.Contains("workflow.manage", manager!.Capabilities!);
+
+        var tenant = await repo.FindTenantByCodeAsync("demo-a", default);
+        var username = $"authrepo-plain-admin-{Guid.NewGuid():N}";
+        try
+        {
+            await repo.AddUserAsync(username, "hash", "ADMIN", tenant!.Id, default);
+            var plainAdmin = await repo.FindUserByUsernameAsync(username, default);
+
+            Assert.NotNull(plainAdmin);
+            Assert.Equal("ADMIN", plainAdmin!.Role);
+            Assert.Empty(plainAdmin.Capabilities!);
+        }
+        finally
+        {
+            await using var conn = await _fx.DataSource!.OpenConnectionAsync();
+            await conn.ExecuteAsync("DELETE FROM users WHERE username = @username", new { username });
+        }
+    }
 }

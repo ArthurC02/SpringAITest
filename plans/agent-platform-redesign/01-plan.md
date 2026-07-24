@@ -118,7 +118,7 @@ System Prompt 不得被用來取代授權、租戶隔離、金額門檻、敏感
 - 將 Agent Skills 定義為唯一公開 Skill 作者格式；flow YAML 保留為 legacy/internal。
 - 釘住既有 `/api/skills*` 行為，避免重整期間破壞已上傳 package。
 - 依 Backend 既有 `DbBootstrap` idempotent 建表慣例擴充 schema(不引入 migration framework),並建立 in-memory repository 契約測試。
-- 種子一筆 system-owned Default Agent-Runtime Workflow（rev1，published、不可編輯），作為 P1 Agent 發布時 `runtimeWorkflow` 的預設 pin 目標，解除 P1 對 P3 Designer/registry 的依賴；canonical Graph IR fixture 由 Workflow 端提供。
+- 種子一筆 system-owned Default Agent-Runtime Workflow（rev1，published、不可編輯），作為 P1 Agent 發布時 `runtimeWorkflow` 的預設 pin 目標，解除 P1 對 P3 Designer/registry 的依賴。D1 因 Workflow Graph compiler 尚未交付，bootstrap fixture 先由 Backend 內嵌並以唯一 Start/End、可達性、必要 stage 與 bounded-loop 結構守衛驗證；D4 必須將同一 fixture 納入 Workflow-owned Node/port/schema compiler 驗證，不能把 Backend 守衛誤稱為完整 compiler validation。
 
 ### P1：Agent Registry 與 Builder
 
@@ -167,6 +167,24 @@ System Prompt 不得被用來取代授權、租戶隔離、金額門檻、敏感
 - 執行觀測：Context 來源、Skill 選擇理由、工具與規則命中、成本、延遲、失敗分類。
 - 敏感工具的人工確認與可恢復執行。
 - legacy flow Skill 的使用量盤點、唯讀化與長期退場決策。
+
+### 6.1 交付切分(D1–D7)
+
+P0–P6 是範圍分類法，本檔與 02/03/04 的引用維持不變；D1–D7 是實際交付順序，每個 D 里程碑結束時系統必須：build 綠、全測試綠、可部署、feature flag 之外的使用者零變化，且至少包含一個使用者可感知的完整價值增量。純基建一律併入首個消費它的切片，不獨立成里程碑。
+
+| 里程碑 | 完成後的可用狀態 | 含原 P 工作項 | Flag | 驗收 | 量級 |
+| --- | --- | --- | --- | --- | --- |
+| D1 Agent Registry 與 Builder — **已交付並完成安全加固(2026-07-24)** | flag 開啟後，租戶 ADMIN 可完整走完建立→選取可固定的 persisted Skill/Tool→validate→publish→restore；Builder API 全部 ADMIN-only。Agent/revision/capability persistence、Default Agent-Runtime Workflow 結構守衛與種子在此落地；catalog-only builtin Skill 明示不可綁。一般 USER 的 redacted published Agent catalog、audience run-time enforcement 與正式 capability grant 管理 UI/API 尚未交付 | P0 的 agent schema/capability persistence/種子/契約測試 + P1 authoring/build path；A-UI-08 的 audience 編輯/保存已完成，catalog/run enforcement 分別延至 D6/D3 | `AGENT_BUILDER_ENABLED`（預設 false） | backend 326、platform 509、frontend Agent Builder 8 tests 全綠；A-DATA-01~09、11、14、15；A-UI-01~07；A-UI-08 僅 authoring/storage | L |
+| D2 Business Rules 與模擬器 | ADMIN 撰寫規則、即時型別檢查、Simulator 餵模擬 facts 驗證命中與 fail-closed；Simulator 即本期 runtime | P2 全部 + P0 的 fact catalog 定案；Spike 5 於期初 | 同 D1 | A-RULE-01~09 | L |
+| D3 Direct Agent 測試執行 | ADMIN 對已發布 Agent 開真實測試對話：load_skill、工具交集、rule gate、pause/resume/cancel、trace；輪詢制、不含 streaming/approval/寫入工具 | P4 direct-agent 半邊 + P0 的 execution-artifact/run lineage；Spike 1、4 於期初 go/no-go | `AGENT_TEST_RUN_ENABLED` | A-RUN-01~12、16~19、22~25；A-DATA-10；e2e 必跑 | XL |
+| D4 Workflow Designer 與 Orchestrator Registry | SYSTEM_ADMIN 視覺檢視/編輯/validate/simulate/publish/diff/restore Harness 與 Orchestrator 面板 | P3 全部 + P0 的 orchestrator/workflow 契約；Spike 6 於期初 | `WORKFLOW_DESIGNER_ENABLED` | A-WF-01~28；A-DATA-12、13 | XL |
+| D5 多 Agent Root Orchestrator 測試執行 | SYSTEM_ADMIN 執行 decompose→bounded dispatch→verify→repair→aggregate，真實 root/child trace 進 Designer overlay(read-only 工具) | P4 多 Agent 半邊 | `MULTI_AGENT_DISPATCH_ENABLED` | A-MA-01~12；A-RUN-14、15；e2e 必跑 | L |
+| D6 聊天/AG-UI 整合(canary) | allowlist 租戶終端 USER 由 Root Orchestrator 服務；未遷移租戶與匿名零感知；回切=關 flag | P5 全部；Spike 2、3 於期初 go/no-go | `AGENT_CHAT_ENABLED` | A-CHAT-01~13 + 05 §7 全部 release blockers；e2e 必跑兩輪 | L(高風險) |
+| D7 寫入工具、Approval 與營運治理 | 核准者處理 waiting_approval；逐工具開放寫入(idempotency)；canary/rollback 與成本觀測；啟動 05 §10 退場清單第一批 | P6 + 05 R5/R6 | `AGENT_WRITE_TOOLS_ENABLED` | A-RUN-13、20、21、26；A-OPS-01~07；e2e 必跑 | M–L |
+
+依賴：D1 → D2 → D3 → D5 → D6 → D7；D4 只依賴 D1，可與 D2/D3 平行(Node Catalog 契約凍結後 frontend 可先行)。
+
+與 05 R 階段映射：R0≈D1–D2、R1≈D3–D4、R2≈D5、R3/R4≈D6、R5/R6≈D7。
 
 ## 7. 主要遷移原則
 

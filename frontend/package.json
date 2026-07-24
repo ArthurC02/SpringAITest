@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:unit": "playwright test --config playwright.unit.config.ts",
     "preview": "vite preview",
     "test:evidence": "playwright test",
     "test:evidence:install": "playwright install --with-deps chromium"

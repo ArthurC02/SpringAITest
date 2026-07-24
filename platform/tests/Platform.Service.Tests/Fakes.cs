@@ -203,6 +203,9 @@ public sealed class FakeWorkflowService : IWorkflowService
 
     public Task<System.Text.Json.JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
+
+    public Task<System.Text.Json.JsonElement> GetToolCatalogAsync(UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(Array.Empty<object>()));
 }
 
 /// <summary>

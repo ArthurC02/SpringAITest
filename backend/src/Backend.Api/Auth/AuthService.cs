@@ -43,7 +43,11 @@ public sealed class AuthService
         ThrowIf(!BCrypt.Net.BCrypt.Verify(request.Password!, user.PasswordHash),
             StatusCodes.Status401Unauthorized, "帳號或密碼錯誤");
 
-        return new AuthResult(user.Username, user.Role, user.TenantCode);
+        return new AuthResult(
+            user.Username,
+            user.Role,
+            user.TenantCode,
+            user.Capabilities);
     }
 
     /// <summary>共用守衛:repo 查詢回 null 就丟對應狀態碼的 ApiException(找租戶 404 / 找使用者 401 共用此段)。</summary>

@@ -20,7 +20,9 @@ public sealed class InMemoryAuthRepository : IAuthRepository
 
     private readonly Dictionary<string, UserRow> _users = new()
     {
-        ["admin-a"] = new UserRow("admin-a", Password123, "ADMIN", "demo-a"),
+        // admin-a 是明確被指派的 workflow manager；ADMIN role 本身不會自動取得 capability。
+        ["admin-a"] = new UserRow(
+            "admin-a", Password123, "ADMIN", "demo-a", """["workflow.manage"]"""),
         ["user-a"] = new UserRow("user-a", Password123, "USER", "demo-a"),
         ["user-b"] = new UserRow("user-b", Password123, "USER", "demo-b"),
     };
@@ -43,7 +45,8 @@ public sealed class InMemoryAuthRepository : IAuthRepository
         lock (_lockObj)
         {
             var tenantCode = _tenants.Values.First(t => t.Id == tenantId).Code;
-            _users[username] = new UserRow(username, passwordHash, role, tenantCode);
+            _users[username] = new UserRow(
+                username, passwordHash, role, tenantCode);
         }
 
         return Task.CompletedTask;

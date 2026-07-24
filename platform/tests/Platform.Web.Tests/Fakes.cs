@@ -248,8 +248,8 @@ public sealed class FakeWorkflowService : IWorkflowService
         }
 
         return Task.FromResult(Json(
-            """[{"name":"kb-query","description":"知識查詢","required_role":"USER","source":"builtin","revision":null},"""
-            + """{"name":"quarterly-qa","description":"季報問答","required_role":"USER","source":"custom","revision":3}]"""));
+            """[{"name":"kb-query","description":"知識查詢","required_role":"USER","source":"builtin","revision":null,"bindable":false},"""
+            + """{"name":"quarterly-qa","description":"季報問答","required_role":"USER","source":"custom","revision":3,"bindable":true}]"""));
     }
 
     public Task<JsonElement> GetNodeCatalogAsync(UserContext ctx, CancellationToken ct = default)
@@ -257,6 +257,13 @@ public sealed class FakeWorkflowService : IWorkflowService
         EngineCalls.Add("nodes");
         return Task.FromResult(Json(
             """[{"name":"query_intake","version":"1.0","description":"輸入正規化","reads":[],"writes":["original_query"],"requires_tools":[]}]"""));
+    }
+
+    public Task<JsonElement> GetToolCatalogAsync(UserContext ctx, CancellationToken ct = default)
+    {
+        EngineCalls.Add("tools");
+        return Task.FromResult(Json(
+            """[{"name":"backend.retrieval_search","kind":"http","description":"在目前租戶已授權的知識庫中進行向量檢索","risk":"read","returns":"list[chunk]"}]"""));
     }
 
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
@@ -561,6 +568,207 @@ public sealed class FakeConfigurationSetService : IConfigurationSetService
             case "bad_values":
                 throw new SkillValidationFailedException("Configuration Set 驗證失敗") { FieldErrors = RangeErrors };
         }
+    }
+}
+
+/// <summary>
+/// Agent Registry 服務 fake(代表 backend :8002 的 /api/agents 透明代理)。重現 D1 需驗的 backend 行為:
+/// 所有 Builder 端點非 ADMIN → 403、GET 帶 ETag、If-Match 版本不符 → 409、
+/// 未知 id → 404。回傳 <see cref="AgentProxyResponse"/>(status + 原始 JSON body + ETag),由 controller 原樣寫回。
+/// Calls 是靜態的,讓「flag off 時請求不得抵達代理」可被斷言。
+/// </summary>
+public sealed class FakeAgentService : IAgentService
+{
+    public static readonly List<string> Calls = new();
+    public static UserContext? LastContext { get; set; }
+    public const string ExistingIdText = "11111111-1111-1111-1111-111111111111";
+    public const string CreatedIdText = "33333333-3333-3333-3333-333333333333";
+    public const string GhostIdText = "22222222-2222-2222-2222-222222222222";
+    public static readonly Guid ExistingId = Guid.Parse(ExistingIdText);
+    public static readonly Guid GhostId = Guid.Parse(GhostIdText);
+
+    /// <summary>目前 draft 版本的 ETag(GET 回傳、If-Match 需相符才放行 PUT/validate)。</summary>
+    public const string CurrentETag = "\"1\"";
+
+    private static AgentProxyResponse Ok(string body, string? etag = null) => new(200, body, etag);
+
+    private static AgentProxyResponse ApiError(int status, string message) => new(
+        status,
+        $"{{\"timestamp\":\"2026-07-24T00:00:00Z\",\"status\":{status},\"message\":{JsonSerializer.Serialize(message)},\"fieldErrors\":{{}}}}",
+        null);
+
+    private static AgentProxyResponse Forbidden() => ApiError(403, "權限不足");
+
+    private const string AgentJson =
+        """{"id":"11111111-1111-1111-1111-111111111111","name":"研究員","slug":"researcher","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null,"draft":{}}""";
+
+    public Task<AgentProxyResponse> ListAsync(UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("list");
+        LastContext = ctx;
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        return Task.FromResult(Ok(
+            """[{"id":"11111111-1111-1111-1111-111111111111","name":"研究員","slug":"researcher","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null}]"""));
+    }
+
+    public Task<AgentProxyResponse> CreateAsync(UserContext ctx, JsonElement? body, CancellationToken ct = default)
+    {
+        Calls.Add("create");
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        return Task.FromResult(new AgentProxyResponse(
+            201,
+            """{"id":"33333333-3333-3333-3333-333333333333","name":"新代理","slug":"new-agent","enabled":true,"draft_version":1,"draft_validated_version":null,"published_revision":null,"draft":{}}""",
+            CurrentETag));
+    }
+
+    public Task<AgentProxyResponse> GetAsync(Guid id, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("get:" + id.ToString("D"));
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        if (id == GhostId)
+        {
+            return Task.FromResult(ApiError(404, "找不到 Agent：" + GhostIdText));
+        }
+
+        return Task.FromResult(Ok(AgentJson, CurrentETag));
+    }
+
+    public Task<AgentProxyResponse> UpdateDraftAsync(
+        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default)
+    {
+        Calls.Add($"update:{id:D}:{ifMatch}");
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        // backend 樂觀鎖語意:缺 If-Match → 428、版本過期 → 409(透明穿透)。
+        if (ifMatch is null)
+        {
+            return Task.FromResult(ApiError(428, "需要 If-Match 前置條件"));
+        }
+
+        if (ifMatch != CurrentETag)
+        {
+            return Task.FromResult(ApiError(409, "草稿版本衝突，請重新載入"));
+        }
+
+        return Task.FromResult(Ok(
+            $$$"""{"id":"{{{id:D}}}","name":"研究員","slug":"researcher","enabled":true,"draft_version":2,"draft_validated_version":null,"published_revision":null,"draft":{}}""",
+            "\"2\""));
+    }
+
+    public Task<AgentProxyResponse> DeactivateAsync(Guid id, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("deactivate:" + id.ToString("D"));
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        return Task.FromResult(new AgentProxyResponse(204, string.Empty, null));
+    }
+
+    public Task<AgentProxyResponse> EnableAsync(Guid id, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("enable:" + id.ToString("D"));
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        return Task.FromResult(Ok(
+            $$$"""{"id":"{{{id:D}}}","slug":"researcher","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null,"draft":{}}""",
+            CurrentETag));
+    }
+
+    public Task<AgentProxyResponse> ValidateAsync(
+        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default)
+    {
+        Calls.Add($"validate:{id:D}:{ifMatch}");
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        if (ifMatch is null)
+        {
+            return Task.FromResult(ApiError(428, "需要 If-Match 前置條件"));
+        }
+
+        if (ifMatch != CurrentETag)
+        {
+            return Task.FromResult(ApiError(409, "草稿版本衝突，請重新載入"));
+        }
+
+        return Task.FromResult(Ok("""{"valid":true,"errors":[]}""", CurrentETag));
+    }
+
+    public Task<AgentProxyResponse> PublishAsync(
+        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default)
+    {
+        Calls.Add($"publish:{id:D}:{ifMatch}");
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        // 真 backend publish 契約：body 必帶 expected_draft_version；If-Match 可被透明轉送，
+        // 但不是 publish 的 concurrency authority。
+        if (body is not JsonElement payload
+            || payload.ValueKind != JsonValueKind.Object
+            || !payload.TryGetProperty("expected_draft_version", out var versionElement)
+            || !versionElement.TryGetInt64(out var expectedVersion))
+        {
+            return Task.FromResult(ApiError(400, "publish 必須帶 expected_draft_version"));
+        }
+
+        if (expectedVersion != 1)
+        {
+            return Task.FromResult(ApiError(409, "草稿版本衝突，請重新載入"));
+        }
+
+        return Task.FromResult(Ok(
+            $$$"""{"id":"{{{id:D}}}","slug":"researcher","name":"研究員","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":1,"draft":{}}""",
+            CurrentETag));
+    }
+
+    public Task<AgentProxyResponse> RevisionsAsync(Guid id, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add("revisions:" + id.ToString("D"));
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        return Task.FromResult(Ok(
+            """[{"revision":1,"status":"published","definition_sha256":"abc","runtime_workflow_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","runtime_workflow_revision":1,"skill_bindings":[],"created_by":"admin-a","created_at":"2026-07-24T00:00:00Z"}]"""));
+    }
+
+    public Task<AgentProxyResponse> RestoreRevisionAsync(
+        Guid id, int revision, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add($"restore:{id:D}:{revision}");
+        if (ctx.Role != "ADMIN")
+        {
+            return Task.FromResult(Forbidden());
+        }
+
+        return Task.FromResult(Ok(
+            $$$"""{"id":"{{{id:D}}}","slug":"researcher","name":"研究員","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":2,"draft":{}}""",
+            CurrentETag));
     }
 }
 

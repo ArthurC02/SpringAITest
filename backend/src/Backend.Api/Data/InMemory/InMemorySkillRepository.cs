@@ -13,6 +13,12 @@ public sealed class InMemorySkillRepository : ISkillRepository
     private readonly ConcurrentDictionary<(string Tenant, string Name), Skill> _store = new();
     private readonly object _gate = new();
 
+    /// <summary>
+    /// Agent publish 在 Lite 模式必須把「解析 current revision」與「寫入 Agent pin」放在同一個
+    /// critical section。只供同 assembly 的 InMemoryAgentRepository 協調，不是公開 repository 契約。
+    /// </summary>
+    internal object ReferenceSyncRoot => _gate;
+
     /// <summary>稽核表:只增不減(軟刪不動它)。</summary>
     private readonly List<(string Tenant, string Name, StoredSkillRevision Row)> _revisions = new();
 
@@ -196,6 +202,30 @@ public sealed class InMemorySkillRepository : ISkillRepository
                 r => r.Tenant == tenantId && r.Name == name && r.Row.Revision == revision).Row;
             return Task.FromResult<StoredSkillRevision?>(row);
         }
+    }
+
+    /// <summary>
+    /// 呼叫端必須持有 <see cref="ReferenceSyncRoot"/>。enabled skill 與其 current immutable
+    /// revision 必須同時存在才可固定；對應 Dapper 的 skill + skill_revision JOIN ... FOR SHARE。
+    /// </summary>
+    internal bool TryResolveEnabledCurrentRevisionUnsafe(
+        string tenantId,
+        string name,
+        out int revision)
+    {
+        if (_store.TryGetValue((tenantId, name), out var skill)
+            && skill.Enabled
+            && _revisions.Any(r =>
+                r.Tenant == tenantId
+                && r.Name == name
+                && r.Row.Revision == skill.CurrentRevision))
+        {
+            revision = skill.CurrentRevision;
+            return true;
+        }
+
+        revision = 0;
+        return false;
     }
 
     private void AddRevisionUnsafe(

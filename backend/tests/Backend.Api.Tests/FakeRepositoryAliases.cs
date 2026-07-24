@@ -7,3 +7,4 @@ global using FakeRagRepository = Backend.Api.Data.InMemory.InMemoryRagRepository
 global using FakeConfigRepository = Backend.Api.Data.InMemory.InMemoryConfigRepository;
 global using FakeSkillRepository = Backend.Api.Data.InMemory.InMemorySkillRepository;
 global using FakeConfigurationSetRepository = Backend.Api.Data.InMemory.InMemoryConfigurationSetRepository;
+global using FakeAgentRepository = Backend.Api.Data.InMemory.InMemoryAgentRepository;

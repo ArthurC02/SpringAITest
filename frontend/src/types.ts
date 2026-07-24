@@ -115,6 +115,11 @@ export interface SkillCatalogEntry {
   required_role: string
   source: 'builtin' | 'custom'
   revision: number | null
+  /**
+   * 是否可固定成 Agent revision binding。builtin 目前沒有 backend persisted immutable
+   * revision，故為 false；只有 server 明確確認 persisted revision 的 custom Skill 才為 true。
+   */
+  bindable: boolean
   input_schema?: Record<string, SkillInputField> | null
   /** 內建骨架項（template-* / kb-query）的 YAML 原文；compose patch 用。custom 為 undefined。 */
   definition?: string
@@ -137,6 +142,121 @@ export interface SkillValidationError {
 export interface SkillValidation {
   valid: boolean
   errors: SkillValidationError[]
+}
+
+// ── Agent Builder（D1）：領域欄位 snake_case；錯誤走 ApiError（camelCase）。 ─────
+
+/** Worker／Verifier eligibility；可複選（見規格 §2.1）。 */
+export type AgentExecutionRole = 'worker' | 'verifier'
+
+/**
+ * Agent draft 的 Skill 綁定寫入形狀（backend 權威）。`revision_policy` 缺席 = 跟隨最新，
+ * 發布時於伺服器固定成確切 revision（規格 §3.2），Skill 之後更新不影響已發布 Agent。
+ */
+export interface AgentSkillBinding {
+  skill: string
+  revision_policy?: string
+}
+
+export interface AgentRuntimeLimits {
+  max_tool_rounds: number
+  max_context_rounds: number
+  timeout_seconds: number
+  token_budget: number
+  step_budget: number
+}
+
+export interface AgentWorkflowRef {
+  id: string
+  revision: number
+}
+
+export type AgentOutputContract = Record<string, unknown>
+
+export interface AgentBusinessRules {
+  version?: number
+  rules?: unknown[]
+  [key: string]: unknown
+}
+
+/** GET /api/tools 的安全作者目錄；不包含 endpoint、token 或其他連線秘密。 */
+export interface AgentToolCatalogEntry {
+  name: string
+  kind: 'http' | 'local'
+  description: string
+  risk: 'low' | 'read' | 'write' | 'privileged'
+  returns: string
+}
+
+/** 已發布 revision 的 Skill 綁定讀取形狀（backend 權威，含固定的 skill_revision）。 */
+export interface AgentRevisionBinding {
+  skill: string
+  skill_revision: number
+  position: number
+  enabled: boolean
+}
+
+/**
+ * Agent 可編輯草稿（建立精靈／編輯器的欄位）。集合欄位（allowed_tools／knowledge_sources／
+ * skill_bindings）以空陣列明確表示「無授權」——絕不用 null 代表全開（規格 §3.3 fail closed）。
+ */
+export interface AgentDraft {
+  name: string
+  slug: string
+  description: string
+  system_prompt: string
+  execution_roles: AgentExecutionRole[]
+  capabilities: string[]
+  output_contract: AgentOutputContract
+  audience: string[]
+  allowed_tools: string[]
+  knowledge_sources: string[]
+  skill_bindings: AgentSkillBinding[]
+  business_rules: AgentBusinessRules
+  runtime_limits: AgentRuntimeLimits
+  /** 建立時可省略，由 server 固定到 system-owned Default Agent-Runtime Workflow。 */
+  runtime_workflow?: AgentWorkflowRef
+}
+
+/** GET /api/agents 一列（清單）。`published_revision=null` 表示尚未發布。 */
+export interface AgentSummary {
+  id: string
+  name: string
+  slug: string
+  description: string
+  enabled: boolean
+  published_revision: number | null
+  updated_at: string
+}
+
+/** GET /api/agents/{id}：含目前草稿與 optimistic-concurrency 版本號（另配 ETag header）。 */
+export interface Agent extends AgentSummary {
+  draft_version: number
+  draft: AgentDraft
+}
+
+/** validate 的一條錯誤；`field` 有值時定位到該欄位內聯顯示，否則彙總。 */
+export interface AgentValidationError {
+  field?: string
+  message: string
+}
+
+/**
+ * POST /api/agents/{id}/validate 回應（backend 權威形狀）。比照 skill validate：
+ * 一律 HTTP 200，valid=false 也是 200。錯誤以 `errors:[{field,message}]` 承載。
+ */
+export interface AgentValidation {
+  valid: boolean
+  errors: AgentValidationError[]
+}
+
+/** GET /api/agents/{id}/revisions 一列（唯讀稽核，依 revision 遞減）。 */
+export interface AgentRevision {
+  revision: number
+  created_by: string
+  created_at: string
+  definition_sha256: string
+  skill_bindings: AgentRevisionBinding[]
 }
 
 /** Configuration Set 的七個可覆寫鍵（snake_case，含 dot 命名空間）。 */

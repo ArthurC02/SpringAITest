@@ -35,7 +35,10 @@ public sealed class SkillController : ControllerBase
     public async Task<ActionResult<JsonElement>> List(CancellationToken ct)
         => Ok(await _skills.ListAsync(User.ToUserContext(), ct));
 
-    /// <summary>可執行 Skill 目錄:引擎合併內建 + 自訂,每筆帶 source 徽章(builtin/custom)。</summary>
+    /// <summary>
+    /// 可執行 Skill 目錄:引擎合併內建 + 自訂,每筆帶 source 與 bindable metadata。
+    /// Platform 原樣轉送引擎判定，不以名稱或 source 自行猜測可否綁定 Agent。
+    /// </summary>
     [HttpGet("catalog")]
     public async Task<ActionResult<JsonElement>> Catalog(CancellationToken ct)
         => Ok(await _engine.GetSkillCatalogAsync(User.ToUserContext(), ct));

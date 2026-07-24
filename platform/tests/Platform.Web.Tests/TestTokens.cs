@@ -20,19 +20,35 @@ internal static class TestTokens
         string tenantCode = "demo-a",
         string? secret = null,
         DateTime? notBefore = null,
-        DateTime? expires = null)
+        DateTime? expires = null,
+        IReadOnlyCollection<string>? capabilities = null)
     {
         var now = DateTime.UtcNow;
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret ?? DefaultSecret));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
-        var token = new JwtSecurityToken(
-            claims: new[]
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, username),
+            new("role", role),
+            new("tenantCode", tenantCode),
+        };
+        // 與 backend JwtService 完全相同：每個 capability 產生一個同名 claim，
+        // JwtSecurityTokenHandler 會把多值序列化成 JSON array；null/空值不產生 claim。
+        if (capabilities is not null)
+        {
+            foreach (var capability in capabilities
+                         .Where(c => !string.IsNullOrWhiteSpace(c))
+                         .Select(c => c.Trim())
+                         .Distinct(StringComparer.Ordinal)
+                         .OrderBy(c => c, StringComparer.Ordinal))
             {
-                new Claim(JwtRegisteredClaimNames.Sub, username),
-                new Claim("role", role),
-                new Claim("tenantCode", tenantCode),
-            },
+                claims.Add(new Claim("capabilities", capability));
+            }
+        }
+
+        var token = new JwtSecurityToken(
+            claims: claims,
             notBefore: notBefore ?? now,
             expires: expires ?? now.AddHours(24),
             signingCredentials: credentials);
