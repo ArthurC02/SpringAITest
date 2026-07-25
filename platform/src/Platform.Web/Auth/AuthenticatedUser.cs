@@ -24,7 +24,12 @@ public static class ClaimsPrincipalExtensions
     public static UserContext ToUserContext(this ClaimsPrincipal principal)
     {
         var user = principal.ToAuthenticatedUser();
-        return new UserContext(user.Username, user.TenantCode, user.Role, principal.GetCapabilities());
+        return new UserContext(
+            user.Username,
+            user.TenantCode,
+            user.Role,
+            principal.GetCapabilities(),
+            principal.GetGroups());
     }
 
     /// <summary>
@@ -42,6 +47,34 @@ public static class ClaimsPrincipalExtensions
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         return caps.Length == 0 ? null : caps;
+    }
+
+    /// <summary>
+    /// Parse repeated signed group claims as one atomic set. If any claim is malformed or
+    /// the bounded count is exceeded, discard the entire group set rather than forwarding
+    /// a valid-looking subset to downstream audience checks.
+    /// </summary>
+    public static IReadOnlyList<string>? GetGroups(this ClaimsPrincipal principal)
+    {
+        var claims = principal.FindAll("groups")
+            .Select(claim => claim.Value)
+            .ToArray();
+        if (claims.Length == 0)
+        {
+            return null;
+        }
+        if (claims.Length > UserGroupContract.MaxGroups
+            || claims.Distinct(StringComparer.Ordinal).Count() != claims.Length)
+        {
+            return null;
+        }
+
+        var groups = claims
+            .OrderBy(group => group, StringComparer.Ordinal)
+            .ToArray();
+        return UserGroupContract.IsCanonicalGroupSet(groups)
+            ? groups
+            : null;
     }
 
     /// <summary>principal 是否具備某個 capability(fail-closed:缺 claim 即 false)。</summary>

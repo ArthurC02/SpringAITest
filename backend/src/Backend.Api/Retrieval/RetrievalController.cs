@@ -24,9 +24,53 @@ public sealed class RetrievalController : ControllerBase
     {
         var tenantId = Request.RequireTenant();
         var topK = request.TopK ?? 4;
+        var scoped = request.ScopeContractVersion is not null
+                     || request.KnowledgeSources is not null;
+        IReadOnlyList<Guid>? allowedDocumentIds = null;
+        if (scoped)
+        {
+            if (request.ScopeContractVersion != 1 || request.KnowledgeSources is null)
+            {
+                throw InvalidScope(
+                    "scope_contract_version=1 and knowledge_sources must be supplied together");
+            }
+
+            var parsed = new HashSet<Guid>();
+            foreach (var source in request.KnowledgeSources)
+            {
+                if (!Guid.TryParseExact(source, "D", out var id)
+                    || !string.Equals(source, id.ToString("D"), StringComparison.Ordinal))
+                {
+                    throw InvalidScope(
+                        "knowledge_sources must contain canonical lowercase document UUIDs");
+                }
+                parsed.Add(id);
+            }
+            allowedDocumentIds = parsed.ToArray();
+            if (allowedDocumentIds.Count == 0)
+            {
+                return Ok(new SearchResponse(Array.Empty<RetrievedChunk>()));
+            }
+        }
 
         var embedding = await _embeddings.EmbedQueryAsync(request.Query!, ct);
-        var chunks = await _rag.SearchAsync(tenantId, embedding, topK, ct);
+        var chunks = allowedDocumentIds is null
+            ? await _rag.SearchAsync(tenantId, embedding, topK, ct)
+            : await _rag.SearchScopedAsync(
+                tenantId,
+                embedding,
+                topK,
+                allowedDocumentIds,
+                ct);
         return Ok(new SearchResponse(chunks));
     }
+
+    private static ApiException InvalidScope(string message)
+        => new(StatusCodes.Status400BadRequest, message)
+        {
+            FieldErrors = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["knowledge_sources"] = message,
+            },
+        };
 }

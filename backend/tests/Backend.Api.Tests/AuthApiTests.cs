@@ -143,6 +143,26 @@ public sealed class AuthApiTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
+    public async Task Login_SignsTenantScopedPersistedGroups()
+    {
+        var client = _factory.CreateInternalClient();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/auth/login",
+            new { username = "admin-a", password = "password123" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var token = (await response.ReadJsonAsync())["token"]!.GetValue<string>();
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+        Assert.Equal(
+            new[] { "operations" },
+            jwt.Claims
+                .Where(claim => claim.Type == "groups")
+                .Select(claim => claim.Value)
+                .ToArray());
+    }
+
+    [Fact]
     public async Task Login_Returns401_WhenPasswordWrong()
     {
         var client = _factory.CreateInternalClient();

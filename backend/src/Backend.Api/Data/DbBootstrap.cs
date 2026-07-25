@@ -1,5 +1,6 @@
 using Dapper;
 using Npgsql;
+using Backend.Api.AgentRuns;
 using Backend.Api.Agents;
 using Backend.Api.Skills;
 
@@ -15,6 +16,7 @@ public static class DbBootstrap
     private const string DefaultPassword = "password123";
 
     private const string RowSavepoint = "skill_migration_row";
+    private const long BootstrapAdvisoryLockId = 823746291;
 
     private const string Ddl = """
         CREATE EXTENSION IF NOT EXISTS vector;
@@ -30,6 +32,20 @@ public static class DbBootstrap
           created_at timestamptz NOT NULL DEFAULT now());
         -- 既有 appdb 的 additive upgrade；空陣列代表沒有 capability，ADMIN 不自動升格。
         ALTER TABLE users ADD COLUMN IF NOT EXISTS capabilities text[] NOT NULL DEFAULT '{}';
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_users_id_tenant ON users (id, tenant_id);
+        CREATE TABLE IF NOT EXISTS user_group_membership (
+          tenant_id bigint NOT NULL REFERENCES tenants(id),
+          user_id bigint NOT NULL,
+          group_id text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (tenant_id, user_id, group_id),
+          CONSTRAINT fk_user_group_membership_user_tenant
+            FOREIGN KEY (user_id, tenant_id) REFERENCES users(id, tenant_id) ON DELETE CASCADE,
+          CONSTRAINT ck_user_group_membership_group_id CHECK (
+            char_length(group_id) BETWEEN 1 AND 128
+            AND group_id ~ '^[a-z0-9]([a-z0-9._-]{0,126}[a-z0-9])?$'));
+        CREATE INDEX IF NOT EXISTS ix_user_group_membership_user
+          ON user_group_membership (user_id, tenant_id);
         CREATE TABLE IF NOT EXISTS conversations (
           id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
           prompt text NOT NULL, reply text NOT NULL,
@@ -141,6 +157,7 @@ public static class DbBootstrap
           enabled boolean NOT NULL DEFAULT true,
           draft_version bigint NOT NULL DEFAULT 1,
           draft_definition jsonb NOT NULL DEFAULT '{}',
+          draft_definition_canonical bytea,
           draft_definition_sha256 text NOT NULL DEFAULT '',
           draft_validated_version bigint,
           published_revision integer,
@@ -149,6 +166,8 @@ public static class DbBootstrap
           updated_at timestamptz NOT NULL DEFAULT now(),
           CONSTRAINT uq_agent_tenant_slug UNIQUE (tenant_id, slug));
         CREATE INDEX IF NOT EXISTS ix_agent_tenant_enabled ON agent (tenant_id, enabled);
+        ALTER TABLE agent
+          ADD COLUMN IF NOT EXISTS draft_definition_canonical bytea;
         -- 不可變發布快照。status = published / superseded(較新發布使舊版 superseded);
         -- 每欄拆存(03 §3)。publish 由 draft_definition 抽欄落地,restore 直接 INSERT ... SELECT 舊列複製。
         CREATE TABLE IF NOT EXISTS agent_revision (
@@ -168,10 +187,13 @@ public static class DbBootstrap
           runtime_workflow_id uuid,
           runtime_workflow_revision integer,
           definition_sha256 text NOT NULL DEFAULT '',
+          canonical_definition bytea,
           created_by text NOT NULL DEFAULT '',
           created_at timestamptz NOT NULL DEFAULT now(),
           CONSTRAINT uq_agent_revision UNIQUE (agent_id, revision));
         CREATE INDEX IF NOT EXISTS ix_agent_revision_agent ON agent_revision (agent_id);
+        ALTER TABLE agent_revision
+          ADD COLUMN IF NOT EXISTS canonical_definition bytea;
         -- 發布時每個 Skill binding 固定到確切 revision(skill 的 current published revision)。
         -- skill_id 以 (tenant_id, name) 於寫入時 join 解析出真 uuid(FK 穩定);skill 更新不改此 pin。
         CREATE TABLE IF NOT EXISTS agent_revision_skill (
@@ -242,6 +264,260 @@ public static class DbBootstrap
         ALTER TABLE agent_revision VALIDATE CONSTRAINT fk_agent_revision_runtime_workflow;
         ALTER TABLE agent_revision_skill VALIDATE CONSTRAINT fk_agent_revision_skill_agent_revision;
         ALTER TABLE agent_revision_skill VALIDATE CONSTRAINT fk_agent_revision_skill_skill_revision;
+
+        -- ==== Agent 平台重整 D3：published direct-Agent test runs ====
+        -- appdb 保存 immutable snapshot、lineage、公開狀態投影與 append-only audit；LangGraph
+        -- checkpoint 本體由 Workflow 的 checkpointer 擁有，這裡只保存 opaque ref/version。
+        CREATE TABLE IF NOT EXISTS agent_run (
+          id uuid PRIMARY KEY,
+          tenant_id text NOT NULL,
+          root_run_id uuid NOT NULL,
+          parent_run_id uuid,
+          task_id text,
+          run_kind text NOT NULL,
+          user_id text NOT NULL,
+          caller_role text NOT NULL,
+          conversation_id text,
+          agent_id uuid NOT NULL,
+          agent_revision integer NOT NULL,
+          workflow_id uuid NOT NULL,
+          workflow_revision integer NOT NULL,
+          execution_snapshot jsonb NOT NULL,
+          execution_snapshot_canonical bytea,
+          snapshot_sha256 text NOT NULL,
+          status text NOT NULL,
+          state_version bigint NOT NULL DEFAULT 1,
+          lease_generation bigint NOT NULL DEFAULT 0,
+          checkpoint_ref text,
+          checkpoint_generation bigint NOT NULL DEFAULT 0,
+          checkpoint_version bigint NOT NULL DEFAULT 0,
+          event_ack_cursor bigint NOT NULL DEFAULT 0,
+          pending_input jsonb,
+          result jsonb,
+          error_code text,
+          error_message text,
+          cancel_requested_at timestamptz,
+          cancel_requested_by text,
+          lease_owner text,
+          lease_token_sha256 text,
+          lease_expires_at timestamptz,
+          lease_command_id uuid,
+          latest_event_sequence bigint NOT NULL DEFAULT 0,
+          started_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          deadline_at timestamptz NOT NULL,
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          completed_at timestamptz,
+          CONSTRAINT ck_agent_run_kind CHECK (run_kind IN ('direct-agent','orchestrator','worker','verifier')),
+          CONSTRAINT ck_agent_run_status CHECK (status IN ('queued','running','waiting_input','completed','failed','cancelled')),
+          CONSTRAINT ck_agent_run_pinned_identity_v2 CHECK (
+            tenant_id !~ '^[[:space:]]*$'
+            AND char_length(tenant_id) <= 256
+            AND user_id !~ '^[[:space:]]*$'
+            AND char_length(user_id) <= 256
+            AND caller_role !~ '^[[:space:]]*$'
+            AND char_length(caller_role) <= 64
+            AND tenant_id IS NOT DISTINCT FROM
+              execution_snapshot->'caller'->>'tenant_id'
+            AND user_id IS NOT DISTINCT FROM
+              execution_snapshot->'caller'->>'user_id'
+            AND caller_role IS NOT DISTINCT FROM
+              execution_snapshot->'caller'->>'role'),
+          CONSTRAINT ck_agent_run_versions CHECK (
+            state_version >= 1
+            AND lease_generation >= 0
+            AND checkpoint_generation >= 0
+            AND checkpoint_generation <= lease_generation
+            AND checkpoint_version >= 0
+            AND event_ack_cursor >= 0),
+          CONSTRAINT ck_agent_run_direct_lineage CHECK (
+            run_kind <> 'direct-agent'
+            OR (root_run_id = id AND parent_run_id IS NULL AND task_id IS NULL)),
+          CONSTRAINT fk_agent_run_agent_revision FOREIGN KEY (agent_id, agent_revision)
+            REFERENCES agent_revision(agent_id, revision),
+          CONSTRAINT fk_agent_run_workflow_revision FOREIGN KEY (workflow_id, workflow_revision)
+            REFERENCES workflow_revision(workflow_id, revision));
+        CREATE INDEX IF NOT EXISTS ix_agent_run_tenant_owner_updated
+          ON agent_run (tenant_id, user_id, updated_at DESC);
+        ALTER TABLE agent_run
+          ADD COLUMN IF NOT EXISTS execution_snapshot_canonical bytea,
+          ADD COLUMN IF NOT EXISTS lease_generation bigint NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS checkpoint_generation bigint NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS event_ack_cursor bigint NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS deadline_at timestamptz,
+          ADD COLUMN IF NOT EXISTS caller_role text,
+          ADD COLUMN IF NOT EXISTS lease_command_id uuid;
+        UPDATE agent_run
+          SET caller_role =
+            (convert_from(execution_snapshot_canonical, 'UTF8')::jsonb)
+              ->'caller'->>'role'
+          WHERE caller_role IS NULL;
+        ALTER TABLE agent_run
+          ALTER COLUMN caller_role SET NOT NULL;
+        DO $agent_run_pinned_identity$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'ck_agent_run_pinned_identity_v2'
+              AND conrelid = 'agent_run'::regclass) THEN
+            ALTER TABLE agent_run
+              ADD CONSTRAINT ck_agent_run_pinned_identity_v2 CHECK (
+                tenant_id !~ '^[[:space:]]*$'
+                AND char_length(tenant_id) <= 256
+                AND user_id !~ '^[[:space:]]*$'
+                AND char_length(user_id) <= 256
+                AND caller_role !~ '^[[:space:]]*$'
+                AND char_length(caller_role) <= 64
+                AND tenant_id IS NOT DISTINCT FROM
+                  execution_snapshot->'caller'->>'tenant_id'
+                AND user_id IS NOT DISTINCT FROM
+                  execution_snapshot->'caller'->>'user_id'
+                AND caller_role IS NOT DISTINCT FROM
+                  execution_snapshot->'caller'->>'role') NOT VALID;
+          END IF;
+        END
+        $agent_run_pinned_identity$;
+        ALTER TABLE agent_run VALIDATE CONSTRAINT ck_agent_run_pinned_identity_v2;
+        UPDATE agent_run
+          SET deadline_at = created_at + interval '60 seconds'
+          WHERE deadline_at IS NULL;
+        ALTER TABLE agent_run
+          ALTER COLUMN deadline_at SET NOT NULL;
+        DO $agent_run_fencing$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'ck_agent_run_fencing_v2'
+              AND conrelid = 'agent_run'::regclass) THEN
+            ALTER TABLE agent_run
+              ADD CONSTRAINT ck_agent_run_fencing_v2 CHECK (
+                state_version >= 1
+                AND lease_generation >= 0
+                AND checkpoint_generation >= 0
+                AND checkpoint_generation <= lease_generation
+                AND checkpoint_version >= 0
+                AND event_ack_cursor >= 0) NOT VALID;
+          END IF;
+        END
+        $agent_run_fencing$;
+        ALTER TABLE agent_run VALIDATE CONSTRAINT ck_agent_run_fencing_v2;
+        CREATE INDEX IF NOT EXISTS ix_agent_run_status_lease
+          ON agent_run (status, lease_expires_at)
+          WHERE status IN ('queued','running');
+
+        CREATE TABLE IF NOT EXISTS agent_run_skill (
+          run_id uuid NOT NULL REFERENCES agent_run(id),
+          position integer NOT NULL,
+          skill_id uuid NOT NULL,
+          skill_revision integer NOT NULL,
+          skill_name text NOT NULL,
+          kind text NOT NULL,
+          definition_sha256 text NOT NULL,
+          package_sha256 text,
+          PRIMARY KEY (run_id, skill_id),
+          CONSTRAINT uq_agent_run_skill_position UNIQUE (run_id, position),
+          CONSTRAINT fk_agent_run_skill_revision FOREIGN KEY (skill_id, skill_revision)
+            REFERENCES skill_revision(skill_id, revision));
+
+        CREATE TABLE IF NOT EXISTS agent_run_event (
+          run_id uuid NOT NULL REFERENCES agent_run(id),
+          sequence bigint NOT NULL,
+          event_id uuid NOT NULL,
+          event_type text NOT NULL,
+          node_id text,
+          lease_generation bigint,
+          event_cursor bigint,
+          snapshot_sha256 text NOT NULL,
+          payload jsonb NOT NULL DEFAULT '{}',
+          created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (run_id, sequence),
+          CONSTRAINT uq_agent_run_event_id UNIQUE (run_id, event_id));
+        ALTER TABLE agent_run_event
+          ADD COLUMN IF NOT EXISTS lease_generation bigint,
+          ADD COLUMN IF NOT EXISTS event_cursor bigint;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_run_event_cursor
+          ON agent_run_event (run_id, event_cursor)
+          WHERE event_cursor IS NOT NULL;
+        DO $agent_run_event_fencing$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'ck_agent_run_event_fencing'
+              AND conrelid = 'agent_run_event'::regclass) THEN
+            ALTER TABLE agent_run_event
+              ADD CONSTRAINT ck_agent_run_event_fencing CHECK (
+                (lease_generation IS NULL AND event_cursor IS NULL)
+                OR (lease_generation >= 1 AND event_cursor >= 0)) NOT VALID;
+          END IF;
+        END
+        $agent_run_event_fencing$;
+        ALTER TABLE agent_run_event
+          VALIDATE CONSTRAINT ck_agent_run_event_fencing;
+
+        CREATE TABLE IF NOT EXISTS agent_run_command (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          command_sequence bigint GENERATED ALWAYS AS IDENTITY,
+          tenant_id text NOT NULL,
+          user_id text NOT NULL,
+          run_id uuid NOT NULL REFERENCES agent_run(id),
+          command_type text NOT NULL,
+          idempotency_key_sha256 text NOT NULL,
+          request_sha256 text NOT NULL,
+          command_input jsonb NOT NULL DEFAULT '{}',
+          command_input_sha256 char(64) NOT NULL,
+          dispatch_claim_owner text,
+          dispatch_claim_token_sha256 text,
+          dispatch_claim_expires_at timestamptz,
+          dispatch_attempts integer NOT NULL DEFAULT 0,
+          dispatch_completed_at timestamptz,
+          execution_recovery_lease_token_sha256 text,
+          last_dispatch_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT ck_agent_run_command_type CHECK (
+            command_type IN ('start','resume','cancel','deadline_cleanup')),
+          CONSTRAINT uq_agent_run_command_idempotency
+            UNIQUE (tenant_id, user_id, command_type, idempotency_key_sha256));
+        ALTER TABLE agent_run_command
+          ADD COLUMN IF NOT EXISTS command_sequence bigint GENERATED ALWAYS AS IDENTITY,
+          ADD COLUMN IF NOT EXISTS command_input jsonb NOT NULL DEFAULT '{}',
+          ADD COLUMN IF NOT EXISTS command_input_sha256 char(64),
+          ADD COLUMN IF NOT EXISTS dispatch_claim_owner text,
+          ADD COLUMN IF NOT EXISTS dispatch_claim_token_sha256 text,
+          ADD COLUMN IF NOT EXISTS dispatch_claim_expires_at timestamptz,
+          ADD COLUMN IF NOT EXISTS dispatch_attempts integer NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS dispatch_completed_at timestamptz,
+          ADD COLUMN IF NOT EXISTS execution_recovery_lease_token_sha256 text,
+          ADD COLUMN IF NOT EXISTS last_dispatch_at timestamptz;
+        DO $agent_run_command_type$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'ck_agent_run_command_type'
+              AND conrelid = 'agent_run_command'::regclass
+              AND pg_get_constraintdef(oid) NOT LIKE '%deadline_cleanup%') THEN
+            ALTER TABLE agent_run_command
+              DROP CONSTRAINT ck_agent_run_command_type;
+          END IF;
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'ck_agent_run_command_type'
+              AND conrelid = 'agent_run_command'::regclass) THEN
+            ALTER TABLE agent_run_command
+              ADD CONSTRAINT ck_agent_run_command_type CHECK (
+                command_type IN ('start','resume','cancel','deadline_cleanup')) NOT VALID;
+          END IF;
+        END
+        $agent_run_command_type$;
+        ALTER TABLE agent_run_command
+          VALIDATE CONSTRAINT ck_agent_run_command_type;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_run_deadline_cleanup
+          ON agent_run_command (run_id)
+          WHERE command_type='deadline_cleanup';
+        CREATE INDEX IF NOT EXISTS ix_agent_run_command_recovery
+          ON agent_run_command (dispatch_claim_expires_at, created_at)
+          WHERE dispatch_completed_at IS NULL;
+        CREATE INDEX IF NOT EXISTS ix_agent_run_command_run_sequence
+          ON agent_run_command (run_id, command_sequence DESC);
         """;
 
     public static async Task RunAsync(NpgsqlDataSource dataSource, ILogger logger, CancellationToken ct = default)
@@ -249,9 +525,24 @@ public static class DbBootstrap
         try
         {
             await using var conn = await dataSource.OpenConnectionAsync(ct);
-            await conn.ExecuteAsync(new CommandDefinition(Ddl, cancellationToken: ct));
-            await MigrateSkillPackagesAndNamesAsync(conn, logger, ct);
-            await SeedAsync(conn, ct);
+            await conn.ExecuteAsync(new CommandDefinition(
+                "SELECT pg_advisory_lock(@lockId)",
+                new { lockId = BootstrapAdvisoryLockId },
+                cancellationToken: ct));
+            try
+            {
+                await conn.ExecuteAsync(new CommandDefinition(Ddl, cancellationToken: ct));
+                await MigrateAgentRunCommandInputHashesAsync(conn, logger, ct);
+                await MigrateSkillPackagesAndNamesAsync(conn, logger, ct);
+                await SeedAsync(conn, ct);
+            }
+            finally
+            {
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "SELECT pg_advisory_unlock(@lockId)",
+                    new { lockId = BootstrapAdvisoryLockId },
+                    cancellationToken: CancellationToken.None));
+            }
         }
         catch (Exception ex)
         {
@@ -259,6 +550,68 @@ public static class DbBootstrap
                 "無法連線或初始化資料庫,backend 啟動中止。請確認 appdb 已啟動且 DB_CONNECTION_STRING 正確。");
             throw;
         }
+    }
+
+    private static async Task MigrateAgentRunCommandInputHashesAsync(
+        NpgsqlConnection conn,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var rows = (await conn.QueryAsync<AgentRunCommandHashMigrationRow>(
+            new CommandDefinition(
+                "SELECT c.id AS Id,c.command_type AS CommandType,"
+                + " c.command_input::text AS CommandInput,"
+                + " r.checkpoint_generation AS CheckpointGeneration,"
+                + " r.checkpoint_version AS CheckpointVersion,"
+                + " r.checkpoint_ref AS CheckpointRef"
+                + " FROM agent_run_command c"
+                + " JOIN agent_run r ON r.id=c.run_id"
+                + " WHERE c.command_input_sha256 IS NULL"
+                + " ORDER BY c.command_sequence FOR UPDATE OF c",
+                transaction: tx,
+                cancellationToken: ct))).AsList();
+
+        foreach (var row in rows)
+        {
+            var commandInputHash = new string('0', 64);
+            if (AgentRunCommandInput.TryParseAndValidate(
+                    row.CommandInput,
+                    row.CommandType,
+                    row.CheckpointGeneration,
+                    row.CheckpointVersion,
+                    row.CheckpointRef,
+                    AgentRunCommandValidationMode.Recovery,
+                    out var validatedInput,
+                    out _))
+            {
+                commandInputHash = AgentRunCommandInput.CanonicalSha256(
+                    validatedInput,
+                    row.CommandType);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Legacy agent-run command {CommandId} has invalid input; "
+                    + "installing a fail-closed integrity marker",
+                    row.Id);
+            }
+
+            await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE agent_run_command"
+                + " SET command_input_sha256=@commandInputHash"
+                + " WHERE id=@Id AND command_input_sha256 IS NULL",
+                new { row.Id, commandInputHash },
+                tx,
+                cancellationToken: ct));
+        }
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "ALTER TABLE agent_run_command"
+            + " ALTER COLUMN command_input_sha256 SET NOT NULL",
+            transaction: tx,
+            cancellationToken: ct));
+        await tx.CommitAsync(ct);
     }
 
     /// <summary>
@@ -441,6 +794,14 @@ public static class DbBootstrap
         byte[]? Package,
         int CurrentRevision);
 
+    private sealed record AgentRunCommandHashMigrationRow(
+        Guid Id,
+        string CommandType,
+        string CommandInput,
+        long CheckpointGeneration,
+        long CheckpointVersion,
+        string? CheckpointRef);
+
     private sealed record SkillRevisionMigrationRow(
         int Revision,
         string Definition,
@@ -500,6 +861,19 @@ public static class DbBootstrap
                     seed.Capabilities,
                 }, cancellationToken: ct));
         }
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO user_group_membership (tenant_id,user_id,group_id)"
+            + " SELECT t.id,u.id,seed.group_id"
+            + " FROM (VALUES"
+            + " ('demo-a','admin-a','operations'),"
+            + " ('demo-a','user-a','analysts'),"
+            + " ('demo-b','user-b','analysts'))"
+            + " AS seed(tenant_code,username,group_id)"
+            + " JOIN tenants t ON t.code=seed.tenant_code"
+            + " JOIN users u ON u.username=seed.username AND u.tenant_id=t.id"
+            + " ON CONFLICT DO NOTHING",
+            cancellationToken: ct));
 
         await SeedDefaultWorkflowAsync(conn, ct);
     }

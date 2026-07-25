@@ -91,6 +91,37 @@ public sealed class InMemoryRagRepository : IRagRepository
         }
     }
 
+    public Task<IReadOnlyList<RetrievedChunk>> SearchScopedAsync(
+        string tenantId,
+        float[] queryEmbedding,
+        int topK,
+        IReadOnlyCollection<Guid> allowedDocumentIds,
+        CancellationToken ct)
+    {
+        if (allowedDocumentIds.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyList<RetrievedChunk>>(
+                Array.Empty<RetrievedChunk>());
+        }
+
+        var allowed = allowedDocumentIds
+            .Select(id => id.ToString("D"))
+            .ToHashSet(StringComparer.Ordinal);
+        lock (_lockObj)
+        {
+            var hits = _docs.Values
+                .Where(d => d.TenantId == tenantId && allowed.Contains(d.Id))
+                .SelectMany(d => d.Chunks.Select(c => (d.Id, d.Title, c.Content, c.Embedding)))
+                .Select(x => (x.Id, x.Title, x.Content, Score: Cosine(queryEmbedding, x.Embedding)))
+                .Where(x => x.Score is not null)
+                .OrderByDescending(x => x.Score!.Value)
+                .Take(topK)
+                .Select(x => new RetrievedChunk(x.Id, x.Title, x.Content, x.Score!.Value))
+                .ToList();
+            return Task.FromResult<IReadOnlyList<RetrievedChunk>>(hits);
+        }
+    }
+
     public Task<AnalysisSummary> SummaryAsync(string tenantId, CancellationToken ct)
     {
         var mine = _docs.Values.Where(d => d.TenantId == tenantId).ToList();

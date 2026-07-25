@@ -24,6 +24,7 @@ public static class InternalRequest
     /// 空白分隔。無 capability 時「不帶」此 header(fail-closed:缺席即無授權,絕不代表全部)。
     /// </summary>
     public const string UserCapabilitiesHeader = "X-User-Capabilities";
+    public const string UserGroupsHeader = "X-User-Groups";
 
     /// <summary>
     /// 組一個帶 X-Internal-Token 的下游請求;<paramref name="ctx"/> 非 null 時再帶 3 個身分 header;可選 JSON body。
@@ -47,6 +48,15 @@ public static class InternalRequest
             if (ctx.Capabilities is { Count: > 0 } capabilities)
             {
                 req.Headers.TryAddWithoutValidation(UserCapabilitiesHeader, string.Join(' ', capabilities));
+            }
+            if (ctx.Groups is { Count: > 0 } groups)
+            {
+                if (!UserGroupContract.IsCanonicalGroupSet(groups))
+                {
+                    throw new InvalidOperationException(
+                        "Authenticated group set exceeds the internal identity contract");
+                }
+                req.Headers.TryAddWithoutValidation(UserGroupsHeader, string.Join(' ', groups));
             }
         }
 

@@ -12,7 +12,13 @@ public sealed record SearchRequest(
     // 缺省(null)時 controller 退回 4;有給則須介於 1~50(負值進真 SQL LIMIT 會 500、0 回空結果 — 一律當非法輸入擋成 400)。
     [property: JsonPropertyName("top_k")]
     [Range(1, 50, ErrorMessage = "top_k 必須介於 1 到 50 之間")]
-    int? TopK);
+    int? TopK,
+
+    [property: JsonPropertyName("knowledge_sources")]
+    IReadOnlyList<string>? KnowledgeSources = null,
+
+    [property: JsonPropertyName("scope_contract_version")]
+    int? ScopeContractVersion = null);
 
 /// <summary>檢索命中的單一片段。JSON:{ document_id, title, content, score }。
 /// score = 1 - cosine distance,與 pgvector cosine 查詢一致(此查詢現由 backend 持有,workflow 經 HTTP 取用)。</summary>

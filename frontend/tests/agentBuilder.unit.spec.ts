@@ -1,11 +1,13 @@
 import { expect, test } from '@playwright/test'
 import {
+  audiencePrincipalError,
   businessRuleCount,
   createEmptyAgentDraft,
   isAgentEditorLocked,
   isSkillBindable,
   nextAgentRevision,
   normalizeAgentDraft,
+  normalizeAudiencePrincipals,
   parseOutputContract,
 } from '../src/agentBuilder'
 import {
@@ -39,7 +41,7 @@ test.describe('Agent Builder model contracts', () => {
         slug: 'wrong-nested-slug',
         description: 'wrong nested description',
         capabilities: ['analysis'],
-        audience: ['finance'],
+        audience: ['USER', 'ADMIN'],
         output_contract: { type: 'object' },
         runtime_limits: {
           max_tool_rounds: 3,
@@ -57,7 +59,7 @@ test.describe('Agent Builder model contracts', () => {
     expect(normalized.slug).toBe('finance-agent')
     expect(normalized.description).toBe('Checks invoices')
     expect(normalized.capabilities).toEqual(['analysis'])
-    expect(normalized.audience).toEqual(['finance'])
+    expect(normalized.audience).toEqual(['role:USER', 'role:ADMIN'])
     expect(normalized.output_contract).toEqual({ type: 'object' })
     expect(normalized.runtime_limits.timeout_seconds).toBe(90)
     expect(normalized.runtime_workflow).toEqual({ id: 'workflow-id', revision: 4 })
@@ -68,7 +70,7 @@ test.describe('Agent Builder model contracts', () => {
     expect(draft.allowed_tools).toEqual([])
     expect(draft.knowledge_sources).toEqual([])
     expect(draft.capabilities).toEqual([])
-    expect(draft.audience).toEqual(['USER', 'ADMIN'])
+    expect(draft.audience).toEqual(['role:USER', 'role:ADMIN'])
     expect(businessRuleCount(draft.business_rules)).toBe(0)
   })
 
@@ -104,6 +106,24 @@ test.describe('Agent Builder model contracts', () => {
   test('previews the next immutable Agent revision', () => {
     expect(nextAgentRevision(null)).toBe(1)
     expect(nextAgentRevision(4)).toBe(5)
+  })
+
+  test('normalizes legacy role principals and validates canonical role/group audiences', () => {
+    expect(
+      normalizeAudiencePrincipals([
+        ' USER ',
+        'role:admin',
+        'group:finance-reviewers',
+        'role:USER',
+      ]),
+    ).toEqual(['role:USER', 'role:ADMIN', 'group:finance-reviewers'])
+    expect(
+      audiencePrincipalError(['role:USER', 'role:ADMIN', 'group:finance-reviewers']),
+    ).toBeNull()
+    expect(audiencePrincipalError(['USER'])).toContain('格式錯誤')
+    expect(audiencePrincipalError(['group:*'])).toContain('wildcard')
+    expect(audiencePrincipalError(['group:Finance Reviewers'])).toContain('格式錯誤')
+    expect(audiencePrincipalError(['role:OWNER'])).toContain('格式錯誤')
   })
 
   test('preserves canonical Business Rule AST including nested groups and unknown handling', () => {

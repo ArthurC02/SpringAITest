@@ -46,6 +46,7 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
 }) => {
   let draftSaveStatus = 200
   let validateIfMatch: string | null = null
+  let savedAudience: string[] | null = null
 
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -104,6 +105,7 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
       return json(route, { valid: true, errors: [] })
     }
     if (path === `/api/agents/${agentId}/draft` && request.method() === 'PUT') {
+      savedAudience = (request.postDataJSON() as { audience: string[] }).audience
       if (draftSaveStatus === 409) {
         return route.fulfill({
           status: 409,
@@ -141,6 +143,8 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   await expect(page.getByLabel('Output contract（JSON object）')).toHaveValue(
     '{\n  "type": "object"\n}',
   )
+  await expect(page.getByRole('checkbox', { name: 'role:USER' })).toBeChecked()
+  await expect(page.getByRole('checkbox', { name: 'role:ADMIN' })).toBeChecked()
 
   await page.getByRole('button', { name: '驗證', exact: true }).click()
   await expect.poll(() => validateIfMatch).toBe('"1"')
@@ -163,7 +167,16 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   draftSaveStatus = 409
   const name = page.getByLabel('名稱')
   await name.fill('Changed name')
+  const groupInput = page.getByLabel('Audience')
+  await groupInput.fill('*')
+  await page.getByRole('button', { name: '加入 group' }).click()
+  await expect(page.getByRole('alert')).toContainText('wildcard')
+  await expect(page.getByRole('button', { name: '儲存草稿' })).toBeDisabled()
+  await page.getByRole('button', { name: '移除 group:*' }).click()
+  await groupInput.fill('finance-reviewers')
+  await page.getByRole('button', { name: '加入 group' }).click()
   await page.getByRole('button', { name: '儲存草稿' }).click()
+  expect(savedAudience).toEqual(['role:USER', 'role:ADMIN', 'group:finance-reviewers'])
   await expect(page.getByRole('alert')).toContainText('已被其他人更新')
   await expect(name).toBeDisabled()
   await expect(page.getByRole('button', { name: '驗證', exact: true })).toBeDisabled()

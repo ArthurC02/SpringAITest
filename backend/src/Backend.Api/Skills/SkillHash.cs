@@ -16,4 +16,29 @@ public static class SkillHash
     /// <summary>agentic package 的 SHA-256(對「實際儲存的原始 zip bytes」計算 — 自洽,不依賴引擎 manifest 語意)。</summary>
     public static string Sha256(byte[] bytes)
         => Convert.ToHexStringLower(SHA256.HashData(bytes));
+
+    /// <summary>
+    /// Compare an expected lowercase/uppercase hexadecimal SHA-256 value without
+    /// data-dependent short-circuiting. Malformed or absent hashes fail closed.
+    /// </summary>
+    public static bool MatchesSha256(byte[] bytes, string? expected)
+    {
+        if (expected is null || expected.Length != 64)
+        {
+            return false;
+        }
+
+        byte[] expectedBytes;
+        try
+        {
+            expectedBytes = Convert.FromHexString(expected);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        var actualBytes = SHA256.HashData(bytes);
+        return CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
+    }
 }

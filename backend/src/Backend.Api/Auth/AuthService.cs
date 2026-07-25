@@ -47,7 +47,8 @@ public sealed class AuthService
             user.Username,
             user.Role,
             user.TenantCode,
-            user.Capabilities);
+            user.Capabilities,
+            user.Groups);
     }
 
     /// <summary>共用守衛:repo 查詢回 null 就丟對應狀態碼的 ApiException(找租戶 404 / 找使用者 401 共用此段)。</summary>

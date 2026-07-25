@@ -36,7 +36,8 @@ public sealed record AuthResult(
     string Username,
     string Role,
     string TenantCode,
-    [property: JsonIgnore] IReadOnlyList<string>? Capabilities = null);
+    [property: JsonIgnore] IReadOnlyList<string>? Capabilities = null,
+    [property: JsonIgnore] IReadOnlyList<string>? Groups = null);
 
 /// <summary>login 的回應 body。JSON:{ token, username, role, tenantCode }。</summary>
 public sealed record LoginResponse(string Token, string Username, string Role, string TenantCode);
@@ -50,8 +51,12 @@ public sealed record UserRow(
     string PasswordHash,
     string Role,
     string TenantCode,
-    string CapabilitiesJson = "[]")
+    string CapabilitiesJson = "[]",
+    string GroupsJson = "[]")
 {
     public IReadOnlyList<string> Capabilities
         => JsonSerializer.Deserialize<string[]>(CapabilitiesJson) ?? Array.Empty<string>();
+
+    public IReadOnlyList<string> Groups
+        => JsonSerializer.Deserialize<string[]>(GroupsJson) ?? Array.Empty<string>();
 }

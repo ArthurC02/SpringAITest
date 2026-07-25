@@ -22,9 +22,16 @@ public sealed class InMemoryAuthRepository : IAuthRepository
     {
         // admin-a 是明確被指派的 workflow manager；ADMIN role 本身不會自動取得 capability。
         ["admin-a"] = new UserRow(
-            "admin-a", Password123, "ADMIN", "demo-a", """["workflow.manage"]"""),
-        ["user-a"] = new UserRow("user-a", Password123, "USER", "demo-a"),
-        ["user-b"] = new UserRow("user-b", Password123, "USER", "demo-b"),
+            "admin-a",
+            Password123,
+            "ADMIN",
+            "demo-a",
+            """["workflow.manage"]""",
+            """["operations"]"""),
+        ["user-a"] = new UserRow(
+            "user-a", Password123, "USER", "demo-a", GroupsJson: """["analysts"]"""),
+        ["user-b"] = new UserRow(
+            "user-b", Password123, "USER", "demo-b", GroupsJson: """["analysts"]"""),
     };
 
     private readonly object _lockObj = new();

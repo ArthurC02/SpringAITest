@@ -21,7 +21,8 @@ internal static class TestTokens
         string? secret = null,
         DateTime? notBefore = null,
         DateTime? expires = null,
-        IReadOnlyCollection<string>? capabilities = null)
+        IReadOnlyCollection<string>? capabilities = null,
+        IReadOnlyCollection<string>? groups = null)
     {
         var now = DateTime.UtcNow;
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret ?? DefaultSecret));
@@ -44,6 +45,13 @@ internal static class TestTokens
                          .OrderBy(c => c, StringComparer.Ordinal))
             {
                 claims.Add(new Claim("capabilities", capability));
+            }
+        }
+        if (groups is not null)
+        {
+            foreach (var group in groups)
+            {
+                claims.Add(new Claim("groups", group));
             }
         }
 

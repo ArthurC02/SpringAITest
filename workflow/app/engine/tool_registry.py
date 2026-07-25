@@ -15,9 +15,10 @@
 """
 
 import asyncio
+import inspect
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, get_args, get_origin, get_type_hints
 
 from app.engine import harness
 from app.engine.models import TraceEntry
@@ -36,6 +37,13 @@ class ToolContext:
     user_id: str = ""
     role: str = ""
     deps: Any = None  # skill 的依賴容器（KbQueryDeps…）；tool 從這裡取 port 實作
+    # Direct-Agent authority is injected by the runtime, never accepted in
+    # model arguments. Legacy Skill paths leave enforcement disabled.
+    run_id: str = ""
+    agent_id: str = ""
+    agent_revision: int = 0
+    knowledge_sources: frozenset[str] = frozenset()
+    enforce_data_scope: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,8 @@ class ToolSpec:
     fn: Callable[..., Awaitable[Any]]
     # 未明示時採最保守分類，避免新工具在 Builder 被錯標成低風險。
     risk: ToolRisk = "privileged"
+    required_args: frozenset[str] = frozenset()
+    nullable_args: frozenset[str] = frozenset()
 
 
 class ToolError(RuntimeError):
@@ -102,14 +112,44 @@ def tool(
             raise ValueError(
                 f"tool {name} 的 risk 必須是 {sorted(VALID_TOOL_RISKS)}，收到：{risk}"
             )
+        signature = inspect.signature(fn)
+        hints = get_type_hints(fn)
+        callable_args: dict[str, type] = {}
+        required_args: set[str] = set()
+        nullable_args: set[str] = set()
+        has_var_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        for parameter_name, parameter in signature.parameters.items():
+            if parameter_name == "ctx":
+                continue
+            if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                continue
+            annotation = hints.get(parameter_name, Any)
+            callable_args[parameter_name] = (args_schema or {}).get(
+                parameter_name, annotation
+            )
+            if parameter.default is inspect.Parameter.empty:
+                required_args.add(parameter_name)
+            if type(None) in get_args(annotation):
+                nullable_args.add(parameter_name)
+        if has_var_kwargs:
+            for parameter_name, annotation in (args_schema or {}).items():
+                callable_args.setdefault(parameter_name, annotation)
+                required_args.add(parameter_name)
+        elif set(args_schema or {}) - set(callable_args):
+            raise ValueError(f"tool {name} declares arguments absent from its callable")
         _REGISTRY[name] = ToolSpec(
             name=name,
             kind=kind,
             description=description,
-            args_schema=dict(args_schema or {}),
+            args_schema=callable_args,
             returns=returns,
             fn=fn,
             risk=risk,
+            required_args=frozenset(required_args),
+            nullable_args=frozenset(nullable_args),
         )
         return fn
 

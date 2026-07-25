@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Backend.Api.Skills;
+using Backend.Api.AgentRuns;
 
 namespace Backend.Api.Data.InMemory;
 
@@ -226,6 +227,43 @@ public sealed class InMemorySkillRepository : ISkillRepository
 
         revision = 0;
         return false;
+    }
+
+    /// <summary>
+    /// D3 direct-run snapshot 在持有 <see cref="ReferenceSyncRoot"/> 時解析一筆已固定 revision。
+    /// parent Skill 必須仍 enabled（新 run 的預設政策），但不要求它仍是 current revision。
+    /// </summary>
+    internal bool TryGetEnabledRevisionUnsafe(
+        string tenantId,
+        string name,
+        int revision,
+        out SkillSnapshotSource? source)
+    {
+        source = null;
+        if (!_store.TryGetValue((tenantId, name), out var skill) || !skill.Enabled)
+        {
+            return false;
+        }
+
+        var row = _revisions
+            .Where(r => r.Tenant == tenantId && r.Name == name && r.Row.Revision == revision)
+            .Select(r => r.Row)
+            .FirstOrDefault();
+        if (row is null)
+        {
+            return false;
+        }
+
+          source = new SkillSnapshotSource(
+              Guid.Empty,
+              name,
+              AgentRunSnapshotBuilder.SkillDescriptionOf(row.Definition),
+            revision,
+            row.Kind,
+            row.Definition,
+            row.DefinitionSha256,
+            row.PackageSha256 ?? (row.Package is null ? null : SkillHash.Sha256(row.Package)));
+        return true;
     }
 
     private void AddRevisionUnsafe(

@@ -288,6 +288,11 @@ class _Builder:
             user_id=state.get("user_id", ""),
             role=state.get("role", ""),
             deps=self.deps,
+            run_id=state.get("run_id", ""),
+            agent_id=state.get("agent_id", ""),
+            agent_revision=state.get("agent_revision", 0),
+            knowledge_sources=frozenset(state.get("knowledge_sources") or []),
+            enforce_data_scope=bool(state.get("enforce_data_scope", False)),
         )
 
     def add_node_step(self, ref: str, params: dict) -> str:

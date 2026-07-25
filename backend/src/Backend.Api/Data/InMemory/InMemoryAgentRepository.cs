@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
+using System.Text;
 using Backend.Api.Agents;
+using Backend.Api.AgentRuns;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Data.InMemory;
@@ -24,6 +26,53 @@ public sealed class InMemoryAgentRepository : IAgentRepository
     }
 
     private static DateTime Now() => DateTime.UtcNow;
+
+    internal object RunSnapshotSyncRoot => _skills.ReferenceSyncRoot;
+
+    internal bool AgentExistsUnsafe(string tenantId, Guid id)
+    {
+        lock (_gate)
+        {
+            return Find(tenantId, id) is not null;
+        }
+    }
+
+    /// <summary>
+    /// 呼叫端持有 <see cref="RunSnapshotSyncRoot"/>；本方法再取 Agent lock，沿用 publish 的固定
+    /// lock order（Skill → Agent），讓 enabled/published pointer 與 pinned revisions 成為同一快照。
+    /// </summary>
+    internal PublishedAgentSnapshotSource? GetPublishedSnapshotUnsafe(string tenantId, Guid id)
+    {
+        lock (_gate)
+        {
+            var entry = Find(tenantId, id);
+            if (entry is null || !entry.Enabled || entry.PublishedRevision is not int revision)
+            {
+                return null;
+            }
+
+            var published = entry.Revisions.FirstOrDefault(r => r.Revision == revision);
+            if (published is null
+                || published.RuntimeWorkflowId is not Guid workflowId
+                || published.RuntimeWorkflowRevision is not int workflowRevision)
+            {
+                return null;
+            }
+
+            return new PublishedAgentSnapshotSource(
+                entry.Id,
+                entry.Name,
+                revision,
+                AgentCanonicalizer.ReadAuthoritativeDefinition(
+                    Encoding.UTF8.GetBytes(published.DefinitionSnapshot),
+                    published.DefinitionSha256,
+                    $"Agent revision {entry.Id:D}#{revision}"),
+                published.DefinitionSha256,
+                workflowId,
+                workflowRevision,
+                published.Bindings.OrderBy(b => b.Position).Select(b => b with { }).ToList());
+        }
+    }
 
     public Task<IReadOnlyList<AgentInfo>> ListAsync(string tenantId, CancellationToken ct)
     {
@@ -50,6 +99,12 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         string tenantId, string slug, string name, string description,
         string canonicalDefinition, string definitionSha256, string createdBy, CancellationToken ct)
     {
+        canonicalDefinition = AgentCanonicalizer.CanonicalizeDefinition(canonicalDefinition);
+        definitionSha256 = SkillHash.Sha256(canonicalDefinition);
+        _ = AgentCanonicalizer.ReadAuthoritativeDefinition(
+            Encoding.UTF8.GetBytes(canonicalDefinition),
+            definitionSha256,
+            $"New Agent draft {slug}");
         lock (_gate)
         {
             // slug 於租戶內唯一(含已停用列)— 對映 DB 的 UNIQUE(tenant_id, slug)。
@@ -85,6 +140,12 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         string tenantId, Guid id, long expectedVersion, string name, string description,
         string canonicalDefinition, string definitionSha256, CancellationToken ct)
     {
+        canonicalDefinition = AgentCanonicalizer.CanonicalizeDefinition(canonicalDefinition);
+        definitionSha256 = SkillHash.Sha256(canonicalDefinition);
+        _ = AgentCanonicalizer.ReadAuthoritativeDefinition(
+            Encoding.UTF8.GetBytes(canonicalDefinition),
+            definitionSha256,
+            $"Agent draft update {id:D}");
         lock (_gate)
         {
             var entry = Find(tenantId, id);
@@ -117,6 +178,9 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         string definitionSha256,
         CancellationToken ct)
     {
+        canonicalDefinition =
+            AgentCanonicalizer.CanonicalizeForLifecycleWrite(canonicalDefinition);
+        definitionSha256 = SkillHash.Sha256(canonicalDefinition);
         lock (_gate)
         {
             var entry = Find(tenantId, id);
@@ -152,6 +216,9 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         string createdBy,
         CancellationToken ct)
     {
+        canonicalDefinition =
+            AgentCanonicalizer.CanonicalizeForLifecycleWrite(canonicalDefinition);
+        definitionSha256 = SkillHash.Sha256(canonicalDefinition);
         ct.ThrowIfCancellationRequested();
 
         // 固定 lock order：Skill snapshot → Agent aggregate。所有 Skill mutation 都持有同一把
@@ -172,6 +239,24 @@ public sealed class InMemoryAgentRepository : IAgentRepository
                 {
                     return Task.FromResult(new AgentPublishResult(
                         AgentWriteStatus.VersionConflict, 0));
+                }
+                var lockedDefinition = AgentCanonicalizer.ReadAuthoritativeDefinition(
+                    Encoding.UTF8.GetBytes(entry.DraftDefinition),
+                    entry.DraftDefinitionSha256,
+                    $"Agent draft {id:D}@{entry.DraftVersion}");
+                if (!AgentCanonicalizer.IsBusinessRuleOnlyCanonicalization(
+                        lockedDefinition,
+                        canonicalDefinition))
+                {
+                    return Task.FromResult(new AgentPublishResult(
+                        AgentWriteStatus.VersionConflict, 0));
+                }
+                var definitionErrors =
+                    AgentCanonicalizer.Validate(canonicalDefinition, entry.Name);
+                if (definitionErrors.Count > 0)
+                {
+                    return Task.FromResult(new AgentPublishResult(
+                        AgentWriteStatus.InvalidReference, 0, definitionErrors));
                 }
 
                 var resolution = ResolveReferencesUnsafe(tenantId, canonicalDefinition);
@@ -218,12 +303,14 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            var definition = Find(tenantId, id)?.Revisions
-                .FirstOrDefault(r => r.Revision == revision)?
-                .DefinitionSnapshot;
-            return Task.FromResult(definition is null
+            var revisionEntry = Find(tenantId, id)?.Revisions
+                .FirstOrDefault(r => r.Revision == revision);
+            return Task.FromResult(revisionEntry is null
                 ? null
-                : AgentCanonicalizer.CanonicalizeDefinition(definition));
+                : AgentCanonicalizer.ReadAuthoritativeDefinition(
+                    Encoding.UTF8.GetBytes(revisionEntry.DefinitionSnapshot),
+                    revisionEntry.DefinitionSha256,
+                    $"Agent revision {id:D}#{revision}"));
         }
     }
 
@@ -236,6 +323,9 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         string createdBy,
         CancellationToken ct)
     {
+        canonicalDefinition =
+            AgentCanonicalizer.CanonicalizeForLifecycleWrite(canonicalDefinition);
+        definitionSha256 = SkillHash.Sha256(canonicalDefinition);
         ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
@@ -249,6 +339,17 @@ public sealed class InMemoryAgentRepository : IAgentRepository
             if (target is null)
             {
                 return Task.FromResult(new AgentPublishResult(AgentWriteStatus.NotFound, 0));
+            }
+            _ = AgentCanonicalizer.ReadAuthoritativeDefinition(
+                Encoding.UTF8.GetBytes(target.DefinitionSnapshot),
+                target.DefinitionSha256,
+                $"Agent revision {id:D}#{revision}");
+            var definitionErrors =
+                AgentCanonicalizer.Validate(canonicalDefinition, entry.Name);
+            if (definitionErrors.Count > 0)
+            {
+                return Task.FromResult(new AgentPublishResult(
+                    AgentWriteStatus.InvalidReference, 0, definitionErrors));
             }
 
             // 舊 revision 與 pinned bindings 保持不可變；新 revision 使用 Workflow 本次重新
@@ -375,9 +476,26 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         public DateTime UpdatedAt;
         public List<RevisionEntry> Revisions = new();
 
-        public Agent ToAgent() => new(
-            Id, Slug, Name, Description, Enabled, DraftVersion, DraftValidatedVersion,
-            PublishedRevision, DraftDefinition, DraftDefinitionSha256, CreatedAt, UpdatedAt);
+        public Agent ToAgent()
+        {
+            var definition = AgentCanonicalizer.ReadAuthoritativeDefinition(
+                Encoding.UTF8.GetBytes(DraftDefinition),
+                DraftDefinitionSha256,
+                $"Agent draft {Id:D}@{DraftVersion}");
+            return new Agent(
+                Id,
+                Slug,
+                Name,
+                Description,
+                Enabled,
+                DraftVersion,
+                DraftValidatedVersion,
+                PublishedRevision,
+                definition,
+                DraftDefinitionSha256,
+                CreatedAt,
+                UpdatedAt);
+        }
     }
 
     private sealed class RevisionEntry

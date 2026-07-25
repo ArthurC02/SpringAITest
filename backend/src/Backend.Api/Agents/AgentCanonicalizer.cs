@@ -1,7 +1,38 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Backend.Api.Skills;
 
 namespace Backend.Api.Agents;
+
+/// <summary>
+/// Backend-owned bounds for the immutable D3 Agent execution snapshot. These values mirror
+/// Workflow's strict runtime models; contract-vector tests guard against cross-service drift.
+/// </summary>
+public static class AgentExecutionContract
+{
+    public const int MaxCanonicalDefinitionBytes = 4 * 1024 * 1024;
+    public const int MaxSnapshotCanonicalBytes = 8 * 1024 * 1024;
+    public const int MaxSnapshotCanonicalBase64Length = 11_184_812;
+    public const int MaxAgentNameLength = 256;
+    public const int MaxSystemPromptLength = 200_000;
+    public const int MaxExecutionRoles = 16;
+    public const int MaxAudience = 256;
+    public const int MaxAllowedTools = 256;
+    public const int MaxKnowledgeSources = 512;
+    public const int MaxSkillBindings = 128;
+    public const int MaxToolRounds = 1_000;
+    public const int MaxContextRounds = 1_000;
+    public const int DefaultTimeoutSeconds = 60;
+    public const int MaxTimeoutSeconds = 86_400;
+    public const int MaxTokenBudget = 10_000_000;
+    public const int MaxStepBudget = 10_000;
+    public const int MaxCallerIdentityLength = 256;
+    public const int MaxCallerRoleLength = 64;
+    public const int MaxSkillNameLength = 64;
+    public const int MaxSkillDescriptionLength = 4_096;
+    public const int MaxWorkflowContractVersionLength = 128;
+}
 
 /// <summary>
 /// Agent 定義的 canonicalize 與最小結構驗證。所有集合欄位缺席/null/空 → 明確空陣列
@@ -12,6 +43,9 @@ namespace Backend.Api.Agents;
 /// </summary>
 public static class AgentCanonicalizer
 {
+    private static readonly UTF8Encoding StrictUtf8 =
+        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     private static readonly HashSet<string> ValidExecutionRoles =
         new(StringComparer.Ordinal) { "worker", "verifier" };
 
@@ -24,10 +58,10 @@ public static class AgentCanonicalizer
             ["execution_roles"] = ToSetArray(req.ExecutionRoles),
             ["capabilities"] = ToSetArray(req.Capabilities),
             ["output_contract"] = CanonicalizeNode(ToNode(req.OutputContract)) ?? new JsonObject(),
-            ["audience"] = ToSetArray(req.Audience),
+            ["audience"] = ToAudienceArray(req.Audience),
             ["allowed_tools"] = ToSetArray(req.AllowedTools),
             ["skill_bindings"] = ToBindings(req.SkillBindings),
-            ["knowledge_sources"] = ToSetArray(req.KnowledgeSources),
+            ["knowledge_sources"] = ToKnowledgeSourceArray(req.KnowledgeSources),
             ["business_rules"] = CanonicalizeNode(ToNode(req.BusinessRules))
                                  ?? JsonNode.Parse(AgentDefaults.EmptyBusinessRules),
             ["runtime_limits"] = ToLimits(req.RuntimeLimits),
@@ -95,6 +129,31 @@ public static class AgentCanonicalizer
         return CanonicalizeDefinition(definition.ToJsonString());
     }
 
+    public static bool IsBusinessRuleOnlyCanonicalization(
+        string lockedDefinition,
+        string candidateDefinition)
+    {
+        try
+        {
+            using var candidate = JsonDocument.Parse(candidateDefinition);
+            if (!candidate.RootElement.TryGetProperty(
+                    "business_rules",
+                    out var candidateRuleSet))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                WithBusinessRules(lockedDefinition, candidateRuleSet),
+                candidateDefinition,
+                StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// 對完整 definition 遞迴排序 object key。Dapper 從 jsonb::text 讀回時不保證保留 C# 的
     /// insertion order；所有會進 hash 的 bytes 都必須先經此處，才能和 in-memory provider 一致。
@@ -103,15 +162,129 @@ public static class AgentCanonicalizer
     public static string CanonicalizeDefinition(string definition)
         => CanonicalizeNode(JsonNode.Parse(definition))!.ToJsonString();
 
-    /// <summary>D1 最小驗證:system_prompt 非空、execution_roles 非空且皆屬 {worker,verifier}、runtime_workflow.id 為合法 uuid。</summary>
-    public static IReadOnlyList<AgentValidationError> Validate(string canonicalDefinition)
+    /// <summary>
+    /// Read an authoritative persisted definition. JSONB is never a fallback: the exact
+    /// canonical bytes and their digest must both be present, strict UTF-8 without a BOM,
+    /// a definition-shaped JSON object, and already in the canonical representation.
+    /// </summary>
+    public static string ReadAuthoritativeDefinition(
+        byte[]? canonicalBytes,
+        string? definitionSha256,
+        string authority)
+    {
+        if (canonicalBytes is null)
+        {
+            throw new InvalidOperationException(
+                $"{authority} lacks authoritative canonical definition bytes");
+        }
+        if (canonicalBytes.Length > AgentExecutionContract.MaxCanonicalDefinitionBytes)
+        {
+            throw new InvalidOperationException(
+                $"{authority} canonical definition exceeds its byte limit");
+        }
+        if (!SkillHash.MatchesSha256(canonicalBytes, definitionSha256))
+        {
+            throw new InvalidOperationException(
+                $"{authority} canonical definition hash mismatch");
+        }
+        if (canonicalBytes.AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }))
+        {
+            throw new InvalidOperationException(
+                $"{authority} canonical definition must not contain a UTF-8 BOM");
+        }
+
+        try
+        {
+            var definition = StrictUtf8.GetString(canonicalBytes);
+            using var document = JsonDocument.Parse(canonicalBytes);
+            if (!HasDefinitionShape(document.RootElement))
+            {
+                throw new InvalidOperationException(
+                    $"{authority} canonical definition has an invalid root schema");
+            }
+            if (!string.Equals(
+                    CanonicalizeDefinition(definition),
+                    definition,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"{authority} definition bytes are not canonical JSON");
+            }
+            return definition;
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is DecoderFallbackException or JsonException)
+        {
+            throw new InvalidOperationException(
+                $"{authority} canonical definition is not strict UTF-8 JSON",
+                ex);
+        }
+    }
+
+    /// <summary>
+    /// Normalize legacy authoring role entries before validate/publish/restore creates a new
+    /// lifecycle result. Existing immutable published revisions are not rewritten.
+    /// </summary>
+    public static string CanonicalizeForLifecycleWrite(string definition)
+    {
+        var canonical = JsonNode.Parse(definition)!.AsObject();
+        if (canonical["audience"] is JsonArray audience)
+        {
+            canonical["audience"] = ToAudienceArray(
+                audience
+                    .Select(item => item?.GetValue<string>())
+                    .Where(item => item is not null)
+                    .Select(item => item!)
+                    .ToArray());
+        }
+        return CanonicalizeDefinition(canonical.ToJsonString());
+    }
+
+    /// <summary>
+    /// Validate the persisted authoring definition against the immutable D3 execution-snapshot
+    /// contract. The optional name is stored outside the definition but appears in the snapshot.
+    /// </summary>
+    public static IReadOnlyList<AgentValidationError> Validate(
+        string canonicalDefinition,
+        string? agentName = null)
     {
         var errors = new List<AgentValidationError>();
+        var definitionBytes = Encoding.UTF8.GetByteCount(canonicalDefinition);
+        if (definitionBytes > AgentExecutionContract.MaxCanonicalDefinitionBytes)
+        {
+            errors.Add(new AgentValidationError(
+                "definition",
+                $"canonical definition 不可超過 {AgentExecutionContract.MaxCanonicalDefinitionBytes} UTF-8 bytes"));
+        }
         var def = JsonNode.Parse(canonicalDefinition)!.AsObject();
 
-        if (string.IsNullOrWhiteSpace(def["system_prompt"]?.GetValue<string>()))
+        if (agentName is not null)
+        {
+            if (string.IsNullOrWhiteSpace(agentName))
+            {
+                errors.Add(new AgentValidationError("name", "name 不可為空"));
+            }
+            else if (agentName.Length > AgentExecutionContract.MaxAgentNameLength)
+            {
+                errors.Add(new AgentValidationError(
+                    "name",
+                    $"name 不可超過 {AgentExecutionContract.MaxAgentNameLength} 字元"));
+            }
+        }
+
+        var systemPrompt = def["system_prompt"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(systemPrompt))
         {
             errors.Add(new AgentValidationError("system_prompt", "system_prompt 不可為空"));
+        }
+        else if (systemPrompt.Length > AgentExecutionContract.MaxSystemPromptLength)
+        {
+            errors.Add(new AgentValidationError(
+                "system_prompt",
+                $"system_prompt 不可超過 {AgentExecutionContract.MaxSystemPromptLength} 字元"));
         }
 
         var roles = def["execution_roles"]!.AsArray();
@@ -130,14 +303,58 @@ public static class AgentCanonicalizer
                 }
             }
         }
+        ValidateList(
+            def, "execution_roles", AgentExecutionContract.MaxExecutionRoles, errors);
+        ValidateList(def, "audience", AgentExecutionContract.MaxAudience, errors);
+        if (def["audience"] is JsonArray audience)
+        {
+            foreach (var entry in audience)
+            {
+                var value = entry?.GetValue<string>();
+                if (!AgentAudience.IsCanonicalEntry(value))
+                {
+                    errors.Add(new AgentValidationError(
+                        "audience",
+                        $"audience entry must be role:ADMIN, role:USER, or group:<canonical-id>: {value}"));
+                }
+            }
+        }
+        ValidateList(def, "allowed_tools", AgentExecutionContract.MaxAllowedTools, errors);
+        ValidateList(
+            def, "knowledge_sources", AgentExecutionContract.MaxKnowledgeSources, errors);
+
+        if (def["output_contract"] is not JsonObject)
+        {
+            errors.Add(new AgentValidationError(
+                "output_contract", "output_contract 必須是 JSON object"));
+        }
+        if (def["business_rules"] is not JsonObject)
+        {
+            errors.Add(new AgentValidationError(
+                "business_rules", "business_rules 必須是 JSON object"));
+        }
+
+        var bindings = def["skill_bindings"]!.AsArray();
+        if (bindings.Count > AgentExecutionContract.MaxSkillBindings)
+        {
+            errors.Add(new AgentValidationError(
+                "skill_bindings",
+                $"skill_bindings 最多 {AgentExecutionContract.MaxSkillBindings} 筆"));
+        }
 
         var workflowId = def["runtime_workflow"]?["id"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(workflowId) || !Guid.TryParse(workflowId, out _))
         {
             errors.Add(new AgentValidationError("runtime_workflow", "runtime_workflow.id 必須是已發布 agent-runtime Workflow 的合法 id"));
         }
+        if (def["runtime_workflow"]?["revision"]?.GetValue<int>() is not int workflowRevision
+            || workflowRevision < 1)
+        {
+            errors.Add(new AgentValidationError(
+                "runtime_workflow", "runtime_workflow.revision 必須大於等於 1"));
+        }
 
-        foreach (var binding in def["skill_bindings"]!.AsArray())
+        foreach (var binding in bindings)
         {
             var policy = binding?["revision_policy"]?.GetValue<string>();
             if (!string.Equals(policy, "latest", StringComparison.Ordinal))
@@ -148,7 +365,89 @@ public static class AgentCanonicalizer
             }
         }
 
+        foreach (var source in def["knowledge_sources"]!.AsArray())
+        {
+            var value = source?.GetValue<string>();
+            if (value is null
+                || !Guid.TryParseExact(value, "D", out var parsed)
+                || !string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal))
+            {
+                errors.Add(new AgentValidationError(
+                    "knowledge_sources",
+                    $"knowledge_sources must contain canonical document UUIDs: {value}"));
+            }
+        }
+
+        if (def["runtime_limits"] is not JsonObject limits)
+        {
+            errors.Add(new AgentValidationError(
+                "runtime_limits", "runtime_limits 必須是 JSON object"));
+        }
+        else
+        {
+            ValidateLimit(
+                limits, "max_tool_rounds", AgentExecutionContract.MaxToolRounds, errors);
+            ValidateLimit(
+                limits, "max_context_rounds", AgentExecutionContract.MaxContextRounds, errors);
+            ValidateLimit(
+                limits, "timeout_seconds", AgentExecutionContract.MaxTimeoutSeconds, errors);
+            ValidateLimit(
+                limits, "token_budget", AgentExecutionContract.MaxTokenBudget, errors);
+            ValidateLimit(
+                limits, "step_budget", AgentExecutionContract.MaxStepBudget, errors);
+        }
+
         return errors;
+    }
+
+    private static void ValidateList(
+        JsonObject definition,
+        string field,
+        int max,
+        ICollection<AgentValidationError> errors)
+    {
+        if (definition[field] is not JsonArray values)
+        {
+            errors.Add(new AgentValidationError(field, $"{field} 必須是 JSON array"));
+            return;
+        }
+        if (values.Count > max)
+        {
+            errors.Add(new AgentValidationError(field, $"{field} 最多 {max} 筆"));
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in values)
+        {
+            if (item is not JsonValue value
+                || !value.TryGetValue<string>(out var text)
+                || string.IsNullOrWhiteSpace(text))
+            {
+                errors.Add(new AgentValidationError(field, $"{field} 不可包含空白值"));
+                continue;
+            }
+            if (!seen.Add(text))
+            {
+                errors.Add(new AgentValidationError(field, $"{field} 不可包含重複值"));
+            }
+        }
+    }
+
+    private static void ValidateLimit(
+        JsonObject limits,
+        string field,
+        int max,
+        ICollection<AgentValidationError> errors)
+    {
+        if (limits[field] is not JsonValue value
+            || !value.TryGetValue<int>(out var number)
+            || number is < 0
+            || number > max)
+        {
+            errors.Add(new AgentValidationError(
+                $"runtime_limits.{field}",
+                $"runtime_limits.{field} 必須介於 0 與 {max}"));
+        }
     }
 
     /// <summary>
@@ -172,6 +471,21 @@ public static class AgentCanonicalizer
 
         return array;
     }
+
+    private static JsonArray ToAudienceArray(IReadOnlyList<string>? values)
+        => ToSetArray(values is null
+            ? null
+            : values.Select(AgentAudience.NormalizeAuthoringEntry).ToArray());
+
+    private static JsonArray ToKnowledgeSourceArray(IReadOnlyList<string>? values)
+        => ToSetArray(values is null
+            ? null
+            : values
+                .Where(value => value is not null)
+                .Select(value => Guid.TryParse(value.Trim(), out var parsed)
+                    ? parsed.ToString("D")
+                    : value)
+                .ToArray());
 
     private static JsonArray ToBindings(IReadOnlyList<AgentSkillBinding>? bindings)
     {
@@ -243,4 +557,25 @@ public static class AgentCanonicalizer
             _ => node.DeepClone(),
         };
     }
+
+    private static bool HasDefinitionShape(JsonElement root)
+        => root.ValueKind == JsonValueKind.Object
+           && HasKind(root, "system_prompt", JsonValueKind.String)
+           && HasKind(root, "execution_roles", JsonValueKind.Array)
+           && HasKind(root, "capabilities", JsonValueKind.Array)
+           && HasKind(root, "output_contract", JsonValueKind.Object)
+           && HasKind(root, "audience", JsonValueKind.Array)
+           && HasKind(root, "allowed_tools", JsonValueKind.Array)
+           && HasKind(root, "skill_bindings", JsonValueKind.Array)
+           && HasKind(root, "knowledge_sources", JsonValueKind.Array)
+           && HasKind(root, "business_rules", JsonValueKind.Object)
+           && HasKind(root, "runtime_limits", JsonValueKind.Object)
+           && HasKind(root, "runtime_workflow", JsonValueKind.Object);
+
+    private static bool HasKind(
+        JsonElement root,
+        string property,
+        JsonValueKind expected)
+        => root.TryGetProperty(property, out var value)
+           && value.ValueKind == expected;
 }

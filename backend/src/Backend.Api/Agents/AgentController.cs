@@ -104,9 +104,11 @@ public sealed class AgentController : ControllerBase
             throw VersionConflict();
         }
 
-        var errors = AgentCanonicalizer.Validate(agent.DraftDefinition).ToList();
-        errors.AddRange(await _repo.ValidateReferencesAsync(tenantId, agent.DraftDefinition, ct));
-        var ruleValidation = await ValidateBusinessRulesAsync(agent.DraftDefinition, tenantId, ct);
+        var lifecycleDefinition =
+            AgentCanonicalizer.CanonicalizeForLifecycleWrite(agent.DraftDefinition);
+        var errors = AgentCanonicalizer.Validate(lifecycleDefinition, agent.Name).ToList();
+        errors.AddRange(await _repo.ValidateReferencesAsync(tenantId, lifecycleDefinition, ct));
+        var ruleValidation = await ValidateBusinessRulesAsync(lifecycleDefinition, tenantId, ct);
         errors.AddRange(ruleValidation.Errors);
         if (errors.Count == 0)
         {
@@ -159,10 +161,18 @@ public sealed class AgentController : ControllerBase
             throw new ApiException(
                 StatusCodes.Status409Conflict, "draft 尚未重新驗證,無法發布(請先呼叫 validate)");
         }
+        var lifecycleDefinition =
+            AgentCanonicalizer.CanonicalizeForLifecycleWrite(agent.DraftDefinition);
+        var definitionErrors =
+            AgentCanonicalizer.Validate(lifecycleDefinition, agent.Name);
+        if (definitionErrors.Count > 0)
+        {
+            throw InvalidDefinition(definitionErrors);
+        }
 
         // Workflow 的 registry/validator 可能在 validate 與 publish 之間升級；publish 必須再次以正式
         // evaluator contract fail closed，而不能只相信先前的 validated_version。
-        var ruleValidation = await ValidateBusinessRulesAsync(agent.DraftDefinition, tenantId, ct);
+        var ruleValidation = await ValidateBusinessRulesAsync(lifecycleDefinition, tenantId, ct);
         if (ruleValidation.Errors.Count > 0)
         {
             throw InvalidBusinessRules(ruleValidation.Errors);
@@ -202,13 +212,21 @@ public sealed class AgentController : ControllerBase
     public async Task<ActionResult<AgentResponse>> Restore(Guid id, int revision, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
-        _ = await _repo.GetAsync(tenantId, id, ct) ?? throw NotFound(id);
+        var agent = await _repo.GetAsync(tenantId, id, ct) ?? throw NotFound(id);
         var sourceDefinition = await _repo.GetRevisionDefinitionAsync(tenantId, id, revision, ct)
                                ?? throw new ApiException(
                                    StatusCodes.Status404NotFound,
                                    $"找不到 Agent revision：{id}#{revision}");
+        var lifecycleDefinition =
+            AgentCanonicalizer.CanonicalizeForLifecycleWrite(sourceDefinition);
+        var definitionErrors =
+            AgentCanonicalizer.Validate(lifecycleDefinition, agent.Name);
+        if (definitionErrors.Count > 0)
+        {
+            throw InvalidDefinition(definitionErrors);
+        }
 
-        var ruleValidation = await ValidateBusinessRulesAsync(sourceDefinition, tenantId, ct);
+        var ruleValidation = await ValidateBusinessRulesAsync(lifecycleDefinition, tenantId, ct);
         if (ruleValidation.Errors.Count > 0)
         {
             throw InvalidBusinessRules(ruleValidation.Errors);
@@ -225,6 +243,10 @@ public sealed class AgentController : ControllerBase
         if (result.Status == AgentWriteStatus.NotFound)
         {
             throw new ApiException(StatusCodes.Status404NotFound, $"找不到 Agent revision：{id}#{revision}");
+        }
+        if (result.Status == AgentWriteStatus.InvalidReference)
+        {
+            throw InvalidDefinition(result.Errors ?? Array.Empty<AgentValidationError>());
         }
 
         return WithETag((await _repo.GetAsync(tenantId, id, ct))!);
@@ -303,6 +325,14 @@ public sealed class AgentController : ControllerBase
                 .ToDictionary(g => g.Key, g => g.First().Message, StringComparer.Ordinal),
         };
     }
+
+    private static ApiException InvalidDefinition(IReadOnlyList<AgentValidationError> errors)
+        => new(StatusCodes.Status422UnprocessableEntity, "Agent execution snapshot contract 驗證失敗")
+        {
+            FieldErrors = errors
+                .GroupBy(e => e.Field, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First().Message, StringComparer.Ordinal),
+        };
 
     private async Task<AgentRuleValidation> ValidateBusinessRulesAsync(
         string canonicalDefinition,

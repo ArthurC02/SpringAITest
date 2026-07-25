@@ -9,6 +9,7 @@ import {
 import { setLogoutHandler } from '../api/http'
 import { invalidateChatPersistence } from '../chatPersistence'
 import { CHAT_MESSAGES_KEY, CHAT_CONVERSATION_ID_KEY, CHAT_USER_ID_KEY } from '../storageKeys'
+import { clearLogicalAttemptStorage } from '../logicalAttemptKey'
 import type { Session } from '../types'
 
 /**
@@ -26,6 +27,7 @@ export function useAuth() {
     localStorage.removeItem(CHAT_MESSAGES_KEY)
     localStorage.removeItem(CHAT_CONVERSATION_ID_KEY)
     localStorage.removeItem(CHAT_USER_ID_KEY)
+    clearLogicalAttemptStorage()
     setSession(null)
   }, [])
 

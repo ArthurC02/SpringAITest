@@ -57,6 +57,12 @@ from app.schemas import (
     ValidatePackageResult,
 )
 from app.security import RequestContext, get_context
+from app.runtime.api import (
+    AgentRuntimeFeatureGateMiddleware,
+    router as agent_runtime_router,
+)
+from app.runtime.service import RuntimeService
+from app.settings import settings
 
 
 def _clean_skill_input(raw: dict) -> dict:
@@ -177,14 +183,22 @@ async def _run_with_timeout(coro, timeout_seconds: float, name: str):
 async def lifespan(app: FastAPI):
     """服務生命週期：暖身並在關機時釋放共用 backend HTTP client（連線池不外洩）。"""
     backend_http.get_client()  # 暖身：啟動時就備好連線池，首個請求不必臨時建立
+    runtime_service: RuntimeService | None = None
+    if settings.agent_test_run_enabled:
+        runtime_service = await RuntimeService.open()
+        app.state.agent_runtime_manager = runtime_service.manager
     try:
         yield
     finally:
+        if runtime_service is not None:
+            await runtime_service.close()
         await backend_http.aclose_client()
 
 
 app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
 app.add_middleware(BusinessRuleRequestLimitMiddleware)
+app.add_middleware(AgentRuntimeFeatureGateMiddleware)
+app.include_router(agent_runtime_router)
 
 
 @app.exception_handler(RequestValidationError)

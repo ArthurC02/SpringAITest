@@ -305,6 +305,64 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
             e.Field == "skill_bindings" && e.Message.Contains("disable-me"));
     }
 
+    [SkippableFact]
+    public async Task PublishAndRestore_RejectDefinitionsOutsideExecutionSnapshotContract()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-execution-contract";
+        var invalidNode = JsonNode.Parse(Def(
+            prompt: new string(
+                'p', AgentExecutionContract.MaxSystemPromptLength + 1)))!.AsObject();
+        invalidNode["runtime_limits"]!["timeout_seconds"] = -1;
+        var invalidDefinition =
+            AgentCanonicalizer.CanonicalizeDefinition(invalidNode.ToJsonString());
+        var invalid = await CreateValidatedAsync(
+            tenant, "invalid-execution-contract", invalidDefinition);
+
+        var rejectedPublish = await Repo.PublishAsync(
+            tenant,
+            invalid.Id,
+            invalid.DraftVersion,
+            invalidDefinition,
+            Sha(invalidDefinition),
+            "p",
+            default);
+
+        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedPublish.Status);
+        Assert.Contains(
+            rejectedPublish.Errors!,
+            error => error.Field == "system_prompt");
+        Assert.Contains(
+            rejectedPublish.Errors!,
+            error => error.Field == "runtime_limits.timeout_seconds");
+
+        var validDefinition = Def();
+        var valid = await CreateValidatedAsync(
+            tenant, "valid-execution-contract", validDefinition);
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await Repo.PublishAsync(
+                tenant,
+                valid.Id,
+                valid.DraftVersion,
+                validDefinition,
+                Sha(validDefinition),
+                "p",
+                default)).Status);
+
+        var rejectedRestore = await Repo.RestoreAsync(
+            tenant,
+            valid.Id,
+            1,
+            invalidDefinition,
+            Sha(invalidDefinition),
+            "p",
+            default);
+        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedRestore.Status);
+        Assert.Single(await Repo.ListRevisionsAsync(
+            tenant, valid.Id, default));
+    }
+
     // ---- restore:原封複製快照 + bindings 成新 revision,不改寫歷史(A-DATA-06)----
 
     [SkippableFact]

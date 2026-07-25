@@ -34,5 +34,16 @@ public interface IRagRepository
     /// <summary>向量相似度檢索,依 cosine distance 由近到遠,score = 1 - distance。</summary>
     Task<IReadOnlyList<RetrievedChunk>> SearchAsync(string tenantId, float[] queryEmbedding, int topK, CancellationToken ct);
 
+    /// <summary>
+    /// D3 scoped retrieval. The server-injected immutable scope is authoritative; implementations
+    /// must apply both tenant and exact document-ID predicates, and an empty scope returns empty.
+    /// </summary>
+    Task<IReadOnlyList<RetrievedChunk>> SearchScopedAsync(
+        string tenantId,
+        float[] queryEmbedding,
+        int topK,
+        IReadOnlyCollection<Guid> allowedDocumentIds,
+        CancellationToken ct);
+
     Task<AnalysisSummary> SummaryAsync(string tenantId, CancellationToken ct);
 }

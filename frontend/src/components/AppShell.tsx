@@ -38,6 +38,7 @@ interface Props {
 export default function AppShell({ session, onLogout }: Props) {
   const [view, setView] = useState<View>('chat')
   const [agentBuilderEnabled, setAgentBuilderEnabled] = useState(false)
+  const [agentTestRunEnabled, setAgentTestRunEnabled] = useState(false)
   const isAdmin = session.role === 'ADMIN'
   const items = NAV.filter((n) => !n.adminOnly || isAdmin)
   const navItems = agentBuilderEnabled && isAdmin ? [...items, AGENTS_NAV] : items
@@ -47,10 +48,16 @@ export default function AppShell({ session, onLogout }: Props) {
     let cancelled = false
     getFeatures()
       .then((f) => {
-        if (!cancelled) setAgentBuilderEnabled(!!f.agentBuilderEnabled)
+        if (!cancelled) {
+          setAgentBuilderEnabled(!!f.agentBuilderEnabled)
+          setAgentTestRunEnabled(!!f.agentBuilderEnabled && !!f.agentTestRunEnabled)
+        }
       })
       .catch(() => {
-        if (!cancelled) setAgentBuilderEnabled(false)
+        if (!cancelled) {
+          setAgentBuilderEnabled(false)
+          setAgentTestRunEnabled(false)
+        }
       })
     return () => {
       cancelled = true
@@ -227,7 +234,9 @@ export default function AppShell({ session, onLogout }: Props) {
               {view === 'documents' && <DocumentsView documents={documents} />}
               {view === 'analysis' && <AnalysisView />}
               {view === 'config' && <ConfigView isAdmin={isAdmin} />}
-              {view === 'agents' && isAdmin && <AgentsView isAdmin />}
+              {view === 'agents' && isAdmin && (
+                <AgentsView isAdmin agentTestRunEnabled={agentTestRunEnabled} />
+              )}
             </ErrorBoundary>
           </main>
         </div>

@@ -70,3 +70,27 @@ async def search_chunks(query: str, top_k: int, tenant_id: str) -> list[dict]:
     )
     resp.raise_for_status()
     return resp.json()["chunks"]
+
+
+async def search_chunks_scoped(
+    query: str,
+    top_k: int,
+    tenant_id: str,
+    knowledge_sources: list[str],
+) -> list[dict]:
+    """D3 retrieval contract: scope is server-built and version-pinned."""
+    resp = await get_client().post(
+        "/api/retrieval/search",
+        json={
+            "query": query,
+            "top_k": top_k,
+            "knowledge_sources": knowledge_sources,
+            "scope_contract_version": 1,
+        },
+        headers={
+            "X-Internal-Token": settings.internal_api_token,
+            "X-Tenant-Id": tenant_id,
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()["chunks"]

@@ -53,7 +53,12 @@ public sealed class AuthRepository : IAuthRepository
         return await conn.QuerySingleOrDefaultAsync<UserRow>(
             new CommandDefinition(
                 "SELECT u.username, u.password_hash AS PasswordHash, u.role, t.code AS TenantCode,"
-                + " to_json(u.capabilities)::text AS CapabilitiesJson"
+                + " to_json(u.capabilities)::text AS CapabilitiesJson,"
+                + " COALESCE(("
+                + " SELECT json_agg(m.group_id ORDER BY m.group_id)::text"
+                + " FROM user_group_membership m"
+                + " WHERE m.user_id=u.id AND m.tenant_id=u.tenant_id"
+                + "),'[]') AS GroupsJson"
                 + " FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.username = @username",
                 new { username }, cancellationToken: ct));
     }

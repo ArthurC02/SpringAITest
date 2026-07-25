@@ -22,7 +22,12 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 from app.engine import expressions, node_registry, script_runner, tool_registry
-from app.engine.harness import CONFIG_SEED_KEYS, IDENTITY_KEYS, IMMUTABLE_KEYS
+from app.engine.harness import (
+    CONFIG_SEED_KEYS,
+    IDENTITY_KEYS,
+    IMMUTABLE_KEYS,
+    RUNTIME_AUTHORITY_KEYS,
+)
 
 # 錯誤碼（規格 §3.4）。
 UNKNOWN_NODE = "unknown_node"
@@ -52,7 +57,9 @@ LOOP_MIN, LOOP_MAX = 1, 10
 # 由伺服器依 RequestContext 注入、Skill 不必宣告也不可經 input 覆蓋的鍵，
 # 以及 Query Intake 建立的不可變鍵、invoke 期注入的 Configuration Set 執行參數（縫⑦）：
 # 資料流檢查時視為「一定有」。
-RESERVED_KEYS = frozenset(IDENTITY_KEYS | IMMUTABLE_KEYS | CONFIG_SEED_KEYS)
+RESERVED_KEYS = frozenset(
+    IDENTITY_KEYS | IMMUTABLE_KEYS | CONFIG_SEED_KEYS | RUNTIME_AUTHORITY_KEYS
+)
 # 由 Harness 寫入的引擎鍵
 ENGINE_KEYS = frozenset(node_registry.ENGINE_KEYS)
 

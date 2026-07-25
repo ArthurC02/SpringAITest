@@ -16,6 +16,36 @@ const EMPTY_LIMITS: AgentRuntimeLimits = {
   step_budget: 0,
 }
 
+const AUDIENCE_GROUP_ID = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/
+
+/** Authoring 相容舊 bare role，但前端送出與顯示一律使用 namespaced principals。 */
+export function normalizeAudiencePrincipals(value: unknown): string[] {
+  return strings(value)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      if (entry === 'USER' || entry === 'ADMIN') return `role:${entry}`
+      if (entry.startsWith('role:')) {
+        const role = entry.slice('role:'.length).toUpperCase()
+        if (role === 'USER' || role === 'ADMIN') return `role:${role}`
+      }
+      return entry
+    })
+    .filter((entry, index, all) => all.indexOf(entry) === index)
+}
+
+export function audiencePrincipalError(audience: readonly string[]): string | null {
+  for (const entry of audience) {
+    if (entry === '*' || entry.includes('*')) {
+      return 'Audience 不允許 wildcard；請明確選擇 role 或 group。'
+    }
+    if (entry === 'role:USER' || entry === 'role:ADMIN') continue
+    if (entry.startsWith('group:') && AUDIENCE_GROUP_ID.test(entry.slice('group:'.length))) continue
+    return `Audience principal 格式錯誤：${entry}；只接受 role:USER、role:ADMIN 或 group:<canonical-id>。`
+  }
+  return null
+}
+
 /** 建立精靈預設 audience 依產品契約開給同 tenant 的 USER 與 ADMIN。 */
 export function createEmptyAgentDraft(): AgentDraft {
   return {
@@ -26,7 +56,7 @@ export function createEmptyAgentDraft(): AgentDraft {
     execution_roles: ['worker'],
     capabilities: [],
     output_contract: {},
-    audience: ['USER', 'ADMIN'],
+    audience: ['role:USER', 'role:ADMIN'],
     allowed_tools: [],
     knowledge_sources: [],
     skill_bindings: [],
@@ -76,7 +106,7 @@ export function normalizeAgentDraft(
     ),
     capabilities: strings(source.capabilities),
     output_contract: outputContract,
-    audience: strings(source.audience, ['USER', 'ADMIN']),
+    audience: normalizeAudiencePrincipals(source.audience ?? ['role:USER', 'role:ADMIN']),
     allowed_tools: strings(source.allowed_tools),
     knowledge_sources: strings(source.knowledge_sources),
     skill_bindings: Array.isArray(source.skill_bindings)

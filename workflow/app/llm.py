@@ -37,3 +37,16 @@ def get_llm() -> ChatOpenAI:
     實際使用的模型名稱由 LLM_MODEL 環境變數決定（測試時可指向 mock-gpt）。
     """
     return build_llm(settings.llm_model, DEFAULT_TEMPERATURE)
+
+
+@lru_cache(maxsize=1)
+def get_direct_agent_runtime_llm() -> ChatOpenAI:
+    """D3 billable turns are single-attempt; retries belong to the run graph."""
+    return ChatOpenAI(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        temperature=DEFAULT_TEMPERATURE,
+        timeout=settings.llm_timeout,
+        max_retries=0,
+    )

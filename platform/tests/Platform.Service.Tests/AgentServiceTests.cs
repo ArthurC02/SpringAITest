@@ -21,6 +21,13 @@ public sealed class AgentServiceTests
     private static readonly UserContext CapCtx =
         new("admin-a", "demo-a", "ADMIN", new[] { "workflow.manage", "agent.author" });
 
+    private static readonly UserContext GroupCtx =
+        new(
+            "admin-a",
+            "demo-a",
+            "ADMIN",
+            Groups: new[] { "operations", "reviewers" });
+
     private static AgentService Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
 
     private static HttpResponseMessage Resp(HttpStatusCode status, string body, string? etag = null)
@@ -55,6 +62,7 @@ public sealed class AgentServiceTests
         Assert.Equal("ADMIN", stub.Header("X-User-Role"));
         // 無 capabilities claim → 不帶 header(fail-closed:缺席即無授權)。
         Assert.False(stub.HasHeader("X-User-Capabilities"));
+        Assert.False(stub.HasHeader("X-User-Groups"));
 
         Assert.Equal(200, result.Status);
         Assert.Equal("researcher", Json(result.Body).EnumerateArray().Single().GetProperty("slug").GetString());
@@ -68,6 +76,31 @@ public sealed class AgentServiceTests
         await Build(stub).ListAsync(CapCtx);
 
         Assert.Equal("workflow.manage agent.author", stub.Header("X-User-Capabilities"));
+    }
+
+    [Fact]
+    public async Task List_RegeneratesGroupsHeaderFromUserContext()
+    {
+        var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, "[]"));
+
+        await Build(stub).ListAsync(GroupCtx);
+
+        Assert.Equal("operations reviewers", stub.Header("X-User-Groups"));
+    }
+
+    [Fact]
+    public async Task List_RejectsOverAggregateGroupContextBeforeTransport()
+    {
+        var stub = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException("must not send"));
+        var context = AdminCtx with
+        {
+            Groups = GroupSet(exceedByOneByte: true),
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => Build(stub).ListAsync(context));
+        Assert.Null(stub.LastRequest);
     }
 
     // ---- 路徑/方法/body 正確性 ----
@@ -101,6 +134,18 @@ public sealed class AgentServiceTests
         Assert.Equal("\"3\"", result.ETag);
         Assert.Equal(3, Json(result.Body).GetProperty("draft_version").GetInt32());
     }
+
+    private static string[] GroupSet(bool exceedByOneByte)
+        => Enumerable.Range(0, 16)
+            .Select(index =>
+            {
+                var length = index == 0 || exceedByOneByte && index == 1
+                    ? 128
+                    : 127;
+                var prefix = $"g{index:D2}";
+                return prefix + new string('a', length - prefix.Length);
+            })
+            .ToArray();
 
     [Fact]
     public async Task Deactivate_SendsDeleteToItemPath()

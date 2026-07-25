@@ -126,6 +126,35 @@ class BackendVectorSearch:
         return results
 
 
+class RevisionedScopedBackendVectorSearch:
+    """Production D3 adapter for Backend's revision-1 scoped search contract."""
+
+    scope_contract_version = 1
+
+    async def search(
+        self, query: str, *, filters: dict[str, Any], top_k: int, tenant_id: str
+    ) -> list[SourceResult]:
+        from app.backend_http import search_chunks_scoped
+
+        sources = filters.get("knowledge_sources")
+        if not isinstance(sources, list) or not sources:
+            return []
+        chunks = await search_chunks_scoped(query, top_k, tenant_id, sources)
+        return [
+            SourceResult(
+                source_id=f"{chunk['document_id']}#chunk{i}",
+                document_id=chunk["document_id"],
+                document_title=chunk["title"],
+                page=None,
+                source_type="text",
+                retrieval_method="vector",
+                original_score=chunk["score"],
+                metadata={"content": chunk["content"]},
+            )
+            for i, chunk in enumerate(chunks)
+        ]
+
+
 class ScoreReranker:
     """RerankerPort：確定性重排（無外部 reranker 服務時的預設），留下 score breakdown。"""
 

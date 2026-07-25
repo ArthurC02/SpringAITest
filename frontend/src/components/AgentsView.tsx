@@ -20,7 +20,13 @@ function statusOf(a: AgentSummary): { label: string; kind: 'admin' | 'user' } {
  * Agent Builder 工作區(D1):清單(名稱/狀態/目前 revision)＋建立精靈＋草稿編輯路由。
  * 入口本身已在 AppShell 以 features flag 把關;此處寫入操作再依 isAdmin 隱藏(伺服器為權威)。
  */
-export default function AgentsView({ isAdmin }: { isAdmin: boolean }) {
+export default function AgentsView({
+  isAdmin,
+  agentTestRunEnabled,
+}: {
+  isAdmin: boolean
+  agentTestRunEnabled: boolean
+}) {
   const toast = useToast()
   const confirm = useConfirm()
   const { data, loading, error, reload } = useResource(listAgents)
@@ -62,6 +68,7 @@ export default function AgentsView({ isAdmin }: { isAdmin: boolean }) {
           key={editing.id ?? 'new'}
           agentId={editing.id}
           isAdmin={isAdmin}
+          agentTestRunEnabled={agentTestRunEnabled}
           onClose={() => {
             setEditing(null)
             void reload()

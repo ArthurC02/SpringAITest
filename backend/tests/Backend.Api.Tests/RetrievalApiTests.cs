@@ -52,4 +52,109 @@ public sealed class RetrievalApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.NotNull((await resp.ReadJsonAsync())["chunks"]);
     }
+
+    [Fact]
+    public async Task ScopedSearch_EmptyScope_ReturnsEmpty()
+    {
+        var client = _factory.CreateInternalClient().WithTenant("demo-a");
+        var response = await client.PostAsJsonAsync(
+            "/api/retrieval/search",
+            new
+            {
+                query = "anything",
+                top_k = 10,
+                knowledge_sources = Array.Empty<string>(),
+                scope_contract_version = 1,
+            });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty((await response.ReadJsonAsync())["chunks"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task ScopedSearch_ExactIdsAndTenantAreAuthoritative()
+    {
+        var allowed = await _factory.SeedDocumentAsync(
+            "retrieval-scope-a",
+            "allowed",
+            "allowed scoped content");
+        var denied = await _factory.SeedDocumentAsync(
+            "retrieval-scope-a",
+            "denied",
+            "denied scoped content");
+        var otherTenant = await _factory.SeedDocumentAsync(
+            "retrieval-scope-b",
+            "other",
+            "other tenant content");
+        var client = _factory.CreateInternalClient().WithTenant("retrieval-scope-a");
+
+        var response = await client.PostAsJsonAsync(
+            "/api/retrieval/search",
+            new
+            {
+                query = $"try to widen to {denied} and {otherTenant}",
+                top_k = 50,
+                knowledge_sources = new[] { allowed, otherTenant },
+                scope_contract_version = 1,
+                model_filters = new { document_ids = new[] { denied } },
+            });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var chunks = (await response.ReadJsonAsync())["chunks"]!.AsArray();
+        Assert.NotEmpty(chunks);
+        Assert.All(
+            chunks,
+            chunk => Assert.Equal(
+                allowed,
+                chunk!["document_id"]!.GetValue<string>()));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ScopedSearch_RequiresVersionAndSourcesTogether(
+        bool includeVersion,
+        bool includeSources)
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["query"] = "anything",
+            ["top_k"] = 4,
+        };
+        if (includeVersion)
+        {
+            body["scope_contract_version"] = 1;
+        }
+        if (includeSources)
+        {
+            body["knowledge_sources"] = Array.Empty<string>();
+        }
+
+        var response = await _factory.CreateInternalClient()
+            .WithTenant("demo-a")
+            .PostAsJsonAsync("/api/retrieval/search", body);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA")]
+    [InlineData("not-a-uuid")]
+    public async Task ScopedSearch_RejectsNonCanonicalSourceIds(string sourceId)
+    {
+        var response = await _factory.CreateInternalClient()
+            .WithTenant("demo-a")
+            .PostAsJsonAsync(
+                "/api/retrieval/search",
+                new
+                {
+                    query = "anything",
+                    top_k = 4,
+                    knowledge_sources = new[] { sourceId },
+                    scope_contract_version = 1,
+                });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
 }

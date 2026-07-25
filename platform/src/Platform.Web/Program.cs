@@ -58,6 +58,8 @@ var jwtOptions = new JwtOptions
 // Agent Builder feature flag(D1):預設 false。關閉時整個 /api/agents* fail-closed 回 404(見下方中介軟體);
 // GET /api/features 只暴露這個布林旗標(AllowAnonymous)供前端決定是否顯示入口。
 var agentBuilderEnabled = string.Equals(cfg["AGENT_BUILDER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var agentTestRunEnabled = agentBuilderEnabled
+    && string.Equals(cfg["AGENT_TEST_RUN_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 
 builder.Services.AddSingleton(llmOptions);
 builder.Services.AddSingleton(mem0Options);
@@ -88,6 +90,10 @@ builder.Services.AddScoped<IConfigService, ConfigService>();
 builder.Services.AddScoped<ISkillService, SkillService>();
 builder.Services.AddScoped<IConfigurationSetService, ConfigurationSetService>();
 builder.Services.AddScoped<IAgentService, AgentService>();
+builder.Services.AddHttpClient<IAgentRunService, AgentRunService>(
+        c => c.Timeout = TimeSpan.FromSeconds(150))
+    .ConfigurePrimaryHttpMessageHandler(
+        () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
 
 // 供 agent pipeline(P1+)取得本次請求的登入身分與記憶 key;Platform.Service 不能引用 ASP.NET Core。
 builder.Services.AddHttpContextAccessor();
@@ -426,6 +432,29 @@ if (!agentBuilderEnabled)
     });
 }
 
+// Direct Agent test execution has its own rollout gate and also depends on Builder being enabled.
+// Fail closed before authentication for both the start route and the /api/runs family.
+if (!agentTestRunEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        var isRunRoute = context.Request.Path.StartsWithSegments("/api/runs");
+        var normalizedPath = path.TrimEnd('/');
+        var isAgentRunStart = normalizedPath.StartsWith(
+                "/api/agents/",
+                StringComparison.OrdinalIgnoreCase)
+            && normalizedPath.EndsWith("/runs", StringComparison.OrdinalIgnoreCase);
+        if (isRunRoute || isAgentRunStart)
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "找不到資源");
+            return;
+        }
+
+        await next();
+    });
+}
+
 // 刻意不用 UseHttpsRedirection:容器內對外是 http(:8080)。
 app.UseAuthentication();
 app.UseAuthorization();
@@ -437,7 +466,10 @@ app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAno
 
 // Feature flags(D1):AllowAnonymous、只暴露布林旗標,供前端決定是否顯示 Agent Builder 入口。
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
-app.MapGet("/api/features", () => Results.Ok(new { agentBuilderEnabled })).AllowAnonymous();
+app.MapGet(
+    "/api/features",
+    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled }))
+    .AllowAnonymous();
 
 // ---------------------------------------------------------------------------
 // AG-UI 端點:CopilotKit 前端經此與「操作助理」對話(HTTP POST + SSE)。

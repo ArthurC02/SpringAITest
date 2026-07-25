@@ -1,5 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Text;
+using Backend.Api.Agents;
 using Backend.Api.Auth;
 using Microsoft.IdentityModel.Tokens;
 
@@ -105,4 +106,97 @@ public sealed class JwtTests
         Assert.Equal("USER", jwt.Claims.Single(c => c.Type == "role").Value);
         Assert.Contains(jwt.Claims, c => c.Type == "capabilities" && c.Value == "workflow.manage");
     }
+
+    [Fact]
+    public void Issue_SignsCanonicalDistinctGroupClaimsInOrdinalOrder()
+    {
+        var token = Service().Issue(
+            "alice",
+            "ADMIN",
+            "demo-a",
+            groups: new[]
+            {
+                "zeta",
+                "operations",
+                "operations",
+            });
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+        Assert.Equal(
+            new[] { "operations", "zeta" },
+            jwt.Claims
+                .Where(claim => claim.Type == "groups")
+                .Select(claim => claim.Value)
+                .ToArray());
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("Operations")]
+    [InlineData("group:operations")]
+    [InlineData("operations finance")]
+    [InlineData("operations\n")]
+    public void Issue_OneMalformedGroupRejectsWholeSet(string malformed)
+    {
+        Assert.Throws<InvalidOperationException>(() => Service().Issue(
+            "alice",
+            "ADMIN",
+            "demo-a",
+            groups: new[] { "operations", malformed }));
+    }
+
+    [Fact]
+    public void Issue_OverBoundGroupSetRejectsWholeSet()
+    {
+        Assert.Throws<InvalidOperationException>(() => Service().Issue(
+            "alice",
+            "ADMIN",
+            "demo-a",
+            groups: Enumerable.Range(0, AgentAudience.MaxCallerGroups + 1)
+                .Select(index => $"group-{index:D3}")
+                .ToArray()));
+    }
+
+    [Fact]
+    public void Issue_GroupWireExactBoundFitsDeployedAuthorizationHeader_PlusOneFails()
+    {
+        var exact = GroupSet(exceedByOneByte: false);
+        var plusOne = GroupSet(exceedByOneByte: true);
+        Assert.Equal(
+            AgentAudience.MaxGroupsWireUtf8Bytes,
+            Encoding.UTF8.GetByteCount(string.Join(' ', exact)));
+        Assert.Equal(
+            AgentAudience.MaxGroupsWireUtf8Bytes + 1,
+            Encoding.UTF8.GetByteCount(string.Join(' ', plusOne)));
+
+        var capabilities = Enumerable.Range(0, 16)
+            .Select(index => $"tool.use:t{index:D2}{new string('a', 48)}")
+            .ToArray();
+        var token = Service().Issue(
+            "alice",
+            "ADMIN",
+            "demo-a",
+            capabilities,
+            exact);
+        var authorizationBytes = Encoding.ASCII.GetByteCount("Bearer " + token);
+        Assert.True(authorizationBytes < JwtService.MaxAuthorizationValueBytes);
+        Assert.True(authorizationBytes < 8 * 1_024);
+        Assert.Throws<InvalidOperationException>(() => Service().Issue(
+            "alice",
+            "ADMIN",
+            "demo-a",
+            groups: plusOne));
+    }
+
+    private static string[] GroupSet(bool exceedByOneByte)
+        => Enumerable.Range(0, 16)
+            .Select(index =>
+            {
+                var length = index == 0 || exceedByOneByte && index == 1
+                    ? 128
+                    : 127;
+                var prefix = $"g{index:D2}";
+                return prefix + new string('a', length - prefix.Length);
+            })
+            .ToArray();
 }

@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text.Json.Nodes;
 using Backend.Api.Agents;
+using Backend.Api.AgentRuns;
 using Backend.Api.Auth;
 using Backend.Api.Common;
 using Backend.Api.Config;
@@ -49,6 +50,9 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IAgentRepository>();
             services.AddSingleton<IAgentRepository, FakeAgentRepository>();
+
+            services.RemoveAll<IAgentRunRepository>();
+            services.AddSingleton<IAgentRunRepository, FakeAgentRunRepository>();
 
             // Skill 驗證不打真的 workflow(:8001)。
             services.RemoveAll<ISkillValidator>();
@@ -105,6 +109,14 @@ internal static class TestHelpers
     public static HttpClient WithUser(this HttpClient client, string userId)
     {
         client.DefaultRequestHeaders.Add(IdentityHeaders.UserHeader, userId);
+        return client;
+    }
+
+    public static HttpClient WithGroups(this HttpClient client, params string[] groups)
+    {
+        client.DefaultRequestHeaders.TryAddWithoutValidation(
+            IdentityHeaders.GroupsHeader,
+            string.Join(' ', groups));
         return client;
     }
 

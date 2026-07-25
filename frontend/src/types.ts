@@ -357,6 +357,54 @@ export interface AgentToolCatalogEntry {
   returns: string
 }
 
+/** D3 direct-Agent test runs. Platform keeps Agent-domain responses snake_case; the UI normalizer
+ * also accepts additive camelCase aliases during rollout. Unknown fields are never rendered. */
+export type AgentRunStatus =
+  | 'queued'
+  | 'starting'
+  | 'running'
+  | 'waiting_input'
+  | 'waiting_approval'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+  | string
+
+export interface AgentRunPinnedSkill {
+  name: string
+  revision: number | null
+}
+
+export interface AgentRun {
+  runId: string
+  status: AgentRunStatus
+  stateVersion: number | null
+  checkpointVersion: number | null
+  latestEventSequence: number
+  pinnedAgentRevision: number | null
+  pinnedWorkflowRevision: number | null
+  pinnedSkills: AgentRunPinnedSkill[]
+  budget: Record<string, string | number | boolean | null>
+  pendingInputMessage: string | null
+  output: unknown
+  error: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+export interface AgentRunEvent {
+  sequence: number
+  eventType: string
+  createdAt: string | null
+  payload: unknown
+}
+
+export interface AgentRunEventPage {
+  events: AgentRunEvent[]
+  latestEventSequence: number
+}
+
 /** 已發布 revision 的 Skill 綁定讀取形狀（backend 權威，含固定的 skill_revision）。 */
 export interface AgentRevisionBinding {
   skill: string

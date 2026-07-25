@@ -9,6 +9,7 @@ zip 進入系統的信任邊界，逃逸樣本（path traversal / drive / dup / 
 """
 
 import io
+import base64
 import zipfile
 
 import pytest
@@ -16,7 +17,13 @@ import yaml
 
 from app import tools as _tools  # noqa: F401  # 觸發 @tool 註冊（unknown_tool 決策表兩半）
 from app.engine import package
-from app.engine.package import LIMITS, PackageError
+from app.engine.package import (
+    LIMITS,
+    MAX_PACKAGE_BASE64_CHARS,
+    MAX_PACKAGE_RAW_BYTES,
+    PackageError,
+)
+from app.runtime.artifacts import ArtifactError, _decode_package
 
 # ---------------------------------------------------------------------------
 # zip fixture helpers
@@ -31,6 +38,23 @@ def make_zip(files, compression=zipfile.ZIP_DEFLATED) -> bytes:
         for name, data in items:
             z.writestr(name, data)
     return buf.getvalue()
+
+
+def test_package_transport_raw_and_base64_boundaries_are_shared() -> None:
+    exact = b"x" * MAX_PACKAGE_RAW_BYTES
+    over = exact + b"x"
+    exact_b64 = base64.b64encode(exact)
+    over_b64 = base64.b64encode(over)
+    assert len(exact_b64) == MAX_PACKAGE_BASE64_CHARS
+    assert len(over_b64) == MAX_PACKAGE_BASE64_CHARS + 4
+    assert _decode_package(exact_b64.decode("ascii")) == exact
+    with pytest.raises(PackageError) as exact_error:
+        package.parse_package(exact, "boundary")
+    assert "transport limit" not in str(exact_error.value)
+    with pytest.raises(ArtifactError, match="limit"):
+        _decode_package(over_b64.decode("ascii"))
+    with pytest.raises(PackageError, match="transport limit"):
+        package.parse_package(over, "oversized")
 
 
 def skill_md(
@@ -698,7 +722,61 @@ def test_file_count_off_point_rejects():
     with pytest.raises(PackageError) as ei:
         package.parse_package(raw, "sales-helper")
     assert ei.value.errors[0].code == package.INVALID_PACKAGE
-    assert "entry 數" in ei.value.errors[0].message
+
+
+def test_entry_path_character_limit_exact_and_plus_one() -> None:
+    exact = "references/" + "a" * (LIMITS.max_entry_path_chars - len("references/"))
+    parsed = package.parse_package(
+        agentic_zip(extra={exact: b"x"}), "sales-helper"
+    )
+    assert exact in parsed.entries
+
+    over = exact + "a"
+    with pytest.raises(PackageError, match="path exceeds"):
+        package.parse_package(agentic_zip(extra={over: b"x"}), "sales-helper")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "references/guide.txt ",
+        " references/guide.txt",
+        "references/ nested/guide.txt",
+        "references/nested /guide.txt",
+    ],
+)
+def test_resource_paths_with_segment_edge_whitespace_are_rejected(path: str) -> None:
+    with pytest.raises(PackageError):
+        package.parse_package(
+            agentic_zip(extra={path: b"not exactly addressable"}),
+            "sales-helper",
+        )
+
+
+def test_aggregate_entry_path_character_limit_exact_and_plus_one() -> None:
+    base = len("SKILL.md")
+    first = "references/" + "a" * 20
+    exact_second_length = LIMITS.max_total_path_chars - base - len(first)
+    limits = package.PackageLimits(
+        max_file_count=LIMITS.max_file_count,
+        max_single_file_bytes=LIMITS.max_single_file_bytes,
+        max_total_uncompressed_bytes=LIMITS.max_total_uncompressed_bytes,
+        max_compression_ratio=LIMITS.max_compression_ratio,
+        max_entry_path_chars=LIMITS.max_total_path_chars,
+        max_total_path_chars=LIMITS.max_total_path_chars,
+    )
+    second = "assets/" + "b" * (exact_second_length - len("assets/"))
+    package.parse_package(
+        agentic_zip(extra={first: b"x", second: b"x"}),
+        "sales-helper",
+        limits=limits,
+    )
+    with pytest.raises(PackageError, match="aggregate entry paths"):
+        package.parse_package(
+            agentic_zip(extra={first: b"x", second + "b": b"x"}),
+            "sales-helper",
+            limits=limits,
+        )
 
 
 def test_directory_entries_count_toward_archive_limit_on_point():

@@ -101,6 +101,7 @@ function Start-DeterministicProfile {
     $bytes = [byte[]]::new(48); [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     $script:evidenceHmacKey = [Convert]::ToBase64String($bytes)
     $env:EVIDENCE_HMAC_KEY = $script:evidenceHmacKey
+    $env:EVIDENCE_CHECKPOINT_HMAC_KEY = $script:evidenceHmacKey
     # E-06 needs a known source cadence. Supply it explicitly to Compose and then verify the
     # running model reports the same value before writing it into any release artifact.
     $env:EVIDENCE_FRAME_DELAY_SECONDS = '0.5'
@@ -113,7 +114,7 @@ function Start-DeterministicProfile {
         if ($LASTEXITCODE -ne 0) { throw 'Unable to start optional evidence profile.' }
     } finally {
         Pop-Location
-        Remove-Item Env:EVIDENCE_HMAC_KEY, Env:EVIDENCE_FRAME_DELAY_SECONDS -ErrorAction SilentlyContinue
+        Remove-Item Env:EVIDENCE_HMAC_KEY, Env:EVIDENCE_CHECKPOINT_HMAC_KEY, Env:EVIDENCE_FRAME_DELAY_SECONDS -ErrorAction SilentlyContinue
     }
     if (-not (Wait-Http 'http://127.0.0.1:4010/health') -or -not (Wait-Http 'http://127.0.0.1:8180/actuator/health')) { throw 'Evidence profile did not become ready.' }
     $modelHealth = (Invoke-Json GET 'http://127.0.0.1:4010/health').Content | ConvertFrom-Json
@@ -485,15 +486,18 @@ function Get-RealHmac([string]$Value) {
     'hmac:' + ([Convert]::ToHexString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))).ToLowerInvariant())
 }
 function Set-RealEvidenceEnvironment {
-    $names = @('EVIDENCE_HMAC_KEY','EVIDENCE_REAL_MEM0_MODEL','EVIDENCE_REAL_EMBEDDING_MODEL','EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER','EVIDENCE_REAL_WORKFLOW_MODEL','EVIDENCE_PLATFORM_LLM_BASE_URL','EVIDENCE_PLATFORM_LITELLM_KEY','EVIDENCE_PLATFORM_CHAT_MODEL','EVIDENCE_PLATFORM_MEM0_MODE')
+    $names = @('EVIDENCE_HMAC_KEY','EVIDENCE_CHECKPOINT_HMAC_KEY','EVIDENCE_WORKFLOW_LLM_BASE_URL','EVIDENCE_WORKFLOW_LLM_API_KEY','EVIDENCE_REAL_MEM0_MODEL','EVIDENCE_REAL_EMBEDDING_MODEL','EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER','EVIDENCE_REAL_WORKFLOW_MODEL','EVIDENCE_PLATFORM_LLM_BASE_URL','EVIDENCE_PLATFORM_LITELLM_KEY','EVIDENCE_PLATFORM_CHAT_MODEL','EVIDENCE_PLATFORM_MEM0_MODE')
     foreach ($name in $names) { $script:realEnvSnapshot[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
     $bytes = [byte[]]::new(48); [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     $script:realEvidenceHmacKey = [Convert]::ToBase64String($bytes)
     $env:EVIDENCE_HMAC_KEY = $script:realEvidenceHmacKey
+    $env:EVIDENCE_CHECKPOINT_HMAC_KEY = $script:realEvidenceHmacKey
     $env:EVIDENCE_REAL_MEM0_MODEL = $script:realModelAlias
     $env:EVIDENCE_REAL_EMBEDDING_MODEL = $script:realEmbeddingAlias
     $env:EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER = 'openai'
     $env:EVIDENCE_REAL_WORKFLOW_MODEL = $script:realModelAlias
+    $env:EVIDENCE_WORKFLOW_LLM_BASE_URL = 'http://litellm:4000/v1'
+    $env:EVIDENCE_WORKFLOW_LLM_API_KEY = 'sk-1234'
     $env:EVIDENCE_PLATFORM_LLM_BASE_URL = 'http://litellm:4000'
     $env:EVIDENCE_PLATFORM_LITELLM_KEY = 'sk-1234'
     $env:EVIDENCE_PLATFORM_CHAT_MODEL = $script:realModelAlias

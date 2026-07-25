@@ -121,6 +121,50 @@ public sealed class InMemoryRepositoriesTests
     }
 
     [Fact]
+    public async Task Rag_ScopedSearch_EnforcesTenantAndExactDocumentIds()
+    {
+        var repo = new InMemoryRagRepository();
+        var allowed = Guid.NewGuid();
+        var denied = Guid.NewGuid();
+        var otherTenant = Guid.NewGuid();
+        await SeedReadyAsync(
+            repo,
+            "demo-a",
+            allowed.ToString("D"),
+            "allowed",
+            new[] { ("allowed", Vec(1f, 0f)) });
+        await SeedReadyAsync(
+            repo,
+            "demo-a",
+            denied.ToString("D"),
+            "denied",
+            new[] { ("denied", Vec(1f, 0f)) });
+        await SeedReadyAsync(
+            repo,
+            "demo-b",
+            otherTenant.ToString("D"),
+            "other",
+            new[] { ("other", Vec(1f, 0f)) });
+
+        var scoped = await repo.SearchScopedAsync(
+            "demo-a",
+            Vec(1f, 0f),
+            10,
+            new[] { allowed, otherTenant },
+            default);
+        var empty = await repo.SearchScopedAsync(
+            "demo-a",
+            Vec(1f, 0f),
+            10,
+            Array.Empty<Guid>(),
+            default);
+
+        Assert.All(scoped, item => Assert.Equal(allowed.ToString("D"), item.DocumentId));
+        Assert.NotEmpty(scoped);
+        Assert.Empty(empty);
+    }
+
+    [Fact]
     public async Task Rag_Search_DimensionMismatch_SkipsChunk_DoesNotThrow()
     {
         var repo = new InMemoryRagRepository();

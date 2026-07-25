@@ -38,5 +38,34 @@ class Settings(BaseSettings):
     kb_query_top_k: int = 8                     # 檢索計畫預設取回筆數；requires_multi_doc 時節點內會加倍
     kb_query_max_retrieval_attempts: int = 2    # 檢索嘗試上限（含首次），防止驗證 RETRY 無限重試
 
+    # D3 direct-Agent runtime is independently feature gated. PostgreSQL is
+    # the only production checkpoint source; tests inject an in-memory saver.
+    agent_test_run_enabled: bool = False
+    checkpoint_database_url: str | None = None
+    checkpoint_hmac_key: str = "agent-run-checkpoint-dev-key"
+    runtime_lease_seconds: int = Field(default=30, ge=5, le=300)
+    runtime_recovery_interval_seconds: float = Field(default=10.0, ge=1, le=300)
+    runtime_recovery_batch_size: int = Field(default=20, ge=1, le=100)
+    runtime_cancel_grace_seconds: float = Field(default=2.0, gt=0, le=30)
+    runtime_default_timeout_seconds: int = Field(default=60, ge=1, le=600)
+    runtime_default_step_budget: int = Field(default=24, ge=1, le=200)
+    runtime_default_tool_rounds: int = Field(default=8, ge=1, le=50)
+    runtime_default_context_rounds: int = Field(default=3, ge=1, le=20)
+    runtime_default_token_budget: int = Field(default=16_000, ge=256, le=1_000_000)
+    runtime_max_message_chars: int = Field(default=32_000, ge=256, le=200_000)
+    runtime_model_context_tokens: int = Field(
+        default=128_000, ge=1_024, le=2_000_000
+    )
+    runtime_model_output_reserve_tokens: int = Field(
+        default=4_096, ge=1, le=1_000_000
+    )
+
+    @field_validator("checkpoint_hmac_key")
+    @classmethod
+    def validate_checkpoint_hmac_key(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("CHECKPOINT_HMAC_KEY must not be blank")
+        return value
+
 
 settings = Settings()

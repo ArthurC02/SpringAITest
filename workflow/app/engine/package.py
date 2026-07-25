@@ -43,6 +43,10 @@ from typing import Any, Mapping
 import yaml
 from pydantic import ValidationError
 
+MAX_PACKAGE_BASE64_CHARS = 8 * 1024 * 1024
+# Base64 length is 4 * ceil(raw_bytes / 3). This is the largest raw payload
+# whose canonical encoding fits the immutable execution-artifact field.
+MAX_PACKAGE_RAW_BYTES = (MAX_PACKAGE_BASE64_CHARS // 4) * 3
 from app.engine import script_runner, tool_registry
 from app.engine.skill import Skill, SkillError, parse_source, validate_source
 
@@ -72,6 +76,8 @@ class PackageLimits:
     max_single_file_bytes: int
     max_total_uncompressed_bytes: int
     max_compression_ratio: int
+    max_entry_path_chars: int = 128
+    max_total_path_chars: int = 8_192
 
 
 # 唯一來源常數。endpoint 引用 LIMITS；測試以 LIMITS 的欄位建邊界 fixture（證明單一來源）。
@@ -183,7 +189,9 @@ def _validate_entry_path(name: str) -> str:
     # 避免不同解壓器折疊後形成正規化重複。
     canonical = normalized[:-1] if normalized.endswith("/") else normalized
     parts = canonical.split("/")
-    if not canonical or any(p in ("", "..", ".") for p in parts):
+    if not canonical or any(
+        p in ("", "..", ".") or p != p.strip() for p in parts
+    ):
         raise _reject(f"不允許空白、'..' 或 '.' 路徑成分: {name!r}")
     return canonical
 
@@ -433,6 +441,7 @@ def _read_entries(raw: bytes, limits: PackageLimits) -> dict[str, bytes]:
         seen_paths: set[str] = set()
         total_uncompressed = 0
         total_compressed = 0
+        total_path_chars = 0
         ordered_offsets = sorted(info.header_offset for info in infos)
         next_offsets = {
             offset: (
@@ -459,6 +468,16 @@ def _read_entries(raw: bytes, limits: PackageLimits) -> dict[str, bytes]:
                     f"entry local/central CRC 或大小不一致: {info.filename!r}"
                 )
             path = _validate_entry_path(info.filename)
+            if len(path) > limits.max_entry_path_chars:
+                raise _reject(
+                    f"archive entry path exceeds {limits.max_entry_path_chars} characters"
+                )
+            total_path_chars += len(path)
+            if total_path_chars > limits.max_total_path_chars:
+                raise _reject(
+                    "archive aggregate entry paths exceed "
+                    f"{limits.max_total_path_chars} characters"
+                )
             if path in seen_paths:
                 raise _reject(f"正規化後重複的 entry: {path!r}")
             seen_paths.add(path)
@@ -502,6 +521,7 @@ def _read_entries(raw: bytes, limits: PackageLimits) -> dict[str, bytes]:
 
 def _strip_single_root_folder(
     entries: dict[str, bytes],
+    limits: PackageLimits = LIMITS,
 ) -> tuple[dict[str, bytes], str | None]:
     """所有 entry 都在同一個頂層資料夾下 → 回 (剝除前綴的 entries, 前綴)；否則原樣回 (entries, None)。
 
@@ -516,7 +536,17 @@ def _strip_single_root_folder(
     if not all(path.startswith(f"{prefix}/") for path in entries):
         return entries, None  # 有與資料夾同名的 root 檔案 → 不是單一頂層資料夾結構
     cut = len(prefix) + 1
-    return {path[cut:]: data for path, data in entries.items()}, prefix
+    stripped = {path[cut:]: data for path, data in entries.items()}
+    if any(len(path) > limits.max_entry_path_chars for path in stripped):
+        raise _reject(
+            f"archive exposed path exceeds {limits.max_entry_path_chars} characters"
+        )
+    if sum(map(len, stripped)) > limits.max_total_path_chars:
+        raise _reject(
+            "archive aggregate exposed paths exceed "
+            f"{limits.max_total_path_chars} characters"
+        )
+    return stripped, prefix
 
 
 # ---------------------------------------------------------------------------
@@ -883,11 +913,16 @@ def parse_package(
     expected_name 是 optional transport guard：None 時由 SKILL.md 唯一決定名稱；有值時嚴格核對。
     sha256 為原始 zip bytes 的雜湊。
     """
+    if len(raw) > MAX_PACKAGE_RAW_BYTES:
+        raise PackageError.of(
+            INVALID_PACKAGE,
+            f"package exceeds the {MAX_PACKAGE_RAW_BYTES}-byte transport limit",
+        )
     sha256 = hashlib.sha256(raw).hexdigest()
     entries = _read_entries(raw, limits)
     folder: str | None = None
     if SKILL_MD not in entries:
-        entries, folder = _strip_single_root_folder(entries)
+        entries, folder = _strip_single_root_folder(entries, limits)
     if SKILL_MD not in entries:
         raise PackageError.of(MISSING_SKILL_MD, f"package 缺少根目錄 {SKILL_MD}")
 

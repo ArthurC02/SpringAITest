@@ -606,6 +606,79 @@ public sealed class FakeConfigurationSetService : IConfigurationSetService
     }
 }
 
+/// <summary>D3 run API fake used to verify the Platform authentication and feature-gate boundary.</summary>
+public sealed class FakeAgentRunService : IAgentRunService
+{
+    public static readonly List<string> Calls = new();
+    public static UserContext? LastContext { get; set; }
+    public const string RunIdText = "44444444-4444-4444-4444-444444444444";
+
+    private const string RunJson =
+        """{"id":"44444444-4444-4444-4444-444444444444","status":"queued","state_version":1,"checkpoint_version":0}""";
+
+    public Task<AgentProxyResponse> StartAsync(
+        Guid agentId,
+        string? message,
+        string? idempotencyKey,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        Calls.Add($"start:{agentId:D}:{message}:{idempotencyKey}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(202, RunJson, null));
+    }
+
+    public Task<AgentProxyResponse> GetAsync(
+        Guid runId,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        Calls.Add($"get:{runId:D}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(200, RunJson, null));
+    }
+
+    public Task<AgentProxyResponse> EventsAsync(
+        Guid runId,
+        long afterSequence,
+        int limit,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        Calls.Add($"events:{runId:D}:{afterSequence}:{limit}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(
+            200,
+            $$"""{"run_id":"{{RunIdText}}","events":[],"next_sequence":{{afterSequence}}}""",
+            null));
+    }
+
+    public Task<AgentProxyResponse> ResumeAsync(
+        Guid runId,
+        string? message,
+        long? expectedCheckpointVersion,
+        string? idempotencyKey,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        Calls.Add($"resume:{runId:D}:{message}:{expectedCheckpointVersion}:{idempotencyKey}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(202, RunJson, null));
+    }
+
+    public Task<AgentProxyResponse> CancelAsync(
+        Guid runId,
+        string? reason,
+        string? idempotencyKey,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        Calls.Add($"cancel:{runId:D}:{reason}:{idempotencyKey}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(202, RunJson, null));
+    }
+}
+
 /// <summary>
 /// Agent Registry 服務 fake(代表 backend :8002 的 /api/agents 透明代理)。重現 D1 需驗的 backend 行為:
 /// 所有 Builder 端點非 ADMIN → 403、GET 帶 ETag、If-Match 版本不符 → 409、

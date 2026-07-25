@@ -38,6 +38,18 @@ IDENTITY_KEYS = {"tenant_id", "user_id", "role"}
 # 節點/Script 不得寫入（只讀）。目前只有通用 retrieve@1.0 讀的 retrieval_top_k。
 CONFIG_SEED_KEYS = {"retrieval_top_k"}
 
+# D3 revision-pinned legacy-flow adapter seeds these values from the immutable
+# Agent snapshot. They are state channels so existing Tool steps can consume
+# them, but Skill input, nodes, and scripts must never be able to overwrite
+# them.
+RUNTIME_AUTHORITY_KEYS = {
+    "run_id",
+    "agent_id",
+    "agent_revision",
+    "knowledge_sources",
+    "enforce_data_scope",
+}
+
 
 @dataclass
 class _Step:

@@ -61,6 +61,73 @@ public sealed class CapabilityAuthorizationTests : IClassFixture<TestWebAppFacto
         Assert.False(principal.HasCapability("workflow.manage"));
     }
 
+    [Fact]
+    public void GetGroups_RepeatedCanonicalClaimsReturnSortedAtomicSet()
+    {
+        var principal = Principal(
+            "ADMIN",
+            new Claim("groups", "zeta"),
+            new Claim("groups", "operations"));
+
+        Assert.Equal(
+            new[] { "operations", "zeta" },
+            principal.GetGroups());
+        Assert.Equal(
+            new[] { "operations", "zeta" },
+            principal.ToUserContext().Groups);
+    }
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("Operations")]
+    [InlineData("group:operations")]
+    [InlineData("operations finance")]
+    [InlineData("operations,finance")]
+    [InlineData("operations\n")]
+    public void GetGroups_OneMalformedClaimRejectsWholeSet(string malformed)
+    {
+        var principal = Principal(
+            "ADMIN",
+            new Claim("groups", "operations"),
+            new Claim("groups", malformed));
+
+        Assert.Null(principal.GetGroups());
+        Assert.Null(principal.ToUserContext().Groups);
+    }
+
+    [Fact]
+    public void GetGroups_OverBoundRejectsWholeSet()
+    {
+        var claims = Enumerable.Range(0, 257)
+            .Select(index => new Claim("groups", $"group-{index:D3}"))
+            .ToArray();
+        var principal = Principal("ADMIN", claims);
+
+        Assert.Null(principal.GetGroups());
+    }
+
+    [Fact]
+    public void GetGroups_DuplicateClaimRejectsWholeSet()
+    {
+        var principal = Principal(
+            "ADMIN",
+            new Claim("groups", "operations"),
+            new Claim("groups", "operations"));
+
+        Assert.Null(principal.GetGroups());
+    }
+
+    [Fact]
+    public void GetGroups_OverAggregateWireBoundRejectsWholeSet()
+    {
+        var claims = GroupSet(exceedByOneByte: true)
+            .Select(group => new Claim("groups", group))
+            .ToArray();
+        var principal = Principal("ADMIN", claims);
+
+        Assert.Null(principal.GetGroups());
+    }
+
     // ---- (b) policy 映射 ----
 
     [Fact]
@@ -82,4 +149,16 @@ public sealed class CapabilityAuthorizationTests : IClassFixture<TestWebAppFacto
         Assert.False((await authz.AuthorizeAsync(adminNoCap, null, "workflow.manage")).Succeeded);
         Assert.False((await authz.AuthorizeAsync(userNoCap, null, "workflow.manage")).Succeeded);
     }
+
+    private static string[] GroupSet(bool exceedByOneByte)
+        => Enumerable.Range(0, 16)
+            .Select(index =>
+            {
+                var length = index == 0 || exceedByOneByte && index == 1
+                    ? 128
+                    : 127;
+                var prefix = $"g{index:D2}";
+                return prefix + new string('a', length - prefix.Length);
+            })
+            .ToArray();
 }

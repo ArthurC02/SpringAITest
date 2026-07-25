@@ -813,6 +813,224 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Empty(body["errors"]!.AsArray());
     }
 
+    [Fact]
+    public async Task Validate_KnowledgeSourcesRequireCanonicalDocumentUuids()
+    {
+        var client = Admin();
+        var body = ValidBody("val-source-id");
+        body["knowledge_sources"] = new JsonArray("not-a-document-uuid");
+        var (id, _) = await CreateAsync(client, body);
+
+        var result = await (await ValidateAsync(client, id)).ReadJsonAsync();
+
+        Assert.False(result["valid"]!.GetValue<bool>());
+        Assert.Contains(
+            result["errors"]!.AsArray(),
+            error => error!["field"]!.GetValue<string>() == "knowledge_sources");
+    }
+
+    [Fact]
+    public async Task Validate_RejectsDefinitionsOutsideD3ExecutionSnapshotBounds()
+    {
+        var client = Admin();
+        var body = ValidBody(
+            $"d3-snapshot-bounds-{Guid.NewGuid():N}",
+            new string('n', AgentExecutionContract.MaxAgentNameLength + 1));
+        body["system_prompt"] =
+            new string('p', AgentExecutionContract.MaxSystemPromptLength + 1);
+        body["audience"] = new JsonArray(
+            Enumerable.Range(0, AgentExecutionContract.MaxAudience + 1)
+                .Select(index => JsonValue.Create($"group:role-{index}"))
+                .ToArray());
+        body["allowed_tools"] = new JsonArray(
+            Enumerable.Range(0, AgentExecutionContract.MaxAllowedTools + 1)
+                .Select(index => JsonValue.Create($"tool-{index}"))
+                .ToArray());
+        body["knowledge_sources"] = new JsonArray(
+            Enumerable.Range(0, AgentExecutionContract.MaxKnowledgeSources + 1)
+                .Select(_ => JsonValue.Create(Guid.NewGuid().ToString("D")))
+                .ToArray());
+        body["skill_bindings"] = new JsonArray(
+            Enumerable.Range(0, AgentExecutionContract.MaxSkillBindings + 1)
+                .Select(index => (JsonNode)new JsonObject
+                {
+                    ["skill"] = $"bound-skill-{index}",
+                    ["revision_policy"] = "latest",
+                })
+                .ToArray());
+        body["output_contract"] = new JsonObject();
+        body["runtime_limits"] = new JsonObject
+        {
+            ["max_tool_rounds"] = -1,
+            ["max_context_rounds"] = AgentExecutionContract.MaxContextRounds + 1,
+            ["timeout_seconds"] = AgentExecutionContract.MaxTimeoutSeconds + 1,
+            ["token_budget"] = AgentExecutionContract.MaxTokenBudget + 1,
+            ["step_budget"] = AgentExecutionContract.MaxStepBudget + 1,
+        };
+        var (id, _) = await CreateAsync(client, body);
+
+        var result = await (await ValidateAsync(client, id)).ReadJsonAsync();
+
+        Assert.False(result["valid"]!.GetValue<bool>());
+        var fields = result["errors"]!.AsArray()
+            .Select(error => error!["field"]!.GetValue<string>())
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("name", fields);
+        Assert.Contains("system_prompt", fields);
+        Assert.Contains("audience", fields);
+        Assert.Contains("allowed_tools", fields);
+        Assert.Contains("knowledge_sources", fields);
+        Assert.Contains("skill_bindings", fields);
+        Assert.Contains("runtime_limits.max_tool_rounds", fields);
+        Assert.Contains("runtime_limits.max_context_rounds", fields);
+        Assert.Contains("runtime_limits.timeout_seconds", fields);
+        Assert.Contains("runtime_limits.token_budget", fields);
+        Assert.Contains("runtime_limits.step_budget", fields);
+        Assert.Null(
+            (await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync())
+            ["draft_validated_version"]);
+    }
+
+    [Fact]
+    public void ExecutionSnapshotContract_AcceptsExactPublishedBounds()
+    {
+        var definition = AgentCanonicalizer.Canonicalize(new AgentUpsert(
+            Slug: null,
+            Name: null,
+            Description: null,
+            SystemPrompt: new string('p', AgentExecutionContract.MaxSystemPromptLength),
+            ExecutionRoles: new[] { "worker", "verifier" },
+            Capabilities: null,
+            OutputContract: JsonSerializer.SerializeToElement(new { type = "object" }),
+            Audience: Enumerable.Range(0, AgentExecutionContract.MaxAudience)
+                .Select(index => $"group:role-{index}")
+                .ToArray(),
+            AllowedTools: Enumerable.Range(0, AgentExecutionContract.MaxAllowedTools)
+                .Select(index => $"tool-{index}")
+                .ToArray(),
+            SkillBindings: Enumerable.Range(0, AgentExecutionContract.MaxSkillBindings)
+                .Select(index => new AgentSkillBinding($"skill-{index}"))
+                .ToArray(),
+            KnowledgeSources: Enumerable.Range(0, AgentExecutionContract.MaxKnowledgeSources)
+                .Select(_ => Guid.NewGuid().ToString("D"))
+                .ToArray(),
+            BusinessRules: null,
+            RuntimeLimits: new AgentRuntimeLimits(
+                AgentExecutionContract.MaxToolRounds,
+                AgentExecutionContract.MaxContextRounds,
+                AgentExecutionContract.MaxTimeoutSeconds,
+                AgentExecutionContract.MaxTokenBudget,
+                AgentExecutionContract.MaxStepBudget),
+            RuntimeWorkflow: new AgentWorkflowRef(
+                AgentDefaults.RuntimeWorkflowId,
+                AgentDefaults.RuntimeWorkflowRevision)));
+
+        Assert.Empty(AgentCanonicalizer.Validate(
+            definition,
+            new string('n', AgentExecutionContract.MaxAgentNameLength)));
+    }
+
+    [Fact]
+    public async Task RepositoryPublishAndRestore_RecheckExecutionSnapshotContract()
+    {
+        var repo = _factory.Fake<IAgentRepository>();
+        var suffix = Guid.NewGuid().ToString("N");
+        var invalidDefinition = AgentCanonicalizer.Canonicalize(new AgentUpsert(
+            Slug: null,
+            Name: null,
+            Description: null,
+            SystemPrompt: new string(
+                'p', AgentExecutionContract.MaxSystemPromptLength + 1),
+            ExecutionRoles: new[] { "worker" },
+            Capabilities: null,
+            OutputContract: null,
+            Audience: new[] { "ADMIN" },
+            AllowedTools: null,
+            SkillBindings: null,
+            KnowledgeSources: null,
+            BusinessRules: null,
+            RuntimeLimits: new AgentRuntimeLimits(TimeoutSeconds: -1),
+            RuntimeWorkflow: new AgentWorkflowRef(
+                AgentDefaults.RuntimeWorkflowId,
+                AgentDefaults.RuntimeWorkflowRevision)));
+        var invalid = await repo.CreateAsync(
+            "demo-a",
+            $"invalid-contract-{suffix}",
+            "invalid contract",
+            string.Empty,
+            invalidDefinition,
+            SkillHash.Sha256(invalidDefinition),
+            "admin-a",
+            default);
+        Assert.NotNull(invalid);
+        Assert.True(await repo.MarkValidatedAsync(
+            "demo-a",
+            invalid!.Id,
+            invalid.DraftVersion,
+            invalidDefinition,
+            SkillHash.Sha256(invalidDefinition),
+            default));
+
+        var rejectedPublish = await repo.PublishAsync(
+            "demo-a",
+            invalid.Id,
+            invalid.DraftVersion,
+            invalidDefinition,
+            SkillHash.Sha256(invalidDefinition),
+            "admin-a",
+            default);
+
+        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedPublish.Status);
+        Assert.Contains(
+            rejectedPublish.Errors!,
+            error => error.Field == "system_prompt");
+        Assert.Contains(
+            rejectedPublish.Errors!,
+            error => error.Field == "runtime_limits.timeout_seconds");
+
+        var validDefinition = AgentCanonicalizer.Canonicalize(
+            ValidBody($"valid-contract-{suffix}").Deserialize<AgentUpsert>()!);
+        var valid = await repo.CreateAsync(
+            "demo-a",
+            $"valid-contract-{suffix}",
+            "valid contract",
+            string.Empty,
+            validDefinition,
+            SkillHash.Sha256(validDefinition),
+            "admin-a",
+            default);
+        Assert.NotNull(valid);
+        Assert.True(await repo.MarkValidatedAsync(
+            "demo-a",
+            valid!.Id,
+            valid.DraftVersion,
+            validDefinition,
+            SkillHash.Sha256(validDefinition),
+            default));
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await repo.PublishAsync(
+                "demo-a",
+                valid.Id,
+                valid.DraftVersion,
+                validDefinition,
+                SkillHash.Sha256(validDefinition),
+                "admin-a",
+                default)).Status);
+
+        var rejectedRestore = await repo.RestoreAsync(
+            "demo-a",
+            valid.Id,
+            1,
+            invalidDefinition,
+            SkillHash.Sha256(invalidDefinition),
+            "admin-a",
+            default);
+        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedRestore.Status);
+        Assert.Single(await repo.ListRevisionsAsync(
+            "demo-a", valid.Id, default));
+    }
+
     [Theory]
     [InlineData("system_prompt", "")]      // 空 system_prompt
     [InlineData("execution_roles", "[]")]  // 空 roles

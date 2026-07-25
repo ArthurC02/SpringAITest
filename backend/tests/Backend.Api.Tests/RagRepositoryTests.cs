@@ -90,6 +90,52 @@ public sealed class RagRepositoryTests : IAsyncLifetime
     // ---- (b) 重跑冪等:重複投遞同一份不得讓 chunk 累積(先 DELETE 再批次 INSERT) ----
 
     [SkippableFact]
+    public async Task SearchScopedAsync_EnforcesTenantAndExactDocumentIds()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenantA = "ragrepo-scoped-a";
+        const string tenantB = "ragrepo-scoped-b";
+        var allowed = Guid.NewGuid();
+        var denied = Guid.NewGuid();
+        var otherTenant = Guid.NewGuid();
+        await CompleteAsync(
+            tenantA,
+            allowed.ToString("D"),
+            "allowed",
+            new[] { "allowed" },
+            new[] { OneHot(0) });
+        await CompleteAsync(
+            tenantA,
+            denied.ToString("D"),
+            "denied",
+            new[] { "denied" },
+            new[] { OneHot(0) });
+        await CompleteAsync(
+            tenantB,
+            otherTenant.ToString("D"),
+            "other",
+            new[] { "other" },
+            new[] { OneHot(0) });
+
+        var scoped = await Repo.SearchScopedAsync(
+            tenantA,
+            OneHot(0),
+            10,
+            new[] { allowed, otherTenant },
+            default);
+        var empty = await Repo.SearchScopedAsync(
+            tenantA,
+            OneHot(0),
+            10,
+            Array.Empty<Guid>(),
+            default);
+
+        Assert.NotEmpty(scoped);
+        Assert.All(scoped, item => Assert.Equal(allowed.ToString("D"), item.DocumentId));
+        Assert.Empty(empty);
+    }
+
+    [SkippableFact]
     public async Task CompleteDocumentAsync_Rerun_IsIdempotent_NoChunkAccumulation()
     {
         _fx.SkipIfUnavailable();

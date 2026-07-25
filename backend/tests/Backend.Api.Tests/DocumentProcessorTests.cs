@@ -172,6 +172,19 @@ public sealed class ThrowingMarkFailedRagRepository : IRagRepository
         string tenantId, float[] queryEmbedding, int topK, CancellationToken ct)
         => _inner.SearchAsync(tenantId, queryEmbedding, topK, ct);
 
+    public Task<IReadOnlyList<RetrievedChunk>> SearchScopedAsync(
+        string tenantId,
+        float[] queryEmbedding,
+        int topK,
+        IReadOnlyCollection<Guid> allowedDocumentIds,
+        CancellationToken ct)
+        => _inner.SearchScopedAsync(
+            tenantId,
+            queryEmbedding,
+            topK,
+            allowedDocumentIds,
+            ct);
+
     public Task<AnalysisSummary> SummaryAsync(string tenantId, CancellationToken ct)
         => _inner.SummaryAsync(tenantId, ct);
 }

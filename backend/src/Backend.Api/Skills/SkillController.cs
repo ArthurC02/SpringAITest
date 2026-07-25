@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Backend.Api.AgentRuns;
 using Backend.Api.Common;
 using Microsoft.AspNetCore.Mvc;
 
@@ -113,6 +114,45 @@ public sealed class SkillController : ControllerBase
         }
 
         return Ok(revisions);
+    }
+
+    /// <summary>
+    /// D3 runtime 專用的 revision-aware immutable execution artifact。與 current-only
+    /// <c>/{name}/package</c> 不同，這裡只讀指定的 skill_revision；Skill 後續更新或停用都不會漂移。
+    /// package 以 base64 放在 internal JSON envelope，避免依 kind 使用兩套 wire contract。
+    /// </summary>
+    [HttpGet("{name}/revisions/{revision:int}/execution-artifact")]
+    [AdminOnly("權限不足，無法存取 Skill execution artifact")]
+    public async Task<ActionResult<SkillExecutionArtifact>> ExecutionArtifact(
+        string name, int revision, CancellationToken ct)
+    {
+        var row = await _repo.GetRevisionAsync(Request.RequireTenant(), name, revision, ct);
+        if (row is null)
+        {
+            throw new ApiException(
+                StatusCodes.Status404NotFound, $"找不到 Skill revision：{name}#{revision}");
+        }
+
+        if (!string.Equals(SkillHash.Sha256(row.Definition), row.DefinitionSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Skill revision definition hash mismatch：{name}#{revision}");
+        }
+
+        var packageSha = row.Package is null ? null : SkillHash.Sha256(row.Package);
+        if (row.PackageSha256 is not null
+            && !string.Equals(packageSha, row.PackageSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Skill revision package hash mismatch：{name}#{revision}");
+        }
+
+        return Ok(new SkillExecutionArtifact(
+            name,
+            row.Revision,
+            row.Kind,
+            row.Definition,
+            row.DefinitionSha256,
+            packageSha,
+            row.Package is null ? null : Convert.ToBase64String(row.Package)));
     }
 
     /// <summary>建立 skill — 201(revision 1)。定義未通過引擎驗證 → 422;同名(含既有工作流)→ 409。僅 flow。</summary>

@@ -158,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
             and message.get("tool_call_id") == "call_evidence_1"
             for message in messages
         )
+        d3_action = self._d3_runtime_action(request, messages)
         wants_tool_call = (
             "__evidence_tool_call__" in str(last_user)
             and bool(request.get("tools"))
@@ -165,14 +166,17 @@ class Handler(BaseHTTPRequestHandler):
         )
         response_id = "chatcmpl-evidence-" + uuid.uuid4().hex
         if request.get("stream") is True:
-            self._stream(response_id, request, wants_tool_call)
+            self._stream(response_id, request, wants_tool_call, d3_action)
         else:
-            self._completion(response_id, request, wants_tool_call)
+            self._completion(response_id, request, wants_tool_call, d3_action)
 
-    def _completion(self, response_id: str, request: dict[str, Any], wants_tool_call: bool) -> None:
+    def _completion(self, response_id: str, request: dict[str, Any], wants_tool_call: bool, d3_action: str | None) -> None:
         message: dict[str, Any] = {"role": "assistant", "content": "evidence model reply"}
         finish_reason = "stop"
-        if wants_tool_call:
+        if d3_action:
+            message = self._d3_tool_call_message(request, d3_action)
+            finish_reason = "tool_calls"
+        elif wants_tool_call:
             message = self._tool_call_message(request)
             finish_reason = "tool_calls"
         self._json(HTTPStatus.OK, {
@@ -183,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         })
 
-    def _stream(self, response_id: str, request: dict[str, Any], wants_tool_call: bool) -> None:
+    def _stream(self, response_id: str, request: dict[str, Any], wants_tool_call: bool, d3_action: str | None) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -191,8 +195,9 @@ class Handler(BaseHTTPRequestHandler):
         # readers see completion instead of waiting forever for a persistent socket.
         self.send_header("Connection", "close")
         self.end_headers()
-        if wants_tool_call:
-            deltas = [{"role": "assistant", "tool_calls": self._tool_call_message(request)["tool_calls"]}]
+        if d3_action or wants_tool_call:
+            call_message = self._d3_tool_call_message(request, d3_action) if d3_action else self._tool_call_message(request)
+            deltas = [{"role": "assistant", "tool_calls": call_message["tool_calls"]}]
             self._write_frame(response_id, request, deltas[0], "tool_calls")
         else:
             for index, text in enumerate(("evidence", " model", " reply")):
@@ -239,6 +244,56 @@ class Handler(BaseHTTPRequestHandler):
             "role": "assistant",
             "content": None,
             "tool_calls": [{"id": "call_evidence_1", "type": "function", "function": {"name": name, "arguments": '{"view":"documents"}'}}],
+        }
+
+    @staticmethod
+    def _d3_runtime_action(request: dict[str, Any], messages: list[Any]) -> str | None:
+        """Return one safe D3 action selected by an explicit test marker.
+
+        No prompt is recorded or echoed. These markers are accepted only by the
+        loopback evidence profile and map solely to actions already advertised
+        by Workflow's runtime tool schema.
+        """
+        text = "\n".join(str(m.get("content", "")) for m in messages if isinstance(m, dict))
+        functions = {
+            str((item.get("function") or {}).get("name"))
+            for item in (request.get("tools") or []) if isinstance(item, dict)
+        }
+        if "__d3_waiting_input__" in text and "runtime_request_input" in functions:
+            # After a durable resume, the caller's second user message is present.
+            user_count = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "user")
+            return None if user_count > 1 else "request_input"
+        if "__d3_load_exit__" in text:
+            if "Governed observation from load_skill" not in text and "runtime_load_skill" in functions:
+                return "load_skill"
+            if "Governed observation from read_resource" not in text and "runtime_read_resource" in functions:
+                return "read_resource"
+            if "Governed observation from exit_skill" not in text and "runtime_exit_skill" in functions:
+                return "exit_skill"
+        if "__d3_unbound_skill__" in text and "runtime_load_skill" in functions:
+            return "unbound_skill"
+        return None
+
+    @staticmethod
+    def _d3_tool_call_message(request: dict[str, Any], action: str) -> dict[str, Any]:
+        wire_name, arguments = {
+            "request_input": ("runtime_request_input", {"question": "evidence input required"}),
+            "load_skill": ("runtime_load_skill", {"name": ""}),
+            "unbound_skill": ("runtime_load_skill", {"name": "not-bound"}),
+            "read_resource": ("runtime_read_resource", {"path": "references/evidence.txt"}),
+            "exit_skill": ("runtime_exit_skill", {}),
+        }[action]
+        if action == "load_skill":
+            tools = request.get("tools") or []
+            load = next((item for item in tools if
+                str((item.get("function") or {}).get("name")) == "runtime_load_skill"), {})
+            enum = (((load.get("function") or {}).get("parameters") or {})
+                    .get("properties", {}).get("name", {}).get("enum", []))
+            arguments["name"] = str(enum[0]) if enum else ""
+        return {
+            "role": "assistant", "content": None,
+            "tool_calls": [{"id": "call_d3_" + action, "type": "function",
+                "function": {"name": wire_name, "arguments": json.dumps(arguments, separators=(",", ":"))}}],
         }
 
 

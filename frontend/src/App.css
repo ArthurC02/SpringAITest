@@ -1727,3 +1727,108 @@ cpk-thread-inspector {
     flex-direction: column;
   }
 }
+
+/* ── Direct Agent 測試主控台（D3）────────────────────────────────────── */
+.agent-test-console__actions,
+.agent-test-console__status,
+.agent-test-console__event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-test-console__actions {
+  margin: 10px 0;
+}
+
+.agent-test-console__run {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.agent-test-console__status {
+  justify-content: space-between;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--code-bg);
+}
+
+.agent-test-console__status code,
+.agent-test-console__event-head code {
+  overflow-wrap: anywhere;
+}
+
+.agent-test-console__summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.agent-test-console__summary > div,
+.agent-test-console__resume,
+.agent-test-console__events > li {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.agent-test-console__summary dt {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.agent-test-console__summary dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-h);
+}
+
+.agent-test-console__pins {
+  margin: 0;
+}
+
+.agent-test-console__resume {
+  display: grid;
+  gap: 8px;
+  border-color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.agent-test-console details pre,
+.agent-test-console__events pre {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--code-bg);
+  font-size: 12px;
+}
+
+.agent-test-console__events {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 24px;
+}
+
+.agent-test-console__event-head .muted {
+  margin-left: auto;
+}
+
+@media (max-width: 600px) {
+  .agent-test-console__status,
+  .agent-test-console__event-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .agent-test-console__event-head .muted {
+    margin-left: 0;
+  }
+}

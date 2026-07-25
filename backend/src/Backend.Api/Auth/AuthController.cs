@@ -29,7 +29,12 @@ public sealed class AuthController : ControllerBase
     public async Task<ActionResult<LoginResponse>> Login([FromBody] LoginRequest request, CancellationToken ct)
     {
         var result = await _auth.LoginAsync(request, ct);
-        var token = _jwt.Issue(result.Username, result.Role, result.TenantCode, result.Capabilities);
+        var token = _jwt.Issue(
+            result.Username,
+            result.Role,
+            result.TenantCode,
+            result.Capabilities,
+            result.Groups);
         return Ok(new LoginResponse(token, result.Username, result.Role, result.TenantCode));
     }
 }

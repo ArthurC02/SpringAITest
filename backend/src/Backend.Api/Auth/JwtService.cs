@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using Backend.Api.Agents;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Backend.Api.Auth;
@@ -12,6 +13,8 @@ namespace Backend.Api.Auth;
 /// </summary>
 public sealed class JwtService
 {
+    public const int MaxAuthorizationValueBytes = 7 * 1_024;
+
     private readonly string _secret;
     private readonly TimeSpan _expiration;
 
@@ -23,7 +26,8 @@ public sealed class JwtService
 
     public string Issue(
         string username, string role, string tenantCode,
-        IReadOnlyCollection<string>? capabilities = null)
+        IReadOnlyCollection<string>? capabilities = null,
+        IReadOnlyCollection<string>? groups = null)
     {
         var now = DateTime.UtcNow;
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secret));
@@ -55,12 +59,36 @@ public sealed class JwtService
             }
         }
 
+        if (groups is not null)
+        {
+            var groupSet = groups
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(group => group, StringComparer.Ordinal)
+                .ToArray();
+            if (!AgentAudience.IsCanonicalGroupSet(groupSet))
+            {
+                throw new InvalidOperationException(
+                    "Persisted group membership set exceeds the signed identity contract");
+            }
+            foreach (var group in groupSet)
+            {
+                claims.Add(new Claim("groups", group));
+            }
+        }
+
         var token = new JwtSecurityToken(
             claims: claims,
             notBefore: now,
             expires: now.Add(_expiration),
             signingCredentials: credentials);
 
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        var encoded = new JwtSecurityTokenHandler().WriteToken(token);
+        if (Encoding.ASCII.GetByteCount("Bearer " + encoded)
+            >= MaxAuthorizationValueBytes)
+        {
+            throw new InvalidOperationException(
+                "Issued JWT exceeds the deployed Authorization header budget");
+        }
+        return encoded;
     }
 }

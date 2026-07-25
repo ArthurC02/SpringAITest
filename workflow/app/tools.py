@@ -12,8 +12,17 @@ from typing import Any
 
 from app.engine.tool_registry import ToolContext, tool
 from app.nodes.kbquery import calculator
-from app.nodes.kbquery.adapters import BackendVectorSearch, ScoreReranker, StaticGlossary
+from app.nodes.kbquery.adapters import (
+    BackendVectorSearch,
+    RevisionedScopedBackendVectorSearch,
+    ScoreReranker,
+    StaticGlossary,
+)
 from app.nodes.kbquery.models import SourceResult
+
+
+class DataScopeDenied(RuntimeError):
+    """A scoped retrieval was attempted without any server-granted source."""
 
 
 def _dep(ctx: ToolContext, name: str) -> Any:
@@ -30,9 +39,20 @@ def _dep(ctx: ToolContext, name: str) -> Any:
 )
 async def retrieval_search(ctx: ToolContext, query: str, top_k: int = 4) -> list[dict]:
     """租戶邊界由 ctx.tenant_id 決定，不由 args 決定：script 偽造不了租戶。"""
+    if ctx.enforce_data_scope and not ctx.knowledge_sources:
+        raise DataScopeDenied("retrieval is unavailable without a granted knowledge source")
     searcher = (_dep(ctx, "searchers") or {}).get("vector") or BackendVectorSearch()
+    if ctx.enforce_data_scope and isinstance(searcher, BackendVectorSearch):
+        searcher = RevisionedScopedBackendVectorSearch()
     results = await searcher.search(
-        query, filters={}, top_k=top_k, tenant_id=ctx.tenant_id
+        query,
+        filters=(
+            {"knowledge_sources": sorted(ctx.knowledge_sources)}
+            if ctx.enforce_data_scope
+            else {}
+        ),
+        top_k=top_k,
+        tenant_id=ctx.tenant_id,
     )
     return [r.model_dump() for r in results]
 

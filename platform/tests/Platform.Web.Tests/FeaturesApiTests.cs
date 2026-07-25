@@ -3,7 +3,7 @@ using System.Net;
 namespace Platform.Web.Tests;
 
 /// <summary>
-/// GET /api/features(D1):AllowAnonymous、只暴露 agentBuilderEnabled 布林旗標(camelCase),供前端決定入口顯示。
+/// GET /api/features:AllowAnonymous、只暴露 rollout 布林旗標(camelCase),供前端決定入口顯示。
 /// </summary>
 public sealed class FeaturesApiTests
 {
@@ -17,8 +17,8 @@ public sealed class FeaturesApiTests
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
         Assert.False(body["agentBuilderEnabled"]!.GetValue<bool>());
-        // 只暴露這一個欄位,不揭露其他組態。
-        Assert.Single(body.AsObject());
+        Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
+        Assert.Equal(2, body.AsObject().Count);
     }
 
     [Fact]
@@ -29,6 +29,21 @@ public sealed class FeaturesApiTests
         var resp = await factory.CreateClient().GetAsync("/api/features");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.True((await resp.ReadJsonAsync())["agentBuilderEnabled"]!.GetValue<bool>());
+        var body = await resp.ReadJsonAsync();
+        Assert.True(body["agentBuilderEnabled"]!.GetValue<bool>());
+        Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Features_TestRunRequiresBothFlags()
+    {
+        using var factory = new TestWebAppFactory(
+            agentBuilderEnabled: true,
+            agentTestRunEnabled: true);
+
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+
+        Assert.True(body["agentBuilderEnabled"]!.GetValue<bool>());
+        Assert.True(body["agentTestRunEnabled"]!.GetValue<bool>());
     }
 }

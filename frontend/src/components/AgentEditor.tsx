@@ -20,6 +20,7 @@ import type {
   SkillCatalogEntry,
 } from '../types'
 import {
+  audiencePrincipalError,
   businessRuleCount,
   createEmptyAgentDraft,
   isAgentEditorLocked,
@@ -35,11 +36,13 @@ import Skeleton from './Skeleton'
 import { useConfirm } from './ConfirmDialog'
 import { runWithToast, useToast } from './Toast'
 import BusinessRuleEditor from './BusinessRuleEditor'
+import AgentTestConsole from './AgentTestConsole'
 
 interface Props {
   /** null = 建立模式；有值 = 編輯既有 Agent。 */
   agentId: string | null
   isAdmin: boolean
+  agentTestRunEnabled: boolean
   onClose: () => void
   /** 建立成功後把新 id 交回,由 AgentsView 切換到編輯模式。 */
   onCreated: (id: string) => void
@@ -164,12 +167,123 @@ function StringSetEditor({
   )
 }
 
+function AudienceEditor({
+  items,
+  disabled,
+  error,
+  onChange,
+}: {
+  items: string[]
+  disabled: boolean
+  error: string | null
+  onChange: (next: string[]) => void
+}) {
+  const [groupId, setGroupId] = useState('')
+  const roles = ['USER', 'ADMIN'] as const
+  const nonRoles = items.filter((item) => item !== 'role:USER' && item !== 'role:ADMIN')
+
+  function toggleRole(role: (typeof roles)[number]) {
+    const principal = `role:${role}`
+    onChange(
+      items.includes(principal)
+        ? items.filter((item) => item !== principal)
+        : [...items, principal],
+    )
+  }
+
+  function addGroup() {
+    const principal = `group:${groupId.trim()}`
+    if (groupId.trim() && !items.includes(principal)) onChange([...items, principal])
+    setGroupId('')
+  }
+
+  return (
+    <div className="field">
+      <label htmlFor="agent-audience-group">Audience</label>
+      <p className="muted agent-set__hint">
+        以 namespaced principal 授權；角色使用 role:，群組使用 group:。空集合會 fail-closed。
+      </p>
+      <div className="agent-roles">
+        {roles.map((role) => (
+          <label key={role} className="agent-check">
+            <input
+              type="checkbox"
+              checked={items.includes(`role:${role}`)}
+              disabled={disabled}
+              onChange={() => toggleRole(role)}
+            />
+            role:{role}
+          </label>
+        ))}
+      </div>
+      {nonRoles.length > 0 && (
+        <ul className="agent-set__chips">
+          {nonRoles.map((principal) => (
+            <li key={principal} className="agent-set__chip">
+              <span className="agent-set__chip-label">{principal}</span>
+              {!disabled && (
+                <button
+                  type="button"
+                  className="agent-set__chip-x"
+                  aria-label={`移除 ${principal}`}
+                  onClick={() => onChange(items.filter((item) => item !== principal))}
+                >
+                  ×
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!disabled && (
+        <div className="agent-set__add">
+          <input
+            id="agent-audience-group"
+            className="input"
+            value={groupId}
+            placeholder="finance-reviewers"
+            aria-invalid={!!error}
+            aria-describedby={error ? 'agent-audience-error' : undefined}
+            onChange={(event) => setGroupId(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                addGroup()
+              }
+            }}
+          />
+          <button type="button" className="btn" disabled={!groupId.trim()} onClick={addGroup}>
+            加入 group
+          </button>
+        </div>
+      )}
+      {items.length === 0 && (
+        <p className="agent-set__empty" role="note">
+          無 Audience principal，任何人都不可啟動。
+        </p>
+      )}
+      {error && (
+        <span id="agent-audience-error" className="field-error" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  )
+}
+
 /**
  * Agent Builder 編輯器(建立精靈 + 草稿編輯合一)。負責:身分/System Prompt/工具/知識來源/
  * Skill 綁定表單、ETag 樂觀併發(412 提示重載)、validate(field_errors 定位欄位)、
  * 發布預覽(顯示將被固定的 skill revisions)→ publish、版本歷史 + 回溯。寫入操作僅 ADMIN。
  */
-export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onChanged }: Props) {
+export default function AgentEditor({
+  agentId,
+  isAdmin,
+  agentTestRunEnabled,
+  onClose,
+  onCreated,
+  onChanged,
+}: Props) {
   const toast = useToast()
   const confirm = useConfirm()
   const creating = !agentId
@@ -189,7 +303,7 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
   const [validation, setValidation] = useState<AgentValidation | null>(null)
   const [validatedVersion, setValidatedVersion] = useState<number | null>(null)
   const [conflict, setConflict] = useState(false)
-  const [sub, setSub] = useState<'edit' | 'history'>('edit')
+  const [sub, setSub] = useState<'edit' | 'history' | 'test'>('edit')
   const [showPreview, setShowPreview] = useState(false)
   const previewTriggerRef = useRef<HTMLButtonElement | null>(null)
   const previewCancelRef = useRef<HTMLButtonElement | null>(null)
@@ -348,6 +462,7 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
   })
   const rulesCount = businessRuleCount(form.business_rules)
   const outputContractFields = Object.keys(form.output_contract)
+  const audienceError = audiencePrincipalError(form.audience)
   const hasConcurrencyToken = creating || !!etag
   const locked = isAgentEditorLocked(readOnly, busy, conflict)
 
@@ -364,7 +479,8 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
     !hasUnverifiedBindings &&
     missingTools.length === 0 &&
     !hasUnverifiedTools &&
-    !outputContractError
+    !outputContractError &&
+    !audienceError
 
   function fieldError(key: string): string | undefined {
     if (!validatedForCurrent) return undefined
@@ -373,7 +489,7 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
 
   // ---- 建立模式:只有表單 + 建立鈕(建立後由父層切換到編輯模式載入完整功能) ----
   async function onCreate() {
-    if (outputContractError) return
+    if (outputContractError || audienceError) return
     setBusy(true)
     try {
       const created = await createAgent(form)
@@ -388,7 +504,7 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
   }
 
   async function onSaveDraft() {
-    if (!agentId || conflict || !etag || outputContractError) return
+    if (!agentId || conflict || !etag || outputContractError || audienceError) return
     setBusy(true)
     try {
       await putAgentDraft(agentId, form, etag)
@@ -521,6 +637,11 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
             <button className="btn" aria-pressed={sub === 'history'} onClick={() => setSub('history')}>
               版本控管
             </button>
+            {agentTestRunEnabled && publishedRevision !== null && (
+              <button className="btn" aria-pressed={sub === 'test'} onClick={() => setSub('test')}>
+                測試 Run
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -542,7 +663,16 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
         </p>
       )}
 
-      {sub === 'history' && !creating ? (
+      {sub === 'test' &&
+      agentTestRunEnabled &&
+      agentId &&
+      publishedRevision !== null ? (
+        <AgentTestConsole
+          agentId={agentId}
+          publishedRevision={publishedRevision}
+          enabled={enabled}
+        />
+      ) : sub === 'history' && !creating ? (
         <section className="skill-history">
           <p className="muted">唯讀歷史(依 revision 遞減);回溯會以該版重新發布為新 revision。</p>
           <ErrorText msg={revisions.error} />
@@ -700,13 +830,10 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
               disabled={locked}
               onChange={(next) => patch({ capabilities: next })}
             />
-            <StringSetEditor
-              id="agent-audience"
-              label="Audience"
-              hint="可使用此 Agent 的角色或群組；空集合會 fail-closed，任何人都不可啟動。"
+            <AudienceEditor
               items={form.audience}
-              placeholder="例如 USER、finance-reviewers"
               disabled={locked}
+              error={audienceError}
               onChange={(next) => patch({ audience: next })}
             />
             <div className="field">
@@ -944,7 +1071,13 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
                   className="btn btn--primary"
                   type="button"
                   onClick={() => void onCreate()}
-                  disabled={busy || !!outputContractError || !form.name.trim() || !form.slug.trim()}
+                  disabled={
+                    busy ||
+                    !!outputContractError ||
+                    !!audienceError ||
+                    !form.name.trim() ||
+                    !form.slug.trim()
+                  }
                 >
                   {busy ? '建立中…' : '建立 Agent'}
                 </button>
@@ -954,7 +1087,9 @@ export default function AgentEditor({ agentId, isAdmin, onClose, onCreated, onCh
                     className="btn btn--primary"
                     type="button"
                     onClick={() => void onSaveDraft()}
-                    disabled={busy || conflict || !etag || !!outputContractError || !dirty}
+                    disabled={
+                      busy || conflict || !etag || !!outputContractError || !!audienceError || !dirty
+                    }
                   >
                     {busy ? '儲存中…' : '儲存草稿'}
                   </button>
