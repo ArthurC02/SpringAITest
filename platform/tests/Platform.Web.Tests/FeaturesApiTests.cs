@@ -20,7 +20,8 @@ public sealed class FeaturesApiTests
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
         Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
         Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
-        Assert.Equal(4, body.AsObject().Count);
+        Assert.False(body["agentChatEnabled"]!.GetValue<bool>());
+        Assert.Equal(5, body.AsObject().Count);
     }
 
     [Fact]

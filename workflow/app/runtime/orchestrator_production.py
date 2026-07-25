@@ -6,7 +6,8 @@ import asyncio
 import json
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from langchain_core.prompts import ChatPromptTemplate
 
 from app.llm import get_direct_agent_runtime_llm
 from app.backend_http import search_chunks_scoped
@@ -45,6 +46,41 @@ class _Plan(BaseModel):
     tasks: list[_PlanTask] = Field(min_length=1, max_length=100)
 
 
+class _ContextSufficiency(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    ready: bool
+    missing: list[str] = Field(default_factory=list, max_length=20)
+    facts: dict[str, str] = Field(default_factory=dict, max_length=32)
+    evidence: list["_FactEvidence"] = Field(default_factory=list, max_length=32)
+
+    @model_validator(mode="after")
+    def valid_authority(self) -> "_ContextSufficiency":
+        if self.ready:
+            if not self.facts or self.missing or not self.evidence:
+                raise ValueError("ready context requires facts, evidence, and no missing fields")
+            if (
+                len(self.evidence) != len(self.facts)
+                or {item.fact_key for item in self.evidence} != set(self.facts)
+            ):
+                raise ValueError("ready context needs exactly one grounded evidence item per fact")
+            return self
+        if not self.missing or self.facts or self.evidence:
+            raise ValueError("insufficient context must expose only missing fields")
+        return self
+
+
+class _FactEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    fact_key: str = Field(min_length=1, max_length=128)
+    quote: str = Field(min_length=1, max_length=16_384)
+    input_index: int = Field(ge=0, le=19)
+
+
+def _normalize_evidence_text(value: str) -> str:
+    """Normalize text only enough to make whitespace/case comparisons stable."""
+    return " ".join(value.casefold().split())
+
+
 class ProductionRootPlanner:
     def __init__(
         self, backend: OrchestratorBackendClient, ctx: RequestContext
@@ -52,6 +88,47 @@ class ProductionRootPlanner:
         self.backend = backend
         self.ctx = ctx
         self.provenance: list[ContextProvenance] = []
+
+    async def _assess_context(self, snapshot: RootExecutionSnapshot, inputs: list[str]) -> _ContextSufficiency | None:
+        if not inputs or len(inputs) > snapshot.limits.max_context_rounds:
+            return None
+        try:
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "Assess whether trusted caller clarifications are sufficient. Return only the strict structured schema; do not infer missing facts."),
+                ("human", "Goal: {goal}\nTrusted resume inputs: {trusted_resume_inputs}"),
+            ])
+            model = prompt | get_direct_agent_runtime_llm().bind(max_tokens=512).with_structured_output(_ContextSufficiency)
+            value = await asyncio.wait_for(
+                model.ainvoke(
+                    {
+                        "goal": snapshot.root_input.message,
+                        "trusted_resume_inputs": json.dumps(
+                            inputs, ensure_ascii=False, separators=(",", ":")
+                        ),
+                    }
+                ),
+                timeout=10,
+            )
+            assessed = _ContextSufficiency.model_validate(value)
+            # Evidence must be traceable to the trusted caller inputs or a fact key;
+            # otherwise the model has manufactured an authority claim.
+            if assessed.ready:
+                for item in assessed.evidence:
+                    source = inputs[item.input_index] if item.input_index < len(inputs) else ""
+                    fact_value = assessed.facts[item.fact_key]
+                    quote = _normalize_evidence_text(item.quote)
+                    normalized_source = _normalize_evidence_text(source)
+                    normalized_value = _normalize_evidence_text(fact_value)
+                    if (
+                        not quote
+                        or quote not in normalized_source
+                        or not normalized_value
+                        or normalized_value not in quote
+                    ):
+                        return None
+            return assessed
+        except Exception:
+            return None
 
     async def decompose(
         self, snapshot: RootExecutionSnapshot, context: dict[str, Any]
@@ -110,9 +187,12 @@ class ProductionRootPlanner:
             raise OrchestratorBackendError(
                 "Root snapshot contains an unsupported context tool"
             )
-        base_context = {
-            "goal": snapshot.root_input.message,
-        }
+        prior = context.get("trusted_resume_inputs", [])
+        prior = prior if isinstance(prior, list) and all(isinstance(x, str) for x in prior) else []
+        resume_input = context.get("user_input")
+        inputs = [*prior, resume_input.strip()] if isinstance(resume_input, str) and resume_input.strip() else prior
+        supplement = await self._assess_context(snapshot, inputs)
+        base_context = {"goal": snapshot.root_input.message}
         base_provenance = [
             ContextProvenance(
                 context_key="goal",
@@ -122,15 +202,34 @@ class ProductionRootPlanner:
                 content_sha256=canonical_json_sha256(snapshot.root_input.message),
             )
         ]
+        if supplement is not None and supplement.ready:
+            # Preserve the provenance boundary at fact granularity: every model
+            # accepted fact has one exact caller-input source, rather than a
+            # synthetic aggregate that could hide an unrelated citation.
+            for item in supplement.evidence:
+                context_key = f"user_context.{item.fact_key}"
+                if context_key in base_context or context_key == "retrieval_chunks":
+                    raise OrchestratorBackendError("Root context fact key conflicts with a reserved key")
+                source = inputs[item.input_index]
+                base_context[context_key] = supplement.facts[item.fact_key]
+                base_provenance.append(
+                    ContextProvenance(
+                        context_key=context_key,
+                        source_type="caller",
+                        source_id=f"resume-input:{item.input_index}",
+                        observed_at=snapshot.root_input.observed_at,
+                        content_sha256=canonical_json_sha256(source),
+                    )
+                )
         if (
             "backend.retrieval_search" not in allowed
             or not snapshot.authority.knowledge_sources
         ):
             acquisition = ContextAcquisition(
-                ready=False,
+                ready=supplement is not None and supplement.ready,
                 context=base_context,
                 provenance=base_provenance,
-                missing=["authorized retrieval context"],
+                missing=[] if supplement is not None and supplement.ready else (supplement.missing if supplement is not None else ["context sufficiency assessment unavailable"]),
             )
             self.provenance = acquisition.provenance
             return acquisition
@@ -146,7 +245,7 @@ class ProductionRootPlanner:
                 "Scoped Root context retrieval failed"
             ) from exc
         acquisition = ContextAcquisition(
-            ready=bool(chunks),
+            ready=bool(chunks) or (supplement is not None and supplement.ready),
             context=base_context | {"retrieval_chunks": chunks},
             provenance=base_provenance
             + [
@@ -158,7 +257,7 @@ class ProductionRootPlanner:
                     content_sha256=canonical_json_sha256(chunks),
                 )
             ],
-            missing=[] if chunks else ["retrieval evidence"],
+            missing=[] if chunks or (supplement is not None and supplement.ready) else (supplement.missing if supplement is not None else ["retrieval evidence"]),
         )
         self.provenance = acquisition.provenance
         return acquisition

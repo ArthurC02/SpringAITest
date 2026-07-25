@@ -119,7 +119,8 @@ public sealed class ChatTurnRecorder : DelegatingAIAgent
             // 一律接著執行。
             try
             {
-                identity.PersistedResponse = await conversations.AddAsync(userMessage, reply, userCtx, ct);
+                identity.PersistedResponse = await conversations.AddAsync(
+                    userMessage, reply, userCtx, identity.TurnMetadata, ct);
             }
             catch (Exception ex)
             {
@@ -136,7 +137,8 @@ public sealed class ChatTurnRecorder : DelegatingAIAgent
         // return,不 remember;只有 persist 成功才 remember。
         try
         {
-            identity.PersistedResponse = await conversations.AddAsync(userMessage, reply, userCtx, ct);
+            identity.PersistedResponse = await conversations.AddAsync(
+                userMessage, reply, userCtx, identity.TurnMetadata, ct);
         }
         catch (Exception ex)
         {

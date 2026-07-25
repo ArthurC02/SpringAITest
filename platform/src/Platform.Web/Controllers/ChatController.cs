@@ -29,7 +29,7 @@ public sealed class ChatController : ControllerBase
     public async Task<ActionResult<ChatResponse>> Chat([FromBody] ChatRequest request, CancellationToken ct)
     {
         SetAuthInvalidHeaderIfNeeded();
-        var result = await _chat.ChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct);
+        var result = await _chat.ChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct, request.OrchestratorId);
         return Ok(result);
     }
 
@@ -53,7 +53,7 @@ public sealed class ChatController : ControllerBase
         // 無法再改寫(HasStarted),連線會無聲斷開。故就地 try/catch:失敗時補一個終止用的 error frame 再正常結束。
         try
         {
-            await foreach (var chunk in _chat.StreamChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct))
+            await foreach (var chunk in _chat.StreamChatAsync(request.Message!, request.UserId, request.ConversationId, MaybeUserContext(), ct, request.OrchestratorId))
             {
                 foreach (var line in chunk.Split('\n'))
                 {

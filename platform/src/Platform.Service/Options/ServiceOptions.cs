@@ -43,6 +43,18 @@ public sealed class BackendOptions
     public string InternalToken { get; set; } = "";
 }
 
+/// <summary>D6 production-chat canary. Both switches are server-owned; callers cannot opt a
+/// tenant into the Root Orchestrator path from a request body.</summary>
+public sealed class AgentChatOptions
+{
+    public bool Enabled { get; init; }
+    public IReadOnlySet<string> TenantAllowlist { get; init; } =
+        new HashSet<string>(StringComparer.Ordinal);
+
+    public bool IsCanaryTenant(string tenant) =>
+        Enabled && TenantAllowlist.Contains(tenant);
+}
+
 /// <summary>
 /// RabbitMQ 連線設定(文件處理訊息發佈)。對應環境變數 RABBITMQ_URL(由 Program.cs 提供 fallback)。
 /// guest 帳號僅允許 loopback,容器間一律用自訂帳號(compose 以 RABBITMQ_DEFAULT_USER/PASS 建立)。

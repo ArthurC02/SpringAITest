@@ -24,7 +24,7 @@ from app.runtime.orchestrator import (
     ROOT_RUNTIME_ADAPTER_VERSION,
 )
 from app.orchestration.validator import validate
-from app.runtime.models import canonical_json_sha256
+from app.runtime.models import canonical_json_bytes, canonical_json_sha256, parse_json_preserving_numbers
 from app.workflow_contracts import GRAPH_IR_COMPILER_CONTRACT_VERSION
 
 
@@ -315,6 +315,32 @@ def test_graph_adapter_and_root_snapshot_hash_proofs_fail_closed():
         RootExecutionSnapshot.model_validate(raw)
 
 
+def test_backend_style_integer_timeout_preserves_root_snapshot_hash():
+    """Backend emits its integer `budgets.timeoutSeconds` unchanged in the snapshot."""
+    raw = _snapshot().model_dump(mode="json")
+    raw["limits"]["timeout_seconds"] = 90
+    unsigned = {key: value for key, value in raw.items() if key != "snapshot_hash"}
+    raw["snapshot_hash"] = canonical_json_sha256(unsigned)
+
+    restored = RootExecutionSnapshot.model_validate(raw)
+
+    assert restored.limits.timeout_seconds == 90
+    assert restored.snapshot_hash == raw["snapshot_hash"]
+
+
+def test_root_snapshot_accepts_preserved_canonical_integer_tokens():
+    raw = _snapshot().model_dump(mode="json")
+    raw["limits"]["timeout_seconds"] = 90
+    unsigned = {key: value for key, value in raw.items() if key != "snapshot_hash"}
+    raw["snapshot_hash"] = canonical_json_sha256(unsigned)
+
+    preserved = parse_json_preserving_numbers(canonical_json_bytes(raw))
+    restored = RootExecutionSnapshot.from_preserved_json(preserved)
+
+    assert restored.limits.timeout_seconds == 90
+    assert restored.snapshot_hash == raw["snapshot_hash"]
+
+
 def test_verifier_requires_exact_unique_task_attempt_coverage():
     snapshot = _snapshot()
     result = ChildResult(
@@ -360,12 +386,12 @@ async def test_context_acquisition_is_bounded_before_decomposition():
         aggregate=_aggregate,
     ).execute(_snapshot(), {})
 
-    assert result.status == "failed"
+    assert result.status == "waiting_input"
     assert result.limitations == ["context remained insufficient"]
     assert not decomposed
     assert len(
         [item for item in result.audit if item["event_type"] == "context_assessed"]
-    ) == 2
+    ) == 1
 
 
 def test_task_envelope_rejects_conversation_and_delegation():

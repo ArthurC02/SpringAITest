@@ -14,7 +14,7 @@ function Resolve-EvidenceDirectory {
 
     $root = [IO.Path]::GetFullPath($RepoRoot)
     $approvedRoot = [IO.Path]::GetFullPath((Join-Path $root 'artifacts/copilot-shared-core'))
-    $candidate = if ([IO.Path]::IsPathFullyQualified($EvidenceDir)) {
+    $candidate = if ([IO.Path]::IsPathRooted($EvidenceDir)) {
         [IO.Path]::GetFullPath($EvidenceDir)
     }
     else {
@@ -31,8 +31,13 @@ function Resolve-EvidenceDirectory {
     # A direct child prevents nested junction traversal. Reject an existing root
     # that was replaced by a reparse point before a failed scan attempts cleanup.
     if (Test-Path -LiteralPath $approvedRoot) {
-        $attributes = (Get-Item -LiteralPath $approvedRoot -Force).Attributes
-        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $rootItem = Get-Item -LiteralPath $approvedRoot -Force
+        $attributes = $rootItem.Attributes
+        # OneDrive marks ordinary cloud-backed directories as reparse points
+        # without a link target. Continue to reject actual junctions/symlinks.
+        $hasLinkTarget = -not [string]::IsNullOrWhiteSpace([string]$rootItem.LinkType) -or
+            @($rootItem.Target).Count -gt 0
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and $hasLinkTarget) {
             throw "Evidence root must not be a reparse point: $approvedRoot"
         }
     }
@@ -55,7 +60,10 @@ function Write-EvidenceJson {
     param([Parameter(Mandatory)]$Run)
 
     $Run.Manifest.updatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
-    $Run.Manifest | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $Run.ManifestPath -Encoding utf8NoBOM
+    [IO.File]::WriteAllText(
+        $Run.ManifestPath,
+        ($Run.Manifest | ConvertTo-Json -Depth 16),
+        [Text.UTF8Encoding]::new($false))
 }
 
 function New-EvidenceRun {
@@ -152,7 +160,10 @@ function Write-EvidenceArtifact {
         throw 'Artifact path escaped EvidenceDir.'
     }
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $Value | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+    [IO.File]::WriteAllText(
+        $path,
+        ($Value | ConvertTo-Json -Depth 16),
+        [Text.UTF8Encoding]::new($false))
 }
 
 function Write-EvidenceJUnit {
@@ -167,7 +178,10 @@ function Write-EvidenceJUnit {
 
     $escape = [Security.SecurityElement]::Escape($Suite)
     $xml = '<?xml version="1.0" encoding="utf-8"?><testsuite name="{0}" tests="{1}" failures="{2}" skipped="{3}" />' -f $escape, $Tests, $Failures, $Skipped
-    Set-Content -LiteralPath (Join-Path $Run.FullPath $RelativePath) -Value $xml -Encoding utf8NoBOM
+    [IO.File]::WriteAllText(
+        (Join-Path $Run.FullPath $RelativePath),
+        $xml,
+        [Text.UTF8Encoding]::new($false))
 }
 
 function Test-EvidenceSecrets {

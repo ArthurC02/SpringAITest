@@ -35,8 +35,12 @@ public sealed class InMemoryRagRepository : IRagRepository
         // ON CONFLICT (id) DO NOTHING:已存在則保留(重複投遞不覆寫既有狀態)。
         _docs.TryAdd(documentId, new Doc
         {
-            Id = documentId, TenantId = tenantId, Title = title, CreatedAt = DateTime.UtcNow,
-            ChunkCount = 0, Status = "processing",
+            Id = documentId,
+            TenantId = tenantId,
+            Title = title,
+            CreatedAt = DateTime.UtcNow,
+            ChunkCount = 0,
+            Status = "processing",
         });
         return Task.CompletedTask;
     }

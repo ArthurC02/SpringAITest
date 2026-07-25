@@ -383,9 +383,10 @@ public static class DbBootstrap
           execution_snapshot jsonb NOT NULL, execution_snapshot_canonical bytea NOT NULL, snapshot_sha256 text NOT NULL,
           workflow_dispatch_snapshot jsonb, workflow_dispatch_snapshot_canonical bytea, workflow_dispatch_snapshot_sha256 text,
           request_sha256 text NOT NULL, idempotency_key_sha256 text NOT NULL,
-          status text NOT NULL CHECK(status IN ('queued','running','waiting_input','completed','failed','cancelled')),
+          status text NOT NULL CHECK(status IN ('queued','running','waiting_input','completed','failed','cancelled','timed_out')),
           state_version bigint NOT NULL DEFAULT 1, cancel_requested_at timestamptz,
           result jsonb, error_code text, error_message text, completed_at timestamptz,
+          checkpoint_ref text, checkpoint_version bigint NOT NULL DEFAULT 0,
           deadline_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
           UNIQUE(tenant_id,user_id,idempotency_key_sha256));
         ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS workflow_dispatch_snapshot jsonb;
@@ -395,6 +396,20 @@ public static class DbBootstrap
         ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS error_code text;
         ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS error_message text;
         ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS checkpoint_ref text;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS checkpoint_version bigint NOT NULL DEFAULT 0;
+        ALTER TABLE orchestrator_run DROP CONSTRAINT IF EXISTS orchestrator_run_status_check;
+        ALTER TABLE orchestrator_run ADD CONSTRAINT orchestrator_run_status_check CHECK(status IN ('queued','running','waiting_input','completed','failed','cancelled','timed_out'));
+        -- D6 rollout selection is durable, server-owned and never inferred from a client header.
+        CREATE TABLE IF NOT EXISTS tenant_runtime_binding (
+          tenant_id text PRIMARY KEY,
+          enabled boolean NOT NULL DEFAULT false,
+          default_orchestrator_id uuid,
+          default_orchestrator_revision integer,
+          canary_user_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          CHECK ((NOT enabled) OR (default_orchestrator_id IS NOT NULL AND default_orchestrator_revision >= 1)),
+          CHECK (jsonb_typeof(canary_user_ids) = 'array'));
         CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_active_conversation
           ON orchestrator_run(tenant_id,user_id,conversation_id,orchestrator_id)
           WHERE status IN ('queued','running','waiting_input');
@@ -406,12 +421,29 @@ public static class DbBootstrap
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(), run_id uuid NOT NULL REFERENCES orchestrator_run(id),
           command_type text NOT NULL CHECK(command_type IN ('start','cancel')), dispatch_attempt integer NOT NULL DEFAULT 0,
           claim_owner text, claim_token_sha256 text, claim_expires_at timestamptz, dispatch_completed_at timestamptz, completed_at timestamptz, lease_generation bigint NOT NULL DEFAULT 0,
-          idempotency_key_sha256 text,
+          idempotency_key_sha256 text, command_input jsonb, command_input_sha256 text,
           created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(run_id,command_type));
         CREATE INDEX IF NOT EXISTS ix_orchestrator_run_command_reclaim ON orchestrator_run_command(claim_expires_at,created_at) WHERE completed_at IS NULL;
         ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS claim_owner text;
         ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS dispatch_completed_at timestamptz;
         ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS idempotency_key_sha256 text;
+        ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS command_input jsonb;
+        ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS command_input_sha256 text;
+        ALTER TABLE orchestrator_run_command DROP CONSTRAINT IF EXISTS orchestrator_run_command_command_type_check;
+        ALTER TABLE orchestrator_run_command ADD CONSTRAINT orchestrator_run_command_command_type_check CHECK(command_type IN ('start','resume','cancel'));
+        -- A root may legitimately pause and resume more than once. Keep start/cancel
+        -- singletons, but scope resume uniqueness to its caller idempotency key.
+        ALTER TABLE orchestrator_run_command DROP CONSTRAINT IF EXISTS orchestrator_run_command_run_id_command_type_key;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_command_start
+          ON orchestrator_run_command(run_id) WHERE command_type='start';
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_command_cancel
+          ON orchestrator_run_command(run_id) WHERE command_type='cancel';
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_command_resume_idempotency
+          ON orchestrator_run_command(run_id,idempotency_key_sha256)
+          WHERE command_type='resume' AND idempotency_key_sha256 IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS ix_orchestrator_run_command_idempotency_lookup
+          ON orchestrator_run_command(idempotency_key_sha256,run_id)
+          WHERE idempotency_key_sha256 IS NOT NULL;
         CREATE TABLE IF NOT EXISTS orchestrator_run_child (
           id uuid PRIMARY KEY, orchestrator_root_run_id uuid NOT NULL REFERENCES orchestrator_run(id),
           task_id text NOT NULL, attempt integer NOT NULL CHECK(attempt>=1), run_kind text NOT NULL CHECK(run_kind IN ('worker','verifier')),
@@ -975,7 +1007,7 @@ public static class DbBootstrap
 
     /// <summary>
     /// 種入 system-owned Default Agent-Runtime Workflow current revision(published、不可編輯)。
-    /// rev1 是歷史快照，絕不原地 repair；修正版以 rev2 寫入，新 Agent 預設 pin rev2。
+    /// rev1/rev2 都是歷史快照，絕不原地 repair；新版 fixture 以 rev3 寫入，新 Agent 預設 pin rev3。
     /// 冪等重跑只調整 mutable workflow pointer/draft，revision row 只 INSERT、衝突時驗證內容相同，
     /// 不做 UPDATE，避免既有 Agent 的 immutable workflow pin 在 restart 後漂移。
     /// </summary>
@@ -1033,7 +1065,7 @@ public static class DbBootstrap
             + " VALUES (@id, @revision, 'published', 1, @def::jsonb, '{}'::jsonb, convert_to(@def,'UTF8'),"
             + "  convert_to('{}','UTF8'), @sha, @uiSha, @compilerContract, 'system')"
             + " ON CONFLICT (workflow_id, revision) DO NOTHING",
-            new { args.id,args.tenant,args.name,args.kind,args.revision,args.def,args.sha,args.uiSha,compilerContract=WorkflowCompilerContracts.Current }, tx, cancellationToken: ct));
+            new { args.id, args.tenant, args.name, args.kind, args.revision, args.def, args.sha, args.uiSha, compilerContract = WorkflowCompilerContracts.Current }, tx, cancellationToken: ct));
 
         var currentRevisionMatches = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
             "SELECT EXISTS("
@@ -1045,7 +1077,7 @@ public static class DbBootstrap
             + " AND ui_metadata = '{}'::jsonb AND ui_metadata_canonical = convert_to('{}','UTF8')"
             + " AND ui_metadata_sha256 = @uiSha"
             + " AND compiler_contract_version = @compilerContract)",
-            new { args.id,args.revision,args.def,args.sha,args.uiSha,compilerContract=WorkflowCompilerContracts.Current }, tx, cancellationToken: ct));
+            new { args.id, args.revision, args.def, args.sha, args.uiSha, compilerContract = WorkflowCompilerContracts.Current }, tx, cancellationToken: ct));
         if (!currentRevisionMatches)
         {
             throw new InvalidOperationException(

@@ -37,13 +37,13 @@ function New-EvidenceJwt([string]$User, [string]$Tenant) {
 function Invoke-Json([string]$Method, [string]$Url, [object]$Body = $null, [string]$Token = '') {
     $headers = @{}
     if ($Token) { $headers.Authorization = "Bearer $Token" }
-    $params = @{ Method=$Method; Uri=$Url; Headers=$headers; SkipHttpErrorCheck=$true }
+    $params = @{ Method=$Method; Uri=$Url; Headers=$headers; UseBasicParsing=$true }
     if ($null -ne $Body) { $params.ContentType='application/json'; $params.Body=$Body | ConvertTo-Json -Depth 30 -Compress }
     Invoke-WebRequest @params
 }
 function Wait-Http([string]$Url, [int]$Attempts = 45) {
     foreach ($attempt in 1..$Attempts) {
-        try { if ((Invoke-WebRequest -Uri $Url -SkipHttpErrorCheck).StatusCode -eq 200) { return $true } } catch { }
+        try { if ((Invoke-WebRequest -UseBasicParsing -Uri $Url).StatusCode -eq 200) { return $true } } catch { }
         Start-Sleep -Seconds 2
     }
     return $false
@@ -109,7 +109,10 @@ function Start-DeterministicProfile {
     try {
         $composeArgs = @('-f', 'docker-compose.yml', '-f', 'docker-compose.evidence.yml', '--profile', 'evidence', 'up', '-d')
         if ($BuildEvidenceProfile) { $composeArgs += '--build' }
-        $composeArgs += @('evidence-model', 'workflow-capture-proxy', 'platform-evidence', 'evidence-nginx', 'frontend-evidence')
+        # Deterministic evidence intentionally names its normal dependencies.
+        # They are not compose depends_on edges because the RealModel lane
+        # redirects the same proxy/gateway to an isolated dependency chain.
+        $composeArgs += @('rabbitmq', 'backend', 'workflow', 'evidence-model', 'workflow-capture-proxy', 'platform-evidence', 'evidence-nginx', 'frontend-evidence')
         docker compose @composeArgs
         if ($LASTEXITCODE -ne 0) { throw 'Unable to start optional evidence profile.' }
     } finally {
@@ -483,12 +486,14 @@ $script:realServicesChanged = $false
 
 function Get-RealHmac([string]$Value) {
     $hmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($script:realEvidenceHmacKey))
-    'hmac:' + ([Convert]::ToHexString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))).ToLowerInvariant())
+    'hmac:' + (([BitConverter]::ToString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))) -replace '-', '').ToLowerInvariant())
 }
-function Set-RealEvidenceEnvironment {
-    $names = @('EVIDENCE_HMAC_KEY','EVIDENCE_CHECKPOINT_HMAC_KEY','EVIDENCE_WORKFLOW_LLM_BASE_URL','EVIDENCE_WORKFLOW_LLM_API_KEY','EVIDENCE_REAL_MEM0_MODEL','EVIDENCE_REAL_EMBEDDING_MODEL','EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER','EVIDENCE_REAL_WORKFLOW_MODEL','EVIDENCE_PLATFORM_LLM_BASE_URL','EVIDENCE_PLATFORM_LITELLM_KEY','EVIDENCE_PLATFORM_CHAT_MODEL','EVIDENCE_PLATFORM_MEM0_MODE')
+function Set-RealEvidenceEnvironment([string]$Tenant) {
+    $names = @('EVIDENCE_HMAC_KEY','EVIDENCE_CHECKPOINT_HMAC_KEY','EVIDENCE_WORKFLOW_LLM_BASE_URL','EVIDENCE_WORKFLOW_LLM_API_KEY','EVIDENCE_REAL_MEM0_MODEL','EVIDENCE_REAL_EMBEDDING_MODEL','EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER','EVIDENCE_REAL_WORKFLOW_MODEL','EVIDENCE_PLATFORM_LLM_BASE_URL','EVIDENCE_PLATFORM_LITELLM_KEY','EVIDENCE_PLATFORM_CHAT_MODEL','EVIDENCE_PLATFORM_MEM0_MODE','EVIDENCE_DB_NAME','EVIDENCE_AGENT_BUILDER_ENABLED','EVIDENCE_WORKFLOW_DESIGNER_ENABLED','EVIDENCE_MULTI_AGENT_DISPATCH_ENABLED','EVIDENCE_AGENT_CHAT_ENABLED','EVIDENCE_AGENT_CHAT_TENANT_ALLOWLIST','EVIDENCE_WORKFLOW_UPSTREAM_URL','EVIDENCE_PLATFORM_BACKEND_BASE_URL','EVIDENCE_PLATFORM_RABBITMQ_URL')
     foreach ($name in $names) { $script:realEnvSnapshot[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
-    $bytes = [byte[]]::new(48); [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $bytes = New-Object byte[] 48
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     $script:realEvidenceHmacKey = [Convert]::ToBase64String($bytes)
     $env:EVIDENCE_HMAC_KEY = $script:realEvidenceHmacKey
     $env:EVIDENCE_CHECKPOINT_HMAC_KEY = $script:realEvidenceHmacKey
@@ -502,6 +507,17 @@ function Set-RealEvidenceEnvironment {
     $env:EVIDENCE_PLATFORM_LITELLM_KEY = 'sk-1234'
     $env:EVIDENCE_PLATFORM_CHAT_MODEL = $script:realModelAlias
     $env:EVIDENCE_PLATFORM_MEM0_MODE = 'http'
+    $env:EVIDENCE_WORKFLOW_UPSTREAM_URL = 'http://workflow-evidence:8000'
+    $env:EVIDENCE_PLATFORM_BACKEND_BASE_URL = 'http://backend-evidence:8080'
+    $rabbitPassword = if ([string]::IsNullOrWhiteSpace($env:RABBITMQ_PASSWORD)) { 'app-dev-password' } else { $env:RABBITMQ_PASSWORD }
+    $env:EVIDENCE_PLATFORM_RABBITMQ_URL = "amqp://app:$rabbitPassword@rabbitmq-evidence:5672"
+    # D6 is enabled only in this isolated evidence composition. The generated
+    # tenant is the complete canary allowlist; no request header can widen it.
+    $env:EVIDENCE_AGENT_BUILDER_ENABLED = 'true'
+    $env:EVIDENCE_WORKFLOW_DESIGNER_ENABLED = 'true'
+    $env:EVIDENCE_MULTI_AGENT_DISPATCH_ENABLED = 'true'
+    $env:EVIDENCE_AGENT_CHAT_ENABLED = 'true'
+    $env:EVIDENCE_AGENT_CHAT_TENANT_ALLOWLIST = $Tenant
 }
 function Restore-RealEvidenceEnvironment {
     foreach ($entry in $script:realEnvSnapshot.GetEnumerator()) {
@@ -514,6 +530,25 @@ function Test-RealProviderCredential {
     $envFile = Join-Path $infraDir '.env'
     return (Test-Path -LiteralPath $envFile) -and [bool](Select-String -LiteralPath $envFile -Pattern '^\s*OPENAI_API_KEY\s*=\s*[^#\s].*$' -Quiet)
 }
+function Invoke-RealAppDb([string]$Database, [string]$Sql) {
+    Push-Location $infraDir
+    try {
+        docker compose exec -T appdb psql -v ON_ERROR_STOP=1 -U postgres -d $Database -c $Sql | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'isolated evidence database command failed' }
+    } finally { Pop-Location }
+}
+function New-RealEvidenceDatabase {
+    $script:realDatabaseName = 'd6evidence_' + [guid]::NewGuid().ToString('N')
+    if ($script:realDatabaseName -notmatch '^d6evidence_[a-f0-9]{32}$') { throw 'invalid generated evidence database name' }
+    Invoke-RealAppDb 'postgres' "CREATE DATABASE $($script:realDatabaseName);"
+    $env:EVIDENCE_DB_NAME = $script:realDatabaseName
+}
+function Remove-RealEvidenceDatabase {
+    if (-not $script:realDatabaseName) { return }
+    if ($script:realDatabaseName -notmatch '^d6evidence_[a-f0-9]{32}$') { throw 'refusing to remove a non-evidence database' }
+    Invoke-RealAppDb 'postgres' "DROP DATABASE IF EXISTS $($script:realDatabaseName) WITH (FORCE);"
+    $script:realDatabaseName = ''
+}
 function Throw-RealBlocked([string]$Reason) { throw "REAL_BLOCKED:$Reason" }
 function Get-SafeRealFailureDetail([Exception]$Exception) {
     # HTTP/JSON libraries may echo a response fragment in their exception text.
@@ -524,8 +559,8 @@ function Get-SafeRealFailureDetail([Exception]$Exception) {
     if ($message -like 'REAL_BLOCKED:*' -or $message -match '^(chat|embedding|history|AG-UI|mem0|document|real evidence|chat routing|AG-UI routing|chat and AG-UI|chat reply|AG-UI reply|workflow|LiteLLM|Authenticated|native TOOL_CALL|unexpected)') { return $message }
     return 'unexpected real evidence assertion error'
 }
-function Test-RealService([string]$Url, [string]$Name) {
-    if (-not (Wait-Http $Url 8)) { Throw-RealBlocked "$Name service is unavailable" }
+function Test-RealService([string]$Url, [string]$Name, [int]$Attempts = 8) {
+    if (-not (Wait-Http $Url $Attempts)) { Throw-RealBlocked "$Name service is unavailable" }
 }
 function Invoke-LiteLlmPreflight([string]$Path, [object]$Body, [string]$Kind) {
     # LiteLLM's local virtual key is a compose development credential, not the
@@ -544,8 +579,9 @@ function Invoke-LiteLlmPreflight([string]$Path, [object]$Body, [string]$Kind) {
     # config, while this field is retained as provider-returned metadata.
     [pscustomobject]@{ Model=$actual; SystemFingerprint=([string]$doc.system_fingerprint) }
 }
-function Start-RealProfile {
-    Set-RealEvidenceEnvironment
+function Start-RealProfile([string]$Tenant) {
+    Set-RealEvidenceEnvironment $Tenant
+    New-RealEvidenceDatabase
     $script:realServicesChanged = $true
     Push-Location $infraDir
     try {
@@ -561,9 +597,9 @@ function Start-RealProfile {
             docker build -f mem0.Dockerfile -t springaitest-mem0:latest . | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'unable to build the local mem0 evidence image' }
         }
-        $composeArgs = @('-f', 'docker-compose.yml', '-f', 'docker-compose.evidence.yml', '--profile', 'evidence', 'up', '-d')
+        $composeArgs = @('-f', 'docker-compose.yml', '-f', 'docker-compose.evidence.yml', '--profile', 'evidence', '--profile', 'evidence-real', 'up', '-d')
         if ($BuildEvidenceProfile) { $composeArgs += '--build' }
-        $composeArgs += @('backend', 'workflow', 'mem0', 'evidence-model', 'workflow-capture-proxy', 'platform-evidence')
+        $composeArgs += @('rabbitmq-evidence', 'backend-evidence', 'workflow-evidence', 'mem0', 'evidence-model', 'workflow-capture-proxy', 'platform-evidence')
         docker compose @composeArgs | Out-Null
         if ($LASTEXITCODE -ne 0) { Throw-RealBlocked 'real evidence services could not be started' }
     } finally { Pop-Location }
@@ -571,15 +607,18 @@ function Start-RealProfile {
     # anonymous readiness probe. Liveliness is deliberately public; the
     # authenticated chat/embedding preflights below prove provider readiness.
     Test-RealService 'http://127.0.0.1:4000/health/liveliness' 'LiteLLM'
-    Test-RealService 'http://127.0.0.1:8000/docs' 'mem0'
+    # The published mem0 image is arm64-only and starts under QEMU on common
+    # amd64 developer hosts, so allow the same bounded readiness window used
+    # by the rest of the evidence harness.
+    Test-RealService 'http://127.0.0.1:8000/docs' 'mem0' 45
     Test-RealService 'http://127.0.0.1:8011/health' 'workflow capture proxy'
     Test-RealService 'http://127.0.0.1:8180/actuator/health' 'real evidence platform'
 }
 function Record-RealImageMetadata {
     Push-Location $infraDir
     try {
-        foreach ($service in @('litellm','mem0','backend','workflow','evidence-model','workflow-capture-proxy','platform-evidence')) {
-            $containerId = (docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence ps -q $service).Trim()
+        foreach ($service in @('litellm','mem0','rabbitmq-evidence','backend-evidence','workflow-evidence','evidence-model','workflow-capture-proxy','platform-evidence')) {
+            $containerId = (docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence --profile evidence-real ps -q $service).Trim()
             if ($containerId) {
                 $imageId = (docker inspect --format '{{.Image}}' $containerId).Trim()
                 if ($imageId) { Set-EvidenceMetadata -Run $run -Section images -Name $service -Value $imageId }
@@ -591,12 +630,10 @@ function Record-RealImageMetadata {
 }
 function Restore-RealServices {
     if (-not $script:realServicesChanged) { return }
-    # Restore core service environment from the normal compose file.  The
-    # evidence platform itself is restored to its deterministic/in-memory form.
+    # Stop ingress before removing the isolated dependency chain. Normal
+    # backend/workflow/RabbitMQ containers were never reconfigured.
     Push-Location $infraDir
     try {
-        docker compose -f docker-compose.yml up -d backend workflow mem0 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'core service restore failed' }
         $env:EVIDENCE_PLATFORM_LLM_BASE_URL = 'http://evidence-model:8080'
         $env:EVIDENCE_PLATFORM_LITELLM_KEY = 'evidence-not-a-secret'
         $env:EVIDENCE_PLATFORM_CHAT_MODEL = 'evidence-model'
@@ -604,6 +641,21 @@ function Restore-RealServices {
         $env:EVIDENCE_REAL_MEM0_MODEL = 'gpt-4o-mini'
         $env:EVIDENCE_REAL_WORKFLOW_MODEL = 'mock-gpt'
         $env:EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER = 'fake'
+        $env:EVIDENCE_AGENT_BUILDER_ENABLED = 'false'
+        $env:EVIDENCE_WORKFLOW_DESIGNER_ENABLED = 'false'
+        $env:EVIDENCE_MULTI_AGENT_DISPATCH_ENABLED = 'false'
+        $env:EVIDENCE_AGENT_CHAT_ENABLED = 'false'
+        $env:EVIDENCE_AGENT_CHAT_TENANT_ALLOWLIST = ''
+        $env:EVIDENCE_WORKFLOW_UPSTREAM_URL = 'http://workflow:8000'
+        $env:EVIDENCE_PLATFORM_BACKEND_BASE_URL = 'http://backend:8080'
+        $rabbitPassword = if ([string]::IsNullOrWhiteSpace($env:RABBITMQ_PASSWORD)) { 'app-dev-password' } else { $env:RABBITMQ_PASSWORD }
+        $env:EVIDENCE_PLATFORM_RABBITMQ_URL = "amqp://app:$rabbitPassword@rabbitmq:5672"
+        docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence --profile evidence-real stop platform-evidence workflow-capture-proxy | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'evidence ingress stop failed' }
+        docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence --profile evidence-real rm -f -s workflow-evidence backend-evidence rabbitmq-evidence | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'isolated evidence dependency removal failed' }
+        docker compose -f docker-compose.yml up -d --force-recreate mem0 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'shared mem0 restore failed' }
         docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence up -d evidence-model workflow-capture-proxy platform-evidence | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'evidence service restore failed' }
     } finally { Pop-Location }
@@ -632,15 +684,6 @@ function Remove-RealMemories([string]$Base, [string]$UserId) {
         if ($response.StatusCode -notin @(200,204)) { throw "mem0 delete returned HTTP $($response.StatusCode)" }
     }
 }
-function Cleanup-RealConversations([string]$Tenant, [string[]]$Users) {
-    $quotedUsers = ($Users | ForEach-Object { "'$($_.Replace("'", "''"))'" }) -join ','
-    $quotedTenant = $Tenant.Replace("'", "''")
-    Push-Location $infraDir
-    try {
-        docker compose exec -T appdb psql -U postgres -d springaitest -c "DELETE FROM conversations WHERE tenant_id = '$quotedTenant' AND user_id IN ($quotedUsers);" | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'conversation cleanup failed' }
-    } finally { Pop-Location }
-}
 function Wait-RealDocument([string]$Base, [string]$Token, [string]$DocumentId) {
     foreach ($attempt in 1..45) {
         $response = Invoke-Json GET "$Base/api/documents" $null $Token
@@ -668,6 +711,220 @@ function Get-SingleWorkflowCapture([string]$Capture, [string]$Channel) {
     if ([int]$record.upstreamStatus -lt 200 -or [int]$record.upstreamStatus -ge 300 -or $record.upstreamJsonValid -ne $true) { throw "$Channel workflow response was not successful valid JSON" }
     return $record
 }
+function ConvertTo-RealSqlBase64([string]$Value) {
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
+}
+function Get-RealD6RootGraph {
+    $stages = @(
+        @('start', 'start', @{}),
+        @('context', 'acquire_context_and_analyze_problem', @{}),
+        @('sufficiency', 'sufficiency_gate', @{}),
+        @('decompose', 'decompose_work', @{}),
+        @('dispatch', 'dispatch_agents', @{}),
+        @('join', 'join_worker_results', @{}),
+        @('verify', 'invoke_verifier', @{}),
+        @('repair', 'bounded_repair', @{ maxIterations = 1 }),
+        @('aggregate', 'aggregate_results', @{}),
+        @('respond', 'respond', @{}),
+        @('audit', 'audit', @{}),
+        @('end', 'end', @{})
+    )
+    $nodes = @($stages | ForEach-Object { @{ id=$_[0]; type=$_[1]; typeVersion='1.0'; config=$_[2] } })
+    $edges = @()
+    for ($index = 0; $index -lt ($stages.Count - 1); $index++) {
+        $edges += @{ id="e$index"; source=@{ nodeId=$stages[$index][0]; port='out' }; target=@{ nodeId=$stages[$index + 1][0]; port='in' } }
+    }
+    $edges += @{ id='tasks'; source=@{ nodeId='decompose'; port='tasks' }; target=@{ nodeId='dispatch'; port='tasks' } }
+    $edges += @{ id='results'; source=@{ nodeId='dispatch'; port='results' }; target=@{ nodeId='join'; port='results' } }
+    @{ schemaVersion=1; kind='orchestrator'; nodes=$nodes; edges=$edges; governance=@{ maxSteps=40; maxConcurrency=1 } } | ConvertTo-Json -Depth 20 -Compress
+}
+function Get-RealD6VerifierGraph {
+    $fixturePath = Join-Path $repoRoot 'plans/agent-platform-redesign/fixtures/default-agent-runtime-workflow.json'
+    $graph = Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json
+    $graph.runtimeVariant = 'verifier'
+    $loop = @($graph.nodes | Where-Object { $_.type -eq 'bounded_agent_loop' })[0]
+    if ($null -eq $loop) { throw 'default runtime fixture lacks bounded agent loop' }
+    $loop.children = @($loop.children | Where-Object { $_.type -notin @('load_skill', 'tool_policy_and_approval_gate', 'tool_call_and_observation') })
+    $graph | ConvertTo-Json -Depth 30 -Compress
+}
+function ConvertTo-RealCanonicalGraph([string]$Definition) {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Definition))
+    $code = "import base64,json; from app.orchestration.validator import validate; from app.orchestration.canonical import canonical_definition; value=json.loads(base64.b64decode('$encoded')); checked=validate(value,{}); assert checked.valid, checked.errors; print(json.dumps(canonical_definition(value),ensure_ascii=False,separators=(',',':'),sort_keys=True))"
+    Push-Location $infraDir
+    try {
+        $canonical = (docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence-real exec -T workflow-evidence python -c $code) -join "`n"
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($canonical)) {
+            throw 'real evidence Graph canonicalization failed'
+        }
+        return $canonical.Trim()
+    } finally { Pop-Location }
+}
+function Provision-RealD6RootFixture([string]$Tenant, [string]$User) {
+    # The fixture is written only to the generated database, with the same immutable
+    # canonical bytes/hash/revision fields the production reader verifies. It has one
+    # worker and one read-only verifier, and intentionally no context connector: the
+    # first transport turn deterministically reaches the real Root waiting-input path.
+    $workerId = [guid]::NewGuid().ToString('D'); $verifierId = [guid]::NewGuid().ToString('D')
+    $verifierWorkflowId = [guid]::NewGuid().ToString('D'); $rootWorkflowId = [guid]::NewGuid().ToString('D'); $orchestratorId = [guid]::NewGuid().ToString('D')
+    $workerRuntimeId = '00000000-0000-4000-8000-000000000001'; $workerRuntimeRevision = 3
+    $rootGraph = ConvertTo-RealCanonicalGraph (Get-RealD6RootGraph)
+    $verifierGraph = ConvertTo-RealCanonicalGraph (Get-RealD6VerifierGraph)
+    $workerDefinition = @{ allowed_tools=@(); audience=@('role:USER'); business_rules=@{ version=1; rules=@() }; capabilities=@(); execution_roles=@('worker'); knowledge_sources=@(); output_contract=@{}; runtime_limits=@{ max_context_rounds=1; timeout_seconds=30; token_budget=256; step_budget=8 }; runtime_workflow=@{ id=$workerRuntimeId; revision=$workerRuntimeRevision }; skill_bindings=@(); system_prompt='Produce concise evidence only from authorized context.' } | ConvertTo-Json -Depth 20 -Compress
+    $verifierDefinition = @{ allowed_tools=@(); audience=@('role:USER'); business_rules=@{ version=1; rules=@() }; capabilities=@(); execution_roles=@('verifier'); knowledge_sources=@(); output_contract=@{ type='verification-report' }; runtime_limits=@{ timeout_seconds=30; token_budget=256; step_budget=8 }; runtime_workflow=@{ id=$verifierWorkflowId; revision=1 }; skill_bindings=@(); system_prompt='Independently verify worker evidence and return a verification report.' } | ConvertTo-Json -Depth 20 -Compress
+    $orchestratorDefinition = @{ instructions='Coordinate bounded evidence work.'; policy=@{ dispatchMode='bounded-parallel'; joinPolicy='fail-fast'; repairPolicy='fail'; aggregationPolicy='verified-only'; denialPolicy='fail-closed' }; audience=@('role:USER'); budgets=@{ maxContextRounds=1; maxTasks=1; maxChildRuns=2; maxConcurrency=1; maxRepairRounds=1; tokenBudget=512; timeoutSeconds=30 }; capabilities=@(); context=@{ readOnly=$true; allowedTools=@(); knowledgeSources=@() }; verifier=@{ agentId=$verifierId; revision=1; variant='read-only'; independent=$true; outputContract=@{ type='verification-report' } }; workerPool=@(@{ agentId=$workerId; revision=1 }); workerPolicy=@{ requiredAudience=@(); requiredCapabilities=@(); selection='pinned-only' }; workflow=@{ id=$rootWorkflowId; revision=1 } } | ConvertTo-Json -Depth 20 -Compress
+    $data = @{
+        Tenant=(ConvertTo-RealSqlBase64 $Tenant); User=(ConvertTo-RealSqlBase64 $User); Root=(ConvertTo-RealSqlBase64 $rootGraph); Verifier=(ConvertTo-RealSqlBase64 $verifierGraph); Worker=(ConvertTo-RealSqlBase64 $workerDefinition); VerifierAgent=(ConvertTo-RealSqlBase64 $verifierDefinition); Orchestrator=(ConvertTo-RealSqlBase64 $orchestratorDefinition)
+    }
+    $sql = @"
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+BEGIN;
+CREATE TEMP TABLE evidence_payload ON COMMIT DROP AS
+SELECT convert_from(decode('$($data.Tenant)','base64'),'UTF8') tenant, convert_from(decode('$($data.User)','base64'),'UTF8') caller,
+  decode('$($data.Root)','base64') root_graph, decode('$($data.Verifier)','base64') verifier_graph,
+  decode('$($data.Worker)','base64') worker_def, decode('$($data.VerifierAgent)','base64') verifier_def,
+  decode('$($data.Orchestrator)','base64') orchestrator_def;
+INSERT INTO workflow(id,tenant_id,name,kind,enabled,draft_version,draft_definition,draft_ui_metadata,draft_definition_canonical,draft_ui_metadata_canonical,draft_definition_sha256,draft_ui_metadata_sha256,published_revision,created_by)
+SELECT '$rootWorkflowId'::uuid,tenant,'D6 Evidence Root','orchestrator',true,1,convert_from(root_graph,'UTF8')::jsonb,'{}'::jsonb,root_graph,convert_to('{}','UTF8'),encode(digest(root_graph,'sha256'),'hex'),encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),1,'evidence' FROM evidence_payload
+UNION ALL SELECT '$verifierWorkflowId'::uuid,tenant,'D6 Evidence Verifier','agent-runtime',true,1,convert_from(verifier_graph,'UTF8')::jsonb,'{}'::jsonb,verifier_graph,convert_to('{}','UTF8'),encode(digest(verifier_graph,'sha256'),'hex'),encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),1,'evidence' FROM evidence_payload;
+INSERT INTO workflow_revision(workflow_id,revision,status,schema_version,definition,ui_metadata,definition_canonical,ui_metadata_canonical,definition_sha256,ui_metadata_sha256,compiler_contract_version,created_by)
+SELECT '$rootWorkflowId'::uuid,1,'published',1,convert_from(root_graph,'UTF8')::jsonb,'{}'::jsonb,root_graph,convert_to('{}','UTF8'),encode(digest(root_graph,'sha256'),'hex'),encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),'d4-graph-ir-1','evidence' FROM evidence_payload
+UNION ALL SELECT '$verifierWorkflowId'::uuid,1,'published',1,convert_from(verifier_graph,'UTF8')::jsonb,'{}'::jsonb,verifier_graph,convert_to('{}','UTF8'),encode(digest(verifier_graph,'sha256'),'hex'),encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),'d4-graph-ir-1','evidence' FROM evidence_payload;
+INSERT INTO agent(id,tenant_id,slug,name,enabled,draft_version,draft_definition,draft_definition_canonical,draft_definition_sha256,published_revision,created_by)
+SELECT '$workerId'::uuid,tenant,'d6-worker','D6 Evidence Worker',true,1,convert_from(worker_def,'UTF8')::jsonb,worker_def,encode(digest(worker_def,'sha256'),'hex'),1,'evidence' FROM evidence_payload
+UNION ALL SELECT '$verifierId'::uuid,tenant,'d6-verifier','D6 Evidence Verifier',true,1,convert_from(verifier_def,'UTF8')::jsonb,verifier_def,encode(digest(verifier_def,'sha256'),'hex'),1,'evidence' FROM evidence_payload;
+INSERT INTO agent_revision(agent_id,revision,status,canonical_definition,definition_sha256,runtime_workflow_id,runtime_workflow_revision,created_by)
+SELECT '$workerId'::uuid,1,'published',worker_def,encode(digest(worker_def,'sha256'),'hex'),'$workerRuntimeId'::uuid,$workerRuntimeRevision,'evidence' FROM evidence_payload;
+INSERT INTO agent_revision(agent_id,revision,status,canonical_definition,definition_sha256,runtime_workflow_id,runtime_workflow_revision,created_by)
+SELECT '$verifierId'::uuid,1,'published',verifier_def,encode(digest(verifier_def,'sha256'),'hex'),'$verifierWorkflowId'::uuid,1,'evidence' FROM evidence_payload;
+INSERT INTO orchestrator(id,tenant_id,name,description,enabled,draft_version,draft_validated_version,draft_definition,draft_definition_canonical,draft_definition_sha256,published_revision,created_by)
+SELECT '$orchestratorId'::uuid,tenant,'D6 Evidence Root','isolated real-model evidence root',true,1,1,convert_from(orchestrator_def,'UTF8')::jsonb,orchestrator_def,encode(digest(orchestrator_def,'sha256'),'hex'),1,'evidence' FROM evidence_payload;
+INSERT INTO orchestrator_revision(orchestrator_id,revision,status,definition,canonical_definition,definition_sha256,workflow_id,workflow_revision,verifier_agent_id,verifier_agent_revision,created_by)
+SELECT '$orchestratorId'::uuid,1,'published',convert_from(orchestrator_def,'UTF8')::jsonb,orchestrator_def,encode(digest(orchestrator_def,'sha256'),'hex'),'$rootWorkflowId'::uuid,1,'$verifierId'::uuid,1,'evidence' FROM evidence_payload;
+INSERT INTO tenant_runtime_binding(tenant_id,enabled,default_orchestrator_id,default_orchestrator_revision,canary_user_ids)
+SELECT tenant,true,'$orchestratorId'::uuid,1,jsonb_build_array(caller) FROM evidence_payload;
+COMMIT;
+"@
+    Invoke-RealAppDb $script:realDatabaseName $sql
+    [pscustomobject]@{ OrchestratorId=$orchestratorId; RootWorkflowId=$rootWorkflowId; VerifierWorkflowId=$verifierWorkflowId; WorkerId=$workerId; VerifierId=$verifierId; Revision=1 }
+}
+function Get-RealD6RunEvidence([string]$Tenant, [string]$User, [string]$Conversation, [string]$Prompt, [long]$TransportId, [pscustomobject]$Fixture, [string]$Channel) {
+    $tenant64 = ConvertTo-RealSqlBase64 $Tenant
+    $user64 = ConvertTo-RealSqlBase64 $User
+    $conversation64 = ConvertTo-RealSqlBase64 $Conversation
+    $prompt64 = ConvertTo-RealSqlBase64 $Prompt
+    $transportPredicate = if ($TransportId -gt 0) { "AND id=$TransportId" } else { '' }
+    $sql = @"
+WITH expected AS (
+  SELECT convert_from(decode('$tenant64','base64'),'UTF8') tenant,
+         convert_from(decode('$user64','base64'),'UTF8') caller,
+         convert_from(decode('$conversation64','base64'),'UTF8') conversation,
+         convert_from(decode('$prompt64','base64'),'UTF8') prompt
+), matching_run AS (
+  SELECT r.* FROM orchestrator_run r, expected e
+  WHERE r.tenant_id=e.tenant AND r.user_id=e.caller AND r.conversation_id=e.conversation
+), transport AS (
+  SELECT count(*)::int count FROM conversations c, expected e
+  WHERE c.tenant_id=e.tenant AND c.user_id=e.caller AND c.prompt=e.prompt $transportPredicate
+), summary AS (
+  SELECT count(*)::int run_count,max(id::text)::uuid run_id,COALESCE(max(status),'') status,
+         count(*) FILTER (WHERE orchestrator_id='$($Fixture.OrchestratorId)'::uuid AND orchestrator_revision=$($Fixture.Revision)
+           AND workflow_id='$($Fixture.RootWorkflowId)'::uuid AND workflow_revision=$($Fixture.Revision))::int pin_count
+  FROM matching_run
+)
+SELECT s.run_count,COALESCE(s.run_id::text,''),s.status,s.pin_count,
+       (SELECT count(*) FROM orchestrator_run_command c WHERE c.run_id=s.run_id AND c.command_type='start'),
+       (SELECT count(*) FROM orchestrator_run_command c WHERE c.run_id=s.run_id AND c.command_type='start' AND c.dispatch_completed_at IS NOT NULL),
+       (SELECT count(*) FROM orchestrator_run_event e WHERE e.run_id=s.run_id),
+       (SELECT count(*) FROM orchestrator_run_event e WHERE e.run_id=s.run_id AND e.event_type='run_created'),
+       transport.count
+FROM summary s CROSS JOIN transport;
+"@
+    Push-Location $infraDir
+    try {
+        $line = (docker compose exec -T appdb psql -At -F '|' -U postgres -d $script:realDatabaseName -c $sql).Trim()
+        $code = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($code -ne 0) { throw 'unable to read isolated D6 root-run evidence' }
+    $fields = @($line -split '\|')
+    if ($fields.Count -ne 9) { throw "$Channel D6 evidence query returned an invalid shape" }
+    $evidence = [pscustomobject]@{
+        RunCount=[int]$fields[0]; RunId=$fields[1]; Status=$fields[2]; PinCount=[int]$fields[3]
+        StartCommandCount=[int]$fields[4]; DispatchedCommandCount=[int]$fields[5]
+        EventCount=[int]$fields[6]; RunCreatedCount=[int]$fields[7]
+        TransportCount=[int]$fields[8]
+    }
+    if ($evidence.RunCount -ne 1 -or $evidence.RunId -notmatch '^[0-9a-f-]{36}$' -or $evidence.Status -notin @('waiting_input','completed') -or
+        $evidence.PinCount -ne 1 -or $evidence.StartCommandCount -ne 1 -or $evidence.DispatchedCommandCount -ne 1 -or
+        $evidence.EventCount -lt 2 -or $evidence.RunCreatedCount -ne 1 -or $evidence.TransportCount -ne 1) {
+        throw "$Channel did not correlate its transport turn with one dispatched, pinned D6 Root Orchestrator run"
+    }
+    return $evidence
+}
+function Get-RealD6RunDebugStatus([string]$Tenant, [string]$User, [string]$Conversation) {
+    $tenant64 = ConvertTo-RealSqlBase64 $Tenant
+    $user64 = ConvertTo-RealSqlBase64 $User
+    $conversation64 = ConvertTo-RealSqlBase64 $Conversation
+    $sql = "WITH r AS (SELECT * FROM orchestrator_run WHERE tenant_id=convert_from(decode('$tenant64','base64'),'UTF8') AND user_id=convert_from(decode('$user64','base64'),'UTF8') AND conversation_id=convert_from(decode('$conversation64','base64'),'UTF8') ORDER BY created_at DESC LIMIT 1) SELECT COALESCE(r.status,'none')||'/'||COALESCE(r.error_code,'none')||'|'||COALESCE((SELECT e.payload->>'reason' FROM orchestrator_run_event e WHERE e.run_id=r.id AND e.event_type='run_cancelled' ORDER BY e.sequence DESC LIMIT 1),'none') FROM r;"
+    Push-Location $infraDir
+    try {
+        $value = (docker compose exec -T appdb psql -At -U postgres -d $script:realDatabaseName -c $sql).Trim()
+        if ($LASTEXITCODE -ne 0 -or $value -notmatch '^([a-z_]+)/([a-z_]+)\|(.*)$') { return 'unknown/unknown/unknown' }
+        $reason = switch ($Matches[3]) {
+            'Invalid immutable Root execution contract' { 'invalid_contract' }
+            'Root recovery identity does not match snapshot' { 'identity_mismatch' }
+            'Invalid Root resume checkpoint authority' { 'resume_authority' }
+            'Invalid Root resume checkpoint' { 'resume_checkpoint' }
+            default { 'none' }
+        }
+        return "$($Matches[1])/$($Matches[2])/$reason"
+    } finally { Pop-Location }
+}
+function Invoke-RealD6RootEvidence([string]$Base, [string]$Tenant, [string]$User) {
+    try { $fixture = Provision-RealD6RootFixture $Tenant $User }
+    catch { throw 'real evidence D6 fixture provisioning failed' }
+    $token = New-EvidenceJwt $User $Tenant
+    $chatPrompt = "D6 chat correlation $([guid]::NewGuid().ToString('N'))"
+    $chatWireConversation = "d6-chat-$([guid]::NewGuid().ToString('N'))"
+    try { $chat = Invoke-Json POST "$Base/api/chat" @{ message=$chatPrompt; conversationId=$chatWireConversation } $token }
+    catch {
+        $status = Get-RealD6RunDebugStatus $Tenant $User "$Tenant`:$User`:$chatWireConversation"
+        $httpStatus = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        throw "chat D6 evidence request failed with HTTP $httpStatus and root $status"
+    }
+    if ($chat.StatusCode -ne 200) { throw "chat D6 evidence returned HTTP $($chat.StatusCode)" }
+    try { $chatBody = $chat.Content | ConvertFrom-Json } catch { throw 'chat D6 evidence returned invalid JSON' }
+    $chatTransportId = [long]$chatBody.id
+    if ($chatTransportId -le 0) { throw 'chat D6 evidence omitted its persisted transport id' }
+    try { $chatEvidence = Get-RealD6RunEvidence $Tenant $User "$Tenant`:$User`:$chatWireConversation" $chatPrompt $chatTransportId $fixture 'chat' }
+    catch { throw 'chat D6 evidence correlation failed' }
+
+    $aguiPrompt = "D6 AG-UI correlation $([guid]::NewGuid().ToString('N'))"
+    $aguiThread = "d6-agui-$([guid]::NewGuid().ToString('N'))"
+    try { $agui = Invoke-Agui $Base $token $aguiThread @((New-UserMsg $aguiPrompt)) }
+    catch { throw 'AG-UI D6 evidence request failed' }
+    if ($agui.StatusCode -ne 200) { throw "AG-UI D6 evidence returned HTTP $($agui.StatusCode)" }
+    if (@(Get-AguiFrames $agui.Content | Where-Object { $_.type -eq 'RUN_FINISHED' }).Count -ne 1) { throw 'AG-UI D6 root turn did not finish normally' }
+    try { $aguiEvidence = Get-RealD6RunEvidence $Tenant $User "$Tenant`:$User" $aguiPrompt 0 $fixture 'AG-UI' }
+    catch { throw 'AG-UI D6 evidence correlation failed' }
+
+    # No response/request content, JWT, tenant, or durable run ID is retained.
+    Write-EvidenceArtifact -Run $run -RelativePath 'traces/d6-root-path.json' -Value @{
+        orchestratorIdHmac=(Get-RealHmac $fixture.OrchestratorId)
+        rootWorkflowIdHmac=(Get-RealHmac $fixture.RootWorkflowId)
+        expectedRevision=$fixture.Revision
+        chatRootRunIdHmac=(Get-RealHmac $chatEvidence.RunId)
+        aguiRootRunIdHmac=(Get-RealHmac $aguiEvidence.RunId)
+        chatTransportIdHmac=(Get-RealHmac ([string]$chatTransportId))
+        aguiThreadIdHmac=(Get-RealHmac $aguiThread)
+        chatRootRunCount=$chatEvidence.RunCount
+        aguiRootRunCount=$aguiEvidence.RunCount
+        startCommandCount=($chatEvidence.StartCommandCount + $aguiEvidence.StartCommandCount)
+        dispatchedCommandCount=($chatEvidence.DispatchedCommandCount + $aguiEvidence.DispatchedCommandCount)
+        eventCount=($chatEvidence.EventCount + $aguiEvidence.EventCount)
+        correlatedTransportCount=($chatEvidence.TransportCount + $aguiEvidence.TransportCount)
+        channels=@('chat','agui')
+    }
+}
 function Invoke-RealModel {
     $required = @{ PlatformModel=$PlatformModel; WorkflowModel=$WorkflowModel; Mem0Model=$Mem0Model; EmbeddingModel=$EmbeddingModel }
     if ($PlatformModel -ne $script:realModelAlias -or $WorkflowModel -ne $script:realModelAlias -or $Mem0Model -ne $script:realModelAlias -or $EmbeddingModel -ne $script:realEmbeddingAlias) {
@@ -681,11 +938,11 @@ function Invoke-RealModel {
     }
 
     $base = 'http://127.0.0.1:8180'; $capture = 'http://127.0.0.1:8011'; $mem0 = 'http://127.0.0.1:8000'
-    $tenant = "evidence-$([guid]::NewGuid().ToString('N'))"; $e04User = "e04-$([guid]::NewGuid().ToString('N'))"; $e04WrongUser = "e04wrong-$([guid]::NewGuid().ToString('N'))"; $e05User = "e05-$([guid]::NewGuid().ToString('N'))"
+    $tenant = "evidence-$([guid]::NewGuid().ToString('N'))"; $d6User = "d6-$([guid]::NewGuid().ToString('N'))"; $e04User = "e04-$([guid]::NewGuid().ToString('N'))"; $e04WrongUser = "e04wrong-$([guid]::NewGuid().ToString('N'))"; $e05User = "e05-$([guid]::NewGuid().ToString('N'))"
     $e04Marker = "e04pref_$([guid]::NewGuid().ToString('N'))"; $e05Marker = "e05doc_$([guid]::NewGuid().ToString('N'))"
     $documentId = ''; $e04Token = ''; $e05Token = ''; $servicesReady = $false
     try {
-        Start-RealProfile
+        Start-RealProfile $tenant
         $servicesReady = $true
         Record-RealImageMetadata
         $chatMeta = Invoke-LiteLlmPreflight 'chat/completions' @{ model=$script:realModelAlias; messages=@(@{role='user';content='release evidence chat preflight'}); temperature=0 } 'chat'
@@ -698,20 +955,35 @@ function Invoke-RealModel {
         Set-EvidenceMetadata -Run $run -Section models -Name 'LiteLlmEmbeddingProviderActualModel' -Value $embeddingMeta.Model
         if ($chatMeta.SystemFingerprint) { Set-EvidenceMetadata -Run $run -Section models -Name 'LiteLlmChatSystemFingerprint' -Value $chatMeta.SystemFingerprint }
         Add-EvidenceNote -Run $run -Note 'LiteLLM chat and embedding preflight completed before E-04/E-05 fixtures; artifacts contain metadata only.'
+        Invoke-RealD6RootEvidence $base $tenant $d6User
+        Add-EvidenceNote -Run $run -Note 'Chat and AG-UI both allocated an isolated, pinned D6 Root Orchestrator run; no legacy fallback was observed.'
 
         try {
             $e04Token = New-EvidenceJwt $e04User $tenant
             $historyBefore = Invoke-Json GET "$base/api/chat/history" $null $e04Token
             if ($historyBefore.StatusCode -ne 200) { throw "history precheck returned HTTP $($historyBefore.StatusCode)" }
-            $agui = Invoke-Agui $base $e04Token "e04-$([guid]::NewGuid().ToString('N'))" @((New-UserMsg "My durable user preference is this acceptance code: $e04Marker. Please remember this preference."))
+            $agui = Invoke-Agui $base $e04Token "e04-$([guid]::NewGuid().ToString('N'))" @((New-UserMsg "My favorite project codename is $e04Marker. Please remember this durable preference."))
             if ($agui.StatusCode -ne 200) { throw "AG-UI memory turn returned HTTP $($agui.StatusCode)" }
             if (@(Get-AguiFrames $agui.Content | Where-Object { $_.type -eq 'RUN_FINISHED' }).Count -ne 1) { throw 'AG-UI memory turn did not finish normally' }
-            $historyAfter = Invoke-Json GET "$base/api/chat/history" $null $e04Token
-            if ($historyAfter.StatusCode -ne 200) { throw "history verification returned HTTP $($historyAfter.StatusCode)" }
-            $beforeCount = @($historyBefore.Content | ConvertFrom-Json).Count; $afterCount = @($historyAfter.Content | ConvertFrom-Json).Count
+            $beforeCount = [int](($historyBefore.Content | ConvertFrom-Json).Count)
+            $afterCount = $beforeCount
+            foreach ($attempt in 1..10) {
+                $historyAfter = Invoke-Json GET "$base/api/chat/history" $null $e04Token
+                if ($historyAfter.StatusCode -ne 200) { throw "history verification returned HTTP $($historyAfter.StatusCode)" }
+                $afterCount = [int](($historyAfter.Content | ConvertFrom-Json).Count)
+                if ($afterCount -gt $beforeCount) { break }
+                Start-Sleep -Seconds 1
+            }
             if ($afterCount -le $beforeCount) { throw 'AG-UI turn was not persisted to authenticated chat history' }
             $matches = @()
-            foreach ($attempt in 1..30) { $matches = @(Get-Mem0Matches $mem0 "$tenant`:$e04User" $e04Marker); if ($matches.Count -gt 0) { break }; Start-Sleep -Seconds 2 }
+            foreach ($attempt in 1..5) { $matches = @(Get-Mem0Matches $mem0 "$tenant`:$e04User" $e04Marker); if ($matches.Count -gt 0) { break }; Start-Sleep -Seconds 2 }
+            if ($matches.Count -eq 0) {
+                $reinforced = Invoke-Agui $base $e04Token "e04-reinforce-$([guid]::NewGuid().ToString('N'))" @((New-UserMsg "Remember this user fact: my favorite project codename is exactly $e04Marker."))
+                if ($reinforced.StatusCode -ne 200 -or @(Get-AguiFrames $reinforced.Content | Where-Object { $_.type -eq 'RUN_FINISHED' }).Count -ne 1) {
+                    throw 'AG-UI memory reinforcement turn did not finish normally'
+                }
+                foreach ($attempt in 1..25) { $matches = @(Get-Mem0Matches $mem0 "$tenant`:$e04User" $e04Marker); if ($matches.Count -gt 0) { break }; Start-Sleep -Seconds 2 }
+            }
             if ($matches.Count -eq 0) { throw 'mem0 did not return the authenticated marker before timeout' }
             $wrongMatches = @(Get-Mem0Matches $mem0 "$tenant`:$e04WrongUser" $e04Marker)
             if ($wrongMatches.Count -ne 0) { throw 'mem0 marker was visible to the wrong user' }
@@ -727,7 +999,7 @@ function Invoke-RealModel {
             # Keep the numeric fixture short enough that a real model will not
             # regroup or truncate it while still providing ample run uniqueness.
             $number = (Get-Random -Minimum 10000000 -Maximum 99999999).ToString()
-            $created = Invoke-Json POST "$base/api/documents" @{ title="evidence-$e05Marker"; text="驗收追蹤碼 $e05Marker 的唯一數字是 $number。" } $e05Token
+            $created = Invoke-Json POST "$base/api/documents" @{ title = "evidence-$e05Marker"; text = "The unique acceptance number for tracking code $e05Marker is $number." } $e05Token
             if ($created.StatusCode -ne 202) { throw "document create returned HTTP $($created.StatusCode)" }
             try { $documentId = [string](($created.Content | ConvertFrom-Json).id) } catch { throw 'document create returned invalid JSON' }
             if ([string]::IsNullOrWhiteSpace($documentId)) { throw 'document create omitted id' }
@@ -736,7 +1008,7 @@ function Invoke-RealModel {
             foreach ($round in 1..3) {
                 # The answer is intentionally absent from the prompt: a reply
                 # containing the fixture number must prove document retrieval.
-                $question = "本輪驗收清理代碼是 $e05Marker。請查詢該追蹤碼的已上傳文件，告訴我其中的唯一驗收數字。"
+                $question = "Find the uploaded document for tracking code $e05Marker and return its unique acceptance number."
                 Reset-Captures $capture
                 $chat = Invoke-Json POST "$base/api/chat" @{ message=$question; conversationId="e05chat-$round-$([guid]::NewGuid().ToString('N'))" } $e05Token
                 if ($chat.StatusCode -ne 200) { throw "chat routing round $round returned HTTP $($chat.StatusCode)" }
@@ -769,9 +1041,9 @@ function Invoke-RealModel {
             try { Remove-RealDocument $base $e05Token $documentId } catch { $cleanupErrors += 'document cleanup failed' }
             try { Remove-RealMemories $mem0 "$tenant`:$e04User" } catch { $cleanupErrors += 'E-04 memory cleanup failed' }
             try { Remove-RealMemories $mem0 "$tenant`:$e05User" } catch { $cleanupErrors += 'E-05 memory cleanup failed' }
-            try { Cleanup-RealConversations $tenant @($e04User, $e04WrongUser, $e05User) } catch { $cleanupErrors += 'conversation cleanup failed' }
         }
         try { Restore-RealServices } catch { $cleanupErrors += 'service environment restore failed' }
+        try { Remove-RealEvidenceDatabase } catch { $cleanupErrors += 'isolated evidence database rollback failed' }
         Restore-RealEvidenceEnvironment
         if ($cleanupErrors.Count -gt 0) { foreach ($gate in $gates) { Set-EvidenceGate -Run $run -Gate $gate -Status BLOCKED -Detail ($cleanupErrors -join '; ') } }
     }

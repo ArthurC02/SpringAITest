@@ -19,9 +19,23 @@ public sealed class ConversationStore : IConversationStore
     private Exception WrapTransport(Exception ex) => new BackendCallException(FailurePrefix + ex.Message, ex);
 
     public async Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
+        => await AddAsync(prompt, reply, ctx, null, ct);
+
+    public async Task<ChatResponse> AddAsync(
+        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata,
+        CancellationToken ct = default)
     {
         var created = await _backend.SendForJsonAsync<ConversationCreated>(
-            _backend.BuildRequest(HttpMethod.Post, "/api/conversations", ctx, body: new { prompt, reply }),
+            _backend.BuildRequest(HttpMethod.Post, "/api/conversations", ctx, body: new
+            {
+                prompt,
+                reply,
+                orchestrator_id = metadata?.OrchestratorId,
+                orchestrator_revision = metadata?.OrchestratorRevision,
+                workflow_id = metadata?.WorkflowId,
+                workflow_revision = metadata?.WorkflowRevision,
+                root_run_id = metadata?.RootRunId,
+            }),
             WrapTransport,
             (r, _) => Task.FromResult<Exception>(new BackendCallException(FailurePrefix + "HTTP " + (int)r.StatusCode)),
             () => new BackendCallException(FailurePrefix + "回應內容為空"),

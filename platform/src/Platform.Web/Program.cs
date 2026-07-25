@@ -66,6 +66,18 @@ var workflowDesignerEnabled = string.Equals(
     StringComparison.OrdinalIgnoreCase);
 var multiAgentDispatchEnabled = workflowDesignerEnabled
     && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var agentChatEnabled = string.Equals(
+    cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var agentChatTenants = (cfg["AGENT_CHAT_TENANT_ALLOWLIST"] ?? string.Empty)
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+var agentChatOptions = new AgentChatOptions
+{
+    Enabled = agentChatEnabled,
+    TenantAllowlist = new HashSet<string>(
+        agentChatTenants.Where(static tenant =>
+            tenant.Length is > 0 and <= 128 && !tenant.Any(char.IsControl)),
+        StringComparer.Ordinal),
+};
 
 builder.Services.AddSingleton(llmOptions);
 builder.Services.AddSingleton(mem0Options);
@@ -73,6 +85,7 @@ builder.Services.AddSingleton(workflowOptions);
 builder.Services.AddSingleton(backendOptions);
 builder.Services.AddSingleton(rabbitMqOptions);
 builder.Services.AddSingleton(jwtOptions);
+builder.Services.AddSingleton(agentChatOptions);
 
 // ---------------------------------------------------------------------------
 // backend client:核心商業邏輯已抽到 backend(:8002)。連線逾時 5s;讀取逾時 90s
@@ -102,6 +115,10 @@ builder.Services.AddHttpClient<IAgentRunService, AgentRunService>(
     .ConfigurePrimaryHttpMessageHandler(
         () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
 builder.Services.AddHttpClient<IOrchestratorRunService, OrchestratorRunService>(
+        c => c.Timeout = TimeSpan.FromSeconds(90))
+    .ConfigurePrimaryHttpMessageHandler(
+        () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+builder.Services.AddHttpClient<IAgentChatRuntime, AgentChatRuntime>(
         c => c.Timeout = TimeSpan.FromSeconds(90))
     .ConfigurePrimaryHttpMessageHandler(
         () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
@@ -196,8 +213,9 @@ var copilotAgent = builder.Services.AddAIAgent(
             var routing = new SkillRoutingAgent(
                 chatClientAgent, sp.GetRequiredService<ILlmAgent>(), chatHistoryProvider, scopeFactory,
                 loggerFactory.CreateLogger<SkillRoutingAgent>());
+            var brain = new AgentChatRoutingAgent(routing, scopeFactory);
             var recorder = new ChatTurnRecorder(
-                routing, scopeFactory, loggerFactory.CreateLogger<ChatTurnRecorder>());
+                brain, scopeFactory, loggerFactory.CreateLogger<ChatTurnRecorder>());
             return new AguiWireDedupAgent(recorder, chatHistoryProvider);
         },
         ServiceLifetime.Singleton)
@@ -238,8 +256,9 @@ builder.Services.AddAIAgent(
             var routing = new SkillRoutingAgent(
                 chatClientAgent, sp.GetRequiredService<ILlmAgent>(), chatHistoryProvider, scopeFactory,
                 loggerFactory.CreateLogger<SkillRoutingAgent>());
+            var brain = new AgentChatRoutingAgent(routing, scopeFactory);
             return new ChatTurnRecorder(
-                routing, scopeFactory, loggerFactory.CreateLogger<ChatTurnRecorder>());
+                brain, scopeFactory, loggerFactory.CreateLogger<ChatTurnRecorder>());
         },
         ServiceLifetime.Singleton)
     .WithInMemorySessionStore(withIsolation: false);
@@ -512,7 +531,7 @@ app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAno
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
 app.MapGet(
     "/api/features",
-    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled }))
+    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled, agentChatEnabled }))
     .AllowAnonymous();
 
 // ---------------------------------------------------------------------------

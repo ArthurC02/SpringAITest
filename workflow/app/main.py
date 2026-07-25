@@ -202,7 +202,7 @@ async def lifespan(app: FastAPI):
         app.state.agent_runtime_manager = runtime_service.manager
     if settings.multi_agent_dispatch_enabled and runtime_service is not None:
         root_supervisor = RootRuntimeSupervisor(
-            app.state.orchestrator_backend, runtime_service.manager
+            app.state.orchestrator_backend, runtime_service.manager, runtime_service.checkpoints
         )
         root_supervisor.start()
         app.state.root_runtime_supervisor = root_supervisor

@@ -150,7 +150,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                 }
 
                 if (agent.WorkflowId != Guid.Parse(AgentDefaults.RuntimeWorkflowId)
-                    || agent.WorkflowRevision != AgentDefaults.RuntimeWorkflowRevision)
+                    || agent.WorkflowRevision is not (AgentDefaults.PreviousRuntimeWorkflowRevision or AgentDefaults.RuntimeWorkflowRevision))
                 {
                     return Task.FromResult(new AgentRunWriteResult(
                         AgentRunWriteStatus.InvalidState,
@@ -171,7 +171,9 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                 }
 
                 var workflowDefinition = AgentRunSnapshotBuilder.CanonicalizeJson(
-                    AgentDefaults.RuntimeWorkflowDefinition);
+                    agent.WorkflowRevision == AgentDefaults.PreviousRuntimeWorkflowRevision
+                        ? AgentDefaults.PreviousRuntimeWorkflowDefinition
+                        : AgentDefaults.RuntimeWorkflowDefinition);
                 var workflow = new WorkflowSnapshotSource(
                     agent.WorkflowId,
                     agent.WorkflowRevision,
@@ -1833,7 +1835,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
 
     private static bool HasJsonValue(JsonElement? value)
         => value is
-            { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) };
+        { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) };
 
     private static bool WithinJsonLimit(JsonElement? value, int max)
         => value is null or { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined }

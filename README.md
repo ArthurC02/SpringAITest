@@ -424,3 +424,11 @@ curl -X POST http://localhost:8080/api/skills/validate \
 
 1. **聊天歷史補回使用者訊息**：`GET /api/chat/history` 目前只返回 `reply`；若要重建完整對話需補 `prompt` 欄位（存在 backend appdb 的 conversations 表中）。
 2. **短期記憶跨重啟保留**（可選）：目前短期記憶為 in-memory，重啟平台即清；要跨重啟保留可在 backend appdb 新增 `chat_memory` 表並改為從 DB 讀取最近 N 條訊息。
+
+## D6 Agent Chat canary
+
+D6 is delivered behind fail-closed configuration. Set `AGENT_CHAT_ENABLED=true` in Platform, Backend, and Workflow, and set Platform `AGENT_CHAT_TENANT_ALLOWLIST` to the exact tenant codes being migrated. Eligible authenticated users are resolved through the tenant runtime binding; Chat and AG-UI then use the same durable, revision-pinned Root Orchestrator path. Anonymous users, tenants outside the allowlist, and tenants resolved as `legacy` remain on the existing shared-core path. An explicitly requested unavailable Orchestrator fails closed.
+
+Before adding a tenant, publish and pin its Root Workflow, Worker Agent, independent read-only Verifier Agent, and tenant runtime binding. Canary one tenant at a time and retain the D6 verifier bundle. To roll back, first disable Platform `AGENT_CHAT_ENABLED` or remove the tenant from the allowlist, then disable the Workflow and Backend flags. Routing changes immediately; durable run and event records remain audit-retained.
+
+Verification snapshot: Backend 479/479 with PostgreSQL coverage; Platform Service 335/335 and Web 269/269; Workflow 862 passed/2 skipped; Frontend 50/50 plus build/lint; deterministic D6 verifier 13/13 PASS. RealModel bundle `20260725T111722672Z-90c9119f` passed E-04 and E-05. The seventh independent review completed with zero findings.

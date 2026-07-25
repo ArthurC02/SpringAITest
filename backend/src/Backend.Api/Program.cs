@@ -13,6 +13,7 @@ using Backend.Api.Skills;
 using Backend.Api.Workflows;
 using Backend.Api.Orchestrators;
 using Backend.Api.OrchestratorRuns;
+using Backend.Api.RuntimeDiscovery;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -35,6 +36,8 @@ var useInMemoryDb = string.Equals(cfg["DB_PROVIDER"], "inmemory", StringComparis
 var workflowDesignerEnabled = string.Equals(cfg["WORKFLOW_DESIGNER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var multiAgentDispatchEnabled = workflowDesignerEnabled
     && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var agentChatEnabled = multiAgentDispatchEnabled
+    && string.Equals(cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -54,6 +57,7 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IWorkflowRepository, InMemoryWorkflowRepository>();
     builder.Services.AddSingleton<IOrchestratorRepository, InMemoryOrchestratorRepository>();
     builder.Services.AddSingleton<IOrchestratorRunRepository, InMemoryOrchestratorRunRepository>();
+    builder.Services.AddSingleton<IRuntimeBindingRepository, InMemoryRuntimeBindingRepository>();
 }
 else
 {
@@ -69,6 +73,7 @@ else
     builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
     builder.Services.AddScoped<IOrchestratorRepository, OrchestratorRepository>();
     builder.Services.AddScoped<IOrchestratorRunRepository, OrchestratorRunRepository>();
+    builder.Services.AddScoped<IRuntimeBindingRepository, RuntimeBindingRepository>();
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +95,7 @@ builder.Services.AddScoped<IBusinessRuleValidator>(sp => new WorkflowBusinessRul
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("business-rule-validator"),
     workflowBaseUrl,
     internalToken));
+builder.Services.AddScoped<RuntimeDiscoveryService>();
 builder.Services.AddHttpClient("workflow-designer", c => c.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<IWorkflowCompiler>(sp => new WorkflowDesignerCompiler(
@@ -183,6 +189,21 @@ if (!multiAgentDispatchEnabled)
         if (context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
             || context.Request.Path.StartsWithSegments("/api/admin/orchestrators")
                && context.Request.Path.Value?.Contains("/runs", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
+            return;
+        }
+        await next();
+    });
+}
+
+if (!agentChatEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/runtime-discovery")
+            || context.Request.Path.StartsWithSegments("/api/chat-runs")
+            || context.Request.Path.StartsWithSegments("/api/admin/runtime-binding"))
         {
             await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
             return;

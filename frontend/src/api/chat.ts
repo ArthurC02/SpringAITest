@@ -50,6 +50,7 @@ export async function streamChat(
   message: string,
   onToken: (chunk: string) => void,
   signal?: AbortSignal,
+  orchestratorId?: string | null,
 ): Promise<void> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -65,7 +66,12 @@ export async function streamChat(
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ message, userId: getUserId(), conversationId: getConversationId() }),
+    body: JSON.stringify({
+      message,
+      userId: getUserId(),
+      conversationId: getConversationId(),
+      ...(orchestratorId ? { orchestratorId } : {}),
+    }),
     signal,
   })
   // 這支端點 AllowAnonymous、驗證失敗永不回 401，platform 改用這個 header 標示

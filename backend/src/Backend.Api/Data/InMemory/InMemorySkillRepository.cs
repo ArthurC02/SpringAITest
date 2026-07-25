@@ -84,8 +84,12 @@ public sealed class InMemorySkillRepository : ISkillRepository
 
             var stored = skill with
             {
-                Kind = "flow", Package = null, CurrentRevision = 1, Enabled = true,
-                CreatedAt = now, UpdatedAt = now,
+                Kind = "flow",
+                Package = null,
+                CurrentRevision = 1,
+                Enabled = true,
+                CreatedAt = now,
+                UpdatedAt = now,
             };
             _store[(tenantId, skill.Name)] = stored;
             AddRevisionUnsafe(tenantId, stored, createdBy);
@@ -153,8 +157,11 @@ public sealed class InMemorySkillRepository : ISkillRepository
 
             var stored = skill with
             {
-                Package = package?.ToArray(), CurrentRevision = 1, Enabled = true,
-                CreatedAt = now, UpdatedAt = now,
+                Package = package?.ToArray(),
+                CurrentRevision = 1,
+                Enabled = true,
+                CreatedAt = now,
+                UpdatedAt = now,
                 SimpleForm = null,
             };
             _store[(tenantId, skill.Name)] = stored;
@@ -254,15 +261,15 @@ public sealed class InMemorySkillRepository : ISkillRepository
             return false;
         }
 
-          source = new SkillSnapshotSource(
-              Guid.Empty,
-              name,
-              AgentRunSnapshotBuilder.SkillDescriptionOf(row.Definition),
-            revision,
-            row.Kind,
-            row.Definition,
-            row.DefinitionSha256,
-            row.PackageSha256 ?? (row.Package is null ? null : SkillHash.Sha256(row.Package)));
+        source = new SkillSnapshotSource(
+            Guid.Empty,
+            name,
+            AgentRunSnapshotBuilder.SkillDescriptionOf(row.Definition),
+          revision,
+          row.Kind,
+          row.Definition,
+          row.DefinitionSha256,
+          row.PackageSha256 ?? (row.Package is null ? null : SkillHash.Sha256(row.Package)));
         return true;
     }
 

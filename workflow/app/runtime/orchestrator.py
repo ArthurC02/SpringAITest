@@ -15,7 +15,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.orchestration.validator import validate as validate_graph
-from app.runtime.models import canonical_json_sha256
+from app.runtime.models import _validation_json_value, canonical_json_sha256
 from app.workflow_contracts import GRAPH_IR_COMPILER_CONTRACT_VERSION
 
 ROOT_RUNTIME_ADAPTER_VERSION = "root-runtime-adapter-1"
@@ -54,7 +54,11 @@ class OrchestratorLimits(_StrictModel):
     max_child_runs: int = Field(ge=1, le=100)
     max_concurrency: int = Field(ge=1, le=32)
     max_repair_rounds: int = Field(ge=0, le=10)
-    timeout_seconds: float = Field(gt=0, le=86_400)
+    # Backend's immutable orchestrator snapshot derives this directly from the
+    # integer `budgets.timeoutSeconds` contract.  Keeping it integral avoids
+    # changing `90` to `90.0` during Pydantic validation and invalidating the
+    # cross-service canonical snapshot hash.
+    timeout_seconds: int = Field(gt=0, le=86_400)
 
     @model_validator(mode="after")
     def child_budget_covers_tasks(self) -> "OrchestratorLimits":
@@ -150,6 +154,17 @@ class RootExecutionSnapshot(_StrictModel):
     context_byte_budget: int = Field(ge=1, le=10_000_000)
     business_rules: dict[str, Any]
     policies: dict[str, Any]
+
+    @classmethod
+    def from_preserved_json(cls, raw: dict[str, Any]) -> "RootExecutionSnapshot":
+        """Validate canonical JSON while preserving its numeric spellings for hashing.
+
+        Claim decoding uses ``RawNumberToken`` so it can first prove the Backend
+        artifact bytes are canonical.  Strict Pydantic models intentionally do
+        not accept those string subclasses as integers, so convert only for
+        model validation after the byte-level proof has completed.
+        """
+        return cls.model_validate(_validation_json_value(raw))
 
     @model_validator(mode="after")
     def verifier_is_independent_and_read_only(self) -> "RootExecutionSnapshot":
@@ -248,11 +263,12 @@ class VerificationReport(_StrictModel):
 
 
 class RootRunResult(_StrictModel):
-    status: Literal["completed", "failed", "cancelled", "timed_out"]
+    status: Literal["waiting_input", "completed", "failed", "cancelled", "timed_out"]
     accepted_results: list[ChildResult]
     verification_report: VerificationReport | None = None
     aggregate: dict[str, Any] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
+    clarification: list[str] = Field(default_factory=list)
     audit: list[dict[str, Any]]
 
     @model_validator(mode="after")
@@ -396,17 +412,27 @@ class RootOrchestrator:
         context: dict[str, Any],
         *,
         cancel_on_task_cancel: bool = True,
+        remaining_deadline_seconds: float | None = None,
+        context_round: int = 1,
     ) -> RootRunResult:
         audit = [self._event(snapshot, "root_started")]
         ledger = RootTokenLedger(snapshot.token_budget, audit)
+        if context_round < 1 or context_round > snapshot.limits.max_context_rounds:
+            return self._failed(
+                audit, [], None, "context round budget exhausted"
+            )
         try:
-            async with asyncio.timeout(snapshot.limits.timeout_seconds):
+            timeout_seconds = snapshot.limits.timeout_seconds
+            if remaining_deadline_seconds is not None:
+                timeout_seconds = min(timeout_seconds, remaining_deadline_seconds)
+            async with asyncio.timeout(max(0, timeout_seconds)):
                 return await self._execute(
                     snapshot,
                     context,
                     audit,
                     ledger,
                     cancel_on_task_cancel=cancel_on_task_cancel,
+                    context_round=context_round,
                 )
         except RootBudgetExceeded as exc:
             return self._failed(
@@ -435,37 +461,44 @@ class RootOrchestrator:
         ledger: RootTokenLedger,
         *,
         cancel_on_task_cancel: bool,
+        context_round: int,
     ) -> RootRunResult:
-        acquired = context
-        for context_round in range(1, snapshot.limits.max_context_rounds + 1):
-            acquisition = await self._acquire_context(
-                snapshot, acquired, context_round
+        # An insufficient assessment is an explicit interruption boundary.  Do
+        # not burn multiple context rounds against identical input in a single
+        # command: the supervisor checkpoints this result and a later resume
+        # supplies the next trusted caller clarification.  That makes the
+        # max-context budget restart-safe and prevents an initial chat turn
+        # from terminally failing before the user can answer a question.
+        acquisition = await self._acquire_context(
+            snapshot, context, context_round
+        )
+        audit.append(
+            self._event(
+                snapshot,
+                "context_assessed",
+                context_round=context_round,
+                ready=acquisition.ready,
+                missing_count=len(acquisition.missing),
             )
-            audit.append(
-                self._event(
-                    snapshot,
-                    "context_assessed",
-                    context_round=context_round,
-                    ready=acquisition.ready,
-                    missing_count=len(acquisition.missing),
-                )
-            )
-            acquired = acquisition.context
-            ledger.charge(snapshot, "context", acquisition.model_dump(mode="json"))
-            acquired_size = len(
-                json.dumps(
-                    acquired, ensure_ascii=False, separators=(",", ":")
-                ).encode()
-            )
-            if acquired_size > snapshot.context_byte_budget:
-                return self._failed(
-                    audit, [], None, "context byte budget exhausted"
-                )
-            if acquisition.ready:
-                break
-        else:
-            return self._failed(
-                audit, [], None, "context remained insufficient"
+        )
+        acquired = acquisition.context
+        ledger.charge(snapshot, "context", acquisition.model_dump(mode="json"))
+        acquired_size = len(
+            json.dumps(acquired, ensure_ascii=False, separators=(",", ":"))
+            .encode()
+        )
+        if acquired_size > snapshot.context_byte_budget:
+            return self._failed(audit, [], None, "context byte budget exhausted")
+        if not acquisition.ready:
+            return RootRunResult(
+                status="waiting_input",
+                accepted_results=[],
+                audit=audit,
+                clarification=[
+                    "Additional context is required: " + item
+                    for item in acquisition.missing
+                ],
+                limitations=["context remained insufficient"],
             )
 
         ledger.reserve(snapshot, "planner", PLANNER_PROVIDER_TOKEN_CAP)

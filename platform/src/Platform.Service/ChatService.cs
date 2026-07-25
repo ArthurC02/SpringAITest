@@ -49,10 +49,12 @@ public sealed class ChatService : IChatService
         _logger = logger;
     }
 
-    public async Task<ChatResponse> ChatAsync(string message, string? userId, string? conversationId, UserContext? userCtx = null, CancellationToken ct = default)
+    public async Task<ChatResponse> ChatAsync(string message, string? userId, string? conversationId, UserContext? userCtx = null, CancellationToken ct = default, Guid? orchestratorId = null)
     {
         _identity.SetRequestKeys(userId, conversationId, userCtx);
-        var (_, cid) = _identity.DeriveMemoryKeys();
+        _identity.SetRequestedOrchestratorId(orchestratorId);
+        var (_, derivedCid) = _identity.DeriveMemoryKeys();
+        var cid = OrchestratorSessionKey(derivedCid, orchestratorId);
 
         using var activity = StartSpan(message);
         try
@@ -85,10 +87,12 @@ public sealed class ChatService : IChatService
     }
 
     public async IAsyncEnumerable<string> StreamChatAsync(
-        string message, string? userId, string? conversationId, UserContext? userCtx = null, [EnumeratorCancellation] CancellationToken ct = default)
+        string message, string? userId, string? conversationId, UserContext? userCtx = null, [EnumeratorCancellation] CancellationToken ct = default, Guid? orchestratorId = null)
     {
         _identity.SetRequestKeys(userId, conversationId, userCtx);
-        var (_, cid) = _identity.DeriveMemoryKeys();
+        _identity.SetRequestedOrchestratorId(orchestratorId);
+        var (_, derivedCid) = _identity.DeriveMemoryKeys();
+        var cid = OrchestratorSessionKey(derivedCid, orchestratorId);
 
         // 刻意手動管理 span 生命週期(對應原 Java streamChat 不是 @Transactional、手動 start/stop):
         // 串流在訂閱時才執行,持久化發生在串流結束後、仍在本請求範圍內。
@@ -173,4 +177,7 @@ public sealed class ChatService : IChatService
 
         return activity;
     }
+
+    private static string OrchestratorSessionKey(string conversationId, Guid? orchestratorId) =>
+        orchestratorId is { } id ? $"{conversationId}:orchestrator:{id:D}" : conversationId;
 }

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useCopilotReadable, useCopilotAction } from '@copilotkit/react-core'
 import { CopilotSidebar } from '@copilotkit/react-ui'
-import type { Session } from '../types'
+import type { ChatOrchestrator, Session } from '../types'
 import { useDocuments } from '../hooks/useDocuments'
 import { invokeSkill } from '../api/skills'
 import { getFeatures } from '../api/agents'
+import { listChatOrchestrators } from '../api/chatOrchestrators'
 import { ConfirmProvider } from './ConfirmDialog'
 import { ToastProvider } from './Toast'
 import ErrorBoundary from './ErrorBoundary'
@@ -36,15 +37,24 @@ const ORCHESTRATORS_NAV = { id: 'orchestrators' as const, icon: '🧭', label: '
 interface Props {
   session: Session
   onLogout: () => void
+  selectedOrchestratorId: string | null
+  onSelectOrchestrator: (id: string | null) => void
 }
 
 /** 已登入外殼：左側欄導覽 + 頂欄身分 + 右主內容區（useState 切視圖，不用 router）。 */
-export default function AppShell({ session, onLogout }: Props) {
+export default function AppShell({
+  session,
+  onLogout,
+  selectedOrchestratorId,
+  onSelectOrchestrator,
+}: Props) {
   const [view, setView] = useState<View>('chat')
   const [agentBuilderEnabled, setAgentBuilderEnabled] = useState(false)
   const [agentTestRunEnabled, setAgentTestRunEnabled] = useState(false)
   const [workflowDesignerEnabled, setWorkflowDesignerEnabled] = useState(false)
   const [multiAgentDispatchEnabled, setMultiAgentDispatchEnabled] = useState(false)
+  const [agentChatEnabled, setAgentChatEnabled] = useState(false)
+  const [chatOrchestrators, setChatOrchestrators] = useState<ChatOrchestrator[]>([])
   const isAdmin = session.role === 'ADMIN'
   // Capability comparison is exact: `workflow.manage.other` is never sufficient.
   const canManageWorkflow = (session.capabilities ?? []).includes('workflow.manage')
@@ -64,6 +74,7 @@ export default function AppShell({ session, onLogout }: Props) {
           setAgentTestRunEnabled(!!f.agentBuilderEnabled && !!f.agentTestRunEnabled)
           setWorkflowDesignerEnabled(!!f.workflowDesignerEnabled)
           setMultiAgentDispatchEnabled(!!f.multiAgentDispatchEnabled)
+          setAgentChatEnabled(!!f.agentChatEnabled)
         }
       })
       .catch(() => {
@@ -72,12 +83,37 @@ export default function AppShell({ session, onLogout }: Props) {
           setAgentTestRunEnabled(false)
           setWorkflowDesignerEnabled(false)
           setMultiAgentDispatchEnabled(false)
+          setAgentChatEnabled(false)
         }
       })
     return () => {
       cancelled = true
     }
   }, [])
+
+  // Global flag is only the first gate. A non-canary tenant receives 404 from the
+  // authenticated catalog route, which keeps the UI exactly legacy.
+  useEffect(() => {
+    let cancelled = false
+    if (!agentChatEnabled) {
+      setChatOrchestrators([])
+      onSelectOrchestrator(null)
+      return
+    }
+    listChatOrchestrators()
+      .then((items) => {
+        if (!cancelled) setChatOrchestrators(items)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setChatOrchestrators([])
+          onSelectOrchestrator(null)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [agentChatEnabled, onSelectOrchestrator])
 
   // useDocuments 提升到此層：AppShell 的 copilot action(建立/刪除)與 DocumentsView 共用
   // 同一份狀態,避免兩處各自實例化造成雙重輪詢(見契約)。DocumentsView 改吃 props。
@@ -248,7 +284,13 @@ export default function AppShell({ session, onLogout }: Props) {
           {/* key={view}：某視圖崩潰後切換到別的視圖即自動復原（重掛邊界）。 */}
           <main className="shell__content">
             <ErrorBoundary key={view}>
-              {view === 'chat' && <ChatView />}
+              {view === 'chat' && (
+                <ChatView
+                  orchestrators={chatOrchestrators}
+                  selectedOrchestratorId={selectedOrchestratorId}
+                  onSelectOrchestrator={onSelectOrchestrator}
+                />
+              )}
               {view === 'documents' && <DocumentsView documents={documents} />}
               {view === 'analysis' && <AnalysisView />}
               {view === 'config' && <ConfigView isAdmin={isAdmin} />}

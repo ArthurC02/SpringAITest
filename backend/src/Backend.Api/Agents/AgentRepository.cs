@@ -559,11 +559,11 @@ public sealed class AgentRepository : IAgentRepository
                 "runtime_workflow", "runtime_workflow 必須引用合法的 published revision"));
         }
         else if (workflowId == Guid.Parse(AgentDefaults.RuntimeWorkflowId)
-                 && workflow.Revision == AgentDefaults.LegacyRuntimeWorkflowRevision)
+                 && workflow.Revision != AgentDefaults.RuntimeWorkflowRevision)
         {
             errors.Add(new AgentValidationError(
                 "runtime_workflow",
-                "Default Agent-Runtime Workflow rev1 是不可再綁定的 legacy revision；請使用 current revision"));
+                $"Default Agent-Runtime Workflow rev{workflow.Revision} is historical; new Agent writes must pin current rev{AgentDefaults.RuntimeWorkflowRevision}"));
         }
         else
         {

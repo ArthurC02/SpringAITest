@@ -5,8 +5,8 @@ namespace Backend.Api.Agents;
 /// <summary>
 /// D1 系統級常數。Default Agent-Runtime Workflow 是 system-owned、published、不可編輯的 revision;
 /// 其固定 id/current revision 於 DbBootstrap 種入,亦供 InMemory 對偶與 Agent 驗證引用(兩路徑同一事實)。
-/// rev1 是早期缺少明確 Start/End 的歷史 fixture；bootstrap 絕不原地改寫它。修正版從 rev2 開始，
-/// 新 Agent 預設 pin rev2，既有 rev1 pin 則維持原快照以保留 audit/replay 語意。
+/// rev1、rev2 都是歷史 immutable fixture；bootstrap 絕不原地改寫它們。新版 fixture 發布為 rev3，
+/// 新 Agent 預設 pin rev3，既有 revision pin 則維持原快照以保留 audit/replay 語意。
 /// definition 是 canonical Graph IR JSON,形狀依 02-spec §7.3 的 visible-required/optional stages
 /// (Graph IR = 是 的階段;wrapper-owned 的 Identity/Budget/Final Checkpoint/Cleanup/Audit 不入 Graph)。
 /// 內容 D3 才會被編譯/消費,此期只求形狀正確。
@@ -21,7 +21,11 @@ public static class AgentDefaults
 
     public const int LegacyRuntimeWorkflowRevision = 1;
 
-    public const int RuntimeWorkflowRevision = 2;
+    public const int PreviousRuntimeWorkflowRevision = 2;
+
+    public const int RuntimeWorkflowRevision = 3;
+
+    public const string PreviousRuntimeWorkflowSha256 = "1bcd5a670a62858a79fe7958b3a953fa922ef282200977be9ef6eacb43ed7f57";
 
     public const string RuntimeWorkflowName = "Default Agent-Runtime Workflow";
 
@@ -33,6 +37,10 @@ public static class AgentDefaults
     /// 迴圈與 repair 皆有上限(maxIterations / maxRepairRounds)。edges 線性串接、單一 Start/End。
     /// </summary>
     public const string RuntimeWorkflowDefinition = """{"edges":[{"id":"e0","source":{"nodeId":"start","port":"out"},"target":{"nodeId":"preflight","port":"in"}},{"id":"e1","source":{"nodeId":"preflight","port":"out"},"target":{"nodeId":"inject_context","port":"in"}},{"id":"e2","source":{"nodeId":"inject_context","port":"out"},"target":{"nodeId":"initial_checkpoint","port":"in"}},{"id":"e3","source":{"nodeId":"initial_checkpoint","port":"out"},"target":{"nodeId":"agent_loop","port":"in"}},{"id":"e4","source":{"nodeId":"agent_loop","port":"out"},"target":{"nodeId":"validate_output","port":"in"}},{"id":"e5","source":{"nodeId":"validate_output","port":"out"},"target":{"nodeId":"repair","port":"in"}},{"id":"e6","source":{"nodeId":"repair","port":"out"},"target":{"nodeId":"end","port":"in"}}],"governance":{"maxConcurrency":1,"maxSteps":40},"kind":"agent-runtime","nodes":[{"config":{},"id":"start","type":"start","typeVersion":"1.0"},{"config":{},"id":"preflight","type":"dependency_and_capability_preflight","typeVersion":"1.0"},{"config":{},"id":"inject_context","type":"inject_authorized_context","typeVersion":"1.0"},{"config":{},"id":"initial_checkpoint","type":"checkpoint","typeVersion":"1.0"},{"children":[{"config":{},"id":"model_step","type":"model_step","typeVersion":"1.0"},{"config":{},"id":"load_skill","optional":true,"type":"load_skill","typeVersion":"1.0"},{"config":{},"id":"tool_gate","type":"tool_policy_and_approval_gate","typeVersion":"1.0"},{"config":{},"id":"tool_call","type":"tool_call_and_observation","typeVersion":"1.0"},{"config":{},"id":"checkpoint_budget","type":"checkpoint_and_budget_gate","typeVersion":"1.0"}],"config":{"maxIterations":8},"id":"agent_loop","type":"bounded_agent_loop","typeVersion":"1.0"},{"config":{},"id":"validate_output","type":"validate_structured_output","typeVersion":"1.0"},{"config":{"maxRepairRounds":2},"id":"repair","type":"bounded_repair_or_controlled_failure","typeVersion":"1.0"},{"config":{},"id":"end","type":"end","typeVersion":"1.0"}],"runtimeVariant":"worker","schemaVersion":1}""";
+
+    /// <summary>Exact immutable D5 rev2 bytes. Existing published pins may execute them,
+    /// but lifecycle validation never offers this historical revision for new writes.</summary>
+    public const string PreviousRuntimeWorkflowDefinition = RuntimeWorkflowDefinition;
 
     /// <summary>business_rules 缺席/null 時使用的 canonical 空 Rule AST。</summary>
     public const string EmptyBusinessRules = """{"version":1,"rules":[]}""";

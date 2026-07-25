@@ -1,5 +1,7 @@
 using Backend.Api.Agents;
+using Backend.Api.AgentRuns;
 using Backend.Api.Skills;
+using Backend.Api.Workflows;
 using Dapper;
 using System.Text;
 using System.Text.Json;
@@ -36,7 +38,11 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
 
         await using var conn = await _fx.DataSource!.OpenConnectionAsync();
         await conn.ExecuteAsync(
-            "DELETE FROM agent_revision_skill WHERE agent_id IN (SELECT id FROM agent WHERE tenant_id LIKE 'agentrepo-%');"
+            "DELETE FROM agent_run_command WHERE tenant_id LIKE 'agentrepo-%';"
+            + " DELETE FROM agent_run_event WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrepo-%');"
+            + " DELETE FROM agent_run_skill WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrepo-%');"
+            + " DELETE FROM agent_run WHERE tenant_id LIKE 'agentrepo-%';"
+            + " DELETE FROM agent_revision_skill WHERE agent_id IN (SELECT id FROM agent WHERE tenant_id LIKE 'agentrepo-%');"
             + " DELETE FROM agent_revision WHERE agent_id IN (SELECT id FROM agent WHERE tenant_id LIKE 'agentrepo-%');"
             + " DELETE FROM agent WHERE tenant_id LIKE 'agentrepo-%';"
             + " DELETE FROM skill_revision WHERE skill_id IN (SELECT id FROM skill WHERE tenant_id LIKE 'agentrepo-%');"
@@ -518,28 +524,96 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.Empty(AgentDefaults.ValidateRuntimeWorkflowFixture());
     }
 
+    [SkippableFact]
+    public async Task Bootstrap_UpgradesPriorRev2WithoutOverwritingItsImmutableBytes()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-runtime-upgrade";
+        var priorRev2 = AgentDefaults.PreviousRuntimeWorkflowDefinition;
+        var id = Guid.Parse(AgentDefaults.RuntimeWorkflowId);
+        var priorHash = SkillHash.Sha256(priorRev2);
+        Assert.Equal(AgentDefaults.PreviousRuntimeWorkflowSha256, priorHash);
+
+        await using var connection = await _fx.DataSource!.OpenConnectionAsync();
+        await connection.ExecuteAsync("INSERT INTO workflow_revision(workflow_id,revision,status,schema_version,definition,ui_metadata,definition_canonical,ui_metadata_canonical,definition_sha256,ui_metadata_sha256,compiler_contract_version,created_by) VALUES(@id,2,'published',1,@definition::jsonb,'{}'::jsonb,convert_to(@definition,'UTF8'),convert_to('{}','UTF8'),@hash,@uiHash,@contract,'upgrade-test') ON CONFLICT(workflow_id,revision) DO UPDATE SET status=EXCLUDED.status,schema_version=EXCLUDED.schema_version,definition=EXCLUDED.definition,ui_metadata=EXCLUDED.ui_metadata,definition_canonical=EXCLUDED.definition_canonical,ui_metadata_canonical=EXCLUDED.ui_metadata_canonical,definition_sha256=EXCLUDED.definition_sha256,ui_metadata_sha256=EXCLUDED.ui_metadata_sha256,compiler_contract_version=EXCLUDED.compiler_contract_version", new { id, definition = priorRev2, hash = priorHash, uiHash = SkillHash.Sha256("{}"), contract = WorkflowCompilerContracts.Current });
+        await connection.ExecuteAsync("UPDATE workflow SET published_revision=2,draft_definition=@definition::jsonb,draft_definition_canonical=convert_to(@definition,'UTF8'),draft_definition_sha256=@hash WHERE id=@id", new { id, definition = priorRev2, hash = priorHash });
+
+        var historicalAgentDefinition = AgentCanonicalizer.Canonicalize(new AgentUpsert(
+            Slug: null, Name: null, Description: null, SystemPrompt: "historical worker",
+            ExecutionRoles: ["worker"], Capabilities: null, OutputContract: null,
+            Audience: ["ADMIN"], AllowedTools: [], SkillBindings: null,
+            KnowledgeSources: null, BusinessRules: null, RuntimeLimits: null,
+            RuntimeWorkflow: new AgentWorkflowRef(AgentDefaults.RuntimeWorkflowId, AgentDefaults.PreviousRuntimeWorkflowRevision)));
+        var historicalAgentHash = SkillHash.Sha256(historicalAgentDefinition);
+        var historicalAgentId = Guid.NewGuid();
+        await connection.ExecuteAsync("INSERT INTO agent(id,tenant_id,slug,name,draft_definition,draft_definition_canonical,draft_definition_sha256,draft_validated_version,published_revision,created_by) VALUES(@agentId,@tenant,'historical-worker','Historical Worker',@definition::jsonb,@bytes,@hash,1,1,'upgrade-test'); INSERT INTO agent_revision(agent_id,revision,status,system_prompt,execution_roles,audience,business_rules,allowed_tools,knowledge_sources,runtime_limits,runtime_workflow_id,runtime_workflow_revision,definition_sha256,canonical_definition,created_by) VALUES(@agentId,1,'published','historical worker','[\"worker\"]'::jsonb,'[\"ADMIN\"]'::jsonb,'{}'::jsonb,'[]'::jsonb,'[]'::jsonb,'{}'::jsonb,@workflowId,@workflowRevision,@hash,@bytes,'upgrade-test')", new { agentId = historicalAgentId, tenant, definition = historicalAgentDefinition, bytes = Encoding.UTF8.GetBytes(historicalAgentDefinition), hash = historicalAgentHash, workflowId = id, workflowRevision = AgentDefaults.PreviousRuntimeWorkflowRevision });
+
+        await Backend.Api.Data.DbBootstrap.RunAsync(_fx.DataSource!, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        Assert.Equal(AgentDefaults.RuntimeWorkflowRevision,
+            await connection.ExecuteScalarAsync<int>("SELECT published_revision FROM workflow WHERE id=@id", new { id }));
+        Assert.Equal(Encoding.UTF8.GetBytes(priorRev2),
+            await connection.ExecuteScalarAsync<byte[]>("SELECT definition_canonical FROM workflow_revision WHERE workflow_id=@id AND revision=2", new { id }));
+        Assert.Equal(priorHash,
+            await connection.ExecuteScalarAsync<string>("SELECT definition_sha256 FROM workflow_revision WHERE workflow_id=@id AND revision=2", new { id }));
+        Assert.Equal(Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition),
+            await connection.ExecuteScalarAsync<byte[]>("SELECT definition_canonical FROM workflow_revision WHERE workflow_id=@id AND revision=@revision", new { id, revision = AgentDefaults.RuntimeWorkflowRevision }));
+        Assert.Equal(AgentDefaults.PreviousRuntimeWorkflowRevision,
+            await connection.ExecuteScalarAsync<int>("SELECT runtime_workflow_revision FROM agent_revision WHERE agent_id=@agentId AND revision=1", new { agentId = historicalAgentId }));
+
+        var historicalRunRepository = new AgentRunRepository(_fx.DataSource!);
+        var started = await historicalRunRepository.CreateDirectAsync(tenant, "admin-a", "ADMIN", historicalAgentId, "replay historical pin", "historical-start", default);
+        Assert.Equal(AgentRunWriteStatus.Success, started.Status);
+        Assert.Equal(AgentDefaults.PreviousRuntimeWorkflowRevision, started.Run!.WorkflowRevision);
+        var replayed = await historicalRunRepository.CreateDirectAsync(tenant, "admin-a", "ADMIN", historicalAgentId, "replay historical pin", "historical-start", default);
+        Assert.Equal(AgentRunWriteStatus.Replay, replayed.Status);
+
+        // Some pre-D5 local databases contain a different, self-consistent rev2 row. Bootstrap
+        // must not rewrite that historical row, and already-published Agent pins still replay it.
+        const string preD5ResidueModel = """{"edges":[],"governance":{"maxConcurrency":1,"maxSteps":1},"kind":"agent-runtime","nodes":[],"schemaVersion":1}""";
+        var residueHash = SkillHash.Sha256(preD5ResidueModel);
+        await connection.ExecuteAsync("UPDATE workflow_revision SET definition=@definition::jsonb,definition_canonical=convert_to(@definition,'UTF8'),definition_sha256=@hash WHERE workflow_id=@id AND revision=2", new { id, definition = preD5ResidueModel, hash = residueHash });
+        await Backend.Api.Data.DbBootstrap.RunAsync(_fx.DataSource!, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.Equal(Encoding.UTF8.GetBytes(preD5ResidueModel),
+            await connection.ExecuteScalarAsync<byte[]>("SELECT definition_canonical FROM workflow_revision WHERE workflow_id=@id AND revision=2", new { id }));
+        var residueRun = await historicalRunRepository.CreateDirectAsync(tenant, "admin-a", "ADMIN", historicalAgentId, "execute residue pin", "residue-start", default);
+        Assert.Equal(AgentRunWriteStatus.Success, residueRun.Status);
+        Assert.Equal(AgentDefaults.PreviousRuntimeWorkflowRevision, residueRun.Run!.WorkflowRevision);
+
+        var rejected = await Repo.ValidateReferencesAsync(tenant, historicalAgentDefinition, default);
+        Assert.Contains(rejected, error => error.Field == "runtime_workflow");
+        var omittedDefault = AgentCanonicalizer.Canonicalize(new AgentUpsert(
+            Slug: null, Name: null, Description: null, SystemPrompt: "new worker",
+            ExecutionRoles: ["worker"], Capabilities: null, OutputContract: null,
+            Audience: ["ADMIN"], AllowedTools: [], SkillBindings: null,
+            KnowledgeSources: null, BusinessRules: null, RuntimeLimits: null,
+            RuntimeWorkflow: null));
+        Assert.Equal(AgentDefaults.RuntimeWorkflowRevision, AgentCanonicalizer.WorkflowOf(omittedDefault).Revision);
+        Assert.Empty(await Repo.ValidateReferencesAsync(tenant, omittedDefault, default));
+    }
+
     [Fact]
     public void DefaultAgentRuntimeWorkflow_MatchesSharedFixtureExactly()
     {
-        var current=new DirectoryInfo(AppContext.BaseDirectory);string? path=null;
-        while(current is not null){var candidate=Path.Combine(current.FullName,"plans","agent-platform-redesign","fixtures","default-agent-runtime-workflow.json");if(File.Exists(candidate)){path=candidate;break;}current=current.Parent;}
+        var current = new DirectoryInfo(AppContext.BaseDirectory); string? path = null;
+        while (current is not null) { var candidate = Path.Combine(current.FullName, "plans", "agent-platform-redesign", "fixtures", "default-agent-runtime-workflow.json"); if (File.Exists(candidate)) { path = candidate; break; } current = current.Parent; }
         Assert.NotNull(path);
-        var fixtureBytes=File.ReadAllBytes(path!);var backendBytes=Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition);
-        Assert.Equal(2003,fixtureBytes.Length);
-        Assert.Equal(fixtureBytes,backendBytes);
-        Assert.Equal((byte)'{',backendBytes[0]);Assert.Equal((byte)'}',backendBytes[^1]);
+        var fixtureBytes = File.ReadAllBytes(path!); var backendBytes = Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition);
+        Assert.Equal(2003, fixtureBytes.Length);
+        Assert.Equal(fixtureBytes, backendBytes);
+        Assert.Equal((byte)'{', backendBytes[0]); Assert.Equal((byte)'}', backendBytes[^1]);
         Assert.Empty(AgentDefaults.ValidateRuntimeWorkflowFixture());
-        Assert.Equal("1bcd5a670a62858a79fe7958b3a953fa922ef282200977be9ef6eacb43ed7f57",SkillHash.Sha256(AgentDefaults.RuntimeWorkflowDefinition));
+        Assert.Equal("1bcd5a670a62858a79fe7958b3a953fa922ef282200977be9ef6eacb43ed7f57", SkillHash.Sha256(AgentDefaults.RuntimeWorkflowDefinition));
     }
 
     [SkippableFact]
     public async Task Bootstrap_RejectsExistingRuntimeRevisionCanonicalByteDrift()
     {
-        _fx.SkipIfUnavailable();var id=Guid.Parse(AgentDefaults.RuntimeWorkflowId);
-        await using var connection=await _fx.DataSource!.OpenConnectionAsync();
-        await connection.ExecuteAsync("UPDATE workflow_revision SET ui_metadata_canonical=convert_to('{\"drift\":true}','UTF8') WHERE workflow_id=@id AND revision=@revision",new{id,revision=AgentDefaults.RuntimeWorkflowRevision});
-        try{await Assert.ThrowsAsync<InvalidOperationException>(()=>Backend.Api.Data.DbBootstrap.RunAsync(_fx.DataSource!,Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));}
-        finally{await connection.ExecuteAsync("UPDATE workflow_revision SET ui_metadata_canonical=convert_to('{}','UTF8') WHERE workflow_id=@id AND revision=@revision",new{id,revision=AgentDefaults.RuntimeWorkflowRevision});}
+        _fx.SkipIfUnavailable(); var id = Guid.Parse(AgentDefaults.RuntimeWorkflowId);
+        await using var connection = await _fx.DataSource!.OpenConnectionAsync();
+        await connection.ExecuteAsync("UPDATE workflow_revision SET ui_metadata_canonical=convert_to('{\"drift\":true}','UTF8') WHERE workflow_id=@id AND revision=@revision", new { id, revision = AgentDefaults.RuntimeWorkflowRevision });
+        try { await Assert.ThrowsAsync<InvalidOperationException>(() => Backend.Api.Data.DbBootstrap.RunAsync(_fx.DataSource!, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance)); }
+        finally { await connection.ExecuteAsync("UPDATE workflow_revision SET ui_metadata_canonical=convert_to('{}','UTF8') WHERE workflow_id=@id AND revision=@revision", new { id, revision = AgentDefaults.RuntimeWorkflowRevision }); }
     }
 
     private sealed record RevRow(

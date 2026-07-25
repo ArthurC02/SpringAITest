@@ -17,6 +17,9 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
     private const string BodyConversationIdKey = "chat.request.conversationId";
     private const string PersistFailureKey = "chat.persist.failure";
     private const string PersistedResponseKey = "chat.persist.response";
+    private const string OrchestratorIdKey = "chat.request.orchestratorId";
+    private const string TurnMetadataKey = "chat.turn.metadata";
+    private const int MaxLogicalAttemptIdLength = 512;
 
     private readonly IHttpContextAccessor _httpContextAccessor;
 
@@ -51,6 +54,50 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
         set => SetItem(PersistedResponseKey, value);
     }
 
+    public Guid? RequestedOrchestratorId
+    {
+        get
+        {
+            var context = _httpContextAccessor.HttpContext;
+            if (context?.Items[OrchestratorIdKey] is Guid selected)
+                return selected;
+            var wire = context?.Request.Headers["X-Orchestrator-Id"].ToString().Trim();
+            if (string.IsNullOrEmpty(wire))
+                return null;
+            if (Guid.TryParse(wire, out var id))
+                return id;
+            throw new Platform.Service.Exceptions.WorkflowBadInputException(
+                "orchestratorId 格式錯誤");
+        }
+    }
+
+    public void SetRequestedOrchestratorId(Guid? orchestratorId) =>
+        SetItem(OrchestratorIdKey, orchestratorId);
+
+    public string? LogicalAttemptId
+    {
+        get
+        {
+            var values = _httpContextAccessor.HttpContext?.Request.Headers["Idempotency-Key"];
+            if (values is null || values.Value.Count == 0)
+                return null;
+            if (values.Value.Count != 1)
+                throw new Platform.Service.Exceptions.WorkflowBadInputException(
+                    "Idempotency-Key must contain exactly one value");
+            var value = values.Value[0]?.Trim();
+            if (string.IsNullOrEmpty(value) || value.Length > MaxLogicalAttemptIdLength)
+                throw new Platform.Service.Exceptions.WorkflowBadInputException(
+                    "Idempotency-Key is invalid");
+            return value;
+        }
+    }
+
+    public ChatTurnMetadata? TurnMetadata
+    {
+        get => _httpContextAccessor.HttpContext?.Items[TurnMetadataKey] as ChatTurnMetadata;
+        set => SetItem(TurnMetadataKey, value);
+    }
+
     public void SetRequestKeys(string? userId, string? conversationId, UserContext? userCtx)
     {
         // userCtx 參數在 Web 實作刻意不使用:CurrentUser 恆以 HttpContext.User 為準(唯一信任來源),
@@ -60,6 +107,7 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
         SetItem(BodyConversationIdKey, conversationId);
         SetItem(PersistFailureKey, null);
         SetItem(PersistedResponseKey, null);
+        SetItem(TurnMetadataKey, null);
     }
 
     private void SetItem(string key, object? value)

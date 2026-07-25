@@ -57,6 +57,29 @@ public sealed class ConversationStoreTests
     }
 
     [Fact]
+    public async Task Add_WithRootMetadata_ForwardsServerDerivedLineage()
+    {
+        var stub = new StubHttpMessageHandler(_ =>
+            TestHttp.Json(HttpStatusCode.Created, "{\"id\":5,\"createdAt\":\"2026-07-12T10:00:00Z\"}"));
+        var metadata = new ChatTurnMetadata(
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            2,
+            Guid.Parse("22222222-2222-2222-2222-222222222222"),
+            3,
+            Guid.Parse("33333333-3333-3333-3333-333333333333"));
+
+        await Build(stub).AddAsync("prompt", "reply", Ctx, metadata);
+
+        using var doc = JsonDocument.Parse(stub.LastBody!);
+        var root = doc.RootElement;
+        Assert.Equal(metadata.OrchestratorId, root.GetProperty("orchestrator_id").GetGuid());
+        Assert.Equal(2, root.GetProperty("orchestrator_revision").GetInt32());
+        Assert.Equal(metadata.WorkflowId, root.GetProperty("workflow_id").GetGuid());
+        Assert.Equal(3, root.GetProperty("workflow_revision").GetInt32());
+        Assert.Equal(metadata.RootRunId, root.GetProperty("root_run_id").GetGuid());
+    }
+
+    [Fact]
     public async Task Add_500_ThrowsBackendCall_NotWorkflowInvocation()
     {
         var store = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));

@@ -17,7 +17,7 @@ function loadMessages(): Message[] {
  * 聊天狀態與行為的集中處：訊息清單、送出、清除，並把對話保存在 localStorage，
  * 重新整理頁面後仍在。元件只需呼叫 send()/clear() 並渲染 messages。
  */
-export function useChat() {
+export function useChat(orchestratorId: string | null = null) {
   const [messages, setMessages] = useState<Message[]>(loadMessages)
   const [loading, setLoading] = useState(false)
   // 登出會使此實例的世代失效，杜絕任何較晚發生的 lifecycle flush 回寫舊訊息。
@@ -78,6 +78,7 @@ export function useChat() {
           )
         },
         controller.signal,
+        orchestratorId,
       )
     } catch (e) {
       if ((e as Error).name === 'AbortError') {
@@ -108,7 +109,7 @@ export function useChat() {
       setLoading(false)
       abortRef.current = null
     }
-  }, [])
+  }, [orchestratorId])
 
   // 停止產生：中止進行中的串流（AbortError 由 send 的 catch 當作正常中止處理）。
   const stop = useCallback(() => {

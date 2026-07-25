@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 import json
+from langchain_core.runnables import RunnableLambda
 
 from app.runtime.models import canonical_json_sha256
 from app.runtime.orchestrator import (
@@ -13,6 +14,7 @@ from app.runtime.orchestrator_backend import ChildRecord, ChildStatus
 from app.runtime.orchestrator_production import (
     ProductionChildRuntime,
     ProductionRootPlanner,
+    _ContextSufficiency,
 )
 from app.security import RequestContext
 from tests.test_root_orchestrator import _snapshot
@@ -151,6 +153,70 @@ async def test_context_acquisition_uses_only_scoped_server_retrieval(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_verified_resume_input_is_consumed_and_satisfies_context_gate(monkeypatch):
+    snapshot = _snapshot_with_input()
+    raw = snapshot.model_dump(mode="python")
+    raw["authority"]["context_tools"] = []
+    raw.pop("snapshot_hash")
+    without_retrieval = RootExecutionSnapshot(
+        snapshot_hash=canonical_json_sha256(raw), **raw
+    )
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+    from app.runtime.orchestrator_production import _ContextSufficiency
+    async def sufficient(_snapshot, inputs):
+        assert inputs == ["Region: Taiwan"]
+        return _ContextSufficiency(ready=True, facts={"region": "Taiwan"}, evidence=[{"fact_key":"region","quote":"Region: Taiwan","input_index":0}])
+    monkeypatch.setattr(planner, "_assess_context", sufficient)
+
+    acquired = await planner.acquire(
+        without_retrieval,
+        {"user_input": "Region: Taiwan"},
+        1,
+    )
+
+    assert acquired.ready
+    assert acquired.missing == []
+    assert acquired.context["user_context.region"] == "Taiwan"
+    assert ("user_context.region", "caller", "resume-input:0") in {
+        (item.context_key, item.source_type, item.source_id)
+        for item in acquired.provenance
+    }
+    assert next(
+        item.content_sha256
+        for item in acquired.provenance
+        if item.context_key == "user_context.region"
+    ) == canonical_json_sha256("Region: Taiwan")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_input",
+    ["Taiwan region", "I do not know", "Region:"],
+)
+async def test_unstructured_or_incomplete_resume_stays_fail_closed(monkeypatch, user_input):
+    snapshot = _snapshot_with_input()
+    raw = snapshot.model_dump(mode="python")
+    raw["authority"]["context_tools"] = []
+    raw.pop("snapshot_hash")
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+    from app.runtime.orchestrator_production import _ContextSufficiency
+    async def insufficient(_snapshot, _inputs):
+        return _ContextSufficiency(ready=False, missing=["region is required"])
+    monkeypatch.setattr(planner, "_assess_context", insufficient)
+    acquired = await planner.acquire(
+        RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw),
+        {"user_input": user_input},
+        1,
+    )
+    assert not acquired.ready
+    assert acquired.missing == ["region is required"]
+
+
+@pytest.mark.asyncio
 async def test_context_acquisition_rejects_unknown_tool_without_calling_network(
     monkeypatch,
 ):
@@ -167,6 +233,101 @@ async def test_context_acquisition_rejects_unknown_tool_without_calling_network(
     )
     with pytest.raises(Exception, match="unsupported context tool"):
         await planner.acquire(forged, {}, 1)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"region","quote":"Region: Taiwan","input_index":0}], "missing": ["country"]},
+        {"ready": True, "facts": {}, "evidence": [{"fact_key":"region","quote":"Taiwan","input_index":0}], "missing": []},
+        {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [], "missing": []},
+        {"ready": False, "facts": {"region": "Taiwan"}, "evidence": [], "missing": ["country"]},
+        {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"region","quote":"Taiwan","input_index":0}, {"fact_key":"region","quote":"Taiwan","input_index":0}], "missing": []},
+    ],
+)
+def test_context_sufficiency_rejects_contradictory_authority(payload):
+    with pytest.raises(ValueError):
+        _ContextSufficiency(**payload)
+
+
+@pytest.mark.asyncio
+async def test_context_sufficiency_rejects_forged_evidence(monkeypatch):
+    snapshot = _snapshot_with_input()
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+
+    class Model:
+        def bind(self, **_kwargs):
+            return self
+        def with_structured_output(self, _schema):
+            return RunnableLambda(
+                lambda _value: {
+                    "ready": True,
+                    "facts": {"region": "Taiwan"},
+                    "evidence": [{"fact_key": "region", "quote": "invented authority", "input_index": 0}],
+                    "missing": [],
+                }
+            )
+
+    monkeypatch.setattr("app.runtime.orchestrator_production.get_direct_agent_runtime_llm", lambda: Model())
+    assert await planner._assess_context(snapshot, ["I am in Taiwan"]) is None
+
+
+@pytest.mark.asyncio
+async def test_context_sufficiency_rejects_unrelated_privilege_claim(monkeypatch):
+    snapshot = _snapshot_with_input()
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+
+    class Model:
+        def bind(self, **_kwargs):
+            return self
+
+        def with_structured_output(self, _schema):
+            return RunnableLambda(
+                lambda _value: {
+                    "ready": True,
+                    "facts": {"is_admin": "true"},
+                    "evidence": [
+                        {"fact_key": "is_admin", "quote": "Region: Taiwan", "input_index": 0}
+                    ],
+                    "missing": [],
+                }
+            )
+
+    monkeypatch.setattr("app.runtime.orchestrator_production.get_direct_agent_runtime_llm", lambda: Model())
+    assert await planner._assess_context(snapshot, ["Region: Taiwan"]) is None
+
+
+@pytest.mark.asyncio
+async def test_context_sufficiency_accepts_natural_grounded_fact(monkeypatch):
+    snapshot = _snapshot_with_input()
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+
+    class Model:
+        def bind(self, **_kwargs):
+            return self
+
+        def with_structured_output(self, _schema):
+            return RunnableLambda(
+                lambda _value: {
+                    "ready": True,
+                    "facts": {"region": "Taiwan"},
+                    "evidence": [
+                        {"fact_key": "region", "quote": "I am in Taiwan", "input_index": 0}
+                    ],
+                    "missing": [],
+                }
+            )
+
+    monkeypatch.setattr("app.runtime.orchestrator_production.get_direct_agent_runtime_llm", lambda: Model())
+    assessed = await planner._assess_context(snapshot, ["I am in Taiwan"])
+    assert assessed is not None
+    assert assessed.facts == {"region": "Taiwan"}
 
 
 @pytest.mark.asyncio

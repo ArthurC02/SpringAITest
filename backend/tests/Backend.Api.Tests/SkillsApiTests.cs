@@ -505,7 +505,10 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
             ["templateId"] = templateId,
             ["form"] = new JsonObject
             {
-                ["name"] = "名稱", ["description"] = "描述", ["rule"] = "規則", ["topK"] = topK,
+                ["name"] = "名稱",
+                ["description"] = "描述",
+                ["rule"] = "規則",
+                ["topK"] = topK,
             },
         };
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from app.runtime.manager import RuntimeRunManager
+from app.runtime.checkpoints import PostgresCheckpointStore
 from app.runtime.orchestrator_backend import (
     OrchestratorBackendClient,
     OrchestratorBackendPermanentError,
@@ -20,10 +22,11 @@ logger = logging.getLogger(__name__)
 
 class RootRuntimeSupervisor:
     def __init__(
-        self, backend: OrchestratorBackendClient, manager: RuntimeRunManager
+        self, backend: OrchestratorBackendClient, manager: RuntimeRunManager, checkpoints: PostgresCheckpointStore | None = None
     ) -> None:
         self.backend = backend
         self.manager = manager
+        self.checkpoints = checkpoints
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
         self._recovery_task: asyncio.Task[None] | None = None
@@ -72,9 +75,67 @@ class RootRuntimeSupervisor:
                 claim.run_id, ctx, "Root recovery identity does not match snapshot"
             )
             return
+        context: dict = {}
+        context_round = 1
+        if claim.command_type == "resume":
+            if not claim.resume_input or not claim.checkpoint_ref or claim.checkpoint_version != 1:
+                await self.backend.cancel_root(claim.run_id, ctx, "Invalid Root resume checkpoint authority")
+                return
+            try:
+                checkpoint = await self.checkpoints.get_root_context_checkpoint(claim.checkpoint_ref)
+                if checkpoint != {**checkpoint, "root_run_id": claim.run_id, "snapshot_hash": claim.snapshot_hash, "tenant_id": ctx.tenant_id, "user_id": ctx.user_id, "stage": "context", "audit": checkpoint.get("audit", [])}:
+                    raise ValueError("Root checkpoint authority does not match claim")
+            except Exception:
+                await self.backend.cancel_root(claim.run_id, ctx, "Invalid Root resume checkpoint")
+                return
+            prior_inputs = checkpoint.get("trusted_resume_inputs", [])
+            prior_round = checkpoint.get("context_round")
+            if (
+                not isinstance(prior_round, int)
+                or isinstance(prior_round, bool)
+                or not 1 <= prior_round <= snapshot.limits.max_context_rounds
+                or not isinstance(prior_inputs, list)
+                or len(prior_inputs) != prior_round - 1
+                or not all(
+                    isinstance(item, str) and 0 < len(item) <= 16_384
+                    for item in prior_inputs
+                )
+            ):
+                await self.backend.cancel_root(claim.run_id, ctx, "Invalid Root resume checkpoint")
+                return
+            if prior_round >= snapshot.limits.max_context_rounds:
+                await self.backend.cancel_root(
+                    claim.run_id, ctx, "Root context round budget exhausted"
+                )
+                return
+            context_round = prior_round + 1
+            context = {"user_input": claim.resume_input, "trusted_resume_inputs": prior_inputs}
         runtime = build_production_root(self.backend, self.manager, ctx)
+        try:
+            deadline_at = getattr(claim, "deadline_at", None)
+            deadline = datetime.fromisoformat(
+                deadline_at.replace("Z", "+00:00")
+            ) if deadline_at else None
+            remaining_deadline_seconds = (
+                deadline.astimezone(timezone.utc) - datetime.now(timezone.utc)
+            ).total_seconds() if deadline else snapshot.limits.timeout_seconds
+        except (TypeError, ValueError) as exc:
+            raise OrchestratorBackendPermanentError(
+                "Backend returned an invalid Root deadline"
+            ) from exc
+        if remaining_deadline_seconds <= 0:
+            await self.backend.cancel_root(
+                claim.run_id, ctx, "Root run deadline expired"
+            )
+            return
         execution = asyncio.create_task(
-            runtime.execute(snapshot, {}, cancel_on_task_cancel=False)
+            runtime.execute(
+                snapshot,
+                context,
+                cancel_on_task_cancel=False,
+                remaining_deadline_seconds=remaining_deadline_seconds,
+                context_round=context_round,
+            )
         )
         try:
             while True:
@@ -92,11 +153,26 @@ class RootRuntimeSupervisor:
             raise
         await self.backend.complete_dispatch(claim, ctx)
         current = await self.backend.get_root(claim.run_id, ctx)
-        if current.status in {"completed", "failed", "cancelled"}:
+        if current.status in {"completed", "failed", "cancelled", "timed_out"}:
+            return
+        if result.status == "waiting_input":
+            if self.checkpoints is None: raise RuntimeError("Root checkpoint store is unavailable")
+            accumulated = [*context.get("trusted_resume_inputs", []), *([context["user_input"]] if context.get("user_input") else [])]
+            if (
+                len(accumulated) != context_round - 1
+                or any(
+                    not isinstance(item, str) or not 0 < len(item) <= 16_384
+                    for item in accumulated
+                )
+            ):
+                await self.backend.cancel_root(claim.run_id, ctx, "Invalid Root resume checkpoint")
+                return
+            reference, version = await self.checkpoints.put_root_context_checkpoint({"root_run_id": claim.run_id, "snapshot_hash": claim.snapshot_hash, "tenant_id": ctx.tenant_id, "user_id": ctx.user_id, "stage": "context", "audit": result.audit, "trusted_resume_inputs": accumulated, "context_round": context_round})
+            await self.backend.transition_root(claim, ctx, to_status="waiting_input", result=result.model_dump(mode="json"), error_code=None, error_message=None, events=[{"event_type": item["event_type"], "payload": item} for item in result.audit], checkpoint_ref=reference, checkpoint_version=version)
             return
         terminal = (
             result.status
-            if result.status in {"completed", "failed", "cancelled"}
+            if result.status in {"completed", "failed", "cancelled", "timed_out"}
             else "failed"
         )
         try:

@@ -41,12 +41,16 @@ class _Wire(BaseModel):
 class RootCommandClaim(_Wire):
     command_id: str
     run_id: str
-    command_type: Literal["start", "cancel"]
+    command_type: Literal["start", "resume"]
     claim_token: str
     claim_expires_at: str
     lease_generation: int = Field(ge=1)
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     snapshot_canonical_base64: str
+    resume_input: str | None = None
+    checkpoint_ref: str | None = None
+    checkpoint_version: int | None = None
+    deadline_at: str | None = None
 
     def snapshot(self) -> RootExecutionSnapshot:
         try:
@@ -56,7 +60,7 @@ class RootCommandClaim(_Wire):
             value = parse_json_preserving_numbers(raw)
             if canonical_json_bytes(value) != raw:
                 raise ValueError("Root snapshot bytes are not canonical JSON")
-            snapshot = RootExecutionSnapshot.model_validate(value)
+            snapshot = RootExecutionSnapshot.from_preserved_json(value)
             if snapshot.snapshot_hash != self.snapshot_hash:
                 raise ValueError("snapshot envelope hash mismatch")
             return snapshot
@@ -302,11 +306,13 @@ class OrchestratorBackendClient:
         claim: RootCommandClaim,
         ctx: RequestContext,
         *,
-        to_status: Literal["completed", "failed", "cancelled"],
+        to_status: Literal["completed", "failed", "cancelled", "timed_out"],
         result: dict | None,
         error_code: str | None,
         error_message: str | None,
         events: list[dict],
+        checkpoint_ref: str | None = None,
+        checkpoint_version: int | None = None,
     ) -> None:
         root = await self.get_root(claim.run_id, ctx)
         await self._request(
@@ -322,6 +328,8 @@ class OrchestratorBackendClient:
                 "error_code": error_code,
                 "error_message": error_message,
                 "events": events,
+                "checkpoint_ref": checkpoint_ref,
+                "checkpoint_version": checkpoint_version,
             },
         )
 

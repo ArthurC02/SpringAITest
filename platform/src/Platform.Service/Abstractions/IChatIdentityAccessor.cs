@@ -11,6 +11,10 @@ namespace Platform.Service.Abstractions;
 /// </summary>
 public interface IChatIdentityAccessor
 {
+    Guid? RequestedOrchestratorId => null;
+    void SetRequestedOrchestratorId(Guid? orchestratorId) { }
+    string? LogicalAttemptId => null;
+    ChatTurnMetadata? TurnMetadata { get => null; set { } }
     UserContext? CurrentUser { get; }
 
     /// <summary>沿用 ChatService.cs 既有的防 IDOR 語意(見 <see cref="ChatMemoryKeyDerivation"/>),不放寬。</summary>

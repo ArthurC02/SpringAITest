@@ -348,6 +348,12 @@ public sealed class FakeChatIdentityAccessor : IChatIdentityAccessor
     public UserContext? CurrentUser { get; private set; }
     public Exception? PersistFailure { get; set; }
     public ChatResponse? PersistedResponse { get; set; }
+    public ChatTurnMetadata? TurnMetadata { get; set; }
+    public Guid? RequestedOrchestratorId { get; private set; }
+    public string? LogicalAttemptId { get; set; }
+
+    public void SetRequestedOrchestratorId(Guid? orchestratorId) =>
+        RequestedOrchestratorId = orchestratorId;
 
     public void SetRequestKeys(string? userId, string? conversationId, UserContext? userCtx)
     {
@@ -356,6 +362,7 @@ public sealed class FakeChatIdentityAccessor : IChatIdentityAccessor
         CurrentUser = userCtx;
         PersistFailure = null;
         PersistedResponse = null;
+        TurnMetadata = null;
     }
 
     public (string Uid, string Cid) DeriveMemoryKeys()

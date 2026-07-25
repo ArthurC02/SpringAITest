@@ -22,6 +22,15 @@ export interface Session {
   capabilities?: string[]
 }
 
+/** D6 USER-safe published runtime discovery DTO. */
+export interface ChatOrchestrator {
+  id: string
+  name: string
+  description: string
+  revision: number
+  capabilities: string[]
+}
+
 // ── Workflow Designer (D4): semantic graph and canvas metadata are deliberately separate. ──
 export type WorkflowKind = 'orchestrator' | 'agent-runtime'
 export type WorkflowRuntimeVariant = 'worker' | 'verifier'

@@ -189,7 +189,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
             }
 
             if (workflowId != Guid.Parse(AgentDefaults.RuntimeWorkflowId)
-                || workflowRevision != AgentDefaults.RuntimeWorkflowRevision)
+                || workflowRevision is not (AgentDefaults.PreviousRuntimeWorkflowRevision or AgentDefaults.RuntimeWorkflowRevision))
             {
                 await tx.RollbackAsync(ct);
                 return InvalidState("Agent-Runtime Workflow revision 無法執行");
@@ -226,8 +226,9 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 || workflow.CompilerContractVersion != WorkflowCompilerContracts.Current
                 || workflow.CanonicalDefinition is null
                 || !SkillHash.MatchesSha256(workflow.CanonicalDefinition, workflow.DefinitionSha256)
-                || !workflow.CanonicalDefinition.AsSpan().SequenceEqual(
-                    Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition)))
+                || (workflowRevision == AgentDefaults.RuntimeWorkflowRevision
+                    && !workflow.CanonicalDefinition.AsSpan().SequenceEqual(
+                        Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition))))
             {
                 throw new InvalidOperationException(
                     $"Workflow revision hash mismatch：{workflowId:D}#{workflowRevision}");
@@ -529,11 +530,11 @@ public sealed class AgentRunRepository : IAgentRunRepository
             idempotencyKey,
             SkillHash.Sha256($"{runId:D}\0{expectedCheckpointVersion}\0{message}"),
             row => JsonSerializer.Serialize(new
-                {
-                    message,
-                    expected_checkpoint_version = expectedCheckpointVersion,
-                    expected_checkpoint_ref = row.CheckpointRef,
-                }),
+            {
+                message,
+                expected_checkpoint_version = expectedCheckpointVersion,
+                expected_checkpoint_ref = row.CheckpointRef,
+            }),
             async (conn, tx, row) =>
             {
                 if (row.CancelRequested
@@ -2704,7 +2705,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
 
     private static bool HasJsonValue(JsonElement? value)
         => value is
-            { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) };
+        { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) };
 
     private static AgentRunWriteResult NotFound(string message)
         => new(AgentRunWriteStatus.NotFound, Message: message);

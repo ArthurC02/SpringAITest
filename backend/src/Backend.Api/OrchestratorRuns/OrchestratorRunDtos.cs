@@ -9,6 +9,8 @@ public sealed record OrchestratorRunStartRequest(
 
 public sealed record OrchestratorRunCancelRequest(
     [property: JsonPropertyName("reason")] string? Reason = null);
+public sealed record OrchestratorRunResumeRequest(
+    [property: JsonPropertyName("input")] string? Input);
 
 public sealed record OrchestratorRunResponse(
     [property: JsonPropertyName("id")] Guid Id,
@@ -25,7 +27,10 @@ public sealed record OrchestratorRunResponse(
     [property: JsonPropertyName("budgets")] JsonElement Budgets,
     [property: JsonPropertyName("created_at")] DateTime CreatedAt,
     [property: JsonPropertyName("updated_at")] DateTime UpdatedAt,
-    [property: JsonPropertyName("command_id")] Guid? CommandId = null);
+    [property: JsonPropertyName("command_id")] Guid? CommandId = null,
+    [property: JsonPropertyName("result")] JsonElement? Result = null,
+    [property: JsonPropertyName("error_code")] string? ErrorCode = null,
+    [property: JsonPropertyName("error_message")] string? ErrorMessage = null);
 
 public sealed record OrchestratorRunEventResponse(
     [property: JsonPropertyName("sequence")] long Sequence,
@@ -42,6 +47,17 @@ public sealed record OrchestratorRunEventsResponse(
 public enum OrchestratorRunWriteStatus { Success, Replay, NotFound, Conflict, InvalidState }
 public sealed record OrchestratorRunDispatch(Guid CommandId);
 public sealed record OrchestratorRunWriteResult(OrchestratorRunWriteStatus Status, OrchestratorRunResponse? Run = null, string? Message = null, OrchestratorRunDispatch? Dispatch = null, bool Replayed = false);
+/// <summary>Owner-scoped discovery result.  <see cref="CommandId"/> is the command that
+/// matched an idempotency key (rather than always the root's original start command).</summary>
+public sealed record OrchestratorRunActiveLookup(
+    OrchestratorRunResponse? Run,
+    Guid? CommandId = null,
+    bool IsAmbiguous = false,
+    bool IsMismatch = false);
+public sealed record OrchestratorRunReplayRequest(
+    [property: JsonPropertyName("conversation_id")] string? ConversationId,
+    [property: JsonPropertyName("orchestrator_id")] Guid? OrchestratorId,
+    [property: JsonPropertyName("message")] string? Message);
 public sealed record OrchestratorRunCommandClaimRequest(
     [property: JsonPropertyName("worker_id")] string? WorkerId,
     [property: JsonPropertyName("lease_seconds")] int LeaseSeconds = 30);
@@ -59,7 +75,11 @@ public sealed record OrchestratorRunCommandClaim(
     [property: JsonPropertyName("claim_expires_at")] DateTime ClaimExpiresAt,
     [property: JsonPropertyName("lease_generation")] long LeaseGeneration,
     [property: JsonPropertyName("snapshot_hash")] string SnapshotHash,
-    [property: JsonPropertyName("snapshot_canonical_base64")] string SnapshotCanonicalBase64);
+    [property: JsonPropertyName("snapshot_canonical_base64")] string SnapshotCanonicalBase64,
+    [property: JsonPropertyName("resume_input")] string? ResumeInput = null,
+    [property: JsonPropertyName("checkpoint_ref")] string? CheckpointRef = null,
+    [property: JsonPropertyName("checkpoint_version")] long? CheckpointVersion = null,
+    [property: JsonPropertyName("deadline_at")] DateTime? DeadlineAt = null);
 public enum OrchestratorRunDispatchCompleteStatus { Success, NotFound, Conflict }
 public sealed record OrchestratorRunRecoveryClaimRequest(
     [property: JsonPropertyName("worker_id")] string? WorkerId,
@@ -122,6 +142,8 @@ public sealed record OrchestratorRootTransitionRequest(
     [property: JsonPropertyName("claim_token")] string? ClaimToken,
     [property: JsonPropertyName("lease_generation")] long LeaseGeneration,
     [property: JsonPropertyName("to_status")] string? ToStatus,
+    [property: JsonPropertyName("checkpoint_ref")] string? CheckpointRef = null,
+    [property: JsonPropertyName("checkpoint_version")] long? CheckpointVersion = null,
     [property: JsonPropertyName("result")] JsonElement? Result = null,
     [property: JsonPropertyName("error_code")] string? ErrorCode = null,
     [property: JsonPropertyName("error_message")] string? ErrorMessage = null,
@@ -146,15 +168,18 @@ public interface IOrchestratorRunRepository
         IReadOnlyCollection<string> groups, IReadOnlyCollection<string> capabilities,
         Guid orchestratorId, string conversationId, string message, string idempotencyKey, CancellationToken ct);
     Task<OrchestratorRunResponse?> GetAsync(string tenantId, string userId, Guid runId, CancellationToken ct);
+    Task<OrchestratorRunActiveLookup> FindActiveAsync(string tenantId, string userId, string conversationId, CancellationToken ct);
+    Task<OrchestratorRunActiveLookup> FindByIdempotencyKeyAsync(string tenantId, string userId, string idempotencyKey, OrchestratorRunReplayRequest replay, CancellationToken ct);
     Task<OrchestratorRunEventsResponse?> EventsAsync(string tenantId, string userId, Guid runId, long after, int limit, CancellationToken ct);
     Task<OrchestratorRunWriteResult> CancelAsync(string tenantId, string userId, Guid runId, string? reason, string idempotencyKey, CancellationToken ct);
+    Task<OrchestratorRunWriteResult> ResumeAsync(string tenantId, string userId, Guid runId, string input, string idempotencyKey, CancellationToken ct);
     Task<string?> ExecutionArtifactAsync(string tenantId, string userId, Guid runId, CancellationToken ct);
-    Task<OrchestratorRunCommandClaim?> ClaimCommandAsync(string tenantId,string userId,Guid runId,Guid commandId,string workerId,int leaseSeconds,CancellationToken ct);
-    Task<OrchestratorRunCommandClaim?> RenewCommandAsync(string tenantId,string userId,Guid runId,Guid commandId,string claimToken,long leaseGeneration,int leaseSeconds,CancellationToken ct);
-    Task<OrchestratorRunDispatchCompleteStatus> CompleteDispatchAsync(string tenantId,string userId,Guid runId,Guid commandId,string claimToken,CancellationToken ct);
-    Task<OrchestratorRunRecoveryResponse> ClaimRecoveryAsync(string workerId,int limit,int leaseSeconds,CancellationToken ct);
-    Task<OrchestratorChildResponse?> CreateChildAsync(string tenantId,string userId,Guid rootRunId,OrchestratorChildCreateRequest request,CancellationToken ct);
-    Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenantId,string userId,Guid rootRunId,Guid childId,CancellationToken ct);
-    Task<OrchestratorRunWriteResult> TransitionAsync(string tenantId,string userId,Guid rootRunId,OrchestratorRootTransitionRequest request,CancellationToken ct);
-    Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenantId,string userId,Guid rootRunId,OrchestratorContextAcquireRequest request,CancellationToken ct);
+    Task<OrchestratorRunCommandClaim?> ClaimCommandAsync(string tenantId, string userId, Guid runId, Guid commandId, string workerId, int leaseSeconds, CancellationToken ct);
+    Task<OrchestratorRunCommandClaim?> RenewCommandAsync(string tenantId, string userId, Guid runId, Guid commandId, string claimToken, long leaseGeneration, int leaseSeconds, CancellationToken ct);
+    Task<OrchestratorRunDispatchCompleteStatus> CompleteDispatchAsync(string tenantId, string userId, Guid runId, Guid commandId, string claimToken, CancellationToken ct);
+    Task<OrchestratorRunRecoveryResponse> ClaimRecoveryAsync(string workerId, int limit, int leaseSeconds, CancellationToken ct);
+    Task<OrchestratorChildResponse?> CreateChildAsync(string tenantId, string userId, Guid rootRunId, OrchestratorChildCreateRequest request, CancellationToken ct);
+    Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenantId, string userId, Guid rootRunId, Guid childId, CancellationToken ct);
+    Task<OrchestratorRunWriteResult> TransitionAsync(string tenantId, string userId, Guid rootRunId, OrchestratorRootTransitionRequest request, CancellationToken ct);
+    Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenantId, string userId, Guid rootRunId, OrchestratorContextAcquireRequest request, CancellationToken ct);
 }

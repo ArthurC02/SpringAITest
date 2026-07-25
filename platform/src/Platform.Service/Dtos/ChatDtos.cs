@@ -15,8 +15,18 @@ public sealed record ChatRequest(
 
     // 選填:短期 ChatMemory 分組;空白時 service 退回成 userId。
     [StringLength(128, ErrorMessage = "conversationId 長度不可超過 128 字")]
-    string? ConversationId);
+    string? ConversationId,
+
+    Guid? OrchestratorId = null);
 
 /// <summary>聊天回應。JSON:{ id, reply, createdAt };刻意沒有 prompt 欄位。
 /// CreatedAt 為 UTC(Kind=Utc),序列化自然帶結尾 Z。</summary>
 public sealed record ChatResponse(long Id, string Reply, DateTime CreatedAt);
+
+/// <summary>Server-derived D6 lineage attached to the one existing conversation write.</summary>
+public sealed record ChatTurnMetadata(
+    Guid OrchestratorId,
+    int OrchestratorRevision,
+    Guid WorkflowId,
+    int WorkflowRevision,
+    Guid RootRunId);

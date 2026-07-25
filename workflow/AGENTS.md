@@ -74,8 +74,9 @@ headers required):
 - LLM goes through LiteLLM (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` envs; `mock-gpt` for keyless testing). Langfuse LangChain callback is toggled by `LANGFUSE_ENABLED`.
 - `langfuse.langchain.CallbackHandler` imports `langchain` internally — the full `langchain` package is required, `langchain-core` alone is not enough (already pinned in `pyproject.toml`).
 - Host port is `:8001` (container `:8000`) because mem0 occupies host `:8000`.
-- Test suite: 800 passed, 1 skipped (PostgreSQL runtime integration is separately covered by the D3 evidence verifier).
+- Test suite baseline after the final D6 rerun: 862 passed, 2 skipped; PostgreSQL runtime behavior is also covered by the dedicated evidence verifiers.
 - **D3 direct-Agent runtime:** `app/runtime/` executes only Backend-issued immutable snapshots and requires both `AGENT_TEST_RUN_ENABLED=true` and durable PostgreSQL checkpoint configuration; there is no in-memory production fallback. A lease generation maps to a generation-specific LangGraph thread ID, checkpoint references are HMAC-signed, and resume input is accepted only for the exact durable interrupt identity. `waiting_input` releases the Backend lease; restart recovery, deadline, cancellation, output-contract validation, provider usage bounds, rule gates, tool grants, and scoped retrieval all fail closed. Missing provider usage is conservatively charged as serialized input plus the configured maximum output.
+- **D6 chat dispatch:** `AGENT_CHAT_ENABLED` defaults false and gates the internal chat-run dispatch endpoint independently from D5 test-start. Workflow accepts only Backend-issued root/command identity, then uses the same claim, lease-generation fencing, checkpoint, transition, recovery, and redaction contracts as the D5 Root runtime. Platform dispatch is best-effort; an accepted durable command remains recoverable after a failed kick.
 - **D4 Harness Graph IR:** `app/orchestration/` is a separate constrained
   compiler contract; do not route it through `app/engine/compiler.py` or reuse
   the Skill YAML schema. Workflow is the sole validator/canonicalizer. Graph

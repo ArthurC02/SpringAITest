@@ -9,6 +9,26 @@ namespace Backend.Api.Tests;
 public sealed class InMemoryAgentRunRecoveryTests
 {
     [Fact]
+    public async Task HistoricalRev2PublishedPin_RemainsExecutableWhileNewAuthoringRejectsIt()
+    {
+        var (agents, skills, agent) = await CreatePublishedAgentAsync("historical-rev2");
+        var published = agents.GetPublishedSnapshotUnsafe("demo-a", agent.Id)!;
+        using var definitionDocument = JsonDocument.Parse(published.Definition);
+        var definition = System.Text.Json.Nodes.JsonNode.Parse(definitionDocument.RootElement.GetRawText())!.AsObject();
+        definition["runtime_workflow"]!["revision"] = AgentDefaults.PreviousRuntimeWorkflowRevision;
+        var historicalDefinition = AgentCanonicalizer.CanonicalizeDefinition(definition.ToJsonString());
+        SetPublishedWorkflowRevision(agents, agent.Id, historicalDefinition, AgentDefaults.PreviousRuntimeWorkflowRevision);
+
+        var authoredErrors = await agents.ValidateReferencesAsync("demo-a", historicalDefinition, default);
+        Assert.Contains(authoredErrors, error => error.Field == "runtime_workflow");
+
+        var runs = new InMemoryAgentRunRepository(agents, skills);
+        var started = await runs.CreateDirectAsync("demo-a", "admin-a", "ADMIN", agent.Id, "historical", "historical-start", default);
+        Assert.Equal(AgentRunWriteStatus.Success, started.Status);
+        Assert.Equal(AgentDefaults.PreviousRuntimeWorkflowRevision, started.Run!.WorkflowRevision);
+    }
+
+    [Fact]
     public async Task OrchestratorChild_UsesPinnedChildSnapshotAndNeverDirectRunShape()
     {
         var (agents, skills, agent) = await CreatePublishedAgentAsync("orchestrator-child");
@@ -1184,6 +1204,21 @@ public sealed class InMemoryAgentRunRecoveryTests
 
     private static string V2CheckpointRef(long generation)
         => $"v2:{generation}:{new string('b', 64)}:{Guid.NewGuid():D}";
+
+    private static void SetPublishedWorkflowRevision(
+        InMemoryAgentRepository agents, Guid agentId, string definition, int workflowRevision)
+    {
+        var entries = (System.Collections.IEnumerable)typeof(InMemoryAgentRepository)
+            .GetField("_agents", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(agents)!;
+        var entry = entries.Cast<object>().Single(item =>
+            (Guid)item.GetType().GetField("Id")!.GetValue(item)! == agentId);
+        var revisions = (System.Collections.IList)entry.GetType().GetField("Revisions")!.GetValue(entry)!;
+        var revision = revisions.Cast<object>().Single();
+        revision.GetType().GetField("DefinitionSnapshot")!.SetValue(revision, definition);
+        revision.GetType().GetField("DefinitionSha256")!.SetValue(revision, SkillHash.Sha256(definition));
+        revision.GetType().GetField("RuntimeWorkflowRevision")!.SetValue(revision, (int?)workflowRevision);
+    }
 
     private static async Task<(
         InMemoryAgentRepository Agents,

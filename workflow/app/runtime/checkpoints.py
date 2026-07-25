@@ -6,6 +6,7 @@ import hmac
 import sys
 import re
 import uuid
+import json
 from collections import defaultdict
 from typing import Any
 
@@ -238,6 +239,44 @@ class PostgresCheckpointStore:
             await self._pool.close()
         self._pool = None
         self.saver = None
+
+    async def put_root_context_checkpoint(self, payload: dict[str, Any]) -> tuple[str, int]:
+        """Persist the pre-dispatch Root context gate state in Workflow's checkpoint DB.
+
+        The opaque reference is HMAC-bound to its canonical bytes; Backend stores only
+        that reference and is never trusted to manufacture or alter checkpoint state.
+        """
+        if self._pool is None:
+            raise RuntimeError("root checkpoint store is not open")
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode()).hexdigest()
+        ident = str(uuid.uuid4())
+        mac = hmac.new(settings.checkpoint_hmac_key.encode(), f"{ident}:{digest}".encode(), hashlib.sha256).hexdigest()
+        async with self._pool.connection() as conn:
+            await conn.execute("CREATE TABLE IF NOT EXISTS workflow_root_context_checkpoint (id uuid PRIMARY KEY, payload jsonb NOT NULL, payload_sha256 text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())")
+            await conn.execute("INSERT INTO workflow_root_context_checkpoint(id,payload,payload_sha256) VALUES(%s,%s::jsonb,%s)", (ident, canonical, digest))
+        return f"rctx1:{ident}:{digest}:{mac}", 1
+
+    async def get_root_context_checkpoint(self, reference: str) -> dict[str, Any]:
+        if self._pool is None:
+            raise RuntimeError("root checkpoint store is not open")
+        parts = reference.split(":")
+        if len(parts) != 4 or parts[0] != "rctx1":
+            raise ValueError("invalid Root context checkpoint reference")
+        ident, digest, mac = parts[1:]
+        expected = hmac.new(settings.checkpoint_hmac_key.encode(), f"{ident}:{digest}".encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, mac):
+            raise ValueError("Root context checkpoint signature is invalid")
+        async with self._pool.connection() as conn:
+            cursor = await conn.execute("SELECT payload::text,payload_sha256 FROM workflow_root_context_checkpoint WHERE id=%s", (ident,))
+            row = await cursor.fetchone()
+        if row is None or row["payload_sha256"] != digest:
+            raise ValueError("Root context checkpoint is missing or corrupt")
+        payload = json.loads(row["payload"])
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if hashlib.sha256(canonical.encode()).hexdigest() != digest:
+            raise ValueError("Root context checkpoint is missing or corrupt")
+        return payload
 
 
 def require_runtime_checkpoint_dsn() -> str:
