@@ -112,6 +112,18 @@ async def cancel_agent_run(
     return await _call(_manager(request).dispatch_command(run_id, body.command_id, ctx))
 
 
+@router.post(
+    "/{run_id}/approvals/{approval_id}/execute",
+    response_model=RuntimeRunResult,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def execute_approved_write(run_id: str, approval_id: str, request: Request) -> RuntimeRunResult:
+    if not settings.agent_write_tools_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    ctx = await _context(request)
+    return await _call(_manager(request).execute_approved_write(run_id, approval_id, ctx))
+
+
 async def _call(awaitable) -> RuntimeRunResult:
     try:
         return await awaitable

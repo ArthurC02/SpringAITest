@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # D3 direct-Agent runtime is independently feature gated. PostgreSQL is
     # the only production checkpoint source; tests inject an in-memory saver.
     agent_test_run_enabled: bool = False
+    # D7 is deliberately independent from the D3 direct-run switch.  Until it
+    # is enabled, policy approval decisions remain fail-closed and no write
+    # tool ever enters the effective runtime authority.
+    agent_write_tools_enabled: bool = False
+    agent_write_tools_allowlist: str = ""
+    agent_write_tools_tenant_allowlist: str = ""
     multi_agent_dispatch_enabled: bool = False
     multi_agent_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
     multi_agent_root_lease_seconds: int = Field(default=300, ge=30, le=300)

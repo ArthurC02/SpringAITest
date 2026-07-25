@@ -13,6 +13,7 @@ from app.engine import tool_registry
 from app.engine.tool_registry import ToolContext, ToolSpec
 from app.runtime.artifacts import LoadedSkillArtifact
 from app.runtime.models import DirectAgentExecutionSnapshot, canonical_json_bytes
+from app.settings import settings
 
 MAX_TOOL_ARGUMENT_BYTES = 32_768
 MAX_TOOL_OBSERVATION_CHARS = 16_384
@@ -61,6 +62,10 @@ def effective_tool_names(
         for spec in tool_registry.all_specs()
         if spec.risk in {"low", "read"} and _runtime_available(spec, snapshot, deps)
     }
+    if settings.agent_write_tools_enabled:
+        configured_tools = {x.strip() for x in settings.agent_write_tools_allowlist.split(",") if x.strip()}
+        configured_tenants = {x.strip() for x in settings.agent_write_tools_tenant_allowlist.split(",") if x.strip()}
+        safe |= {spec.name for spec in tool_registry.all_specs() if spec.risk == "write" and spec.name in configured_tools and snapshot.caller.tenant_id in configured_tenants}
     return names & safe
 
 
@@ -148,6 +153,23 @@ async def invoke_direct_tool(
         fingerprint=fingerprint,
         verified_context=verified_context,
     )
+
+
+async def invoke_approved_write_tool(
+    *, name: str, arguments: dict[str, Any], snapshot: DirectAgentExecutionSnapshot,
+    artifact: LoadedSkillArtifact | None, rule_tools: frozenset[str] | None,
+    deps: Any, timeout_seconds: float, effect_id: str,
+) -> ToolObservation:
+    allowed = effective_tool_names(snapshot, artifact=artifact, rule_tools=rule_tools, deps=deps)
+    spec = tool_registry.get(name)
+    if name not in allowed or spec is None or spec.risk != "write":
+        raise DirectToolDenied("tool is not an approved write capability")
+    _validate_arguments(spec, arguments)
+    ctx = ToolContext(tenant_id=snapshot.caller.tenant_id,user_id=snapshot.caller.user_id,role=snapshot.caller.role,deps=deps,run_id=snapshot.run_id,agent_id=snapshot.agent.id,agent_revision=snapshot.agent.revision,knowledge_sources=effective_knowledge_sources(snapshot),enforce_data_scope=True,effect_id=effect_id)
+    try:
+        async with asyncio.timeout(timeout_seconds): result = await tool_registry.invoke(name, ctx, allowed, arguments)
+    except TimeoutError as exc: raise DirectToolDenied("tool exceeded its bounded timeout") from exc
+    return ToolObservation(content=_bounded_observation(result), fingerprint=tool_fingerprint(name, arguments))
 
 
 def tool_fingerprint(name: str, arguments: dict[str, Any]) -> str:

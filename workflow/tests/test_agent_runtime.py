@@ -306,6 +306,99 @@ class UsageModel:
 
 
 @pytest.mark.asyncio
+async def test_registered_write_tool_enters_waiting_approval_without_invoking_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_snapshot = snapshot(tools=["runtime.write_evidence"])
+    monkeypatch.setattr("app.runtime.graph.settings.agent_write_tools_enabled", True)
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_enabled", True
+    )
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_allowlist",
+        "runtime.write_evidence",
+    )
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_tenant_allowlist",
+        run_snapshot.caller.tenant_id,
+    )
+
+    class MustNotWrite:
+        calls = 0
+
+        async def write(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("approval gate must run before a write tool")
+
+    sink = MustNotWrite()
+    graph = compile_runtime_graph(InMemorySaver(serde=strict_serializer()))
+    context = build_context(
+        snapshot=run_snapshot,
+        request_context=request_context(),
+        model=FakeModel(
+            [
+                RuntimeCommand(
+                    kind="tool_call",
+                    name="runtime.write_evidence",
+                    arguments={"record_id": "refund-1", "value": "approved"},
+                )
+            ]
+        ),
+        artifact_reader=FakeArtifactReader(),
+        deps=SimpleNamespace(write_evidence_sink=sink),
+    )
+    config = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+    )
+    interrupted = await graph.ainvoke(initial_state(run_snapshot, "write"), config, context=context)
+
+    assert interrupted["__interrupt__"]
+    state = await graph.aget_state(config)
+    assert state.interrupts
+    assert state.values["pending_approval"]["required_role"] == "ADMIN"
+    assert state.values["pending_approval"]["action_fingerprint"]
+    assert sink.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_registered_write_tool_fails_closed_when_write_flag_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_snapshot = snapshot(tools=["runtime.write_evidence"])
+    monkeypatch.setattr("app.runtime.graph.settings.agent_write_tools_enabled", False)
+    graph = compile_runtime_graph(InMemorySaver(serde=strict_serializer()))
+    context = build_context(
+        snapshot=run_snapshot,
+        request_context=request_context(),
+        model=FakeModel(
+            [
+                RuntimeCommand(
+                    kind="tool_call",
+                    name="runtime.write_evidence",
+                    arguments={"record_id": "refund-1", "value": "approved"},
+                )
+            ]
+        ),
+        artifact_reader=FakeArtifactReader(),
+    )
+    result = await graph.ainvoke(
+        initial_state(run_snapshot, "write"),
+        checkpoint_config(
+            tenant_id=run_snapshot.caller.tenant_id,
+            user_id=run_snapshot.caller.user_id,
+            run_id=run_snapshot.run_id,
+            snapshot_hash=run_snapshot.snapshot_hash,
+        ),
+        context=context,
+    )
+    assert result["status"] == "failed"
+    assert result["error_code"] == "write_tools_disabled"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("usage", [-1, float("nan"), 4_001])
 async def test_invalid_or_overshoot_model_usage_fails_before_final_accept(
     usage: Any,

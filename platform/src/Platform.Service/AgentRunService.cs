@@ -148,6 +148,35 @@ public sealed class AgentRunService : IAgentRunService
         return allocation.Response;
     }
 
+    public Task<AgentProxyResponse> ApprovalsAsync(
+        Guid runId,
+        UserContext ctx,
+        CancellationToken ct = default)
+        => BackendAsync(HttpMethod.Get, $"/api/runs/{runId:D}/approvals", ctx, null, null, ct);
+
+    public async Task<AgentProxyResponse> DecideApprovalAsync(
+        Guid runId,
+        Guid approvalId,
+        bool approve,
+        string? reason,
+        string? idempotencyKey,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        var response = await BackendAsync(
+            HttpMethod.Post,
+            $"/api/runs/{runId:D}/approvals/{approvalId:D}/" + (approve ? "approve" : "reject"),
+            ctx,
+            new { reason = reason?.Trim() },
+            idempotencyKey,
+            ct);
+        if (approve && IsSuccess(response.Status))
+        {
+            await KickApprovedWriteAsync(runId, approvalId, ctx, ct);
+        }
+        return response;
+    }
+
     private async Task<AgentProxyResponse> BackendAsync(
         HttpMethod method,
         string path,
@@ -261,6 +290,17 @@ public sealed class AgentRunService : IAgentRunService
                 "Agent run Workflow kick failed for command {CommandId}; durable command remains recoverable",
                 commandId);
         }
+    }
+
+    private async Task KickApprovedWriteAsync(Guid runId, Guid approvalId, UserContext ctx, CancellationToken ct)
+    {
+        try
+        {
+            using var request = InternalRequest.Build(HttpMethod.Post, _workflowOptions.BaseUrl.TrimEnd('/') + $"/agent-runs/{runId:D}/approvals/{approvalId:D}/execute", _workflowOptions.InternalToken, ctx, new { }, JsonOpts);
+            using var response = await InternalRequest.SendAsync(_workflow, request, WrapTransport, ct);
+            if (!response.IsSuccessStatusCode) _logger.LogWarning("Approved write Workflow kick failed for approval {ApprovalId}: HTTP {StatusCode}", approvalId, (int)response.StatusCode);
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Approved write Workflow kick failed for approval {ApprovalId}; durable effect remains recoverable", approvalId); }
     }
 
     private Exception WrapTransport(Exception ex)

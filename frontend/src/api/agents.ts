@@ -22,6 +22,7 @@ export interface FeatureFlags {
   workflowDesignerEnabled?: boolean
   multiAgentDispatchEnabled?: boolean
   agentChatEnabled?: boolean
+  agentWriteToolsEnabled?: boolean
 }
 
 export function getFeatures(): Promise<FeatureFlags> {

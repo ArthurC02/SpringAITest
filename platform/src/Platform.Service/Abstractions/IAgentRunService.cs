@@ -41,4 +41,22 @@ public interface IAgentRunService
         string? idempotencyKey,
         UserContext ctx,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// D7 approval queue for a run.  This deliberately has no admin/capability parameter:
+    /// Backend is the authority for tenant, required-role and separation-of-duties checks.
+    /// </summary>
+    Task<AgentProxyResponse> ApprovalsAsync(
+        Guid runId,
+        UserContext ctx,
+        CancellationToken ct = default);
+
+    Task<AgentProxyResponse> DecideApprovalAsync(
+        Guid runId,
+        Guid approvalId,
+        bool approve,
+        string? reason,
+        string? idempotencyKey,
+        UserContext ctx,
+        CancellationToken ct = default);
 }

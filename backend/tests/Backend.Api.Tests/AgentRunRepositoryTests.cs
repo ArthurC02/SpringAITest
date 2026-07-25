@@ -51,7 +51,12 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
 
         await using var connection = await _fixture.DataSource!.OpenConnectionAsync();
         await connection.ExecuteAsync(
-            "DELETE FROM agent_run_command WHERE tenant_id LIKE 'agentrunrepo-%';"
+            "DELETE FROM agent_run_write_outbox WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrunrepo-%');"
+            + " DELETE FROM agent_run_write_effect WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrunrepo-%');"
+            + " DELETE FROM agent_run_approval_execute WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrunrepo-%');"
+            + " DELETE FROM agent_run_approval_decision WHERE approval_id IN (SELECT id FROM agent_run_approval WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrunrepo-%'));"
+            + " DELETE FROM agent_run_approval WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrunrepo-%');"
+            + " DELETE FROM agent_run_command WHERE tenant_id LIKE 'agentrunrepo-%';"
             + " DELETE FROM agent_run_event WHERE run_id IN"
             + " (SELECT id FROM agent_run WHERE tenant_id LIKE 'agentrunrepo-%');"
             + " DELETE FROM agent_run_skill WHERE run_id IN"
@@ -65,6 +70,134 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
             + " DELETE FROM skill_revision WHERE skill_id IN"
             + " (SELECT id FROM skill WHERE tenant_id LIKE 'agentrunrepo-%');"
             + " DELETE FROM skill WHERE tenant_id LIKE 'agentrunrepo-%';");
+    }
+
+    [SkippableFact]
+    public async Task D7_Approval_EffectOutboxAndExecuteFence_RoundTripThroughDapper()
+    {
+        _fixture.SkipIfUnavailable();
+        var tenant = "agentrunrepo-d7-approval-" + Guid.NewGuid().ToString("N");
+        var agent = await PublishedAgentAsync(tenant, "d7-approval");
+        var created = await Runs.CreateDirectAsync(tenant, "admin-a", "ADMIN", agent.Id, "write evidence", "d7-start", default);
+        var firstLease = await Runs.ClaimLeaseAsync(tenant, "admin-a", created.Run!.Id,
+            new AgentRunLeaseRequest(created.Run.StateVersion, "workflow", 300), default);
+        var running = await Runs.TransitionAsync(tenant, "admin-a", created.Run.Id,
+            new AgentRunTransitionRequest(firstLease.Lease!.Run.StateVersion, AgentRunStatuses.Running, firstLease.Lease.LeaseToken,
+                firstLease.Lease.LeaseGeneration, firstLease.Lease.EventAckCursor), default);
+        Assert.Equal(AgentRunWriteStatus.Success, running.Status);
+
+        var approvals = new AgentRunApprovalRepository(_fixture.DataSource!);
+        var fingerprint = new string('a', 64);
+        var pending = await approvals.CreateAsync(tenant, "admin-a", created.Run.Id,
+            new AgentRunApprovalCreateRequest(running.Run!.StateVersion, firstLease.Lease.LeaseToken, firstLease.Lease.LeaseGeneration,
+                V2CheckpointRef(firstLease.Lease.LeaseGeneration), 1, "USER", fingerprint, DateTime.UtcNow.AddMinutes(10)), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, pending.Status);
+        Assert.True(pending.Approval!.SelfApprovalForbidden);
+        Assert.Equal(AgentRunApprovalWriteStatus.Forbidden,
+            (await approvals.DecideAsync(tenant, "admin-a", "USER", created.Run.Id, pending.Approval.Id, true, "self", null, default)).Status);
+        Assert.Equal(AgentRunApprovalWriteStatus.NotFound,
+            (await approvals.DecideAsync("other-tenant", "approver", "USER", created.Run.Id, pending.Approval.Id, true, "cross", null, default)).Status);
+        var approved = await approvals.DecideAsync(tenant, "business-approver", "USER", created.Run.Id, pending.Approval.Id, true, "approve", "ok", default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, approved.Status);
+        Assert.Equal(AgentRunApprovalWriteStatus.Replay,
+            (await approvals.DecideAsync(tenant, "business-approver", "USER", created.Run.Id, pending.Approval.Id, true, "approve", "retry", default)).Status);
+
+        var execute = await approvals.ClaimExecuteAsync(tenant, created.Run.Id, pending.Approval.Id, default);
+        Assert.NotNull(execute);
+        Assert.Null(await approvals.ClaimExecuteAsync(tenant, created.Run.Id, pending.Approval.Id, default));
+
+        var queued = await Runs.GetAsync(tenant, "admin-a", created.Run.Id, default);
+        var writeLease = await Runs.ClaimLeaseAsync(tenant, "admin-a", created.Run.Id,
+            new AgentRunLeaseRequest(queued!.StateVersion, "workflow-write", 300), default);
+        var writeRunning = await Runs.TransitionAsync(tenant, "admin-a", created.Run.Id,
+            new AgentRunTransitionRequest(writeLease.Lease!.Run.StateVersion, AgentRunStatuses.Running, writeLease.Lease.LeaseToken,
+                writeLease.Lease.LeaseGeneration, writeLease.Lease.EventAckCursor), default);
+        Assert.Equal(AgentRunWriteStatus.Success, writeRunning.Status);
+        Assert.Equal(AgentRunApprovalWriteStatus.Conflict,
+            (await approvals.ConsumeAsync(tenant, created.Run.Id, pending.Approval.Id,
+                new AgentRunApprovalConsumeRequest(fingerprint, "stale", firstLease.Lease.LeaseGeneration), default)).Status);
+        var effect = await approvals.ConsumeAsync(tenant, created.Run.Id, pending.Approval.Id,
+            new AgentRunApprovalConsumeRequest(fingerprint, writeLease.Lease.LeaseToken, writeLease.Lease.LeaseGeneration), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, effect.Status);
+        var evidence = await approvals.WriteEvidenceAsync(tenant, created.Run.Id, effect.Response!.EffectId,
+            new AgentRunWriteEvidenceRequest("refund-1", "approved"), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, evidence.Status);
+        Assert.Equal(AgentRunApprovalWriteStatus.Replay,
+            (await approvals.WriteEvidenceAsync(tenant, created.Run.Id, effect.Response.EffectId,
+                new AgentRunWriteEvidenceRequest("refund-1", "approved"), default)).Status);
+        Assert.Equal(AgentRunApprovalWriteStatus.Conflict,
+            (await approvals.WriteEvidenceAsync(tenant, created.Run.Id, effect.Response.EffectId,
+                new AgentRunWriteEvidenceRequest("refund-1", "mutated"), default)).Status);
+        Assert.Equal(AgentRunApprovalWriteStatus.Conflict,
+            await approvals.CompleteExecuteAsync(pending.Approval.Id, "wrong", false, default));
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            await approvals.CompleteExecuteAsync(pending.Approval.Id, execute!.ClaimToken, false, default));
+
+        await using var connection = await _fixture.DataSource!.OpenConnectionAsync();
+        Assert.Equal(1, await connection.ExecuteScalarAsync<int>(
+            "SELECT count(*) FROM agent_run_write_outbox WHERE effect_id=@effectId AND status='delivered'", new { effectId = effect.Response.EffectId }));
+
+        // Cancellation is a durable safety gate: even a valid business
+        // approver cannot turn a cancelled waiting approval into an execute
+        // command (and therefore cannot create an effect/outbox record).
+        var cancelledRun = await Runs.CreateDirectAsync(tenant, "admin-a", "ADMIN", agent.Id, "cancel before approve", "d7-cancel-before-approve", default);
+        var cancelledLease = await Runs.ClaimLeaseAsync(tenant, "admin-a", cancelledRun.Run!.Id,
+            new AgentRunLeaseRequest(cancelledRun.Run.StateVersion, "workflow", 300), default);
+        var cancelledRunning = await Runs.TransitionAsync(tenant, "admin-a", cancelledRun.Run.Id,
+            new AgentRunTransitionRequest(cancelledLease.Lease!.Run.StateVersion, AgentRunStatuses.Running, cancelledLease.Lease.LeaseToken,
+                cancelledLease.Lease.LeaseGeneration, cancelledLease.Lease.EventAckCursor), default);
+        var cancelledApproval = await approvals.CreateAsync(tenant, "admin-a", cancelledRun.Run.Id,
+            new AgentRunApprovalCreateRequest(cancelledRunning.Run!.StateVersion, cancelledLease.Lease.LeaseToken,
+                cancelledLease.Lease.LeaseGeneration, V2CheckpointRef(cancelledLease.Lease.LeaseGeneration), 1,
+                "USER", new string('e', 64), DateTime.UtcNow.AddMinutes(10)), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, cancelledApproval.Status);
+        var cancellation = await Runs.CancelAsync(tenant, "admin-a", cancelledRun.Run.Id, "cancel before approval", "d7-cancel-request", default);
+        Assert.True(cancellation.Run!.CancelRequested);
+        var cancelledDecision = await approvals.DecideAsync(tenant, "business-approver", "USER", cancelledRun.Run.Id,
+            cancelledApproval.Approval!.Id, true, "d7-cancel-approve", null, default);
+        Assert.Equal(AgentRunApprovalWriteStatus.InvalidState, cancelledDecision.Status);
+        Assert.Equal("cancelled", cancelledDecision.Approval!.Status);
+        Assert.Null(await approvals.ClaimExecuteAsync(tenant, cancelledRun.Run.Id, cancelledApproval.Approval.Id, default));
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>(
+            "SELECT count(*) FROM agent_run_approval_execute WHERE approval_id=@approvalId", new { approvalId = cancelledApproval.Approval.Id }));
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>(
+            "SELECT count(*) FROM agent_run_write_effect WHERE run_id=@runId", new { runId = cancelledRun.Run.Id }));
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>(
+            "SELECT count(*) FROM agent_run_write_outbox WHERE run_id=@runId", new { runId = cancelledRun.Run.Id }));
+
+        // A cancellation after effect reservation but before evidence must win
+        // at the Backend transaction fence, leaving no durable side effect.
+        var reservedRun = await Runs.CreateDirectAsync(tenant, "admin-a", "ADMIN", agent.Id, "reserve then cancel", "d7-reserve-cancel", default);
+        var reservedStartLease = await Runs.ClaimLeaseAsync(tenant, "admin-a", reservedRun.Run!.Id,
+            new AgentRunLeaseRequest(reservedRun.Run.StateVersion, "workflow", 300), default);
+        var reservedRunning = await Runs.TransitionAsync(tenant, "admin-a", reservedRun.Run.Id,
+            new AgentRunTransitionRequest(reservedStartLease.Lease!.Run.StateVersion, AgentRunStatuses.Running, reservedStartLease.Lease.LeaseToken,
+                reservedStartLease.Lease.LeaseGeneration, reservedStartLease.Lease.EventAckCursor), default);
+        var reservedApproval = await approvals.CreateAsync(tenant, "admin-a", reservedRun.Run.Id,
+            new AgentRunApprovalCreateRequest(reservedRunning.Run!.StateVersion, reservedStartLease.Lease.LeaseToken,
+                reservedStartLease.Lease.LeaseGeneration, V2CheckpointRef(reservedStartLease.Lease.LeaseGeneration), 1,
+                "USER", new string('f', 64), DateTime.UtcNow.AddMinutes(10)), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await approvals.DecideAsync(tenant, "business-approver", "USER", reservedRun.Run.Id, reservedApproval.Approval!.Id,
+                true, "d7-reserve-approve", null, default)).Status);
+        var reservedQueued = await Runs.GetAsync(tenant, "admin-a", reservedRun.Run.Id, default);
+        var reservedWriteLease = await Runs.ClaimLeaseAsync(tenant, "admin-a", reservedRun.Run.Id,
+            new AgentRunLeaseRequest(reservedQueued!.StateVersion, "workflow-write", 300), default);
+        Assert.Equal(AgentRunWriteStatus.Success,
+            (await Runs.TransitionAsync(tenant, "admin-a", reservedRun.Run.Id,
+                new AgentRunTransitionRequest(reservedWriteLease.Lease!.Run.StateVersion, AgentRunStatuses.Running,
+                    reservedWriteLease.Lease.LeaseToken, reservedWriteLease.Lease.LeaseGeneration,
+                    reservedWriteLease.Lease.EventAckCursor), default)).Status);
+        var reservedEffect = await approvals.ConsumeAsync(tenant, reservedRun.Run.Id, reservedApproval.Approval.Id,
+            new AgentRunApprovalConsumeRequest(new string('f', 64), reservedWriteLease.Lease.LeaseToken,
+                reservedWriteLease.Lease.LeaseGeneration), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, reservedEffect.Status);
+        await Runs.CancelAsync(tenant, "admin-a", reservedRun.Run.Id, "cancel reserved write", "d7-reserved-cancel", default);
+        Assert.Equal(AgentRunApprovalWriteStatus.InvalidState,
+            (await approvals.WriteEvidenceAsync(tenant, reservedRun.Run.Id, reservedEffect.Response!.EffectId,
+                new AgentRunWriteEvidenceRequest("must-not-write", "cancelled"), default)).Status);
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>(
+            "SELECT count(*) FROM agent_run_write_outbox WHERE run_id=@runId", new { runId = reservedRun.Run.Id }));
     }
 
     [SkippableFact]

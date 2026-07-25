@@ -102,6 +102,9 @@ def test_all_production_tools_have_explicit_expected_risk():
         "local.calculator": "low",
         "local.glossary": "read",
         "local.rerank": "low",
+        # D7's sole write tool is registered as write-risk and remains
+        # unreachable unless both server allowlists enable it.
+        "runtime.write_evidence": "write",
     }
 
 
@@ -391,6 +394,7 @@ def test_initial_four_tools_are_registered():
         "local.calculator",
         "local.glossary",
         "local.rerank",
+        "runtime.write_evidence",
     } <= names
 
 

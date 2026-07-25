@@ -65,6 +65,9 @@ public sealed class RuntimeDiscoveryService(
     }
 
     public async Task<TenantRuntimeBinding> PutBindingAsync(string tenant, TenantRuntimeBindingUpsert request, CancellationToken ct)
+        => await bindings.PutAsync(tenant, ValidateBinding(request), ct);
+
+    public TenantRuntimeBinding ValidateBinding(TenantRuntimeBindingUpsert request)
     {
         var users = (request.CanaryUserIds ?? []).Select(x => x.Trim()).Where(x => x.Length is > 0 and <= 128 && !x.Any(char.IsControl))
             .Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToArray();
@@ -72,7 +75,7 @@ public sealed class RuntimeDiscoveryService(
         if (request.Enabled && (request.DefaultOrchestratorId is null || request.DefaultOrchestratorRevision is null))
             throw new ApiException(400, "enabled binding requires a pinned default Orchestrator revision");
         if (request.DefaultOrchestratorRevision is <= 0) throw new ApiException(400, "default_orchestrator_revision is invalid");
-        return await bindings.PutAsync(tenant, new(request.Enabled, request.DefaultOrchestratorId, request.DefaultOrchestratorRevision, users), ct);
+        return new(request.Enabled, request.DefaultOrchestratorId, request.DefaultOrchestratorRevision, users);
     }
 
     private async Task<Active> ActiveAsync(string tenant, Guid id, int? requiredRevision, string role, IReadOnlyCollection<string> groups, CancellationToken ct)

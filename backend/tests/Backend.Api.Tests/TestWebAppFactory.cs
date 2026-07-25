@@ -11,6 +11,8 @@ using Backend.Api.Files;
 using Backend.Api.Skills;
 using Backend.Api.Workflows;
 using Backend.Api.Orchestrators;
+using Backend.Api.RuntimeDiscovery;
+using Backend.Api.OperationsGovernance;
 using Backend.Api.Data.InMemory;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -24,7 +26,7 @@ namespace Backend.Api.Tests;
 /// 以「Testing」環境啟動真實應用程式(真實驗證、內部憑證守門、例外映射),
 /// 但把 Dapper 儲存庫換成行程記憶體 fake,不連真 DB(Testing 環境亦跳過 DbBootstrap)。
 /// </summary>
-public sealed class TestWebAppFactory : WebApplicationFactory<Program>
+public class TestWebAppFactory : WebApplicationFactory<Program>
 {
     public const string InternalToken = "internal-dev-token";
 
@@ -33,6 +35,7 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseEnvironment("Testing");
         builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", "true");
         builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", "true");
+        builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", "true");
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IAuthRepository>();
@@ -58,11 +61,17 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IAgentRunRepository>();
             services.AddSingleton<IAgentRunRepository, FakeAgentRunRepository>();
+            services.RemoveAll<IAgentRunApprovalRepository>();
+            services.AddSingleton<IAgentRunApprovalRepository, InMemoryAgentRunApprovalRepository>();
 
             services.RemoveAll<IWorkflowRepository>();
             services.AddSingleton<IWorkflowRepository, InMemoryWorkflowRepository>();
             services.RemoveAll<IOrchestratorRepository>();
             services.AddSingleton<IOrchestratorRepository, InMemoryOrchestratorRepository>();
+            services.RemoveAll<IRuntimeBindingRepository>();
+            services.AddSingleton<IRuntimeBindingRepository, InMemoryRuntimeBindingRepository>();
+            services.RemoveAll<IOperationsGovernanceRepository>();
+            services.AddSingleton<IOperationsGovernanceRepository, InMemoryOperationsGovernanceRepository>();
             services.RemoveAll<IWorkflowCompiler>();
             services.AddSingleton<IWorkflowCompiler, FakeWorkflowCompiler>();
 

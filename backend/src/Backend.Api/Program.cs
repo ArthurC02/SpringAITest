@@ -14,6 +14,7 @@ using Backend.Api.Workflows;
 using Backend.Api.Orchestrators;
 using Backend.Api.OrchestratorRuns;
 using Backend.Api.RuntimeDiscovery;
+using Backend.Api.OperationsGovernance;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -38,6 +39,7 @@ var multiAgentDispatchEnabled = workflowDesignerEnabled
     && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentChatEnabled = multiAgentDispatchEnabled
     && string.Equals(cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var agentWriteToolsEnabled = string.Equals(cfg["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -54,10 +56,12 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IConfigurationSetRepository, InMemoryConfigurationSetRepository>();
     builder.Services.AddSingleton<IAgentRepository, InMemoryAgentRepository>();
     builder.Services.AddSingleton<IAgentRunRepository, InMemoryAgentRunRepository>();
+    builder.Services.AddSingleton<IAgentRunApprovalRepository, InMemoryAgentRunApprovalRepository>();
     builder.Services.AddSingleton<IWorkflowRepository, InMemoryWorkflowRepository>();
     builder.Services.AddSingleton<IOrchestratorRepository, InMemoryOrchestratorRepository>();
     builder.Services.AddSingleton<IOrchestratorRunRepository, InMemoryOrchestratorRunRepository>();
     builder.Services.AddSingleton<IRuntimeBindingRepository, InMemoryRuntimeBindingRepository>();
+    builder.Services.AddSingleton<IOperationsGovernanceRepository, InMemoryOperationsGovernanceRepository>();
 }
 else
 {
@@ -70,10 +74,12 @@ else
     builder.Services.AddScoped<IConfigurationSetRepository, ConfigurationSetRepository>();
     builder.Services.AddScoped<IAgentRepository, AgentRepository>();
     builder.Services.AddScoped<IAgentRunRepository, AgentRunRepository>();
+    builder.Services.AddScoped<IAgentRunApprovalRepository, AgentRunApprovalRepository>();
     builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
     builder.Services.AddScoped<IOrchestratorRepository, OrchestratorRepository>();
     builder.Services.AddScoped<IOrchestratorRunRepository, OrchestratorRunRepository>();
     builder.Services.AddScoped<IRuntimeBindingRepository, RuntimeBindingRepository>();
+    builder.Services.AddScoped<IOperationsGovernanceRepository, OperationsGovernanceRepository>();
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +169,23 @@ if (!app.Environment.IsEnvironment("Testing") && !useInMemoryDb)
 app.UseExceptionHandler();
 
 // 內部憑證守門(/health 免驗);置於例外處理之後、路由之前。
+if (!agentWriteToolsEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        var d7RunPath = context.Request.Path.StartsWithSegments("/api/agent-runs")
+            && (context.Request.Path.Value?.Contains("/approvals", StringComparison.OrdinalIgnoreCase) == true
+                || context.Request.Path.Value?.Contains("/write-effects", StringComparison.OrdinalIgnoreCase) == true);
+        if (((context.Request.Path.StartsWithSegments("/api/runs") || context.Request.Path.StartsWithSegments("/api/agent-runs")) && context.Request.Path.Value?.Contains("/approvals", StringComparison.OrdinalIgnoreCase) == true)
+            || d7RunPath
+            || context.Request.Path.StartsWithSegments("/api/agent-run-approval-executions")
+            || context.Request.Path.StartsWithSegments("/api/admin/operations")
+            || context.Request.Path.StartsWithSegments("/api/operations/telemetry"))
+        { await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable"); return; }
+        await next();
+    });
+}
+
 app.UseMiddleware<InternalTokenMiddleware>(internalToken);
 
 // D4 authoring endpoints stay invisible even to a direct internal caller while rollout is off.

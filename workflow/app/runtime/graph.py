@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -114,6 +115,7 @@ def initial_state(
         messages=[{"role": "user", "content": message}],
         pending_command=None,
         pending_input=None,
+        pending_approval=None,
         active_skill_scope=None,
         step_count=0,
         tool_rounds=0,
@@ -147,6 +149,7 @@ def compile_runtime_graph(
     graph.add_node("read_resource", _read_resource)
     graph.add_node("prepare_input", _prepare_input)
     graph.add_node("pause_for_input", _pause_for_input)
+    graph.add_node("pause_for_approval", _pause_for_approval)
     graph.add_node("accept_final", _accept_final)
     graph.add_node("validate_output", _validate_output)
     graph.add_node("budget_gate", _budget_gate)
@@ -170,6 +173,7 @@ def compile_runtime_graph(
             "request_input": "prepare_input",
             "final": "accept_final",
             "waiting_input": "prepare_input",
+            "waiting_approval": "pause_for_approval",
             "finalize": "finalize",
         },
     )
@@ -177,6 +181,7 @@ def compile_runtime_graph(
         graph.add_edge(node, "budget_gate")
     graph.add_edge("prepare_input", "pause_for_input")
     graph.add_edge("pause_for_input", "budget_gate")
+    graph.add_edge("pause_for_approval", "budget_gate")
     graph.add_edge("accept_final", "validate_output")
     graph.add_edge("validate_output", "finalize")
     graph.add_conditional_edges(
@@ -227,6 +232,7 @@ async def _model_step(
         rule_tools=rule_tools,
         deps=context.deps,
     )
+    started = time.perf_counter()
     try:
         turn = await context.model.next_command(
             snapshot=context.snapshot,
@@ -270,6 +276,12 @@ async def _model_step(
                 "step": step,
                 "action_kind": turn.command.kind,
                 "active_skill": bool(artifact),
+                "skill_name": artifact.name if artifact else None,
+                "skill_revision": artifact.revision if artifact else None,
+                "agent_id": context.snapshot.agent.id,
+                "agent_revision": context.snapshot.agent.revision,
+                "usage_units": token_usage,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
                 **(turn.audit_metadata or {}),
             },
     )
@@ -371,6 +383,16 @@ async def _policy_gate(
         )
     except Exception:
         return _failure(state, context, "policy_gate", "policy_evaluation_failed")
+    # Write tools never inherit a permissive read-policy outcome. The server
+    # registered risk classification imposes an approval gate even when an old
+    # RuleSet omitted an explicit require_approval action.
+    spec = tool_registry.get(command.name or "") if command.kind == "tool_call" else None
+    if spec is not None and spec.risk == "write" and decision.outcome == "continue":
+        decision = (
+            PolicyDecision(outcome="waiting_approval", code="write_approval_required", required_role="ADMIN", summary=decision.summary)
+            if settings.agent_write_tools_enabled
+            else PolicyDecision(outcome="blocked", code="write_tools_disabled", summary=decision.summary)
+        )
     audit_tags = _bounded_unique(
         [*(state.get("audit_tags") or []), *decision.audit_tags]
     )
@@ -503,6 +525,22 @@ async def _policy_gate(
                     "source": "rule",
                 }
             )
+    elif decision.outcome == "waiting_approval":
+        # The action fingerprint is derived from the model-selected command
+        # plus the immutable snapshot, never supplied by the browser.
+        output.update(
+            pending_approval={
+                "required_role": decision.required_role,
+                "action_fingerprint": canonical_json_sha256({
+                    "snapshot_hash": context.snapshot.snapshot_hash,
+                    "command": command.model_dump(mode="json"),
+                    "active_skill": (state.get("active_skill_scope") or {}).get("instruction_sha256"),
+                }),
+                "command": command.model_dump(mode="json"),
+                "active_skill_scope": state.get("active_skill_scope"),
+            },
+            pending_command=None,
+        )
     elif decision.routed_skill:
         active_scope = state.get("active_skill_scope") or {}
         pin = context.snapshot.skill_pin(decision.routed_skill)
@@ -524,6 +562,8 @@ def _after_policy(state: RuntimeState) -> str:
         return "finalize"
     if state.get("pending_input"):
         return "waiting_input"
+    if state.get("pending_approval"):
+        return "waiting_approval"
     kind = str((state.get("pending_command") or {}).get("kind") or "finalize")
     # A final answer produced inside a Skill scope completes that task frame,
     # not the entire Agent run. Close the scope first; the next model turn is
@@ -729,6 +769,7 @@ async def _invoke_tool(
             ),
         }
     artifact = await _active_artifact(state, context)
+    started = time.perf_counter()
     try:
         observation = await invoke_direct_tool(
             name=name,
@@ -767,6 +808,11 @@ async def _invoke_tool(
             "invoke_tool",
             {
                 "tool_name": name,
+                "skill_name": artifact.name if artifact else None,
+                "skill_revision": artifact.revision if artifact else None,
+                "agent_id": context.snapshot.agent.id,
+                "agent_revision": context.snapshot.agent.revision,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
                 "status": "ok",
                 "verified_context": (
                     {
@@ -882,6 +928,21 @@ def _pause_for_input(
             {"status": "running"},
         ),
     }
+
+
+def _pause_for_approval(
+    state: RuntimeState, runtime: Runtime[RuntimeGraphContext]
+) -> dict[str, Any]:
+    pending = state.get("pending_approval") or {}
+    # Approval is resolved only through the Backend approval API. A generic
+    # LangGraph resume value is rejected so it can never impersonate a decision.
+    interrupt({
+        "kind": "approval",
+        "run_id": runtime.context.snapshot.run_id,
+        "snapshot_hash": runtime.context.snapshot.snapshot_hash,
+        "required_role": str(pending.get("required_role") or ""),
+    })
+    return _failure(state, runtime.context, "pause_for_approval", "approval_resume_denied")
 
 
 async def _accept_final(

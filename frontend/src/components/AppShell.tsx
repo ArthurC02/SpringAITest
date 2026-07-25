@@ -16,8 +16,10 @@ import ConfigView from './ConfigView'
 import AgentsView from './AgentsView'
 import WorkflowsView from './WorkflowsView'
 import OrchestratorsView from './OrchestratorsView'
+import ApprovalInbox from './ApprovalInbox'
+import OperationsGovernanceView from './OperationsGovernanceView'
 
-type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agents' | 'workflows' | 'orchestrators'
+type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agents' | 'workflows' | 'orchestrators' | 'approvals' | 'operations'
 
 // copilot 的 switchView 只認四個原視圖(不含 agents,副駕不涉入 Agent Builder)。
 const VIEWS: View[] = ['chat', 'documents', 'analysis', 'config']
@@ -33,6 +35,8 @@ const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
 const AGENTS_NAV = { id: 'agents' as const, icon: '🧑‍💼', label: 'Agents' }
 const WORKFLOWS_NAV = { id: 'workflows' as const, icon: '🧩', label: 'Workflow Designer' }
 const ORCHESTRATORS_NAV = { id: 'orchestrators' as const, icon: '🧭', label: 'Orchestrators' }
+const APPROVALS_NAV = { id: 'approvals' as const, icon: '✅', label: 'Approvals' }
+const OPERATIONS_NAV = { id: 'operations' as const, icon: '📈', label: 'Operations' }
 
 interface Props {
   session: Session
@@ -54,6 +58,7 @@ export default function AppShell({
   const [workflowDesignerEnabled, setWorkflowDesignerEnabled] = useState(false)
   const [multiAgentDispatchEnabled, setMultiAgentDispatchEnabled] = useState(false)
   const [agentChatEnabled, setAgentChatEnabled] = useState(false)
+  const [agentWriteToolsEnabled, setAgentWriteToolsEnabled] = useState(false)
   const [chatOrchestrators, setChatOrchestrators] = useState<ChatOrchestrator[]>([])
   const isAdmin = session.role === 'ADMIN'
   // Capability comparison is exact: `workflow.manage.other` is never sufficient.
@@ -62,6 +67,8 @@ export default function AppShell({
   const navItems = [
     ...(agentBuilderEnabled && isAdmin ? [...items, AGENTS_NAV] : items),
     ...(workflowDesignerEnabled && canManageWorkflow ? [WORKFLOWS_NAV, ORCHESTRATORS_NAV] : []),
+    ...(agentWriteToolsEnabled ? [APPROVALS_NAV] : []),
+    ...(agentWriteToolsEnabled && canManageWorkflow ? [OPERATIONS_NAV] : []),
   ]
 
   // features flag:失敗或 false 一律 fail-closed(不顯示 Agents 入口)。登入即取一次。
@@ -75,6 +82,7 @@ export default function AppShell({
           setWorkflowDesignerEnabled(!!f.workflowDesignerEnabled)
           setMultiAgentDispatchEnabled(!!f.multiAgentDispatchEnabled)
           setAgentChatEnabled(!!f.agentChatEnabled)
+          setAgentWriteToolsEnabled(!!f.agentWriteToolsEnabled)
         }
       })
       .catch(() => {
@@ -84,6 +92,7 @@ export default function AppShell({
           setWorkflowDesignerEnabled(false)
           setMultiAgentDispatchEnabled(false)
           setAgentChatEnabled(false)
+          setAgentWriteToolsEnabled(false)
         }
       })
     return () => {
@@ -125,6 +134,8 @@ export default function AppShell({
       view === 'agents' ? AGENTS_NAV.label
         : view === 'workflows' ? WORKFLOWS_NAV.label
           : view === 'orchestrators' ? ORCHESTRATORS_NAV.label
+            : view === 'approvals' ? APPROVALS_NAV.label
+              : view === 'operations' ? OPERATIONS_NAV.label
             : NAV.find((n) => n.id === view)?.label ?? ''
     document.title = `${label} — 資料分析平台`
   }, [view])
@@ -299,6 +310,8 @@ export default function AppShell({
               )}
               {view === 'workflows' && workflowDesignerEnabled && canManageWorkflow && <WorkflowsView />}
               {view === 'orchestrators' && workflowDesignerEnabled && canManageWorkflow && <OrchestratorsView multiAgentDispatchEnabled={multiAgentDispatchEnabled} />}
+              {view === 'approvals' && agentWriteToolsEnabled && <ApprovalInbox />}
+              {view === 'operations' && agentWriteToolsEnabled && canManageWorkflow && <OperationsGovernanceView />}
             </ErrorBoundary>
           </main>
         </div>

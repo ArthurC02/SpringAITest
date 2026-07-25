@@ -68,6 +68,8 @@ var multiAgentDispatchEnabled = workflowDesignerEnabled
     && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentChatEnabled = string.Equals(
     cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var agentWriteToolsEnabled = string.Equals(
+    cfg["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentChatTenants = (cfg["AGENT_CHAT_TENANT_ALLOWLIST"] ?? string.Empty)
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 var agentChatOptions = new AgentChatOptions
@@ -469,7 +471,12 @@ if (!agentTestRunEnabled)
     app.Use(async (context, next) =>
     {
         var path = context.Request.Path.Value ?? string.Empty;
-        var isRunRoute = context.Request.Path.StartsWithSegments("/api/runs");
+        // D7 approvals are a separate runtime feature.  A business approver must not lose
+        // an already-waiting chat/root approval merely because the ADMIN-only D3 test console
+        // is disabled.  Its own gate below remains fail-closed.
+        var isApprovalRoute = path.StartsWith("/api/runs/", StringComparison.OrdinalIgnoreCase)
+            && path.Contains("/approvals", StringComparison.OrdinalIgnoreCase);
+        var isRunRoute = context.Request.Path.StartsWithSegments("/api/runs") && !isApprovalRoute;
         var normalizedPath = path.TrimEnd('/');
         var isAgentRunStart = normalizedPath.StartsWith(
                 "/api/agents/",
@@ -478,6 +485,26 @@ if (!agentTestRunEnabled)
         if (isRunRoute || isAgentRunStart)
         {
             await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "找不到資源");
+            return;
+        }
+
+        await next();
+    });
+}
+
+// D7 write actions/approvals are independently fail-closed before authentication.  Do not
+// fold this into Builder or workflow.manage: approvers are ordinary authenticated users and
+// Backend owns the role/tenant/SoD decision.
+if (!agentWriteToolsEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        if (path.StartsWith("/api/runs/", StringComparison.OrdinalIgnoreCase)
+            && path.Contains("/approvals", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/api/admin/operations", StringComparison.OrdinalIgnoreCase))
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
             return;
         }
 
@@ -531,7 +558,7 @@ app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAno
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
 app.MapGet(
     "/api/features",
-    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled, agentChatEnabled }))
+    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled, agentChatEnabled, agentWriteToolsEnabled }))
     .AllowAnonymous();
 
 // ---------------------------------------------------------------------------

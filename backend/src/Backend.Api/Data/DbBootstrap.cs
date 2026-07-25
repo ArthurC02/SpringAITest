@@ -344,7 +344,7 @@ public static class DbBootstrap
           updated_at timestamptz NOT NULL DEFAULT now(),
           completed_at timestamptz,
           CONSTRAINT ck_agent_run_kind CHECK (run_kind IN ('direct-agent','orchestrator','worker','verifier')),
-          CONSTRAINT ck_agent_run_status CHECK (status IN ('queued','running','waiting_input','completed','failed','cancelled')),
+          CONSTRAINT ck_agent_run_status CHECK (status IN ('queued','running','waiting_input','waiting_approval','completed','failed','cancelled')),
           CONSTRAINT ck_agent_run_pinned_identity_v2 CHECK (
             tenant_id !~ '^[[:space:]]*$'
             AND char_length(tenant_id) <= 256
@@ -374,6 +374,48 @@ public static class DbBootstrap
             REFERENCES workflow_revision(workflow_id, revision));
         CREATE INDEX IF NOT EXISTS ix_agent_run_tenant_owner_updated
           ON agent_run (tenant_id, user_id, updated_at DESC);
+        -- D7: an approval binds exactly one server-generated action fingerprint and
+        -- has no reusable browser token. Decisions are append-only/idempotent.
+        ALTER TABLE agent_run DROP CONSTRAINT IF EXISTS ck_agent_run_status;
+        ALTER TABLE agent_run ADD CONSTRAINT ck_agent_run_status CHECK(status IN ('queued','running','waiting_input','waiting_approval','completed','failed','cancelled'));
+        CREATE TABLE IF NOT EXISTS agent_run_approval (
+          id uuid PRIMARY KEY, run_id uuid NOT NULL REFERENCES agent_run(id), tenant_id text NOT NULL,
+          requested_by text NOT NULL, required_role text NOT NULL, action_fingerprint text NOT NULL,
+          expires_at timestamptz NOT NULL, self_approval_forbidden boolean NOT NULL DEFAULT true,
+          status text NOT NULL CHECK(status IN ('pending','approved','rejected','consumed','expired','cancelled')),
+          checkpoint_ref text NOT NULL, checkpoint_version bigint NOT NULL,
+          decision text, decided_by text, decided_at timestamptz, reason text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CHECK(action_fingerprint ~ '^[0-9a-f]{64}$'),
+          CHECK(required_role ~ '^[A-Z][A-Z0-9_]{0,63}$'));
+        CREATE INDEX IF NOT EXISTS ix_agent_run_approval_pending ON agent_run_approval(run_id,status,expires_at);
+        CREATE TABLE IF NOT EXISTS agent_run_approval_decision (
+          approval_id uuid NOT NULL REFERENCES agent_run_approval(id), idempotency_key_sha256 text NOT NULL,
+          decision text NOT NULL CHECK(decision IN ('approved','rejected')), approver_id text NOT NULL,
+          reason text, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(approval_id,idempotency_key_sha256));
+        -- The durable effect ledger is consumed by the Workflow write boundary before
+        -- invoking a side effect; unique action fingerprint makes a retry/restart safe.
+        CREATE TABLE IF NOT EXISTS agent_run_write_effect (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), approval_id uuid NOT NULL REFERENCES agent_run_approval(id),
+          run_id uuid NOT NULL REFERENCES agent_run(id), action_fingerprint text NOT NULL,
+          status text NOT NULL CHECK(status IN ('reserved','completed','failed')),
+          created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz,
+          UNIQUE(run_id,action_fingerprint));
+        CREATE TABLE IF NOT EXISTS agent_run_approval_execute (
+          approval_id uuid PRIMARY KEY REFERENCES agent_run_approval(id), run_id uuid NOT NULL REFERENCES agent_run(id),
+          tenant_id text NOT NULL, approver_id text NOT NULL, status text NOT NULL CHECK(status IN ('queued','claimed','completed','dead_letter')),
+          claim_token_sha256 text, claim_expires_at timestamptz, attempts integer NOT NULL DEFAULT 0,
+          created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz);
+        CREATE INDEX IF NOT EXISTS ix_agent_run_approval_execute_recovery
+          ON agent_run_approval_execute(status,claim_expires_at,created_at) WHERE status IN ('queued','claimed');
+        ALTER TABLE agent_run_approval_execute DROP CONSTRAINT IF EXISTS agent_run_approval_execute_status_check;
+        ALTER TABLE agent_run_approval_execute ADD CONSTRAINT agent_run_approval_execute_status_check CHECK(status IN ('queued','claimed','completed','dead_letter'));
+        ALTER TABLE agent_run_write_effect ADD COLUMN IF NOT EXISTS evidence jsonb;
+        CREATE TABLE IF NOT EXISTS agent_run_write_outbox (
+          effect_id uuid PRIMARY KEY REFERENCES agent_run_write_effect(id), run_id uuid NOT NULL REFERENCES agent_run(id),
+          tenant_id text NOT NULL, payload jsonb NOT NULL, status text NOT NULL CHECK(status IN ('pending','delivered')),
+          created_at timestamptz NOT NULL DEFAULT now(), delivered_at timestamptz);
+        CREATE INDEX IF NOT EXISTS ix_agent_run_write_outbox_pending ON agent_run_write_outbox(status,created_at) WHERE status='pending';
         -- D5 root aggregate is intentionally separate from agent_run: roots have no Agent
         -- revision, whereas Worker/Verifier children retain D3's immutable Agent snapshots.
         CREATE TABLE IF NOT EXISTS orchestrator_run (
@@ -410,6 +452,40 @@ public static class DbBootstrap
           updated_at timestamptz NOT NULL DEFAULT now(),
           CHECK ((NOT enabled) OR (default_orchestrator_id IS NOT NULL AND default_orchestrator_revision >= 1)),
           CHECK (jsonb_typeof(canary_user_ids) = 'array'));
+        -- D7 release-control ledger. Evidence references and override reasons are retained for
+        -- audit, while public metrics expose aggregates only. Override keys are hashes, never
+        -- caller-supplied raw idempotency identities.
+        CREATE TABLE IF NOT EXISTS operations_regression_result (
+          id uuid PRIMARY KEY, tenant_id text NOT NULL, suite text NOT NULL, passed boolean NOT NULL,
+          evidence_ref text NOT NULL, recorded_by text NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now(),
+          CHECK (char_length(suite) BETWEEN 1 AND 128), CHECK (char_length(evidence_ref) BETWEEN 1 AND 256),
+          CHECK (char_length(recorded_by) BETWEEN 1 AND 256));
+        CREATE INDEX IF NOT EXISTS ix_operations_regression_result_tenant_latest
+          ON operations_regression_result(tenant_id,recorded_at DESC,id DESC);
+        CREATE TABLE IF NOT EXISTS operations_regression_override (
+          tenant_id text NOT NULL, idempotency_key_sha256 text NOT NULL, regression_id uuid NOT NULL REFERENCES operations_regression_result(id),
+          reason text NOT NULL, actor_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY(tenant_id,idempotency_key_sha256), CHECK (idempotency_key_sha256 ~ '^[0-9a-f]{64}$'),
+          CHECK (char_length(reason) BETWEEN 8 AND 1000), CHECK (char_length(actor_id) BETWEEN 1 AND 256));
+        CREATE INDEX IF NOT EXISTS ix_operations_regression_override_gate
+          ON operations_regression_override(tenant_id,regression_id);
+        CREATE TABLE IF NOT EXISTS operations_release_audit (
+          id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, tenant_id text NOT NULL, kind text NOT NULL,
+          outcome text NOT NULL, actor_id text NOT NULL, detail text NOT NULL, occurred_at timestamptz NOT NULL DEFAULT now(),
+          CHECK (kind IN ('regression','regression_override','rollout','rollback')),
+          CHECK (char_length(outcome) BETWEEN 1 AND 64), CHECK (char_length(actor_id) BETWEEN 1 AND 256),
+          CHECK (char_length(detail) BETWEEN 1 AND 256));
+        CREATE INDEX IF NOT EXISTS ix_operations_release_audit_tenant_time
+          ON operations_release_audit(tenant_id,occurred_at DESC,id DESC);
+        CREATE TABLE IF NOT EXISTS operations_execution_metric (
+          tenant_id text NOT NULL, run_id uuid NOT NULL REFERENCES agent_run(id), event_id uuid NOT NULL,
+          kind text NOT NULL CHECK(kind IN ('model','tool','node')), node_id text, tool_name text, skill_name text, skill_revision integer, agent_id text, agent_revision integer,
+          usage_units bigint, cost_units numeric(18,6), latency_ms bigint,
+          observed_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(tenant_id,run_id,event_id),
+          CHECK (usage_units IS NULL OR usage_units >= 0), CHECK (cost_units IS NULL OR cost_units >= 0), CHECK (latency_ms IS NULL OR latency_ms >= 0));
+        CREATE INDEX IF NOT EXISTS ix_operations_execution_metric_tenant_time
+          ON operations_execution_metric(tenant_id,observed_at DESC);
+        ALTER TABLE operations_execution_metric ADD COLUMN IF NOT EXISTS skill_name text, ADD COLUMN IF NOT EXISTS skill_revision integer, ADD COLUMN IF NOT EXISTS agent_id text, ADD COLUMN IF NOT EXISTS agent_revision integer;
         CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_active_conversation
           ON orchestrator_run(tenant_id,user_id,conversation_id,orchestrator_id)
           WHERE status IN ('queued','running','waiting_input');

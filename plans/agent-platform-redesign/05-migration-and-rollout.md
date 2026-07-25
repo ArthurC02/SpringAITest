@@ -1,6 +1,6 @@
 # Agent 平台重整 — 遷移與發布
 
-> 狀態：規劃中。本檔定義 coexistence、feature flag、觀測、rollback 與 legacy 退場門檻。
+> 狀態：D1–D7 已完成產品交付與 D7 hybrid cross-service e2e 驗證。本檔仍定義 coexistence、feature flag、觀測、rollback 與 legacy 退場門檻；R6 的 legacy 移除尚未執行。
 
 ## 1. 遷移目標
 

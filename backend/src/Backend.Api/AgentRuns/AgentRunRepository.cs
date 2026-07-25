@@ -1610,7 +1610,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
             + " ORDER BY (cmd.command_type='deadline_cleanup') DESC,"
             + " (cmd.command_type='cancel') DESC,"
             + " cmd.command_sequence DESC LIMIT 1) c ON true"
-            + " WHERE r.status IN ('queued','running','waiting_input') AND ("
+            + " WHERE r.status IN ('queued','running','waiting_input','waiting_approval') AND ("
             + " (r.deadline_at<=@databaseNow AND ("
             + " c.command_type<>'deadline_cleanup'"
             + " OR (c.command_type='deadline_cleanup' AND ("
@@ -2076,7 +2076,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 + " THEN latest_event_sequence+1 ELSE latest_event_sequence END,"
                 + " updated_at=clock_timestamp()"
                 + " WHERE id=@runId AND state_version=@expectedStateVersion"
-                + " AND status IN ('queued','running','waiting_input')"
+                + " AND status IN ('queued','running','waiting_input','waiting_approval')"
                 + " RETURNING latest_event_sequence",
                 new
                 {
@@ -2152,7 +2152,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 + " latest_event_sequence=latest_event_sequence+1,"
                 + " updated_at=clock_timestamp()"
                 + " WHERE id=@runId AND state_version=@expectedStateVersion"
-                + " AND status IN ('queued','running','waiting_input')"
+                + " AND status IN ('queued','running','waiting_input','waiting_approval')"
                 + " RETURNING latest_event_sequence",
                 new
                 {

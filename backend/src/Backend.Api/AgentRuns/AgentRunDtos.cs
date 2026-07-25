@@ -8,12 +8,13 @@ public static class AgentRunStatuses
     public const string Queued = "queued";
     public const string Running = "running";
     public const string WaitingInput = "waiting_input";
+    public const string WaitingApproval = "waiting_approval";
     public const string Completed = "completed";
     public const string Failed = "failed";
     public const string Cancelled = "cancelled";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(
-        new[] { Queued, Running, WaitingInput, Completed, Failed, Cancelled },
+        new[] { Queued, Running, WaitingInput, WaitingApproval, Completed, Failed, Cancelled },
         StringComparer.Ordinal);
 
     public static readonly IReadOnlySet<string> Terminal = new HashSet<string>(
@@ -25,12 +26,16 @@ public static class AgentRunStatuses
         (Queued, Running) => true,
         (Queued, Cancelled) => true,
         (Running, WaitingInput) => true,
+        (Running, WaitingApproval) => true,
         (Running, Completed) => true,
         (Running, Failed) => true,
         (Running, Cancelled) => true,
         (WaitingInput, Queued) => true,
         (WaitingInput, Running) => true,
         (WaitingInput, Cancelled) => true,
+        (WaitingApproval, Queued) => true,
+        (WaitingApproval, Running) => true,
+        (WaitingApproval, Cancelled) => true,
         _ => false,
     };
 }

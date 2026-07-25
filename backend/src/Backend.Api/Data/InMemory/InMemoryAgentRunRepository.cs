@@ -7,7 +7,7 @@ using Backend.Api.Skills;
 
 namespace Backend.Api.Data.InMemory;
 
-public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestratorChildRunRepository
+public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestratorChildRunRepository, IAgentRunApprovalLeaseVerifier, IAgentRunApprovalDecisionTransition
 {
     private static readonly IReadOnlySet<string> CancelAuditEventTypes =
         new HashSet<string>(StringComparer.Ordinal)
@@ -679,6 +679,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             }
             var promotionRequired = request.ToStatus is
                 AgentRunStatuses.WaitingInput
+                or AgentRunStatuses.WaitingApproval
                 or AgentRunStatuses.Completed
                 or AgentRunStatuses.Failed
                 or AgentRunStatuses.Cancelled;
@@ -724,13 +725,13 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             {
                 return Task.FromResult(InvalidState("run deadline has elapsed"));
             }
-            if (request.ToStatus == AgentRunStatuses.WaitingInput
+            if (request.ToStatus is AgentRunStatuses.WaitingInput or AgentRunStatuses.WaitingApproval
                 && (checkpointRef is null
                     || request.CheckpointVersion is not long waitingCheckpointVersion
                     || waitingCheckpointVersion <= entry.CheckpointVersion))
             {
                 return Task.FromResult(InvalidState(
-                    "waiting_input requires a nonblank checkpoint_ref and an advanced checkpoint_version"));
+                    "waiting state requires a nonblank checkpoint_ref and an advanced checkpoint_version"));
             }
             if (request.CheckpointVersion is long checkpointVersion
                 && checkpointVersion < entry.CheckpointVersion)
@@ -774,7 +775,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                 entry.CompletedAt = now;
             }
             if (AgentRunStatuses.Terminal.Contains(request.ToStatus)
-                || request.ToStatus == AgentRunStatuses.WaitingInput)
+                || request.ToStatus is AgentRunStatuses.WaitingInput or AgentRunStatuses.WaitingApproval)
             {
                 entry.LeaseOwner = null;
                 entry.LeaseTokenHash = null;
@@ -1771,6 +1772,43 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
            && entry.UserId == userId
             ? entry
             : null;
+
+    public bool HasActiveApprovalLease(string tenantId, string userId, Guid runId, string leaseToken, long leaseGeneration)
+    {
+        lock (_gate)
+        {
+            var entry = Find(tenantId, userId, runId);
+            return entry is not null
+                && entry.Status == AgentRunStatuses.Running
+                && entry.CancelRequestedAt is null
+                && LeaseMatches(entry, leaseToken, leaseGeneration, UtcNow());
+        }
+    }
+
+    public Task<AgentRunWriteResult> ResolveApprovalAsync(string tenantId, string userId, Guid runId, long expectedVersion, bool approve, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            var entry = Find(tenantId, userId, runId);
+            if (entry is null) return Task.FromResult(NotFound());
+            if (entry.Status != AgentRunStatuses.WaitingApproval || entry.StateVersion != expectedVersion)
+                return Task.FromResult(InvalidState("approval decision state changed"));
+            if (entry.CancelRequestedAt is not null)
+                return Task.FromResult(InvalidState("approval decision is cancelled"));
+            entry.Status = approve ? AgentRunStatuses.Queued : AgentRunStatuses.Failed;
+            entry.StateVersion++;
+            entry.UpdatedAt = UtcNow();
+            if (!approve)
+            {
+                entry.CompletedAt = entry.UpdatedAt;
+                entry.LeaseOwner = null;
+                entry.LeaseTokenHash = null;
+                entry.LeaseExpiresAt = null;
+                entry.LeaseCommandId = null;
+            }
+            return Task.FromResult(new AgentRunWriteResult(AgentRunWriteStatus.Success, ToResponse(entry)));
+        }
+    }
 
     private static bool HasValue(JsonObject definition, string field, string value)
         => definition[field] is JsonArray values

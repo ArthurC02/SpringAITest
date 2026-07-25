@@ -9,6 +9,7 @@ adapter —— 自訂 skill（P4）沒有專屬依賴容器時走這條路。
 """
 
 from typing import Any
+from app.settings import settings
 
 from app.engine.tool_registry import ToolContext, tool
 from app.nodes.kbquery import calculator
@@ -23,6 +24,32 @@ from app.nodes.kbquery.models import SourceResult
 
 class DataScopeDenied(RuntimeError):
     """A scoped retrieval was attempted without any server-granted source."""
+
+
+class WriteEvidenceDenied(RuntimeError):
+    pass
+
+
+@tool(
+    name="runtime.write_evidence",
+    kind="local",
+    description="Deterministic, tenant-allowlisted evidence write sink requiring durable approval.",
+    args_schema={"record_id": str, "value": str},
+    returns="dict",
+    risk="write",
+)
+async def write_evidence(ctx: ToolContext, record_id: str, value: str) -> dict:
+    allowed_tools = {x.strip() for x in settings.agent_write_tools_allowlist.split(",") if x.strip()}
+    allowed_tenants = {x.strip() for x in settings.agent_write_tools_tenant_allowlist.split(",") if x.strip()}
+    if not settings.agent_write_tools_enabled or "runtime.write_evidence" not in allowed_tools or ctx.tenant_id not in allowed_tenants:
+        raise WriteEvidenceDenied("write evidence sink is disabled for this tenant")
+    if not record_id.strip() or len(record_id) > 128 or len(value) > 4_000:
+        raise WriteEvidenceDenied("write evidence arguments are invalid")
+    sink = _dep(ctx, "write_evidence_sink")
+    if sink is None or not hasattr(sink, "write"):
+        raise WriteEvidenceDenied("write evidence adapter is unavailable")
+    result = await sink.write(ctx, record_id.strip(), value, effect_id=ctx.effect_id)
+    return {"status": "written", "record_id": record_id.strip(), "version": int(result)}
 
 
 def _dep(ctx: ToolContext, name: str) -> Any:

@@ -51,11 +51,13 @@ class KbQueryDeps:
     # factory。皆有預設，既有 flow 的 KbQueryDeps 建構（含測試 fake）不受影響；agentic 才用到。
     agent_package_reader: AgentSkillPackageReader | None = None
     agent_chat_model: Callable[[], Any] | None = None
+    write_evidence_sink: Any | None = None
 
 
 def _default_deps() -> KbQueryDeps:
     """組出正式環境的依賴組合。"""
     from app.skills.package_reader import BackendPackageReader
+    from app.runtime.write_evidence import BackendWriteEvidenceSink
 
     return KbQueryDeps(
         llm=LangChainStructuredLLM(),
@@ -74,4 +76,5 @@ def _default_deps() -> KbQueryDeps:
         max_retrieval_attempts=settings.kb_query_max_retrieval_attempts,
         agent_package_reader=BackendPackageReader(),
         agent_chat_model=get_llm,
+        write_evidence_sink=BackendWriteEvidenceSink(),
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal
+from app.settings import settings
 
 from app.business_rules.evaluator import evaluate
 from app.business_rules.validator import validate_rule_set
@@ -17,7 +18,7 @@ class PolicyError(RuntimeError):
     """Persisted policy could not be evaluated safely."""
 
 
-PolicyOutcome = Literal["continue", "blocked", "waiting_input"]
+PolicyOutcome = Literal["continue", "blocked", "waiting_input", "waiting_approval"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class PolicyDecision:
     outcome: PolicyOutcome
     code: str
     question: str = ""
+    required_role: str = ""
     routed_skill: str = ""
     allowed_read_tools: frozenset[str] | None = None
     audit_tags: tuple[str, ...] = ()
@@ -142,7 +144,15 @@ class PreActionPolicy:
                 summary=summary,
             )
         if selected == "require_approval":
-            # D3 test runs deliberately have no approval/write boundary.
+            if settings.agent_write_tools_enabled:
+                role = str(selected_action.get("role") or "")
+                if role:
+                    return PolicyDecision(
+                        outcome="waiting_approval",
+                        code="require_approval",
+                        required_role=role,
+                        summary=summary,
+                    )
             return PolicyDecision(
                 outcome="blocked",
                 code="approval_not_enabled",

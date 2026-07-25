@@ -21,7 +21,8 @@ public sealed class FeaturesApiTests
         Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
         Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
         Assert.False(body["agentChatEnabled"]!.GetValue<bool>());
-        Assert.Equal(5, body.AsObject().Count);
+        Assert.False(body["agentWriteToolsEnabled"]!.GetValue<bool>());
+        Assert.Equal(6, body.AsObject().Count);
     }
 
     [Fact]
@@ -73,5 +74,14 @@ public sealed class FeaturesApiTests
             multiAgentDispatchEnabled: true);
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
         Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Features_WriteToolsFlagIsIndependent()
+    {
+        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+        Assert.True(body["agentWriteToolsEnabled"]!.GetValue<bool>());
+        Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
     }
 }

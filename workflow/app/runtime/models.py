@@ -466,6 +466,7 @@ class RuntimeState(TypedDict, total=False):
     messages: list[dict[str, Any]]
     pending_command: dict[str, Any] | None
     pending_input: dict[str, Any] | None
+    pending_approval: dict[str, Any] | None
     active_skill_scope: dict[str, Any] | None
     step_count: int
     tool_rounds: int
@@ -492,6 +493,7 @@ class RuntimeRunResult(StrictModel):
         "accepted",
         "running",
         "waiting_input",
+        "waiting_approval",
         "completed",
         "failed",
         "cancelled",

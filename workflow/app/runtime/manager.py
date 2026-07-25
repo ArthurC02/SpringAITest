@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,13 +33,16 @@ from app.runtime.graph import (
     build_context,
     compile_runtime_graph,
     initial_state,
+    _artifact,
 )
 from app.runtime.model import LangChainRuntimeModel, RuntimeModel
 from app.runtime.models import (
     DirectAgentExecutionSnapshot,
+    RuntimeCommand,
     RuntimeRunResult,
     SnapshotCanonicalEnvelope,
 )
+from app.runtime.tool_boundary import DirectToolDenied, invoke_approved_write_tool
 from app.runtime.models import (
     MAX_BACKEND_RESULT_JSON_BYTES,
     backend_result_wire_size,
@@ -60,6 +64,12 @@ class RuntimeLineageInvalid(RuntimeManagerError):
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _approval_artifact(scope: Any, context: RuntimeGraphContext):
+    if not isinstance(scope, dict) or not scope.get("name"):
+        return None
+    return await _artifact(str(scope["name"]), context)
 
 
 def _authoritative_ref_config(
@@ -460,6 +470,108 @@ class RuntimeRunManager:
             return await self._resume_locked(
                 run_id, message, expected_checkpoint_version, ctx
             )
+
+    async def execute_approved_write(
+        self,
+        run_id: str,
+        approval_id: str,
+        ctx: RequestContext,
+        *,
+        execution_claim_token: str | None = None,
+    ) -> RuntimeRunResult:
+        """Execute D7's one write boundary under a fenced durable command claim.
+
+        The effect ledger and evidence/outbox write are Backend transactions.  A
+        crash after that write but before the terminal run transition therefore
+        replays only the bookkeeping path, never the business side effect.
+        """
+        async with await self._run_lock(run_id):
+            if execution_claim_token is None:
+                execution_claim_token = (await self.backend.claim_approval_execution(run_id, approval_id, ctx)).claim_token
+            try:
+                identity = await self.backend.approval_execution_identity(run_id, approval_id, ctx)
+                owner_ctx = RequestContext(tenant_id=ctx.tenant_id, user_id=identity.user_id, role=identity.role)
+                record = await self.backend.get_run(run_id, owner_ctx)
+                if record.status in {"completed", "failed", "cancelled"}:
+                    await self.backend.complete_approval_execution(approval_id, execution_claim_token, dead_letter=True)
+                    return RuntimeRunResult(run_id=run_id, status=record.status, snapshot_hash=record.snapshot_hash, checkpoint_version=record.checkpoint_version)
+                if record.cancel_requested:
+                    # A cancellation wins until the write effect is atomically
+                    # reserved.  ACK/dead-letter the execute claim before
+                    # returning a conflict so recovery cannot invoke the tool.
+                    raise RuntimeManagerConflict("approved write was cancelled")
+                if record.status != "queued":
+                    raise RuntimeManagerConflict("approved write is not queued")
+                snapshot = await self.backend.execution_snapshot(run_id, owner_ctx)
+                lease = await self.backend.claim_lease(run_id, owner_ctx, record.state_version)
+                if lease.run.cancel_requested:
+                    raise RuntimeManagerConflict("approved write was cancelled")
+                if not lease.checkpoint_ref:
+                    raise RuntimeManagerConflict("approved write has no durable checkpoint")
+                config = _authoritative_ref_config(lease.checkpoint_ref, generation=lease.checkpoint_generation, run_id=run_id, snapshot_hash=snapshot.snapshot_hash, ctx=owner_ctx)
+                checkpoint = await self.graph.aget_state(config)
+                values = dict(checkpoint.values or {})
+                pending = values.get("pending_approval") or {}
+                raw_command = pending.get("command")
+                fingerprint = str(pending.get("action_fingerprint") or "")
+                if not isinstance(raw_command, dict) or not fingerprint:
+                    raise RuntimeManagerConflict("approved write checkpoint is invalid")
+                command = RuntimeCommand.model_validate(raw_command)
+                if command.kind != "tool_call" or not command.name:
+                    raise RuntimeManagerConflict("approval is not bound to a tool call")
+                claim = await self.backend.consume_approval(run_id, approval_id, owner_ctx, action_fingerprint=fingerprint, lease_token=lease.lease_token, lease_generation=lease.lease_generation)
+                replayed_effect = claim.outcome == "completed"
+                if claim.outcome not in {"granted", "completed"}:
+                    raise RuntimeManagerConflict("write effect cannot be safely resumed")
+                write_started = time.perf_counter()
+                if replayed_effect:
+                    observation = ToolObservation(content="Approved write completed.", fingerprint=fingerprint)
+                else:
+                    graph_context = build_context(snapshot=snapshot, request_context=owner_ctx, model=self.model, artifact_reader=self.artifact_reader, deps=self.deps)
+                    try:
+                        artifact = await _approval_artifact(pending.get("active_skill_scope"), graph_context)
+                        observation = await invoke_approved_write_tool(name=command.name, arguments=command.arguments, snapshot=snapshot, artifact=artifact, rule_tools=None, deps=self.deps, timeout_seconds=graph_context.tool_timeout_seconds, effect_id=claim.effect_id)
+                        # The Backend evidence adapter already sets a successful
+                        # effect terminal state.  This is deliberately idempotent
+                        # for a future allowed write adapter.
+                        await self.backend.complete_effect(run_id, claim.effect_id, owner_ctx, succeeded=True)
+                    except Exception:
+                        await self.backend.complete_effect(run_id, claim.effect_id, owner_ctx, succeeded=False)
+                        failed = await self.backend.transition(run_id, owner_ctx, expected_version=lease.run.state_version, lease_token=lease.lease_token, lease_generation=lease.lease_generation, to_status="failed", checkpoint_ref=lease.checkpoint_ref, checkpoint_version=lease.checkpoint_version + 1, error_code="approved_write_failed", error_message="Approved write tool failed.")
+                        await self.backend.complete_approval_execution(approval_id, execution_claim_token)
+                        return RuntimeRunResult(run_id=run_id, status="failed", snapshot_hash=snapshot.snapshot_hash, checkpoint_version=failed.checkpoint_version)
+                active_scope = pending.get("active_skill_scope") or {}
+                event = runtime_event(
+                    run_id=run_id,
+                    snapshot_hash=snapshot.snapshot_hash,
+                    event_type="approved_write_completed",
+                    node_id="approved_write",
+                    event_key=f"write:{fingerprint}",
+                    # Never include tool arguments, observations, approval
+                    # reason, or model text in telemetry/audit payloads.
+                    payload={
+                        "tool_name": command.name,
+                        "status": "replayed" if replayed_effect else "ok",
+                        "latency_ms": max(0, int((time.perf_counter() - write_started) * 1000)),
+                        "usage_units": 0,
+                        "cost_units": 0,
+                        "agent_id": str(snapshot.agent.id),
+                        "agent_revision": snapshot.agent.revision,
+                        "skill_name": active_scope.get("name") or None,
+                        "skill_revision": active_scope.get("revision") or None,
+                    },
+                )
+                after_events = await self.backend.append_events(run_id, owner_ctx, [event], expected_version=lease.run.state_version, lease_token=lease.lease_token, lease_generation=lease.lease_generation, event_cursor_start=lease.event_ack_cursor)
+                completed = await self.backend.transition(run_id, owner_ctx, expected_version=after_events.state_version, lease_token=lease.lease_token, lease_generation=lease.lease_generation, to_status="completed", checkpoint_ref=lease.checkpoint_ref, checkpoint_version=lease.checkpoint_version + 1, result={"output": observation.content})
+                await self.backend.complete_approval_execution(approval_id, execution_claim_token)
+                return RuntimeRunResult(run_id=run_id, status="completed", snapshot_hash=snapshot.snapshot_hash, checkpoint_version=completed.checkpoint_version)
+            except RuntimeManagerConflict:
+                # Invalid/corrupt checkpoint and terminal cancellation are not
+                # retryable; turn the execution queue entry into a durable dead
+                # letter.  Transport/CAS failures intentionally remain unacked
+                # so a fresh lease can recover them.
+                await self.backend.complete_approval_execution(approval_id, execution_claim_token, dead_letter=True)
+                raise
 
     async def _resume_locked(
         self,
@@ -983,17 +1095,32 @@ class RuntimeRunManager:
             )
             checkpoint_version = handle.checkpoint_version + 1
             if snapshot.interrupts:
-                terminal_status = "waiting_input"
+                waiting_approval = values.get("pending_approval") or {}
+                terminal_status = "waiting_approval" if waiting_approval else "waiting_input"
                 pending = values.get("pending_input") or {}
-                await self._transition_handle(
-                    handle,
-                    to_status=terminal_status,
-                    checkpoint_ref_value=ref,
-                    checkpoint_version=checkpoint_version,
-                    pending_input={
-                        "question": str(pending.get("question") or "")[:2_000]
-                    },
-                )
+                if waiting_approval:
+                    # Backend atomically releases the fenced lease and creates
+                    # the durable approval record. Do not first transition the
+                    # run: that would leave a waiting run with no approval.
+                    await self.backend.create_approval(
+                        handle.run_id,
+                        handle.ctx,
+                        expected_version=handle.state_version,
+                        lease_token=handle.lease_token,
+                        lease_generation=handle.lease_generation,
+                        checkpoint_ref=ref or "",
+                        checkpoint_version=checkpoint_version,
+                        required_role=str(waiting_approval.get("required_role") or ""),
+                        action_fingerprint=str(waiting_approval.get("action_fingerprint") or ""),
+                    )
+                else:
+                    await self._transition_handle(
+                        handle,
+                        to_status=terminal_status,
+                        checkpoint_ref_value=ref,
+                        checkpoint_version=checkpoint_version,
+                        pending_input={"question": str(pending.get("question") or "")[:2_000]},
+                    )
             elif values.get("status") == "completed":
                 result = {"output": values.get("final_output") or ""}
                 if backend_result_wire_size(result) > MAX_BACKEND_RESULT_JSON_BYTES:
@@ -1735,6 +1862,21 @@ class RuntimeRunManager:
 
     async def recovery_loop(self) -> None:
         while not self._closed:
+            if settings.agent_write_tools_enabled:
+                try:
+                    for item in await self.backend.claim_approval_recovery():
+                        try:
+                            ctx = RequestContext(tenant_id=str(item["tenant_id"]), user_id=str(item["approver_id"]), role="USER")
+                            await self.execute_approved_write(
+                                str(item["run_id"]),
+                                str(item["approval_id"]),
+                                ctx,
+                                execution_claim_token=str(item["claim_token"]),
+                            )
+                        except Exception:
+                            logger.exception("Approved write recovery failed")
+                except Exception:
+                    logger.exception("Approved write recovery claim failed")
             try:
                 await self.recover_once()
             except asyncio.CancelledError:

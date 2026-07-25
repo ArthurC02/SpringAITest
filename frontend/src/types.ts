@@ -589,6 +589,18 @@ export interface AgentRunEventPage {
   latestEventSequence: number
 }
 
+/** D7 approval projection: only Backend's redacted, public fields are represented here. */
+export interface RunApproval {
+  id: string
+  runId: string | null
+  status: string
+  requiredRole: string | null
+  expiresAt: string | null
+  decision: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+}
+
 /** 已發布 revision 的 Skill 綁定讀取形狀（backend 權威，含固定的 skill_revision）。 */
 export interface AgentRevisionBinding {
   skill: string

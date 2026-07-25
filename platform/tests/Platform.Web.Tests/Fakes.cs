@@ -677,6 +677,22 @@ public sealed class FakeAgentRunService : IAgentRunService
         LastContext = ctx;
         return Task.FromResult(new AgentProxyResponse(202, RunJson, null));
     }
+
+    public Task<AgentProxyResponse> ApprovalsAsync(Guid runId, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add($"approvals:{runId:D}:{ctx.UserId}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(200,
+            """[{"id":"66666666-6666-4666-8666-666666666666","run_id":"44444444-4444-4444-4444-444444444444","status":"pending","required_role":"USER","action_fingerprint":"redacted"}]""", null));
+    }
+
+    public Task<AgentProxyResponse> DecideApprovalAsync(Guid runId, Guid approvalId, bool approve, string? reason, string? idempotencyKey, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add($"approval:{runId:D}:{approvalId:D}:{approve}:{reason}:{idempotencyKey}:{ctx.UserId}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(202,
+            """{"id":"66666666-6666-4666-8666-666666666666","status":"approved"}""", null));
+    }
 }
 
 public sealed class FakeOrchestratorRunService : IOrchestratorRunService

@@ -54,6 +54,34 @@ class LeaseRecord(BaseModel):
     run: RunRecord
 
 
+class ApprovalRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    id: str
+    status: str
+
+
+class EffectClaim(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    effect_id: str
+    outcome: str
+
+
+class ApprovalExecutionIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    user_id: str
+    role: str
+
+
+class ApprovalExecutionClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    approval_id: str
+    run_id: str
+    tenant_id: str
+    approver_id: str
+    claim_token: str
+
+
 class RecoveryCommand(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -136,6 +164,60 @@ class BackendRunClient:
             return RunRecord.model_validate(body)
         except Exception as exc:
             raise BackendRunError("Backend returned an invalid Agent run") from exc
+
+    async def create_approval(
+        self, run_id: str, ctx: RequestContext, *, expected_version: int,
+        lease_token: str, lease_generation: int, checkpoint_ref: str,
+        checkpoint_version: int, required_role: str, action_fingerprint: str,
+    ) -> ApprovalRecord:
+        body = await self._request_json("POST", f"/api/agent-runs/{_guid(run_id)}/approvals", ctx, json={"expected_version": expected_version,"lease_token": lease_token,"lease_generation": lease_generation,"checkpoint_ref": checkpoint_ref,"checkpoint_version": checkpoint_version,"required_role": required_role,"action_fingerprint": action_fingerprint,"expires_at": _approval_expiry()},)
+        try: return ApprovalRecord.model_validate(body)
+        except Exception as exc: raise BackendRunError("Backend returned invalid approval") from exc
+
+    async def consume_approval(self, run_id: str, approval_id: str, ctx: RequestContext, *, action_fingerprint: str, lease_token: str, lease_generation: int) -> EffectClaim:
+        body = await self._request_json("POST", f"/api/agent-runs/{_guid(run_id)}/approvals/{_guid(approval_id)}/consume", ctx, json={"action_fingerprint": action_fingerprint,"lease_token": lease_token,"lease_generation": lease_generation})
+        try: return EffectClaim.model_validate(body)
+        except Exception as exc: raise BackendRunError("Backend returned invalid effect claim") from exc
+
+    async def approval_execution_identity(self, run_id: str, approval_id: str, ctx: RequestContext) -> ApprovalExecutionIdentity:
+        body = await self._request_json("GET", f"/api/agent-runs/{_guid(run_id)}/approvals/{_guid(approval_id)}/execution-identity", ctx)
+        try: return ApprovalExecutionIdentity.model_validate(body)
+        except Exception as exc: raise BackendRunError("Backend returned invalid approval execution identity") from exc
+
+    async def claim_approval_execution(self, run_id: str, approval_id: str, ctx: RequestContext) -> ApprovalExecutionClaim:
+        body = await self._request_json(
+            "POST",
+            f"/api/agent-runs/{_guid(run_id)}/approvals/{_guid(approval_id)}/execute/claim",
+            ctx,
+            json={},
+        )
+        try:
+            return ApprovalExecutionClaim.model_validate(body)
+        except Exception as exc:
+            raise BackendRunError("Backend returned invalid approval execution claim") from exc
+
+    async def complete_effect(self, run_id: str, effect_id: str, ctx: RequestContext, *, succeeded: bool) -> None:
+        await self._request_no_content("POST", f"/api/agent-runs/{_guid(run_id)}/write-effects/{_guid(effect_id)}/complete?succeeded={'true' if succeeded else 'false'}", ctx, json={})
+
+    async def claim_approval_recovery(self) -> list[dict[str, Any]]:
+        response = await get_client().post("/api/agent-run-approval-executions/recovery/claim?limit=20", headers={"X-Internal-Token": settings.internal_api_token}, json={}, timeout=httpx.Timeout(10.0))
+        response.raise_for_status(); body=response.json(); return body if isinstance(body,list) else []
+
+    async def complete_approval_execution(self, approval_id: str, claim_token: str, *, dead_letter: bool = False) -> None:
+        try:
+            response = await get_client().post(
+                f"/api/agent-run-approval-executions/{_guid(approval_id)}/complete",
+                headers={"X-Internal-Token": settings.internal_api_token},
+                json={"claim_token": claim_token, "dead_letter": dead_letter},
+                timeout=httpx.Timeout(10.0),
+            )
+            if response.status_code == 409:
+                raise BackendRunConflict("approval execution claim changed")
+            response.raise_for_status()
+        except BackendRunError:
+            raise
+        except httpx.HTTPError as exc:
+            raise BackendRunError("approval execution acknowledgement failed") from exc
 
     async def claim_lease(
         self, run_id: str, ctx: RequestContext, expected_version: int
@@ -284,9 +366,26 @@ class BackendRunClient:
             },
         )
         try:
-            return RunRecord.model_validate(body)
+            record = RunRecord.model_validate(body)
         except Exception as exc:
             raise BackendRunError("Backend returned an invalid event response") from exc
+        # Metering is additive and best-effort: command/event durability remains authoritative.
+        # Only pre-sanitized numeric counters and stable IDs cross this boundary.
+        for event in events:
+            if event.event_type not in {"model_step", "tool_completed", "approved_write_completed"}:
+                continue
+            try:
+                await self._request_json("POST", "/api/operations/telemetry", ctx, json={
+                    "run_id": _guid(run_id), "event_id": _guid(event.event_id), "kind": "model" if event.event_type == "model_step" else "tool",
+                    "node_id": event.node_id or None, "usage_units": event.payload.get("usage_units"),
+                    "tool_name": event.payload.get("tool_name"), "skill_name": event.payload.get("skill_name"),
+                    "skill_revision": event.payload.get("skill_revision"), "latency_ms": event.payload.get("latency_ms"),
+                    "cost_units": event.payload.get("cost_units"), "agent_id": event.payload.get("agent_id"), "agent_revision": event.payload.get("agent_revision"),
+                })
+            except Exception:
+                # A telemetry outage must not duplicate/retry a durable runtime command.
+                pass
+        return record
 
     async def _request_json(
         self,
@@ -360,3 +459,8 @@ def quote_path(value: str) -> str:
     if not value or len(value) > 256:
         raise BackendRunError("command_id is invalid")
     return quote(value, safe="")
+
+
+def _approval_expiry() -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat().replace("+00:00", "Z")

@@ -44,6 +44,8 @@ class ToolContext:
     agent_revision: int = 0
     knowledge_sources: frozenset[str] = frozenset()
     enforce_data_scope: bool = False
+    # Durable Backend ledger identity for an approved write; never model input.
+    effect_id: str = ""
 
 
 @dataclass(frozen=True)
