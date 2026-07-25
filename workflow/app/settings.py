@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # D3 direct-Agent runtime is independently feature gated. PostgreSQL is
     # the only production checkpoint source; tests inject an in-memory saver.
     agent_test_run_enabled: bool = False
+    multi_agent_dispatch_enabled: bool = False
+    multi_agent_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
+    multi_agent_root_lease_seconds: int = Field(default=300, ge=30, le=300)
+    multi_agent_heartbeat_seconds: float = Field(default=30, ge=5, le=120)
+    multi_agent_context_top_k: int = Field(default=4, ge=1, le=20)
     checkpoint_database_url: str | None = None
     checkpoint_hmac_key: str = "agent-run-checkpoint-dev-key"
     runtime_lease_seconds: int = Field(default=30, ge=5, le=300)

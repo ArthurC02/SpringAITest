@@ -21,6 +21,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
     private readonly bool _agentBuilderEnabled;
     private readonly bool _agentTestRunEnabled;
     private readonly bool _workflowDesignerEnabled;
+    private readonly bool _multiAgentDispatchEnabled;
     private readonly IMem0Client? _mem0Override;
 
     public TestWebAppFactory()
@@ -31,6 +32,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         bool enableRateLimiting = false, bool removeSessionIsolationProvider = false,
         bool useDevelopmentEnvironment = false, bool agentBuilderEnabled = false,
         bool agentTestRunEnabled = false, bool workflowDesignerEnabled = false,
+        bool multiAgentDispatchEnabled = false,
         IMem0Client? mem0Override = null)
     {
         _enableRateLimiting = enableRateLimiting;
@@ -39,6 +41,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         _agentBuilderEnabled = agentBuilderEnabled;
         _agentTestRunEnabled = agentTestRunEnabled;
         _workflowDesignerEnabled = workflowDesignerEnabled;
+        _multiAgentDispatchEnabled = multiAgentDispatchEnabled;
         _mem0Override = mem0Override;
     }
 
@@ -54,6 +57,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("AGENT_BUILDER_ENABLED", _agentBuilderEnabled ? "true" : "false");
         builder.UseSetting("AGENT_TEST_RUN_ENABLED", _agentTestRunEnabled ? "true" : "false");
         builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", _workflowDesignerEnabled ? "true" : "false");
+        builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", _multiAgentDispatchEnabled ? "true" : "false");
         builder.ConfigureTestServices(services =>
         {
             // B-P1-06:移除 SessionIsolationKeyProvider 註冊,證明 Strict=true 的 fail-closed 真的開著——
@@ -116,6 +120,9 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IAgentRunService>();
             services.AddScoped<IAgentRunService, FakeAgentRunService>();
+
+            services.RemoveAll<IOrchestratorRunService>();
+            services.AddScoped<IOrchestratorRunService, FakeOrchestratorRunService>();
         });
     }
 

@@ -205,6 +205,16 @@ class DirectAgentExecutionSnapshot(StrictModel):
     skills: list[PinnedSkillSummary] = Field(default_factory=list, max_length=128)
     caller: CallerExecutionSnapshot
     mode: Literal["test"]
+    execution_kind: Literal[
+        "direct-worker", "orchestrator-worker", "orchestrator-verifier"
+    ] = Field(
+        default="direct-worker",
+        exclude_if=lambda value: value == "direct-worker",
+    )
+    orchestrator_token_cap: int | None = Field(
+        default=None, ge=1, le=1_000_000,
+        exclude_if=lambda value: value is None,
+    )
     _canonical_source: dict[str, Any] | None = PrivateAttr(default=None)
     _canonical_bytes: bytes | None = PrivateAttr(default=None)
 
@@ -220,8 +230,22 @@ class DirectAgentExecutionSnapshot(StrictModel):
         keys = [(skill.name, skill.revision) for skill in self.skills]
         if len(keys) != len(set(keys)):
             raise ValueError("skill revision pins must be unique")
-        if "worker" not in self.agent.execution_roles:
-            raise ValueError("direct-Agent runs require worker execution eligibility")
+        required_role = (
+            "verifier"
+            if self.execution_kind == "orchestrator-verifier"
+            else "worker"
+        )
+        if (
+            self.execution_kind != "direct-worker"
+            and self.orchestrator_token_cap is None
+        ):
+            raise ValueError(
+                "orchestrator child snapshot requires its reserved token cap"
+            )
+        if required_role not in self.agent.execution_roles:
+            raise ValueError(
+                f"{self.execution_kind} runs require {required_role} execution eligibility"
+            )
         audience = set(self.agent.audience)
         role_allowed = (
             f"role:{self.caller.role}" in audience

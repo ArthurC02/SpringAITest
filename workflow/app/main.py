@@ -61,6 +61,12 @@ from app.runtime.api import (
     AgentRuntimeFeatureGateMiddleware,
     router as agent_runtime_router,
 )
+from app.runtime.orchestrator_api import (
+    MultiAgentDispatchFeatureGateMiddleware,
+    router as orchestrator_runtime_router,
+)
+from app.runtime.orchestrator_backend import OrchestratorBackendClient
+from app.runtime.orchestrator_supervisor import RootRuntimeSupervisor
 from app.orchestration.api import router as workflow_designer_router
 from app.runtime.service import RuntimeService
 from app.settings import settings
@@ -185,12 +191,26 @@ async def lifespan(app: FastAPI):
     """服務生命週期：暖身並在關機時釋放共用 backend HTTP client（連線池不外洩）。"""
     backend_http.get_client()  # 暖身：啟動時就備好連線池，首個請求不必臨時建立
     runtime_service: RuntimeService | None = None
-    if settings.agent_test_run_enabled:
+    root_supervisor: RootRuntimeSupervisor | None = None
+    if settings.multi_agent_dispatch_enabled:
+        # The durable Backend port is production-wired independently from the
+        # D3 direct-Agent manager. Root execution is attached only when every
+        # required child/result/terminal adapter is available.
+        app.state.orchestrator_backend = OrchestratorBackendClient()
+    if settings.agent_test_run_enabled or settings.multi_agent_dispatch_enabled:
         runtime_service = await RuntimeService.open()
         app.state.agent_runtime_manager = runtime_service.manager
+    if settings.multi_agent_dispatch_enabled and runtime_service is not None:
+        root_supervisor = RootRuntimeSupervisor(
+            app.state.orchestrator_backend, runtime_service.manager
+        )
+        root_supervisor.start()
+        app.state.root_runtime_supervisor = root_supervisor
     try:
         yield
     finally:
+        if root_supervisor is not None:
+            await root_supervisor.close()
         if runtime_service is not None:
             await runtime_service.close()
         await backend_http.aclose_client()
@@ -199,7 +219,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
 app.add_middleware(BusinessRuleRequestLimitMiddleware)
 app.add_middleware(AgentRuntimeFeatureGateMiddleware)
+app.add_middleware(MultiAgentDispatchFeatureGateMiddleware)
 app.include_router(agent_runtime_router)
+app.include_router(orchestrator_runtime_router)
 app.include_router(workflow_designer_router)
 
 

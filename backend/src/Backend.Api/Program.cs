@@ -12,6 +12,7 @@ using Backend.Api.Files;
 using Backend.Api.Skills;
 using Backend.Api.Workflows;
 using Backend.Api.Orchestrators;
+using Backend.Api.OrchestratorRuns;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -32,6 +33,8 @@ var rabbitUrl = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:56
 var workflowBaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001";
 var useInMemoryDb = string.Equals(cfg["DB_PROVIDER"], "inmemory", StringComparison.OrdinalIgnoreCase);
 var workflowDesignerEnabled = string.Equals(cfg["WORKFLOW_DESIGNER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var multiAgentDispatchEnabled = workflowDesignerEnabled
+    && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -50,6 +53,7 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IAgentRunRepository, InMemoryAgentRunRepository>();
     builder.Services.AddSingleton<IWorkflowRepository, InMemoryWorkflowRepository>();
     builder.Services.AddSingleton<IOrchestratorRepository, InMemoryOrchestratorRepository>();
+    builder.Services.AddSingleton<IOrchestratorRunRepository, InMemoryOrchestratorRunRepository>();
 }
 else
 {
@@ -64,6 +68,7 @@ else
     builder.Services.AddScoped<IAgentRunRepository, AgentRunRepository>();
     builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
     builder.Services.AddScoped<IOrchestratorRepository, OrchestratorRepository>();
+    builder.Services.AddScoped<IOrchestratorRunRepository, OrchestratorRunRepository>();
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +168,23 @@ if (!workflowDesignerEnabled)
             || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"))
         {
             await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature not enabled");
+            return;
+        }
+        await next();
+    });
+}
+
+// D5 is independently undiscoverable until both the Designer and multi-agent dispatch rollout
+// are explicitly enabled.  This is deliberately before MVC/auth, matching the D3/D4 posture.
+if (!multiAgentDispatchEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
+            || context.Request.Path.StartsWithSegments("/api/admin/orchestrators")
+               && context.Request.Path.Value?.Contains("/runs", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
             return;
         }
         await next();

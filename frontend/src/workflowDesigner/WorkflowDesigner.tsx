@@ -6,6 +6,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import type {
   WorkflowDefinition, WorkflowNodeType, WorkflowSimulation, WorkflowUiMetadata, WorkflowValidation,
+  WorkflowTraceEntry,
 } from '../types'
 import { canConnect } from './connection'
 import { patchPositions, patchViewport, toCanvas } from './graphAdapter'
@@ -17,19 +18,21 @@ import { reconnectSemanticEdge, removeSemanticEdges, removeSemanticNodes } from 
 const nodeTypes = { workflow: WorkflowNode }
 
 export default function WorkflowDesigner({
-  definition, uiMetadata, catalog, validation, simulation, disabled, onChange,
+  definition, uiMetadata, catalog, validation, simulation, runtimeTrace, disabled, onChange,
 }: {
   definition: WorkflowDefinition
   uiMetadata: WorkflowUiMetadata
   catalog: WorkflowNodeType[]
   validation: WorkflowValidation | null
   simulation: WorkflowSimulation | null
+  /** Runtime trace is display-only and is never written back into Graph IR. */
+  runtimeTrace?: WorkflowTraceEntry[]
   disabled: boolean
   onChange: (definition: WorkflowDefinition, metadata: WorkflowUiMetadata) => void
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const invalid = useMemo(() => new Set((validation?.errors ?? []).flatMap((e) => e.id ? [e.id] : [])), [validation])
-  const trace = useMemo(() => new Map((simulation?.trace ?? []).map((e) => [e.node_id, e.status])), [simulation])
+  const trace = useMemo(() => new Map([...(simulation?.trace ?? []), ...(runtimeTrace ?? [])].map((e) => [e.node_id, e.status])), [runtimeTrace, simulation])
   const canvas = useMemo(() => toCanvas(definition, uiMetadata, catalog, invalid, trace), [definition, uiMetadata, catalog, invalid, trace])
   const selected = definition.nodes.find((node) => node.id === selectedId) ?? null
   const selectedType = selected && catalog.find((item) => item.type === selected.type && item.version === selected.typeVersion)

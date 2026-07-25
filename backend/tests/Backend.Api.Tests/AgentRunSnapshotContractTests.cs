@@ -129,6 +129,54 @@ public sealed class AgentRunSnapshotContractTests
     }
 
     [Fact]
+    public void OrchestratorChildSnapshot_ClampsAndHashesItsPinnedTokenCap()
+    {
+        var definition = DefinitionWithPadding(
+            string.Empty,
+            Array.Empty<AgentRevisionSkillInfo>(),
+            new AgentRuntimeLimits(TokenBudget: 50_000));
+        var agent = new PublishedAgentSnapshotSource(
+            Guid.Parse("31111111-1111-4111-8111-111111111111"),
+            "bounded-child",
+            1,
+            definition,
+            SkillHash.Sha256(definition),
+            Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+            AgentDefaults.RuntimeWorkflowRevision,
+            Array.Empty<AgentRevisionSkillInfo>());
+        var workflowDefinition = AgentRunSnapshotBuilder.CanonicalizeJson(
+            AgentDefaults.RuntimeWorkflowDefinition);
+        var workflow = new WorkflowSnapshotSource(
+            Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+            AgentDefaults.RuntimeWorkflowRevision,
+            1,
+            workflowDefinition,
+            SkillHash.Sha256(workflowDefinition),
+            "1");
+
+        var built = AgentRunSnapshotBuilder.Build(
+            Guid.Parse("32222222-2222-4222-8222-222222222222"),
+            "tenant-a", "admin-a", "ADMIN", Array.Empty<string>(),
+            agent, workflow, Array.Empty<SkillSnapshotSource>(),
+            "orchestrator-worker", 10_000,
+            new OrchestratorChildSnapshotProvenance(
+                Guid.Parse("33333333-3333-4333-8333-333333333333"),
+                "bounded-task", 2));
+
+        using var snapshot = JsonDocument.Parse(built.StoredSnapshot);
+        Assert.Equal(10_000, snapshot.RootElement
+            .GetProperty("orchestrator_token_cap").GetInt32());
+        Assert.Equal("33333333-3333-4333-8333-333333333333", snapshot.RootElement
+            .GetProperty("orchestrator_root_run_id").GetString());
+        Assert.Equal("bounded-task", snapshot.RootElement
+            .GetProperty("orchestrator_task_id").GetString());
+        Assert.Equal(10_000, snapshot.RootElement.GetProperty("agent")
+            .GetProperty("runtime_limits").GetProperty("token_budget").GetInt32());
+        Assert.Equal(built.SnapshotHash,
+            SkillHash.Sha256(Encoding.UTF8.GetBytes(built.StoredSnapshot)));
+    }
+
+    [Fact]
     public void CanonicalVector_PinsUtf16KeyOrderNumberLexemesAndEscapes()
     {
         const string source =
@@ -190,7 +238,8 @@ public sealed class AgentRunSnapshotContractTests
 
     private static string DefinitionWithPadding(
         string padding,
-        IReadOnlyList<AgentRevisionSkillInfo> bindings)
+        IReadOnlyList<AgentRevisionSkillInfo> bindings,
+        AgentRuntimeLimits? runtimeLimits = null)
         => AgentCanonicalizer.Canonicalize(new AgentUpsert(
             Slug: null,
             Name: null,
@@ -206,7 +255,7 @@ public sealed class AgentRunSnapshotContractTests
                 .ToArray(),
             KnowledgeSources: Array.Empty<string>(),
             BusinessRules: null,
-            RuntimeLimits: new AgentRuntimeLimits(),
+            RuntimeLimits: runtimeLimits ?? new AgentRuntimeLimits(),
             RuntimeWorkflow: new AgentWorkflowRef(
                 AgentDefaults.RuntimeWorkflowId,
                 AgentDefaults.RuntimeWorkflowRevision)));

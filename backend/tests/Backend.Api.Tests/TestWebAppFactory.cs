@@ -32,6 +32,7 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", "true");
+        builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", "true");
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IAuthRepository>();

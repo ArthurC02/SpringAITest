@@ -82,6 +82,15 @@ public static class OrchestratorCanonicalizer
                 var limits=new[]{("maxContextRounds",100), ("maxTasks",1000), ("maxChildRuns",1000), ("maxConcurrency",64), ("maxRepairRounds",100), ("tokenBudget",10000000), ("timeoutSeconds",86400)};
                 RejectUnknown(budgets,limits.Select(x=>x.Item1).ToArray(),"definition.budgets",errors);
                 foreach(var (name,max) in limits)if(!budgets.TryGetProperty(name,out var value)||!value.TryGetInt32(out var number)||number<1||number>max)errors.Add($"definition.budgets.{name} must be 1..{max}");
+                if(budgets.TryGetProperty("maxTasks",out var tasks)&&tasks.TryGetInt32(out var maxTasks)
+                    && budgets.TryGetProperty("maxChildRuns",out var children)&&children.TryGetInt32(out var maxChildRuns)
+                    && maxChildRuns<maxTasks+1)
+                {
+                    // Each worker task consumes a child slot and the first verification pass
+                    // needs one additional slot. Repairs are runtime-gated against the same
+                    // authoritative ceiling rather than admitted by an impossible definition.
+                    errors.Add("definition.budgets.maxChildRuns must be at least maxTasks + 1 for the verifier reserve");
+                }
             }
         }
         catch(Exception ex)when(ex is JsonException or InvalidOperationException){errors.Add("definition must be valid typed JSON");}

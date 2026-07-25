@@ -901,6 +901,17 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 ToResponse(row),
                 "run fencing state changed");
         }
+        if (terminal)
+        {
+            await SynchronizeOrchestratorChildTerminalAsync(
+                conn,
+                tx,
+                row,
+                request.ToStatus!,
+                request.Result,
+                request.ErrorCode,
+                ct);
+        }
         await tx.CommitAsync(ct);
         return new AgentRunWriteResult(
             AgentRunWriteStatus.Success,
@@ -2492,6 +2503,35 @@ public sealed class AgentRunRepository : IAgentRunRepository
             ? v.GetRawText()
             : null;
 
+    // Root event payloads are deliberately redacted. Child output/context belongs
+    // to the child authority, never to the public root event stream.
+    private static string SafeChildTerminalPayload(
+        (Guid Id, string Task, int Attempt, string Kind, Guid AgentId, int AgentRevision, string SnapshotHash) child,
+        Guid agentRunId, string status, JsonElement? result, string? errorCode)
+    {
+        var raw = JsonText(result);
+        var citationCount = result is { ValueKind: JsonValueKind.Object } value
+            && value.TryGetProperty("citations", out var citations)
+            && citations.ValueKind == JsonValueKind.Array
+            ? citations.GetArrayLength()
+            : 0;
+        return JsonSerializer.Serialize(new
+        {
+            child_id = child.Id,
+            agent_run_id = agentRunId,
+            task_id = child.Task,
+            attempt = child.Attempt,
+            run_kind = child.Kind,
+            agent_id = child.AgentId,
+            agent_revision = child.AgentRevision,
+            agent_snapshot_hash = child.SnapshotHash,
+            status,
+            result_sha256 = raw is null ? null : SkillHash.Sha256(raw),
+            citations = new { count = citationCount },
+            error_code = Normalize(errorCode, 100),
+        });
+    }
+
     private static string? Normalize(string? value, int max)
     {
         var normalized = value?.Trim();
@@ -2559,6 +2599,60 @@ public sealed class AgentRunRepository : IAgentRunRepository
                && JsonNode.DeepEquals(
                    JsonNode.Parse(prior.Payload),
                    JsonNode.Parse(candidatePayload));
+    }
+
+    /// <summary>
+    /// A D5 child is still a normal D3 run.  Its terminal CAS is therefore performed by the
+    /// D3 transition above, then mirrored into the root ledger in the same transaction.  Locking
+    /// the root here serialises its event sequence with root terminal/cancel transitions.
+    /// </summary>
+    private static async Task SynchronizeOrchestratorChildTerminalAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        RunRow run,
+        string status,
+        JsonElement? result,
+        string? errorCode,
+        CancellationToken ct)
+    {
+        var rootId = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT orchestrator_root_run_id FROM agent_run WHERE id=@runId",
+            new { runId = run.Id }, transaction, cancellationToken: ct));
+        if (rootId is not Guid orchestratorRootRunId)
+        {
+            return;
+        }
+
+        var root = await connection.QuerySingleOrDefaultAsync<(string Hash, string Status)>(
+            new CommandDefinition(
+                "SELECT snapshot_sha256 Hash,status Status FROM orchestrator_run"
+                + " WHERE id=@orchestratorRootRunId FOR UPDATE",
+                new { orchestratorRootRunId }, transaction, cancellationToken: ct));
+        if (string.IsNullOrEmpty(root.Hash))
+        {
+            return;
+        }
+
+        var child = await connection.QuerySingleOrDefaultAsync<(Guid Id, string Task, int Attempt, string Kind, Guid AgentId, int AgentRevision, string SnapshotHash)>(
+            new CommandDefinition(
+                "UPDATE orchestrator_run_child SET status=@status,updated_at=clock_timestamp()"
+                + " WHERE agent_run_id=@runId AND status IN ('queued','running')"
+                + " RETURNING id,task_id Task,attempt Attempt,run_kind Kind,agent_id AgentId,agent_revision AgentRevision,agent_snapshot_hash SnapshotHash",
+                new { runId = run.Id, status }, transaction, cancellationToken: ct));
+        if (child.Id == Guid.Empty)
+        {
+            return;
+        }
+
+        var payload = SafeChildTerminalPayload(child, run.Id, status, result, errorCode);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO orchestrator_run_event(run_id,sequence,event_type,snapshot_sha256,payload)"
+            + " VALUES(@orchestratorRootRunId,"
+            + " (SELECT COALESCE(MAX(sequence),0)+1 FROM orchestrator_run_event WHERE run_id=@orchestratorRootRunId),"
+            + " 'child_terminal',@hash,@payload::jsonb)",
+            new { orchestratorRootRunId, hash = root.Hash, payload },
+            transaction,
+            cancellationToken: ct));
     }
 
     private static AgentRunResponse ToResponse(RunRow row) => new(

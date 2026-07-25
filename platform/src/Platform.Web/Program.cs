@@ -64,6 +64,8 @@ var workflowDesignerEnabled = string.Equals(
     cfg["WORKFLOW_DESIGNER_ENABLED"],
     "true",
     StringComparison.OrdinalIgnoreCase);
+var multiAgentDispatchEnabled = workflowDesignerEnabled
+    && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 
 builder.Services.AddSingleton(llmOptions);
 builder.Services.AddSingleton(mem0Options);
@@ -97,6 +99,10 @@ builder.Services.AddScoped<IAgentService, AgentService>();
 builder.Services.AddScoped<IWorkflowAdminService, WorkflowAdminService>();
 builder.Services.AddHttpClient<IAgentRunService, AgentRunService>(
         c => c.Timeout = TimeSpan.FromSeconds(150))
+    .ConfigurePrimaryHttpMessageHandler(
+        () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+builder.Services.AddHttpClient<IOrchestratorRunService, OrchestratorRunService>(
+        c => c.Timeout = TimeSpan.FromSeconds(90))
     .ConfigurePrimaryHttpMessageHandler(
         () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
 
@@ -460,6 +466,19 @@ if (!agentTestRunEnabled)
     });
 }
 
+if (!multiAgentDispatchEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        if (context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
+            || path.StartsWith("/api/admin/orchestrators/", StringComparison.OrdinalIgnoreCase)
+               && path.TrimEnd('/').EndsWith("/runs", StringComparison.OrdinalIgnoreCase))
+        { await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable"); return; }
+        await next();
+    });
+}
+
 // D4 authoring surfaces are independently fail-closed before authentication. This keeps
 // capability-bearing principals from discovering disabled management endpoints.
 if (!workflowDesignerEnabled)
@@ -493,7 +512,7 @@ app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAno
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
 app.MapGet(
     "/api/features",
-    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled }))
+    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled }))
     .AllowAnonymous();
 
 // ---------------------------------------------------------------------------

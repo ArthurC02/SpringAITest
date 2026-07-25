@@ -7,7 +7,7 @@ using Backend.Api.Skills;
 
 namespace Backend.Api.Data.InMemory;
 
-public sealed class InMemoryAgentRunRepository : IAgentRunRepository
+public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestratorChildRunRepository
 {
     private static readonly IReadOnlySet<string> CancelAuditEventTypes =
         new HashSet<string>(StringComparer.Ordinal)
@@ -211,6 +211,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository
                 var entry = new Entry
                 {
                     Id = runId,
+                    RootRunId = runId,
                     TenantId = tenantId,
                     UserId = userId,
                     CallerRole = role,
@@ -243,6 +244,150 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository
                     AgentRunWriteStatus.Success,
                     ToResponse(entry),
                     Dispatch: dispatch));
+            }
+        }
+    }
+
+    Task<AgentRunWriteResult> IOrchestratorChildRunRepository.CreateOrchestratorChildAsync(
+        string tenantId,
+        string userId,
+        string role,
+        IReadOnlyCollection<string> groups,
+        IReadOnlyCollection<string> capabilityClaims,
+        PublishedAgentSnapshotSource agent,
+        WorkflowSnapshotSource workflow,
+        OrchestratorChildSnapshotProvenance provenance,
+        string runKind,
+        int tokenCap,
+        JsonElement taskEnvelope,
+        string idempotencyKey,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (runKind is not ("worker" or "verifier")
+            || tokenCap is < 1 or > AgentExecutionContract.MaxOrchestratorTokenCap
+            || provenance.RootRunId == Guid.Empty
+            || string.IsNullOrWhiteSpace(provenance.TaskId)
+            || provenance.Attempt < 1)
+        {
+            return Task.FromResult(new AgentRunWriteResult(
+                AgentRunWriteStatus.InvalidState, Message: "Invalid immutable orchestrator child pin"));
+        }
+
+        if (taskEnvelope.ValueKind != JsonValueKind.Object)
+        {
+            return Task.FromResult(new AgentRunWriteResult(
+                AgentRunWriteStatus.InvalidState, Message: "Canonical task envelope is required"));
+        }
+        var envelope = OrchestratorRuns.OrchestratorTaskEnvelope.Validate(taskEnvelope);
+        using var canonicalDocument = JsonDocument.Parse(envelope.Canonical);
+        var canonicalEnvelope = canonicalDocument.RootElement.Clone();
+        var key = CommandKey(tenantId, userId, "start", idempotencyKey);
+        var requestHash = SkillHash.Sha256(
+            $"{provenance.RootRunId:D}\0{provenance.TaskId}\0{provenance.Attempt}\0{runKind}\0{agent.AgentId:D}\0{agent.Revision}\0{tokenCap}\0{envelope.Canonical}");
+        lock (_agents.RunSnapshotSyncRoot)
+        {
+            lock (_gate)
+            {
+                if (Replay(key, requestHash, out var replay))
+                {
+                    return Task.FromResult(replay);
+                }
+                var current = _agents.GetPublishedSnapshotUnsafe(tenantId, agent.AgentId);
+                if (current is null
+                    || current.Revision != agent.Revision
+                    || current.WorkflowId != agent.WorkflowId
+                    || current.WorkflowRevision != agent.WorkflowRevision
+                    || !string.Equals(current.DefinitionSha256, agent.DefinitionSha256, StringComparison.Ordinal)
+                    || !string.Equals(current.Definition, agent.Definition, StringComparison.Ordinal)
+                    || workflow.WorkflowId != agent.WorkflowId
+                    || workflow.Revision != agent.WorkflowRevision)
+                {
+                    return Task.FromResult(new AgentRunWriteResult(
+                        AgentRunWriteStatus.InvalidState, Message: "Orchestrator child pin is no longer published"));
+                }
+
+                var definition = JsonNode.Parse(agent.Definition)!.AsObject();
+                var requiredRole = runKind == "verifier" ? "verifier" : "worker";
+                if (!HasValue(definition, "execution_roles", requiredRole)
+                    || !AgentAudience.Matches(
+                        (definition["audience"]?.AsArray() ?? new JsonArray())
+                        .Select(item => item!.GetValue<string>()),
+                        role,
+                        groups,
+                        allowLegacyPublishedRoles: true))
+                {
+                    return Task.FromResult(new AgentRunWriteResult(
+                        AgentRunWriteStatus.InvalidState, Message: "Child Agent does not allow the pinned execution role"));
+                }
+
+                var skills = new List<SkillSnapshotSource>();
+                foreach (var binding in agent.SkillBindings.Where(x => x.Enabled).OrderBy(x => x.Position))
+                {
+                    if (!_skills.TryGetEnabledRevisionUnsafe(
+                            tenantId, binding.Skill, binding.SkillRevision, out var source))
+                    {
+                        return Task.FromResult(new AgentRunWriteResult(
+                            AgentRunWriteStatus.InvalidState, Message: "Pinned child skill is unavailable"));
+                    }
+                    skills.Add(source!);
+                }
+                var errors = AgentRunSnapshotBuilder.ValidateExecutionContract(
+                    agent, workflow, skills, tenantId, userId, role, groups);
+                if (errors.Count > 0)
+                {
+                    return Task.FromResult(new AgentRunWriteResult(
+                        AgentRunWriteStatus.InvalidState, Message: errors[0].Message));
+                }
+
+                var runId = Guid.NewGuid();
+                var snapshot = AgentRunSnapshotBuilder.Build(
+                    runId, tenantId, userId, role, groups, capabilityClaims,
+                    agent, workflow, skills,
+                    runKind == "verifier" ? "orchestrator-verifier" : "orchestrator-worker",
+                    tokenCap, provenance);
+                if (snapshot.CanonicalByteLength > AgentExecutionContract.MaxSnapshotCanonicalBytes)
+                {
+                    return Task.FromResult(new AgentRunWriteResult(
+                        AgentRunWriteStatus.InvalidState, Message: "Agent execution snapshot exceeds canonical byte limit"));
+                }
+
+                var now = UtcNow();
+                var entry = new Entry
+                {
+                    Id = runId,
+                    RootRunId = provenance.RootRunId,
+                    ParentRunId = provenance.RootRunId,
+                    TaskId = provenance.TaskId,
+                    RunKind = runKind,
+                    TenantId = tenantId,
+                    UserId = userId,
+                    CallerRole = role,
+                    AgentId = agent.AgentId,
+                    AgentRevision = agent.Revision,
+                    WorkflowId = workflow.WorkflowId,
+                    WorkflowRevision = workflow.Revision,
+                    Snapshot = snapshot.StoredSnapshot,
+                    SnapshotCanonical = snapshot.CanonicalBytes,
+                    SnapshotHash = snapshot.SnapshotHash,
+                    Status = AgentRunStatuses.Queued,
+                    StateVersion = 1,
+                    CreatedAt = now,
+                    DeadlineAt = now.AddSeconds(snapshot.EffectiveTimeoutSeconds),
+                    UpdatedAt = now,
+                };
+                entry.Skills.AddRange(skills);
+                AddEventUnsafe(entry, Guid.NewGuid(), "run_created", null, EmptyPayload());
+                _runs.Add(runId, entry);
+                var (command, dispatch) = NewClaimedCommand(
+                    runId, "start", requestHash, JsonSerializer.SerializeToElement(new
+                    {
+                        message = envelope.Objective,
+                        task_envelope = canonicalEnvelope,
+                    }));
+                _commands.Add(key, command);
+                return Task.FromResult(new AgentRunWriteResult(
+                    AgentRunWriteStatus.Success, ToResponse(entry), Dispatch: dispatch));
             }
         }
     }
@@ -1767,10 +1912,10 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository
 
     private static AgentRunResponse ToResponse(Entry e) => new(
         e.Id,
-        e.Id,
-        null,
-        null,
-        "direct-agent",
+        e.RootRunId,
+        e.ParentRunId,
+        e.TaskId,
+        e.RunKind,
         e.AgentId,
         e.AgentRevision,
         e.WorkflowId,
@@ -1858,6 +2003,10 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository
     private sealed class Entry
     {
         public Guid Id;
+        public Guid RootRunId;
+        public Guid? ParentRunId;
+        public string? TaskId;
+        public string RunKind = "direct-agent";
         public string TenantId = "";
         public string UserId = "";
         public string CallerRole = "";

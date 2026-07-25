@@ -9,6 +9,66 @@ namespace Backend.Api.Tests;
 public sealed class InMemoryAgentRunRecoveryTests
 {
     [Fact]
+    public async Task OrchestratorChild_UsesPinnedChildSnapshotAndNeverDirectRunShape()
+    {
+        var (agents, skills, agent) = await CreatePublishedAgentAsync("orchestrator-child");
+        var runs = new InMemoryAgentRunRepository(agents, skills);
+        var source = agents.GetPublishedSnapshotUnsafe("demo-a", agent.Id)!;
+        var workflowDefinition = AgentRunSnapshotBuilder.CanonicalizeJson(
+            AgentDefaults.RuntimeWorkflowDefinition);
+        var workflow = new WorkflowSnapshotSource(
+            source.WorkflowId, source.WorkflowRevision, 1, workflowDefinition,
+            SkillHash.Sha256(workflowDefinition), "1");
+        var rootRunId = Guid.Parse("41111111-1111-4111-8111-111111111111");
+        var taskEnvelope = JsonDocument.Parse("""
+            {"objective":"research","required_capabilities":["research"],"context":{"query":"q"},"context_provenance":[{"context_key":"query","source_type":"caller","source_id":"user","observed_at":"2026-01-01T00:00:00Z","content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"write_intent":false,"delegation_depth":0,"repair_of":null}
+            """).RootElement.Clone();
+
+        var started = await ((IOrchestratorChildRunRepository)runs)
+            .CreateOrchestratorChildAsync(
+                "demo-a", "admin-a", "ADMIN", Array.Empty<string>(),
+                Array.Empty<string>(), source, workflow,
+                new OrchestratorChildSnapshotProvenance(rootRunId, "research-a", 2),
+                "worker", 10_000, taskEnvelope, "child-key", default);
+
+        Assert.Equal(AgentRunWriteStatus.Success, started.Status);
+        Assert.Equal(rootRunId, started.Run!.RootRunId);
+        Assert.Equal("research-a", started.Run.TaskId);
+        Assert.Equal("worker", started.Run.RunKind);
+        var artifact = await runs.GetExecutionArtifactAsync(
+            "demo-a", "admin-a", started.Run.Id, default);
+        using var envelope = JsonDocument.Parse(artifact!);
+        var bytes = Convert.FromBase64String(envelope.RootElement
+            .GetProperty("snapshot_canonical_base64").GetString()!);
+        Assert.Equal(started.Run.SnapshotHash, SkillHash.Sha256(bytes));
+        using var snapshot = JsonDocument.Parse(bytes);
+        Assert.Equal("orchestrator-worker", snapshot.RootElement
+            .GetProperty("execution_kind").GetString());
+        Assert.Equal(rootRunId, snapshot.RootElement
+            .GetProperty("orchestrator_root_run_id").GetGuid());
+        Assert.Equal("research-a", snapshot.RootElement
+            .GetProperty("orchestrator_task_id").GetString());
+        Assert.Equal(2, snapshot.RootElement
+            .GetProperty("orchestrator_attempt").GetInt32());
+        Assert.Equal(10_000, snapshot.RootElement
+            .GetProperty("orchestrator_token_cap").GetInt32());
+        Assert.Equal(10_000, snapshot.RootElement.GetProperty("agent")
+            .GetProperty("runtime_limits").GetProperty("token_budget").GetInt32());
+
+        var claim = await runs.ClaimCommandAsync(
+            "demo-a", "admin-a", started.Run.Id, started.Dispatch!.CommandId,
+            new AgentRunCommandClaimRequest("workflow", 30), default);
+        Assert.Equal(AgentRunWriteStatus.Success, claim.Status);
+        var input = claim.Item!.Input;
+        Assert.Equal(new[] { "message", "task_envelope" }, input
+            .EnumerateObject().Select(property => property.Name).OrderBy(name => name));
+        Assert.Equal("research", input.GetProperty("message").GetString());
+        Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(
+            System.Text.Json.Nodes.JsonNode.Parse(taskEnvelope.GetRawText()),
+            System.Text.Json.Nodes.JsonNode.Parse(input.GetProperty("task_envelope").GetRawText())));
+    }
+
+    [Fact]
     public async Task QueuedRun_AckDefersExecutionRecoveryUntilGraceExpires()
     {
         var (agents, skills, agent) =

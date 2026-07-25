@@ -679,6 +679,21 @@ public sealed class FakeAgentRunService : IAgentRunService
     }
 }
 
+public sealed class FakeOrchestratorRunService : IOrchestratorRunService
+{
+    public static readonly List<string> Calls = new();
+    public const string RunIdText = "55555555-5555-5555-5555-555555555555";
+    private const string Body = """{"id":"55555555-5555-5555-5555-555555555555","status":"queued","state_version":1}""";
+    public Task<AgentProxyResponse> StartAsync(Guid id,string? message,string? conversation,System.Text.Json.JsonElement? context,string? key,UserContext user,CancellationToken ct=default)
+    { Calls.Add($"start:{id:D}:{message}:{conversation}:{key}:{user.UserId}"); return Task.FromResult(new AgentProxyResponse(202,Body,null)); }
+    public Task<AgentProxyResponse> GetAsync(Guid id,UserContext user,CancellationToken ct=default)
+    { Calls.Add($"get:{id:D}:{user.UserId}"); return Task.FromResult(new AgentProxyResponse(200,Body,null)); }
+    public Task<AgentProxyResponse> EventsAsync(Guid id,long after,int limit,UserContext user,CancellationToken ct=default)
+    { Calls.Add($"events:{id:D}:{after}:{limit}:{user.UserId}"); return Task.FromResult(new AgentProxyResponse(200,$$"""{"run_id":"{{RunIdText}}","events":[],"next_sequence":{{after}}}""",null)); }
+    public Task<AgentProxyResponse> CancelAsync(Guid id,string? reason,string? key,UserContext user,CancellationToken ct=default)
+    { Calls.Add($"cancel:{id:D}:{reason}:{key}:{user.UserId}"); return Task.FromResult(new AgentProxyResponse(202,Body,null)); }
+}
+
 /// <summary>
 /// Agent Registry 服務 fake(代表 backend :8002 的 /api/agents 透明代理)。重現 D1 需驗的 backend 行為:
 /// 所有 Builder 端點非 ADMIN → 403、GET 帶 ETag、If-Match 版本不符 → 409、

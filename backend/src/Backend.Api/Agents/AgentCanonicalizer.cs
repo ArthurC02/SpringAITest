@@ -25,6 +25,11 @@ public static class AgentExecutionContract
     public const int MaxContextRounds = 1_000;
     public const int DefaultTimeoutSeconds = 60;
     public const int MaxTimeoutSeconds = 86_400;
+    // Must remain aligned with Workflow's runtime_default_token_budget and the
+    // orchestrator child-snapshot model.  A zero Agent value means this server-owned
+    // effective default, never an unbounded child allocation.
+    public const int DefaultTokenBudget = 16_000;
+    public const int MaxOrchestratorTokenCap = 1_000_000;
     public const int MaxTokenBudget = 10_000_000;
     public const int MaxStepBudget = 10_000;
     public const int MaxCallerIdentityLength = 256;

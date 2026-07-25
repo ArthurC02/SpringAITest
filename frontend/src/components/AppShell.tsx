@@ -44,6 +44,7 @@ export default function AppShell({ session, onLogout }: Props) {
   const [agentBuilderEnabled, setAgentBuilderEnabled] = useState(false)
   const [agentTestRunEnabled, setAgentTestRunEnabled] = useState(false)
   const [workflowDesignerEnabled, setWorkflowDesignerEnabled] = useState(false)
+  const [multiAgentDispatchEnabled, setMultiAgentDispatchEnabled] = useState(false)
   const isAdmin = session.role === 'ADMIN'
   // Capability comparison is exact: `workflow.manage.other` is never sufficient.
   const canManageWorkflow = (session.capabilities ?? []).includes('workflow.manage')
@@ -62,6 +63,7 @@ export default function AppShell({ session, onLogout }: Props) {
           setAgentBuilderEnabled(!!f.agentBuilderEnabled)
           setAgentTestRunEnabled(!!f.agentBuilderEnabled && !!f.agentTestRunEnabled)
           setWorkflowDesignerEnabled(!!f.workflowDesignerEnabled)
+          setMultiAgentDispatchEnabled(!!f.multiAgentDispatchEnabled)
         }
       })
       .catch(() => {
@@ -69,6 +71,7 @@ export default function AppShell({ session, onLogout }: Props) {
           setAgentBuilderEnabled(false)
           setAgentTestRunEnabled(false)
           setWorkflowDesignerEnabled(false)
+          setMultiAgentDispatchEnabled(false)
         }
       })
     return () => {
@@ -253,7 +256,7 @@ export default function AppShell({ session, onLogout }: Props) {
                 <AgentsView isAdmin agentTestRunEnabled={agentTestRunEnabled} />
               )}
               {view === 'workflows' && workflowDesignerEnabled && canManageWorkflow && <WorkflowsView />}
-              {view === 'orchestrators' && workflowDesignerEnabled && canManageWorkflow && <OrchestratorsView />}
+              {view === 'orchestrators' && workflowDesignerEnabled && canManageWorkflow && <OrchestratorsView multiAgentDispatchEnabled={multiAgentDispatchEnabled} />}
             </ErrorBoundary>
           </main>
         </div>

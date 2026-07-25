@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/http'
 import {
   createOrchestrator, getOrchestrator, listOrchestratorRevisions, listOrchestrators,
@@ -9,15 +9,189 @@ import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { runWithToast, useToast } from './Toast'
+import { cancelOrchestratorRun, getOrchestratorRun, getOrchestratorRunEvents, newIdempotencyKey, startOrchestratorRun } from '../api/orchestratorRuns'
+import type { AgentRun, AgentRunEvent } from '../types'
+import { getSession } from '../api/auth'
+import { ApiError as HttpApiError } from '../api/http'
+import { mergeRunEvents } from '../agentRunDisplay'
+import {
+  clearOrchestratorRunState,
+  messageFingerprint,
+  readOrchestratorRunState,
+  type StoredOrchestratorRun,
+  writeOrchestratorRunState,
+} from '../orchestratorRunState'
+import { safeOrchestratorBudget, toOrchestratorTraceEvent } from '../orchestratorTrace'
+import { listWorkflowNodeCatalog, listWorkflowRevisions } from '../api/workflows'
+import WorkflowDesigner from '../workflowDesigner/WorkflowDesigner'
+import type { WorkflowDefinition, WorkflowNodeType, WorkflowRevision, WorkflowTraceEntry, WorkflowUiMetadata } from '../types'
 
 const emptyDraft = (): OrchestratorDraft => ({
   name: '', description: '', instructions: '', policy: { dispatchMode: 'bounded-parallel', joinPolicy: 'fail-fast', repairPolicy: 'fail', aggregationPolicy: 'verified-only', denialPolicy: 'fail-closed' }, workflow: { id: '', revision: 0 },
   workerPool: [], workerPolicy: { requiredAudience: [], requiredCapabilities: [], selection: 'pinned-only' }, context: { readOnly: true, allowedTools: [], knowledgeSources: [] },
   audience: [], capabilities: [],
   verifier: { agentId: '', revision: 0, variant: 'read-only', outputContract: { type: 'verification-report' }, independent: true },
-  budgets: { maxContextRounds: 2, maxTasks: 8, maxChildRuns: 8, maxConcurrency: 4, maxRepairRounds: 1, tokenBudget: 10000, timeoutSeconds: 300 },
+  budgets: { maxContextRounds: 2, maxTasks: 8, maxChildRuns: 9, maxConcurrency: 4, maxRepairRounds: 1, tokenBudget: 10000, timeoutSeconds: 300 },
 })
 const isConflict = (e: unknown) => e instanceof ApiError && (e.status === 409 || e.status === 412)
+
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'pending', 'starting', 'running', 'resuming', 'cancelling'])
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out'])
+const POLL_MS = 1500
+
+function isAmbiguousFailure(error: unknown): boolean {
+  return !(error instanceof HttpApiError) || error.status >= 500
+}
+
+function storageScope(): string {
+  const session = getSession()
+  return session ? `${session.tenantCode}:${session.username}` : 'anonymous'
+}
+
+function runtimeNodeTrace(events: AgentRunEvent[]): WorkflowTraceEntry[] {
+  const trace = new Map<string, WorkflowTraceEntry>()
+  for (const event of events) {
+    const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown> : {}
+    const nodeId = typeof payload.node_id === 'string' ? payload.node_id : typeof payload.nodeId === 'string' ? payload.nodeId : null
+    const status = typeof payload.node_status === 'string' ? payload.node_status : typeof payload.status === 'string' ? payload.status : null
+    if (nodeId && status) trace.set(nodeId, { node_id: nodeId, status })
+  }
+  return [...trace.values()]
+}
+
+function TraceOverlay({ run, events, definition, metadata, catalog }: { run: AgentRun; events: AgentRunEvent[]; definition: WorkflowDefinition | null; metadata: WorkflowUiMetadata | null; catalog: WorkflowNodeType[] }) {
+  const budget = safeOrchestratorBudget(run)
+  return <details className="agent-test-console__trace" open><summary>Redacted root / child trace</summary>
+    <dl className="agent-test-console__summary"><div><dt>Root run</dt><dd><code>{run.runId}</code></dd></div><div><dt>Status</dt><dd>{run.status}</dd></div><div><dt>Workflow revision</dt><dd>{run.pinnedWorkflowRevision ?? '?'}</dd></div></dl>
+    {budget.length > 0 && <dl className="agent-test-console__summary">{budget.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value ?? '?')}</dd></div>)}</dl>}
+    <ol className="agent-test-console__events">{events.map((event) => {
+      const item = toOrchestratorTraceEvent(event); const child = item.child
+      return <li key={item.sequence}><div className="agent-test-console__event-head"><code>#{item.sequence}</code><strong>{item.eventType}</strong>{item.rootStatus && <span>root: {item.rootStatus}</span>}</div>
+        {child && <dl className="agent-test-console__summary"><div><dt>Child run</dt><dd>{child.childId ?? '?'}</dd></div><div><dt>Task / attempt</dt><dd>{child.taskId ?? '?'} / {child.attempt ?? '?'}</dd></div><div><dt>Kind / status</dt><dd>{child.kind ?? '?'} / {child.status ?? '?'}</dd></div><div><dt>Agent</dt><dd>{child.agentId ?? '?'}{child.agentRevision === null ? '' : ` r${child.agentRevision}`}</dd></div>{child.verdict && <div><dt>Verdict</dt><dd>{child.verdict}</dd></div>}{child.citations.length > 0 && <div><dt>Citations</dt><dd>{child.citations.map((citation) => <span key={citation.id}>{citation.id}{citation.title ? ` (${citation.title})` : ''} </span>)}</dd></div>}</dl>}
+      </li>
+    })}</ol>
+    {definition && metadata && catalog.length > 0 && <section aria-label="Pinned workflow runtime trace"><h5>Pinned workflow trace</h5><WorkflowDesigner definition={definition} uiMetadata={metadata} catalog={catalog} validation={null} simulation={null} runtimeTrace={runtimeNodeTrace(events)} disabled onChange={() => {}} /></section>}
+  </details>
+}
+
+export function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator }) {
+  const [message, setMessage] = useState('')
+  const [run, setRun] = useState<AgentRun | null>(null)
+  const [events, setEvents] = useState<AgentRunEvent[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [pinnedWorkflow, setPinnedWorkflow] = useState<WorkflowRevision | null>(null)
+  const [workflowCatalog, setWorkflowCatalog] = useState<WorkflowNodeType[]>([])
+  const recordRef = useRef<StoredOrchestratorRun | null>(null)
+  const cursorRef = useRef(0)
+  const runIdRef = useRef<string | null>(null)
+
+  const scope = storageScope()
+  useEffect(() => {
+    let disposed = false
+    void Promise.all([listWorkflowRevisions(orchestrator.draft.workflow.id), listWorkflowNodeCatalog()]).then(([revisions, catalog]) => {
+      if (!disposed) { setPinnedWorkflow(revisions.find((revision) => revision.revision === orchestrator.draft.workflow.revision) ?? null); setWorkflowCatalog(catalog) }
+    }).catch(() => { if (!disposed) { setPinnedWorkflow(null); setWorkflowCatalog([]) } })
+    return () => { disposed = true }
+  }, [orchestrator.draft.workflow.id, orchestrator.draft.workflow.revision])
+  const persist = useCallback((record: StoredOrchestratorRun | null) => {
+    recordRef.current = record
+    if (record) writeOrchestratorRunState(scope, record)
+    else clearOrchestratorRunState(scope, orchestrator.id)
+  }, [orchestrator.id, scope])
+
+  const applyPage = useCallback((page: Awaited<ReturnType<typeof getOrchestratorRunEvents>>, runId: string) => {
+    if (runIdRef.current !== runId) return
+    setEvents((current) => mergeRunEvents(current, page.events))
+    cursorRef.current = Math.max(cursorRef.current, page.latestEventSequence, ...page.events.map((event) => event.sequence))
+    if (recordRef.current?.runId === runId) persist({ ...recordRef.current, eventCursor: cursorRef.current })
+  }, [persist])
+
+  useEffect(() => {
+    const record = readOrchestratorRunState(scope, orchestrator.id)
+    recordRef.current = record
+    // Rebuild the safe, redacted trace from the authoritative event history after a reload.
+    // Sequence merging makes this safe even if the persisted cursor was stale.
+    cursorRef.current = 0
+    if (!record?.runId) return
+    const runId = record.runId
+    runIdRef.current = runId
+    let disposed = false
+    void Promise.all([getOrchestratorRun(runId), getOrchestratorRunEvents(runId, cursorRef.current)])
+      .then(([restored, page]) => {
+        if (disposed || runIdRef.current !== runId) return
+        setRun(restored); applyPage(page, runId)
+        if (TERMINAL_RUN_STATUSES.has(restored.status)) persist(null)
+      })
+      .catch((reason) => { if (!disposed) setError(`Unable to restore active run: ${(reason as Error).message}`) })
+    return () => { disposed = true }
+  }, [applyPage, orchestrator.id, persist, scope])
+
+  const polledRunId = run?.runId
+  const polledRunStatus = run?.status
+  useEffect(() => {
+    if (!polledRunId || !polledRunStatus || !ACTIVE_RUN_STATUSES.has(polledRunStatus)) return
+    const runId = polledRunId
+    runIdRef.current = runId
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const [next, page] = await Promise.all([getOrchestratorRun(runId), getOrchestratorRunEvents(runId, cursorRef.current)])
+        if (disposed || runIdRef.current !== runId) return
+        setRun(next); applyPage(page, runId); setError(null)
+        if (TERMINAL_RUN_STATUSES.has(next.status)) persist(null)
+        else timer = setTimeout(() => void poll(), POLL_MS)
+      } catch (reason) {
+        if (!disposed && runIdRef.current === runId) { setError((reason as Error).message); timer = setTimeout(() => void poll(), POLL_MS) }
+      }
+    }
+    void poll()
+    return () => { disposed = true; if (timer) clearTimeout(timer) }
+  }, [applyPage, persist, polledRunId, polledRunStatus])
+
+  async function start() {
+    const trimmed = message.trim()
+    if (!trimmed || starting || (run && !TERMINAL_RUN_STATUSES.has(run.status))) return
+    const fingerprint = messageFingerprint(trimmed)
+    const reusable = recordRef.current?.runId === null && recordRef.current.messageFingerprint === fingerprint
+    const record: StoredOrchestratorRun = reusable && recordRef.current
+      ? recordRef.current
+      : { version: 1, orchestratorId: orchestrator.id, runId: null, conversationId: globalThis.crypto.randomUUID(), startKey: newIdempotencyKey(), messageFingerprint: fingerprint, eventCursor: 0, cancelKey: null, cancelAccepted: false }
+    persist(record); cursorRef.current = 0; runIdRef.current = null; setRun(null); setEvents([]); setStarting(true); setError(null)
+    try {
+      const started = await startOrchestratorRun(orchestrator.id, trimmed, record.conversationId, record.startKey)
+      const accepted = { ...record, runId: started.runId }
+      persist(accepted); runIdRef.current = started.runId; setRun(started)
+    } catch (reason) {
+      if (!isAmbiguousFailure(reason)) persist(null)
+      setError((reason as Error).message)
+    } finally { setStarting(false) }
+  }
+
+  async function cancel() {
+    if (!run || cancelling || TERMINAL_RUN_STATUSES.has(run.status)) return
+    const record = recordRef.current
+    if (!record || record.runId !== run.runId) return
+    const cancelKey = record.cancelKey ?? newIdempotencyKey()
+    persist({ ...record, cancelKey, cancelAccepted: false }); setCancelling(true); setError(null)
+    try {
+      const cancelled = await cancelOrchestratorRun(run.runId, cancelKey)
+      const accepted = { ...recordRef.current!, cancelKey, cancelAccepted: true }
+      persist(accepted); setRun(TERMINAL_RUN_STATUSES.has(cancelled.status) ? cancelled : { ...cancelled, status: 'cancelling' })
+      if (TERMINAL_RUN_STATUSES.has(cancelled.status)) persist(null)
+    } catch (reason) {
+      if (!isAmbiguousFailure(reason)) persist({ ...recordRef.current!, cancelKey: null, cancelAccepted: false })
+      setError((reason as Error).message)
+    } finally { setCancelling(false) }
+  }
+
+  if (orchestrator.published_revision == null) return <p className="muted">Publish a revision before test-running.</p>
+  const active = !!run && !TERMINAL_RUN_STATUSES.has(run.status)
+  return <section className="agent-block agent-test-console"><h4>System-admin test run</h4><textarea className="input" value={message} disabled={active || starting || cancelling} onChange={(event) => setMessage(event.target.value)} placeholder="Test message" /><div className="agent-actions"><button className="btn btn--primary" disabled={!message.trim() || active || starting || cancelling} onClick={() => void start()}>{starting ? 'Starting…' : 'Start'}</button>{run && <button className="btn btn--danger" disabled={!active || cancelling} onClick={() => void cancel()}>{cancelling || run.status === 'cancelling' ? 'Cancelling…' : 'Cancel'}</button>}</div>{run && <p className="muted"><code>{run.runId}</code> · {run.status} · workflow r{run.pinnedWorkflowRevision ?? '?'}</p>}<ErrorText msg={error} />{run && <TraceOverlay run={run} events={events} definition={pinnedWorkflow?.definition ?? null} metadata={pinnedWorkflow?.ui_metadata ?? null} catalog={workflowCatalog} />}</section>
+}
 
 function PolicyEditor({ value, disabled = false, onChange }: { value: OrchestratorDraft['policy']; disabled?: boolean; onChange: (value: OrchestratorDraft['policy']) => void }) {
   return <div className="agent-runtime-grid"><div className="field"><label>Join policy<select className="input" disabled={disabled} value={value.joinPolicy} onChange={(e) => onChange({ ...value, joinPolicy: e.target.value as OrchestratorDraft['policy']['joinPolicy'] })}><option value="fail-fast">fail-fast</option><option value="allow-partial">allow-partial</option><option value="repair">repair</option></select></label></div><div className="field"><label>Repair policy<select className="input" disabled={disabled} value={value.repairPolicy} onChange={(e) => onChange({ ...value, repairPolicy: e.target.value as OrchestratorDraft['policy']['repairPolicy'] })}><option value="fail">fail</option><option value="redispatch">redispatch</option></select></label></div><p className="muted">dispatch=bounded-parallel · aggregation=verified-only · denial=fail-closed</p></div>
@@ -28,7 +202,7 @@ function WorkerPolicyEditor({ value, disabled = false, onChange }: { value: Orch
   return <div className="agent-runtime-grid"><div className="field"><label>Worker required audience<textarea className="input" disabled={disabled} value={value.requiredAudience.join('\n')} onChange={(e) => onChange({ ...value, requiredAudience: lines(e.target.value) })} /></label></div><div className="field"><label>Worker required capabilities<textarea className="input" disabled={disabled} value={value.requiredCapabilities.join('\n')} onChange={(e) => onChange({ ...value, requiredCapabilities: lines(e.target.value) })} /></label></div><p className="muted">selection=pinned-only</p></div>
 }
 
-function Editor({ id, onClose }: { id: string; onClose: () => void }) {
+function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClose: () => void; multiAgentDispatchEnabled: boolean }) {
   const toast = useToast(); const [item, setItem] = useState<Orchestrator | null>(null); const [draft, setDraft] = useState<OrchestratorDraft | null>(null)
   const [etag, setEtag] = useState<string | null>(null); const [blocked, setBlocked] = useState(false); const [errors, setErrors] = useState<string[]>([])
   const revisions = useResource(useCallback(() => listOrchestratorRevisions(id), [id]))
@@ -54,13 +228,14 @@ function Editor({ id, onClose }: { id: string; onClose: () => void }) {
       <div className="field"><label htmlFor="orchestrator-budgets">Budgets (JSON)</label><textarea id="orchestrator-budgets" className="input" disabled={disabled} defaultValue={JSON.stringify(draft.budgets, null, 2)} key={`${item.draft_version}-budget`} onChange={(e) => { try { update({ budgets: JSON.parse(e.target.value) as OrchestratorDraft['budgets'] }) } catch { /* don't persist invalid JSON */ } }} /></div>
     </section><div className="agent-actions"><button className="btn btn--primary" disabled={disabled} onClick={() => void runWithToast(toast, save, { success: '草稿已儲存' })}>儲存</button><button className="btn" disabled={disabled} onClick={() => void runWithToast(toast, validate, { success: '驗證完成' })}>驗證</button><button className="btn btn--info" disabled={disabled || errors.length > 0} onClick={() => void runWithToast(toast, async () => { if (etag) await publishOrchestrator(id, item.draft_version, etag) }, { success: '已發布', onSuccess: () => load() })}>發布</button></div>
     {errors.length > 0 && <ul className="agent-errors">{errors.map((error) => <li key={error}>{error}</li>)}</ul>}
+    {multiAgentDispatchEnabled && item.enabled && <TestRunConsole orchestrator={item} />}
     <section className="agent-block"><h4>Revision history</h4>{revisions.loading ? <Skeleton rows={2} /> : <ul className="agent-preview__list">{(revisions.data ?? []).map((revision) => <li key={revision.revision}><span>r{revision.revision} · {revision.definition_sha256.slice(0, 12)}</span><button className="btn" onClick={() => void runWithToast(toast, () => restoreOrchestratorRevision(id, revision.revision), { success: '已建立新 revision', onSuccess: () => { void load(); void revisions.reload() } })}>還原</button></li>)}</ul>}</section>
   </div>
 }
 
-export default function OrchestratorsView() {
+export default function OrchestratorsView({ multiAgentDispatchEnabled = false }: { multiAgentDispatchEnabled?: boolean }) {
   const toast = useToast(); const resource = useResource(listOrchestrators); const [editing, setEditing] = useState<string | null>(null); const [create, setCreate] = useState(false); const [draft, setDraft] = useState(emptyDraft)
-  if (editing) return <Editor id={editing} onClose={() => { setEditing(null); void resource.reload() }} />
+  if (editing) return <Editor id={editing} multiAgentDispatchEnabled={multiAgentDispatchEnabled} onClose={() => { setEditing(null); void resource.reload() }} />
   const refsReady = !!draft.workflow.id && draft.workflow.revision > 0 && !!draft.verifier.agentId && draft.verifier.revision > 0 && draft.workerPool.length > 0
   return <div className="view"><div className="view__head"><h2 className="view__title">Root Orchestrators</h2><button className="btn btn--info" onClick={() => setCreate(!create)}>＋ 建立</button></div>{create && <section className="agent-block"><div className="field"><label>名稱<input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label></div><div className="field"><label>說明<input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label></div><div className="agent-runtime-grid"><div className="field"><label>Root Workflow id<input className="input" value={draft.workflow.id} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, id: e.target.value } })} /></label></div><div className="field"><label>Workflow revision<input className="input" type="number" min={1} value={draft.workflow.revision} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, revision: Number(e.target.value) } })} /></label></div><div className="field"><label>Verifier Agent id<input className="input" value={draft.verifier.agentId} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, agentId: e.target.value } })} /></label></div><div className="field"><label>Verifier revision<input className="input" type="number" min={1} value={draft.verifier.revision} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, revision: Number(e.target.value) } })} /></label></div></div><div className="field"><label>Worker pool (JSON)<textarea className="input" defaultValue="[]" onChange={(e) => { try { setDraft({ ...draft, workerPool: JSON.parse(e.target.value) as OrchestratorDraft['workerPool'] }) } catch { /* keep last valid */ } }} /></label></div><PolicyEditor value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} /><WorkerPolicyEditor value={draft.workerPolicy} onChange={(workerPolicy) => setDraft({ ...draft, workerPolicy })} /><div className="field"><label>Audience（每行一項）<textarea className="input" value={draft.audience.join('\n')} onChange={(e) => setDraft({ ...draft, audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><div className="field"><label>Capabilities（每行一項）<textarea className="input" value={draft.capabilities.join('\n')} onChange={(e) => setDraft({ ...draft, capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><button className="btn btn--primary" disabled={!draft.name.trim() || !refsReady} onClick={() => void runWithToast(toast, async () => { const item = await createOrchestrator(draft); setEditing(item.id) }, { success: '已建立 Orchestrator 草稿' })}>建立</button><p className="muted">建立前需提供 pinned Workflow、至少一個 pinned Worker 與 pinned read-only Verifier；revision 必須明確指定，不使用 latest 或硬編碼。</p></section>}<ErrorText msg={resource.error} />{resource.loading ? <Skeleton rows={3} /> : <div className="table-wrap"><table className="table"><thead><tr><th>名稱</th><th>發布</th><th>操作</th></tr></thead><tbody>{(resource.data ?? []).map((row) => <tr key={row.id}><td>{row.name}<br /><span className="muted">{row.description}</span></td><td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td><td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td></tr>)}</tbody></table></div>}</div>
 }

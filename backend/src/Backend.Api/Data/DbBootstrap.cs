@@ -374,6 +374,66 @@ public static class DbBootstrap
             REFERENCES workflow_revision(workflow_id, revision));
         CREATE INDEX IF NOT EXISTS ix_agent_run_tenant_owner_updated
           ON agent_run (tenant_id, user_id, updated_at DESC);
+        -- D5 root aggregate is intentionally separate from agent_run: roots have no Agent
+        -- revision, whereas Worker/Verifier children retain D3's immutable Agent snapshots.
+        CREATE TABLE IF NOT EXISTS orchestrator_run (
+          id uuid PRIMARY KEY, tenant_id text NOT NULL, user_id text NOT NULL, caller_role text NOT NULL,
+          orchestrator_id uuid NOT NULL, orchestrator_revision integer NOT NULL, conversation_id text NOT NULL,
+          workflow_id uuid NOT NULL, workflow_revision integer NOT NULL,
+          execution_snapshot jsonb NOT NULL, execution_snapshot_canonical bytea NOT NULL, snapshot_sha256 text NOT NULL,
+          workflow_dispatch_snapshot jsonb, workflow_dispatch_snapshot_canonical bytea, workflow_dispatch_snapshot_sha256 text,
+          request_sha256 text NOT NULL, idempotency_key_sha256 text NOT NULL,
+          status text NOT NULL CHECK(status IN ('queued','running','waiting_input','completed','failed','cancelled')),
+          state_version bigint NOT NULL DEFAULT 1, cancel_requested_at timestamptz,
+          result jsonb, error_code text, error_message text, completed_at timestamptz,
+          deadline_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE(tenant_id,user_id,idempotency_key_sha256));
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS workflow_dispatch_snapshot jsonb;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS workflow_dispatch_snapshot_canonical bytea;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS workflow_dispatch_snapshot_sha256 text;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS result jsonb;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS error_code text;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS error_message text;
+        ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_active_conversation
+          ON orchestrator_run(tenant_id,user_id,conversation_id,orchestrator_id)
+          WHERE status IN ('queued','running','waiting_input');
+        CREATE TABLE IF NOT EXISTS orchestrator_run_event (
+          run_id uuid NOT NULL REFERENCES orchestrator_run(id), sequence bigint NOT NULL,
+          event_type text NOT NULL, snapshot_sha256 text NOT NULL, payload jsonb NOT NULL DEFAULT '{}',
+          created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(run_id,sequence));
+        CREATE TABLE IF NOT EXISTS orchestrator_run_command (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), run_id uuid NOT NULL REFERENCES orchestrator_run(id),
+          command_type text NOT NULL CHECK(command_type IN ('start','cancel')), dispatch_attempt integer NOT NULL DEFAULT 0,
+          claim_owner text, claim_token_sha256 text, claim_expires_at timestamptz, dispatch_completed_at timestamptz, completed_at timestamptz, lease_generation bigint NOT NULL DEFAULT 0,
+          idempotency_key_sha256 text,
+          created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(run_id,command_type));
+        CREATE INDEX IF NOT EXISTS ix_orchestrator_run_command_reclaim ON orchestrator_run_command(claim_expires_at,created_at) WHERE completed_at IS NULL;
+        ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS claim_owner text;
+        ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS dispatch_completed_at timestamptz;
+        ALTER TABLE orchestrator_run_command ADD COLUMN IF NOT EXISTS idempotency_key_sha256 text;
+        CREATE TABLE IF NOT EXISTS orchestrator_run_child (
+          id uuid PRIMARY KEY, orchestrator_root_run_id uuid NOT NULL REFERENCES orchestrator_run(id),
+          task_id text NOT NULL, attempt integer NOT NULL CHECK(attempt>=1), run_kind text NOT NULL CHECK(run_kind IN ('worker','verifier')),
+          agent_id uuid NOT NULL, agent_revision integer NOT NULL, workflow_id uuid NOT NULL, workflow_revision integer NOT NULL,
+          agent_snapshot_sha256 text NOT NULL, agent_run_id uuid, command_id uuid, task_envelope jsonb NOT NULL DEFAULT '{}', dispatch_artifact jsonb NOT NULL, status text NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE(orchestrator_root_run_id,task_id,attempt));
+        CREATE INDEX IF NOT EXISTS ix_orchestrator_run_child_active ON orchestrator_run_child(orchestrator_root_run_id,status);
+        ALTER TABLE orchestrator_run_child ADD COLUMN IF NOT EXISTS agent_run_id uuid;
+        ALTER TABLE orchestrator_run_child ADD COLUMN IF NOT EXISTS command_id uuid;
+        ALTER TABLE orchestrator_run_child ADD COLUMN IF NOT EXISTS task_envelope jsonb NOT NULL DEFAULT '{}';
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_child_agent_run ON orchestrator_run_child(agent_run_id) WHERE agent_run_id IS NOT NULL;
+        ALTER TABLE agent_run ADD COLUMN IF NOT EXISTS orchestrator_root_run_id uuid;
+        DO $orchestrator_child_lineage$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_agent_run_orchestrator_root') THEN
+            ALTER TABLE agent_run ADD CONSTRAINT fk_agent_run_orchestrator_root
+              FOREIGN KEY (orchestrator_root_run_id) REFERENCES orchestrator_run(id);
+          END IF;
+        END $orchestrator_child_lineage$;
+        CREATE INDEX IF NOT EXISTS ix_agent_run_orchestrator_root
+          ON agent_run(orchestrator_root_run_id) WHERE orchestrator_root_run_id IS NOT NULL;
         ALTER TABLE agent_run
           ADD COLUMN IF NOT EXISTS execution_snapshot_canonical bytea,
           ADD COLUMN IF NOT EXISTS lease_generation bigint NOT NULL DEFAULT 0,

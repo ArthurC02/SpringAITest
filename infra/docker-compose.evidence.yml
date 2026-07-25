@@ -14,6 +14,7 @@ services:
 
   backend:
     environment:
+      DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres};Database=${EVIDENCE_DB_NAME:-springaitest}
       # Match the normal compose default outside RealModel so starting the
       # deterministic profile cannot silently change a caller's embedding mode.
       EMBEDDINGS_PROVIDER: ${EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER:-${WORKFLOW_EMBEDDINGS_PROVIDER:-fake}}
@@ -28,7 +29,7 @@ services:
       LLM_API_KEY: ${EVIDENCE_WORKFLOW_LLM_API_KEY:-evidence-not-a-secret}
       LLM_MODEL: ${EVIDENCE_REAL_WORKFLOW_MODEL:-evidence-model}
       AGENT_TEST_RUN_ENABLED: ${EVIDENCE_AGENT_TEST_RUN_ENABLED:-true}
-      CHECKPOINT_DATABASE_URL: ${EVIDENCE_CHECKPOINT_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@appdb:5432/springaitest}
+      CHECKPOINT_DATABASE_URL: ${EVIDENCE_CHECKPOINT_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@appdb:5432/${EVIDENCE_DB_NAME:-springaitest}}
       CHECKPOINT_HMAC_KEY: ${EVIDENCE_CHECKPOINT_HMAC_KEY:?set a per-run D3 checkpoint HMAC key via the verifier}
 
   evidence-model:
@@ -107,6 +108,7 @@ services:
       AGENT_BUILDER_ENABLED: ${AGENT_BUILDER_ENABLED:-false}
       AGENT_TEST_RUN_ENABLED: ${EVIDENCE_AGENT_TEST_RUN_ENABLED:-true}
       WORKFLOW_DESIGNER_ENABLED: ${WORKFLOW_DESIGNER_ENABLED:-false}
+      MULTI_AGENT_DISPATCH_ENABLED: ${MULTI_AGENT_DISPATCH_ENABLED:-false}
       TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-10.253.254.0/28}
 
   # Curl targets this proxy directly. It retains production SSE nginx settings

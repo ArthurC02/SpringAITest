@@ -110,7 +110,10 @@ internal static class AgentRunSnapshotBuilder
         IReadOnlyCollection<string> capabilityClaims,
         PublishedAgentSnapshotSource agent,
         WorkflowSnapshotSource workflow,
-        IReadOnlyList<SkillSnapshotSource> skills)
+        IReadOnlyList<SkillSnapshotSource> skills,
+        string executionKind = "direct-worker",
+        int? orchestratorTokenCap = null,
+        OrchestratorChildSnapshotProvenance? orchestratorProvenance = null)
         => Build(
             runId,
             tenantId,
@@ -120,7 +123,10 @@ internal static class AgentRunSnapshotBuilder
             capabilityClaims,
             agent,
             workflow,
-            skills);
+            skills,
+            executionKind,
+            orchestratorTokenCap,
+            orchestratorProvenance);
 
     public static Built Build(
         Guid runId,
@@ -131,11 +137,37 @@ internal static class AgentRunSnapshotBuilder
         IReadOnlyCollection<string> capabilityClaims,
         PublishedAgentSnapshotSource agent,
         WorkflowSnapshotSource workflow,
-        IReadOnlyList<SkillSnapshotSource> skills)
+        IReadOnlyList<SkillSnapshotSource> skills,
+        string executionKind = "direct-worker",
+        int? orchestratorTokenCap = null,
+        OrchestratorChildSnapshotProvenance? orchestratorProvenance = null)
     {
+        if (executionKind is not ("direct-worker" or "orchestrator-worker" or "orchestrator-verifier"))
+        {
+            throw new ArgumentOutOfRangeException(nameof(executionKind));
+        }
         var definition = JsonNode.Parse(agent.Definition)!.AsObject();
         var runtimeLimits =
             definition["runtime_limits"]?.DeepClone() as JsonObject ?? new JsonObject();
+        if (orchestratorTokenCap is not null)
+        {
+            if (executionKind is not ("orchestrator-worker" or "orchestrator-verifier")
+                || orchestratorTokenCap is < 1 or > AgentExecutionContract.MaxOrchestratorTokenCap
+                || orchestratorProvenance is null
+                || orchestratorProvenance.RootRunId == Guid.Empty
+                || string.IsNullOrWhiteSpace(orchestratorProvenance.TaskId)
+                || orchestratorProvenance.Attempt < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(orchestratorTokenCap));
+            }
+            var configuredTokenBudget = runtimeLimits["token_budget"]?.GetValue<int>() ?? 0;
+            var effectiveTokenBudget = configuredTokenBudget > 0
+                ? configuredTokenBudget
+                : AgentExecutionContract.DefaultTokenBudget;
+            // Both this materialised limit and the separate cap are immutable snapshot
+            // input. Workflow independently applies the same minimum at execution time.
+            runtimeLimits["token_budget"] = Math.Min(effectiveTokenBudget, orchestratorTokenCap.Value);
+        }
         var configuredTimeout = runtimeLimits["timeout_seconds"]?.GetValue<int>() ?? 0;
         var effectiveTimeout = configuredTimeout == 0
             ? AgentExecutionContract.DefaultTimeoutSeconds
@@ -209,7 +241,15 @@ internal static class AgentRunSnapshotBuilder
                 ["knowledge_source_grants"] = knowledgeSourceGrants,
             },
             ["mode"] = "test",
+            ["execution_kind"] = executionKind,
         };
+        if (orchestratorTokenCap is not null)
+        {
+            snapshot["orchestrator_token_cap"] = orchestratorTokenCap.Value;
+            snapshot["orchestrator_root_run_id"] = orchestratorProvenance!.RootRunId;
+            snapshot["orchestrator_task_id"] = orchestratorProvenance.TaskId;
+            snapshot["orchestrator_attempt"] = orchestratorProvenance.Attempt;
+        }
 
         var stored = Canonicalize(snapshot).ToJsonString(CanonicalJson);
         var canonicalBytes = Encoding.UTF8.GetBytes(stored);
@@ -218,6 +258,139 @@ internal static class AgentRunSnapshotBuilder
             SkillHash.Sha256(canonicalBytes),
             canonicalBytes,
             effectiveTimeout);
+    }
+
+    /// <summary>D5 root artifact.  It intentionally has no <c>agent</c>: worker/verifier agents
+    /// are pinned in the immutable Orchestrator definition, and are materialised only as child
+    /// runs by Workflow.  This prevents a root coordinator from being mistaken for a Worker.</summary>
+    public static Built BuildOrchestratorRoot(
+        Guid runId,
+        string tenantId,
+        string userId,
+        string role,
+        IReadOnlyCollection<string> groups,
+        IReadOnlyCollection<string> capabilityClaims,
+        Guid orchestratorId,
+        int orchestratorRevision,
+        string orchestratorDefinition,
+        string orchestratorDefinitionSha256,
+        WorkflowSnapshotSource rootWorkflow,
+        IReadOnlyList<PublishedAgentSnapshotSource> workers,
+        PublishedAgentSnapshotSource verifier,
+        string rootMessage)
+    {
+        var definition = JsonNode.Parse(orchestratorDefinition)?.AsObject()
+            ?? throw new InvalidOperationException("Orchestrator canonical definition is invalid");
+        var budgets = definition["budgets"]?.DeepClone() as JsonObject
+            ?? throw new InvalidOperationException("Orchestrator budgets are missing");
+        var timeout = budgets["timeoutSeconds"]?.GetValue<int>()
+            ?? throw new InvalidOperationException("Orchestrator timeoutSeconds is missing");
+        var workflow = definition["workflow"]?.DeepClone() as JsonObject
+            ?? throw new InvalidOperationException("Orchestrator workflow is missing");
+        var policy = definition["policy"]?.DeepClone() as JsonObject
+            ?? throw new InvalidOperationException("Orchestrator policy is missing");
+        var context = definition["context"]?.DeepClone() as JsonObject
+            ?? throw new InvalidOperationException("Orchestrator context policy is missing");
+        var rules = new JsonObject { ["version"] = 1, ["rules"] = new JsonArray() };
+        var canonicalRules = Canonicalize(rules).ToJsonString(CanonicalJson);
+        var canonicalPolicy = Canonicalize(policy).ToJsonString(CanonicalJson);
+        var callerGrants = AgentRunCapabilityClaims.Parse(capabilityClaims);
+        var workerPins = new JsonArray(workers.Select(ToRootWorkerPin).ToArray());
+        var snapshot = new JsonObject
+        {
+            ["root_run_id"] = runId.ToString("D"),
+            ["orchestrator_id"] = orchestratorId.ToString("D"),
+            ["orchestrator_revision"] = orchestratorRevision,
+            ["workflow_id"] = rootWorkflow.WorkflowId.ToString("D"),
+            ["workflow_revision"] = rootWorkflow.Revision,
+            ["graph"] = new JsonObject
+            {
+                ["definition"] = JsonNode.Parse(rootWorkflow.Definition),
+                ["definition_sha256"] = rootWorkflow.DefinitionSha256,
+                ["compiler_contract_version"] = rootWorkflow.CompilerContractVersion,
+                ["runtime_adapter_version"] = "root-runtime-adapter-1",
+                ["runtime_adapter_sha256"] = "a9fc6c65dcc0daaedd71bb7bb64e2d2bc1b65cbda5f9715880846df2a32bee63",
+            },
+            ["caller"] = new JsonObject
+            {
+                ["tenant_id"] = tenantId,
+                ["user_id"] = userId,
+                ["role"] = role,
+                ["groups"] = new JsonArray(groups.OrderBy(x => x, StringComparer.Ordinal)
+                    .Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()),
+                ["tool_grants"] = new JsonArray(callerGrants.ToolNames.OrderBy(x => x, StringComparer.Ordinal)
+                    .Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()),
+                ["knowledge_grants"] = new JsonArray(callerGrants.KnowledgeSourceIds.OrderBy(x => x, StringComparer.Ordinal)
+                    .Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()),
+            },
+            // Restart-safe root input. The observed timestamp is server-owned; callers never
+            // get to inject transient context/memory into a recoverable root command.
+            ["root_input"] = new JsonObject
+            {
+                ["message"] = rootMessage,
+                ["observed_at"] = DateTimeOffset.UtcNow.ToString("O"),
+            },
+            ["authority"] = new JsonObject
+            {
+                ["context_tools"] = context["allowedTools"]?.DeepClone() ?? new JsonArray(),
+                ["knowledge_sources"] = context["knowledgeSources"]?.DeepClone() ?? new JsonArray(),
+                ["rule_set_sha256"] = SkillHash.Sha256(canonicalRules),
+                ["policy_sha256"] = SkillHash.Sha256(canonicalPolicy),
+            },
+            ["workers"] = workerPins,
+            ["verifier"] = ToRootWorkerPin(verifier),
+            ["join_policy"] = policy["joinPolicy"]?.DeepClone(),
+            ["limits"] = new JsonObject
+            {
+                ["max_context_rounds"] = budgets["maxContextRounds"]?.DeepClone(),
+                ["max_tasks"] = budgets["maxTasks"]?.DeepClone(),
+                ["max_child_runs"] = budgets["maxChildRuns"]?.DeepClone(),
+                ["max_concurrency"] = budgets["maxConcurrency"]?.DeepClone(),
+                ["max_repair_rounds"] = budgets["maxRepairRounds"]?.DeepClone(),
+                ["timeout_seconds"] = budgets["timeoutSeconds"]?.DeepClone(),
+            },
+            ["token_budget"] = budgets["tokenBudget"]?.DeepClone(),
+            ["context_byte_budget"] = 65_536,
+            ["business_rules"] = rules,
+            ["policies"] = policy,
+        };
+        var payload = Canonicalize(snapshot).ToJsonString(CanonicalJson);
+        var hash = SkillHash.Sha256(payload);
+        snapshot["snapshot_hash"] = hash;
+        var stored = Canonicalize(snapshot).ToJsonString(CanonicalJson);
+        return new Built(stored, hash, Encoding.UTF8.GetBytes(stored), timeout);
+    }
+
+    private static JsonObject ToRootWorkerPin(PublishedAgentSnapshotSource source)
+    {
+        var definition = JsonNode.Parse(source.Definition)?.AsObject()
+            ?? throw new InvalidOperationException("Pinned Agent definition is invalid");
+        return new JsonObject
+        {
+            ["agent_id"] = source.AgentId.ToString("D"),
+            ["agent_revision"] = source.Revision,
+            ["workflow_id"] = source.WorkflowId.ToString("D"),
+            ["workflow_revision"] = source.WorkflowRevision,
+            // This is the immutable Agent revision artifact hash, not a future per-child run hash.
+            ["snapshot_hash"] = source.DefinitionSha256,
+            ["token_cap"] = EffectiveOrchestratorTokenCap(definition),
+            ["capabilities"] = definition["capabilities"]?.DeepClone() ?? new JsonArray(),
+            ["read_only"] = true,
+            ["skill_revisions"] = new JsonObject(source.SkillBindings
+                .Where(binding => binding.Enabled)
+                .OrderBy(binding => binding.Skill, StringComparer.Ordinal)
+                .Select(binding => new KeyValuePair<string, JsonNode?>(
+                    binding.Skill, JsonValue.Create(binding.SkillRevision)))),
+        };
+    }
+
+    private static int EffectiveOrchestratorTokenCap(JsonObject definition)
+    {
+        var configured = definition["runtime_limits"]?["token_budget"]?.GetValue<int>() ?? 0;
+        var effective = configured > 0
+            ? configured
+            : AgentExecutionContract.DefaultTokenBudget;
+        return Math.Min(effective, AgentExecutionContract.MaxOrchestratorTokenCap);
     }
 
     public static string CreateExecutionArtifact(

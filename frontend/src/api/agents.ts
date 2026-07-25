@@ -20,6 +20,7 @@ export interface FeatureFlags {
   agentBuilderEnabled: boolean
   agentTestRunEnabled?: boolean
   workflowDesignerEnabled?: boolean
+  multiAgentDispatchEnabled?: boolean
 }
 
 export function getFeatures(): Promise<FeatureFlags> {

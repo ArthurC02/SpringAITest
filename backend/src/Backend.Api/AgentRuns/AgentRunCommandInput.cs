@@ -101,8 +101,11 @@ internal static class AgentRunCommandInput
             expectedSha256);
 
     private static bool IsStart(JsonElement input)
-        => HasExactProperties(input, "message")
-           && IsMessage(input.GetProperty("message"));
+        => (HasExactProperties(input, "message")
+            || HasExactProperties(input, "message", "task_envelope"))
+           && IsMessage(input.GetProperty("message"))
+           && (!input.TryGetProperty("task_envelope", out var envelope)
+               || envelope.ValueKind == JsonValueKind.Object);
 
     private static bool IsResume(
         JsonElement input,
@@ -210,6 +213,11 @@ internal static class AgentRunCommandInput
                     writer.WriteString(
                         "message",
                         input.GetProperty("message").GetString());
+                    if (input.TryGetProperty("task_envelope", out var taskEnvelope))
+                    {
+                        writer.WritePropertyName("task_envelope");
+                        taskEnvelope.WriteTo(writer);
+                    }
                     break;
                 case "resume":
                     writer.WriteString(

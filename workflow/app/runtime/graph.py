@@ -1188,7 +1188,12 @@ def _effective_limits(snapshot: DirectAgentExecutionSnapshot) -> EffectiveLimits
             or settings.runtime_default_timeout_seconds,
             600,
         ),
-        token_budget=raw.token_budget or settings.runtime_default_token_budget,
+        token_budget=min(
+            raw.token_budget or settings.runtime_default_token_budget,
+            snapshot.orchestrator_token_cap
+            or raw.token_budget
+            or settings.runtime_default_token_budget,
+        ),
         step_budget=step_budget,
     )
 

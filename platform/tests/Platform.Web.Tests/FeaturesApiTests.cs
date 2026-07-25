@@ -19,7 +19,8 @@ public sealed class FeaturesApiTests
         Assert.False(body["agentBuilderEnabled"]!.GetValue<bool>());
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
         Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
-        Assert.Equal(3, body.AsObject().Count);
+        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.Equal(4, body.AsObject().Count);
     }
 
     [Fact]
@@ -34,6 +35,7 @@ public sealed class FeaturesApiTests
         Assert.True(body["agentBuilderEnabled"]!.GetValue<bool>());
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
         Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
+        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
     }
 
     [Fact]
@@ -59,5 +61,16 @@ public sealed class FeaturesApiTests
         Assert.False(body["agentBuilderEnabled"]!.GetValue<bool>());
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
         Assert.True(body["workflowDesignerEnabled"]!.GetValue<bool>());
+        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Features_MultiAgentDispatchRequiresWorkflowDesigner()
+    {
+        using var factory = new TestWebAppFactory(
+            workflowDesignerEnabled: true,
+            multiAgentDispatchEnabled: true);
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+        Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
     }
 }
