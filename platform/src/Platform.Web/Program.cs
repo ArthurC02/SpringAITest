@@ -60,6 +60,10 @@ var jwtOptions = new JwtOptions
 var agentBuilderEnabled = string.Equals(cfg["AGENT_BUILDER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentTestRunEnabled = agentBuilderEnabled
     && string.Equals(cfg["AGENT_TEST_RUN_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var workflowDesignerEnabled = string.Equals(
+    cfg["WORKFLOW_DESIGNER_ENABLED"],
+    "true",
+    StringComparison.OrdinalIgnoreCase);
 
 builder.Services.AddSingleton(llmOptions);
 builder.Services.AddSingleton(mem0Options);
@@ -90,6 +94,7 @@ builder.Services.AddScoped<IConfigService, ConfigService>();
 builder.Services.AddScoped<ISkillService, SkillService>();
 builder.Services.AddScoped<IConfigurationSetService, ConfigurationSetService>();
 builder.Services.AddScoped<IAgentService, AgentService>();
+builder.Services.AddScoped<IWorkflowAdminService, WorkflowAdminService>();
 builder.Services.AddHttpClient<IAgentRunService, AgentRunService>(
         c => c.Timeout = TimeSpan.FromSeconds(150))
     .ConfigurePrimaryHttpMessageHandler(
@@ -455,6 +460,26 @@ if (!agentTestRunEnabled)
     });
 }
 
+// D4 authoring surfaces are independently fail-closed before authentication. This keeps
+// capability-bearing principals from discovering disabled management endpoints.
+if (!workflowDesignerEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/admin/workflows")
+            || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"))
+        {
+            await ApiErrorWriter.WriteAsync(
+                context.Response,
+                StatusCodes.Status404NotFound,
+                "功能尚未啟用");
+            return;
+        }
+
+        await next();
+    });
+}
+
 // 刻意不用 UseHttpsRedirection:容器內對外是 http(:8080)。
 app.UseAuthentication();
 app.UseAuthorization();
@@ -468,7 +493,7 @@ app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAno
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
 app.MapGet(
     "/api/features",
-    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled }))
+    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled }))
     .AllowAnonymous();
 
 // ---------------------------------------------------------------------------

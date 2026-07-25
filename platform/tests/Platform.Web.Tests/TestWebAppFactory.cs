@@ -20,6 +20,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
     private readonly bool _useDevelopmentEnvironment;
     private readonly bool _agentBuilderEnabled;
     private readonly bool _agentTestRunEnabled;
+    private readonly bool _workflowDesignerEnabled;
     private readonly IMem0Client? _mem0Override;
 
     public TestWebAppFactory()
@@ -29,13 +30,15 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
     internal TestWebAppFactory(
         bool enableRateLimiting = false, bool removeSessionIsolationProvider = false,
         bool useDevelopmentEnvironment = false, bool agentBuilderEnabled = false,
-        bool agentTestRunEnabled = false, IMem0Client? mem0Override = null)
+        bool agentTestRunEnabled = false, bool workflowDesignerEnabled = false,
+        IMem0Client? mem0Override = null)
     {
         _enableRateLimiting = enableRateLimiting;
         _removeSessionIsolationProvider = removeSessionIsolationProvider;
         _useDevelopmentEnvironment = useDevelopmentEnvironment;
         _agentBuilderEnabled = agentBuilderEnabled;
         _agentTestRunEnabled = agentTestRunEnabled;
+        _workflowDesignerEnabled = workflowDesignerEnabled;
         _mem0Override = mem0Override;
     }
 
@@ -50,6 +53,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         // Agent Builder feature flag(D1):預設關閉(fail-closed);需要走 /api/agents* 代理的測試以此開啟。
         builder.UseSetting("AGENT_BUILDER_ENABLED", _agentBuilderEnabled ? "true" : "false");
         builder.UseSetting("AGENT_TEST_RUN_ENABLED", _agentTestRunEnabled ? "true" : "false");
+        builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", _workflowDesignerEnabled ? "true" : "false");
         builder.ConfigureTestServices(services =>
         {
             // B-P1-06:移除 SessionIsolationKeyProvider 註冊,證明 Strict=true 的 fail-closed 真的開著——
@@ -106,6 +110,9 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IAgentService>();
             services.AddScoped<IAgentService, FakeAgentService>();
+
+            services.RemoveAll<IWorkflowAdminService>();
+            services.AddScoped<IWorkflowAdminService, FakeWorkflowAdminService>();
 
             services.RemoveAll<IAgentRunService>();
             services.AddScoped<IAgentRunService, FakeAgentRunService>();

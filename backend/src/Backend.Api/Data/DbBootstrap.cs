@@ -3,6 +3,7 @@ using Npgsql;
 using Backend.Api.AgentRuns;
 using Backend.Api.Agents;
 using Backend.Api.Skills;
+using Backend.Api.Workflows;
 
 namespace Backend.Api.Data;
 
@@ -206,7 +207,7 @@ public static class DbBootstrap
           PRIMARY KEY (agent_id, agent_revision, skill_id));
         -- 最小 Workflow / Workflow_revision(D1 只建表 + 種子一筆系統 Default Agent-Runtime Workflow;
         -- 內容 D3 才會被消費,此期只求形狀正確)。
-        CREATE TABLE IF NOT EXISTS workflow (
+         CREATE TABLE IF NOT EXISTS workflow (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
           tenant_id text NOT NULL,
           name text NOT NULL,
@@ -217,8 +218,19 @@ public static class DbBootstrap
           draft_ui_metadata jsonb NOT NULL DEFAULT '{}',
           published_revision integer,
           created_at timestamptz NOT NULL DEFAULT now(),
-          updated_at timestamptz NOT NULL DEFAULT now());
-        CREATE TABLE IF NOT EXISTS workflow_revision (
+           updated_at timestamptz NOT NULL DEFAULT now());
+         -- D4: semantic Graph IR and UI metadata are separate authoritative canonical byte
+         -- streams. jsonb remains a query projection only; immutable revisions never depend on
+         -- PostgreSQL's jsonb reserialization for their digest.
+         ALTER TABLE workflow ADD COLUMN IF NOT EXISTS draft_definition_canonical bytea;
+         ALTER TABLE workflow ADD COLUMN IF NOT EXISTS draft_ui_metadata_canonical bytea;
+         ALTER TABLE workflow ADD COLUMN IF NOT EXISTS draft_definition_sha256 text NOT NULL DEFAULT '';
+         ALTER TABLE workflow ADD COLUMN IF NOT EXISTS draft_ui_metadata_sha256 text NOT NULL DEFAULT '';
+         ALTER TABLE workflow ADD COLUMN IF NOT EXISTS draft_validated_version bigint;
+         ALTER TABLE workflow ADD COLUMN IF NOT EXISTS created_by text NOT NULL DEFAULT '';
+         ALTER TABLE workflow ADD COLUMN IF NOT EXISTS system_owned boolean NOT NULL DEFAULT false;
+         CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_tenant_name ON workflow (tenant_id, name);
+         CREATE TABLE IF NOT EXISTS workflow_revision (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
           workflow_id uuid NOT NULL REFERENCES workflow(id),
           revision integer NOT NULL,
@@ -230,7 +242,30 @@ public static class DbBootstrap
           compiler_contract_version text NOT NULL DEFAULT '1',
           created_by text NOT NULL DEFAULT '',
           created_at timestamptz NOT NULL DEFAULT now(),
-          CONSTRAINT uq_workflow_revision UNIQUE (workflow_id, revision));
+           CONSTRAINT uq_workflow_revision UNIQUE (workflow_id, revision));
+         ALTER TABLE workflow_revision ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'published';
+         ALTER TABLE workflow_revision ADD COLUMN IF NOT EXISTS definition_canonical bytea;
+         ALTER TABLE workflow_revision ADD COLUMN IF NOT EXISTS ui_metadata_canonical bytea;
+         -- D4 Root Orchestrator aggregate: definitions are authoritative canonical bytes; JSONB
+         -- is retained only for inspection.  References are pinned into immutable revisions.
+         CREATE TABLE IF NOT EXISTS orchestrator (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL,
+           name text NOT NULL, description text NOT NULL DEFAULT '', enabled boolean NOT NULL DEFAULT true,
+           draft_version bigint NOT NULL DEFAULT 1, draft_validated_version bigint,
+           draft_definition jsonb NOT NULL DEFAULT '{}', draft_definition_canonical bytea,
+           draft_definition_sha256 text NOT NULL DEFAULT '', published_revision integer,
+           created_by text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(),
+           updated_at timestamptz NOT NULL DEFAULT now(), CONSTRAINT uq_orchestrator_tenant_name UNIQUE(tenant_id,name));
+         CREATE INDEX IF NOT EXISTS ix_orchestrator_tenant_enabled ON orchestrator(tenant_id,enabled);
+         CREATE TABLE IF NOT EXISTS orchestrator_revision (
+           id uuid PRIMARY KEY DEFAULT gen_random_uuid(), orchestrator_id uuid NOT NULL REFERENCES orchestrator(id),
+           revision integer NOT NULL, status text NOT NULL DEFAULT 'published', definition jsonb NOT NULL,
+           canonical_definition bytea NOT NULL, definition_sha256 text NOT NULL,
+           workflow_id uuid NOT NULL, workflow_revision integer NOT NULL,
+           verifier_agent_id uuid NOT NULL, verifier_agent_revision integer NOT NULL,
+           created_by text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(),
+           CONSTRAINT uq_orchestrator_revision UNIQUE(orchestrator_id,revision));
+         CREATE INDEX IF NOT EXISTS ix_orchestrator_revision_orchestrator ON orchestrator_revision(orchestrator_id);
         -- Published Agent references 必須在 DB 層也能對回 immutable revisions；應用層的
         -- tenant/enabled/kind validation 仍不可省略（FK 不表達那些政策）。
         DO $constraints$
@@ -918,29 +953,39 @@ public static class DbBootstrap
         // workflow row 是 current pointer/authoring draft，可安全 reconcile；workflow_revision 則不可變。
         await conn.ExecuteAsync(new CommandDefinition(
             "INSERT INTO workflow (id, tenant_id, name, kind, enabled, draft_version, draft_definition,"
-            + "  draft_ui_metadata, published_revision)"
-            + " VALUES (@id, @tenant, @name, @kind, true, 1, @def::jsonb, '{}'::jsonb, @revision)"
+            + "  draft_ui_metadata, draft_definition_canonical, draft_ui_metadata_canonical,"
+            + "  draft_definition_sha256, draft_ui_metadata_sha256, published_revision, system_owned, created_by)"
+            + " VALUES (@id, @tenant, @name, @kind, true, 1, @def::jsonb, '{}'::jsonb, convert_to(@def,'UTF8'),"
+            + "  convert_to('{}','UTF8'), @sha, @uiSha, @revision, true, 'system')"
             + " ON CONFLICT (id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, name = EXCLUDED.name,"
             + "  kind = EXCLUDED.kind, enabled = true, draft_version = 1,"
             + "  draft_definition = EXCLUDED.draft_definition, draft_ui_metadata = '{}'::jsonb,"
-            + "  published_revision = EXCLUDED.published_revision, updated_at = now()",
+            + "  draft_definition_canonical = EXCLUDED.draft_definition_canonical,"
+            + "  draft_ui_metadata_canonical = EXCLUDED.draft_ui_metadata_canonical,"
+            + "  draft_definition_sha256 = EXCLUDED.draft_definition_sha256,"
+            + "  draft_ui_metadata_sha256 = EXCLUDED.draft_ui_metadata_sha256,"
+            + "  published_revision = EXCLUDED.published_revision, system_owned = true, updated_at = now()",
             args, tx, cancellationToken: ct));
 
         await conn.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO workflow_revision (workflow_id, revision, schema_version, definition, ui_metadata,"
-            + "  definition_sha256, ui_metadata_sha256, compiler_contract_version, created_by)"
-            + " VALUES (@id, @revision, 1, @def::jsonb, '{}'::jsonb, @sha, @uiSha, '1', 'system')"
+            "INSERT INTO workflow_revision (workflow_id, revision, status, schema_version, definition, ui_metadata,"
+            + "  definition_canonical, ui_metadata_canonical, definition_sha256, ui_metadata_sha256, compiler_contract_version, created_by)"
+            + " VALUES (@id, @revision, 'published', 1, @def::jsonb, '{}'::jsonb, convert_to(@def,'UTF8'),"
+            + "  convert_to('{}','UTF8'), @sha, @uiSha, @compilerContract, 'system')"
             + " ON CONFLICT (workflow_id, revision) DO NOTHING",
-            args, tx, cancellationToken: ct));
+            new { args.id,args.tenant,args.name,args.kind,args.revision,args.def,args.sha,args.uiSha,compilerContract=WorkflowCompilerContracts.Current }, tx, cancellationToken: ct));
 
         var currentRevisionMatches = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
             "SELECT EXISTS("
             + " SELECT 1 FROM workflow_revision"
             + " WHERE workflow_id = @id AND revision = @revision"
-            + " AND definition = @def::jsonb AND definition_sha256 = @sha"
-            + " AND ui_metadata = '{}'::jsonb AND ui_metadata_sha256 = @uiSha"
-            + " AND compiler_contract_version = '1')",
-            args, tx, cancellationToken: ct));
+            + " AND status = 'published' AND schema_version = 1"
+            + " AND definition = @def::jsonb AND definition_canonical = convert_to(@def,'UTF8')"
+            + " AND definition_sha256 = @sha"
+            + " AND ui_metadata = '{}'::jsonb AND ui_metadata_canonical = convert_to('{}','UTF8')"
+            + " AND ui_metadata_sha256 = @uiSha"
+            + " AND compiler_contract_version = @compilerContract)",
+            new { args.id,args.revision,args.def,args.sha,args.uiSha,compilerContract=WorkflowCompilerContracts.Current }, tx, cancellationToken: ct));
         if (!currentRevisionMatches)
         {
             throw new InvalidOperationException(

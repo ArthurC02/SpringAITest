@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -51,6 +53,7 @@ from app.nodes.kbquery.models import SourceResult
 from app.security import RequestContext
 from app.settings import settings
 from app.llm import get_direct_agent_runtime_llm
+from app.workflow_contracts import GRAPH_IR_COMPILER_CONTRACT_VERSION
 
 
 def _legacy_python_canonical_writer_vector() -> None:
@@ -262,7 +265,7 @@ def snapshot(
             "revision": 2,
             "definition": workflow,
             "definition_sha256": canonical_json_sha256(workflow),
-            "compiler_contract_version": "1",
+            "compiler_contract_version": GRAPH_IR_COMPILER_CONTRACT_VERSION,
         },
         "skills": skills,
         "caller": {
@@ -842,6 +845,55 @@ class FakeArtifactReader:
 
 def request_context() -> RequestContext:
     return RequestContext(tenant_id="tenant-甲", user_id="admin-1", role="ADMIN")
+
+
+def test_shared_d4_default_fixture_passes_direct_runtime_preflight() -> None:
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "plans"
+        / "agent-platform-redesign"
+        / "fixtures"
+        / "default-agent-runtime-workflow.json"
+    )
+    fixture_bytes = fixture_path.read_bytes()
+    assert not fixture_bytes.startswith(b"\xef\xbb\xbf")
+    assert not fixture_bytes.endswith((b"\n", b"\r"))
+    definition = json.loads(fixture_bytes)
+    backend_pin = hashlib.sha256(fixture_bytes).hexdigest()
+    assert backend_pin == canonical_json_sha256(definition)
+    raw = snapshot().model_dump(mode="json", exclude={"snapshot_hash"})
+    raw["workflow"]["definition"] = definition
+    raw["workflow"]["definition_sha256"] = backend_pin
+    raw["workflow"][
+        "compiler_contract_version"
+    ] = GRAPH_IR_COMPILER_CONTRACT_VERSION
+    raw["snapshot_hash"] = canonical_json_sha256(raw)
+    value = DirectAgentExecutionSnapshot.model_validate(raw)
+
+    build_context(
+        snapshot=value,
+        request_context=request_context(),
+        model=FakeModel([]),
+        artifact_reader=FakeArtifactReader(),
+    )
+
+
+@pytest.mark.parametrize("unsupported_contract", ["1", "graph-ir/1", "unknown"])
+def test_direct_runtime_rejects_legacy_and_unknown_compiler_contracts(
+    unsupported_contract: str,
+) -> None:
+    raw = snapshot().model_dump(mode="json", exclude={"snapshot_hash"})
+    raw["workflow"]["compiler_contract_version"] = unsupported_contract
+    raw["snapshot_hash"] = canonical_json_sha256(raw)
+    value = DirectAgentExecutionSnapshot.model_validate(raw)
+
+    with pytest.raises(RuntimeError, match="unsupported runtime compiler contract"):
+        build_context(
+            snapshot=value,
+            request_context=request_context(),
+            model=FakeModel([]),
+            artifact_reader=FakeArtifactReader(),
+        )
 
 
 def test_snapshot_hash_is_unicode_stable_and_tampering_fails() -> None:

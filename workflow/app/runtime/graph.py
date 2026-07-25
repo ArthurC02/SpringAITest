@@ -48,6 +48,7 @@ from app.runtime.tool_boundary import (
 )
 from app.security import RequestContext
 from app.settings import settings
+from app.workflow_contracts import GRAPH_IR_COMPILER_CONTRACT_VERSION
 
 
 class RuntimePreflightError(RuntimeError):
@@ -1204,7 +1205,10 @@ def _validate_preflight_snapshot(
         or snapshot.caller.role != ctx.role
     ):
         raise RuntimePreflightError("request identity does not match the snapshot")
-    if snapshot.workflow.compiler_contract_version != "1":
+    if (
+        snapshot.workflow.compiler_contract_version
+        != GRAPH_IR_COMPILER_CONTRACT_VERSION
+    ):
         raise RuntimePreflightError("unsupported runtime compiler contract")
     definition = snapshot.workflow.definition
     if definition.get("schemaVersion") != 1 or definition.get("kind") != "agent-runtime":

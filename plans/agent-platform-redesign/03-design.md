@@ -214,7 +214,7 @@ Workflow 不在執行途中逐筆抓 Graph、Agent、rules、bindings 與 Skills
     "id": "main-orchestration",
     "revision": 5,
     "definitionSha256": "…",
-    "compilerContractVersion": "1"
+    "compilerContractVersion": "d4-graph-ir-1"
   },
   "agentPoolPolicy": {
     "requiredAudience": ["USER"],

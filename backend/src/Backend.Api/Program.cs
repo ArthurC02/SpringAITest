@@ -10,6 +10,8 @@ using Backend.Api.Data;
 using Backend.Api.Data.InMemory;
 using Backend.Api.Files;
 using Backend.Api.Skills;
+using Backend.Api.Workflows;
+using Backend.Api.Orchestrators;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -29,6 +31,7 @@ var embeddingModel = cfg["EMBEDDING_MODEL"] ?? "text-embedding-3-small";
 var rabbitUrl = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:5672";
 var workflowBaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001";
 var useInMemoryDb = string.Equals(cfg["DB_PROVIDER"], "inmemory", StringComparison.OrdinalIgnoreCase);
+var workflowDesignerEnabled = string.Equals(cfg["WORKFLOW_DESIGNER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -45,6 +48,8 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IConfigurationSetRepository, InMemoryConfigurationSetRepository>();
     builder.Services.AddSingleton<IAgentRepository, InMemoryAgentRepository>();
     builder.Services.AddSingleton<IAgentRunRepository, InMemoryAgentRunRepository>();
+    builder.Services.AddSingleton<IWorkflowRepository, InMemoryWorkflowRepository>();
+    builder.Services.AddSingleton<IOrchestratorRepository, InMemoryOrchestratorRepository>();
 }
 else
 {
@@ -57,6 +62,8 @@ else
     builder.Services.AddScoped<IConfigurationSetRepository, ConfigurationSetRepository>();
     builder.Services.AddScoped<IAgentRepository, AgentRepository>();
     builder.Services.AddScoped<IAgentRunRepository, AgentRunRepository>();
+    builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
+    builder.Services.AddScoped<IOrchestratorRepository, OrchestratorRepository>();
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +85,10 @@ builder.Services.AddScoped<IBusinessRuleValidator>(sp => new WorkflowBusinessRul
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("business-rule-validator"),
     workflowBaseUrl,
     internalToken));
+builder.Services.AddHttpClient("workflow-designer", c => c.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<IWorkflowCompiler>(sp => new WorkflowDesignerCompiler(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient("workflow-designer"), workflowBaseUrl, internalToken, sp.GetRequiredService<IHttpContextAccessor>()));
 
 // Agent Skill package 驗證(P0):multipart 轉送 zip 給引擎 POST /skills/validate-package(唯一結構/語意權威)。
 builder.Services.AddHttpClient("skill-package-validator", c => c.Timeout = TimeSpan.FromSeconds(30));
@@ -142,6 +153,21 @@ app.UseExceptionHandler();
 
 // 內部憑證守門(/health 免驗);置於例外處理之後、路由之前。
 app.UseMiddleware<InternalTokenMiddleware>(internalToken);
+
+// D4 authoring endpoints stay invisible even to a direct internal caller while rollout is off.
+if (!workflowDesignerEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/admin/workflows")
+            || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"))
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature not enabled");
+            return;
+        }
+        await next();
+    });
+}
 
 app.MapControllers();
 

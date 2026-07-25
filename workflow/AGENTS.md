@@ -55,6 +55,18 @@ reported errors, nodes, strings, and collections. The evaluator independently
 rechecks fact availability at the requested gate; unavailable facts become
 `unknown` and follow the rule's explicit fail-closed policy.
 
+Workflow Designer / Harness Graph IR endpoints (D4; internal token plus identity
+headers required):
+
+- `GET /workflow-designer/catalog/nodes` returns the server-owned, versioned
+  typed Node/port catalogue. It is distinct from the Skill engine's `/nodes`.
+- `POST /workflow-designer/validate` validates and canonicalizes
+  `{definition, ui_metadata}`. The semantic Graph IR uses camelCase fields;
+  its semantic hash is deliberately independent from UI metadata.
+- `POST /workflow-designer/simulate` returns only a deterministic, data-free
+  stable-node-ID trace. It never invokes tools, adapters, networks, or
+  LangGraph runtime execution.
+
 ## Gotchas
 
 - **Skill engine + node registry** — nodes are first-class citizens via `@node` decorators; skills are declarative YAML compiled to LangGraph graphs at load/invoke time. Custom skills are fetched from backend and merged with built-ins. There is no separate named-workflow mechanism any more (the retired `app/workflows/` directory and the `/workflows` API contained hand-written graphs that have been superseded by declarative Skill YAML equivalents); every workflow is now a Skill.
@@ -64,6 +76,15 @@ rechecks fact availability at the requested gate; unavailable facts become
 - Host port is `:8001` (container `:8000`) because mem0 occupies host `:8000`.
 - Test suite: 800 passed, 1 skipped (PostgreSQL runtime integration is separately covered by the D3 evidence verifier).
 - **D3 direct-Agent runtime:** `app/runtime/` executes only Backend-issued immutable snapshots and requires both `AGENT_TEST_RUN_ENABLED=true` and durable PostgreSQL checkpoint configuration; there is no in-memory production fallback. A lease generation maps to a generation-specific LangGraph thread ID, checkpoint references are HMAC-signed, and resume input is accepted only for the exact durable interrupt identity. `waiting_input` releases the Backend lease; restart recovery, deadline, cancellation, output-contract validation, provider usage bounds, rule gates, tool grants, and scoped retrieval all fail closed. Missing provider usage is conservatively charged as serialized input plus the configured maximum output.
+- **D4 Harness Graph IR:** `app/orchestration/` is a separate constrained
+  compiler contract; do not route it through `app/engine/compiler.py` or reuse
+  the Skill YAML schema. Workflow is the sole validator/canonicalizer. Graph
+  IR permits only server-owned typed primitives, rejects embedded prompts,
+  rules, Skill instructions, Agent bindings, and `latest`, validates topology,
+  bounded loops/fan-out/governance/required stages, and keeps compiler-owned
+  authority, budget, cleanup, and audit outside editable IR. The D1 default
+  Agent-Runtime fixture's nested `bounded_agent_loop.children` is supported as
+  a compatibility shape and must remain compiler-valid.
 - **Backend HTTP client:** shared `httpx.AsyncClient` singleton (module-level `_client`, lifespan-managed) for all backend callables (`app/backend_http.py`) — avoids per-call TCP/TLS overhead. `get_client()` returns the singleton (lazy-creates if needed), and `aclose_client()` closes it at shutdown; tests using `TestClient` fall back to lazy creation.
 - **invoke input filtering:** `_clean_skill_input()` strips ENGINE_KEYS (`fatal_error`, `trace`, `errors`) plus RESERVED_KEYS (identity/immutable/seed) and `__` prefixed keys from the invoke input before building the skill state — prevents callers from injecting forged error frames or bypassing fatal-error short-circuit. Invoke then seeds `tenant_id`/`user_id`/`role` into the state from the caller's real identity headers (the only trusted injection point — ToolContext reads them from state).
 - **Script authoring gate (validate-time only):** `POST /skills/validate` passes the caller's role as `author_role`; a non-ADMIN author submitting a definition with script steps gets a `forbidden_script` validation error. `custom.load` and invoke call `validate_source` without `author_role` (gate off) — existing USER+script skills in the DB keep loading and running; `required_role` (who may *invoke*) is untouched.

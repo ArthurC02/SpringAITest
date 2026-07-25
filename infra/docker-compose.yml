@@ -148,6 +148,7 @@ services:
       # Agent Builder 是管理面功能；預設關閉，明確 opt-in 才暴露 /api/agents*。
       AGENT_BUILDER_ENABLED: ${AGENT_BUILDER_ENABLED:-false}
       AGENT_TEST_RUN_ENABLED: ${AGENT_TEST_RUN_ENABLED:-false}
+      WORKFLOW_DESIGNER_ENABLED: ${WORKFLOW_DESIGNER_ENABLED:-false}
       # 只信任 frontend nginx 所在的隔離網段；不得改成共用 default network。
       TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-10.253.254.0/28}
 
@@ -237,6 +238,7 @@ services:
       BACKEND_BASE_URL: http://backend:8080          # 向量檢索改呼叫 backend 的資料檢索服務
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
       AGENT_TEST_RUN_ENABLED: ${AGENT_TEST_RUN_ENABLED:-false}
+      WORKFLOW_DESIGNER_ENABLED: ${WORKFLOW_DESIGNER_ENABLED:-false}
       CHECKPOINT_DATABASE_URL: ${CHECKPOINT_DATABASE_URL:-}
       CHECKPOINT_HMAC_KEY: ${CHECKPOINT_HMAC_KEY:-agent-run-checkpoint-dev-key}
 

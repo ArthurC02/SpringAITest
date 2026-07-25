@@ -685,6 +685,32 @@ public sealed class FakeAgentRunService : IAgentRunService
 /// 未知 id → 404。回傳 <see cref="AgentProxyResponse"/>(status + 原始 JSON body + ETag),由 controller 原樣寫回。
 /// Calls 是靜態的,讓「flag off 時請求不得抵達代理」可被斷言。
 /// </summary>
+public sealed class FakeWorkflowAdminService : IWorkflowAdminService
+{
+    public Task<AdminProxyResponse> SendAsync(
+        HttpMethod method,
+        string resource,
+        Guid? id,
+        string? suffix,
+        UserContext context,
+        string? ifMatch = null,
+        JsonElement? body = null,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            resource,
+            id,
+            suffix,
+            method = method.Method,
+            user = context.UserId,
+            tenant = context.TenantCode,
+            if_match = ifMatch,
+        });
+        return Task.FromResult(new AdminProxyResponse(200, payload, "\"7\""));
+    }
+}
+
 public sealed class FakeAgentService : IAgentService
 {
     public static readonly List<string> Calls = new();

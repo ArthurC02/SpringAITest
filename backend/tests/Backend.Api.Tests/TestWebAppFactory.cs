@@ -9,6 +9,9 @@ using Backend.Api.Configuration;
 using Backend.Api.Conversations;
 using Backend.Api.Files;
 using Backend.Api.Skills;
+using Backend.Api.Workflows;
+using Backend.Api.Orchestrators;
+using Backend.Api.Data.InMemory;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -28,6 +31,7 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", "true");
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IAuthRepository>();
@@ -53,6 +57,13 @@ public sealed class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IAgentRunRepository>();
             services.AddSingleton<IAgentRunRepository, FakeAgentRunRepository>();
+
+            services.RemoveAll<IWorkflowRepository>();
+            services.AddSingleton<IWorkflowRepository, InMemoryWorkflowRepository>();
+            services.RemoveAll<IOrchestratorRepository>();
+            services.AddSingleton<IOrchestratorRepository, InMemoryOrchestratorRepository>();
+            services.RemoveAll<IWorkflowCompiler>();
+            services.AddSingleton<IWorkflowCompiler, FakeWorkflowCompiler>();
 
             // Skill 驗證不打真的 workflow(:8001)。
             services.RemoveAll<ISkillValidator>();

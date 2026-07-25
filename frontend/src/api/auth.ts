@@ -9,14 +9,14 @@ const SESSION_KEY = 'springai:session'
 export function getSession(): Session | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY)
-    return raw ? (JSON.parse(raw) as Session) : null
+    return raw ? normalizeSession(JSON.parse(raw) as Session) : null
   } catch {
     return null
   }
 }
 
 export function saveSession(s: Session): void {
-  localStorage.setItem(SESSION_KEY, JSON.stringify(s))
+  localStorage.setItem(SESSION_KEY, JSON.stringify(normalizeSession(s)))
 }
 
 export function clearSession(): void {
@@ -25,12 +25,28 @@ export function clearSession(): void {
 
 /** 登入成功回 {token,username,role,tenantCode}，同時寫入 localStorage。 */
 export async function login(username: string, password: string): Promise<Session> {
-  const s = await apiFetch<Session>('/api/auth/login', {
+  const s = normalizeSession(await apiFetch<Session>('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ username, password }),
-  })
+  }))
   saveSession(s)
   return s
+}
+
+/** Login response remains backward compatible; the signed JWT is the durable source of additive grants. */
+function normalizeSession(session: Session): Session {
+  if (Array.isArray(session.capabilities)) return { ...session, capabilities: [...new Set(session.capabilities)] }
+  try {
+    const payload = session.token.split('.')[1]
+    const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))) as { capabilities?: unknown }
+    const raw = decoded.capabilities
+    const capabilities = Array.isArray(raw) ? raw.filter((value): value is string => typeof value === 'string')
+      : typeof raw === 'string' ? [raw] : []
+    return { ...session, capabilities }
+  } catch {
+    // An unreadable token never grants UI access; Platform remains the authority.
+    return { ...session, capabilities: [] }
+  }
 }
 
 /** 註冊回 {username,role,tenantCode}（不含 token；成功後仍需登入）。 */

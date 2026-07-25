@@ -82,3 +82,38 @@ code {
   border-radius: 4px;
   background: var(--code-bg);
 }
+
+/* D4 Workflow Designer: canvas styling is deliberately presentation-only. */
+.workflow-designer {
+  display: grid;
+  grid-template-columns: minmax(10rem, 15rem) minmax(24rem, 1fr) minmax(13rem, 18rem);
+  min-height: 34rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.workflow-designer__palette,
+.workflow-designer__inspector {
+  padding: 1rem;
+  border-color: var(--border);
+  background: var(--code-bg);
+}
+
+.workflow-designer__palette { border-right: 1px solid var(--border); }
+.workflow-designer__inspector { border-left: 1px solid var(--border); }
+.workflow-designer__palette .btn { display: block; width: 100%; margin: .5rem 0; text-align: left; }
+.workflow-designer__canvas { position: relative; min-height: 34rem; }
+.workflow-designer__layout { position: absolute; z-index: 4; right: .75rem; top: .75rem; }
+.workflow-designer__config { min-height: 11rem; font-family: var(--mono); font-size: .82rem; }
+.workflow-node { min-width: 10rem; padding: .6rem .8rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); color: var(--text-h); box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+.workflow-node--invalid { border-color: var(--danger); background: var(--danger-bg); }
+.workflow-node__required, .workflow-node__trace { display: inline-block; margin-left: .35rem; padding: 0 .3rem; border-radius: 3px; font-size: .72rem; background: var(--warning-bg); color: var(--warning); }
+.workflow-node__trace { background: var(--success-bg); color: var(--success); }
+
+@media (max-width: 900px) {
+  .workflow-designer { grid-template-columns: 1fr; }
+  .workflow-designer__palette, .workflow-designer__inspector { border: 0; border-bottom: 1px solid var(--border); }
+  .workflow-designer__canvas { min-height: 28rem; }
+}

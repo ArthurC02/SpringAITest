@@ -28,6 +28,7 @@ public sealed class InMemoryAgentRepository : IAgentRepository
     private static DateTime Now() => DateTime.UtcNow;
 
     internal object RunSnapshotSyncRoot => _skills.ReferenceSyncRoot;
+    internal object OrchestratorReferenceSyncRoot => _gate;
 
     internal bool AgentExistsUnsafe(string tenantId, Guid id)
     {
@@ -36,6 +37,19 @@ public sealed class InMemoryAgentRepository : IAgentRepository
             return Find(tenantId, id) is not null;
         }
     }
+
+    internal string? GetActivePublishedDefinitionUnsafe(string tenantId,Guid id,int revision)
+    {
+        lock(_gate)
+        {
+            var entry=Find(tenantId,id);if(entry is null||!entry.Enabled||entry.PublishedRevision!=revision)return null;
+            return entry.Revisions.FirstOrDefault(r=>r.Revision==revision&&r.Status=="published")?.DefinitionSnapshot;
+        }
+    }
+    internal string? GetActivePublishedDefinitionWithoutLock(string tenantId,Guid id,int revision)
+    { var entry=Find(tenantId,id);if(entry is null||!entry.Enabled||entry.PublishedRevision!=revision)return null;return entry.Revisions.FirstOrDefault(r=>r.Revision==revision&&r.Status=="published")?.DefinitionSnapshot; }
+    internal (string Definition,Guid? WorkflowId,int? WorkflowRevision)? GetActivePublishedOrchestratorReferenceWithoutLock(string tenantId,Guid id,int revision)
+    {var entry=Find(tenantId,id);if(entry is null||!entry.Enabled||entry.PublishedRevision!=revision)return null;var row=entry.Revisions.FirstOrDefault(r=>r.Revision==revision&&r.Status=="published");return row is null?null:(row.DefinitionSnapshot,row.RuntimeWorkflowId,row.RuntimeWorkflowRevision);}
 
     /// <summary>
     /// 呼叫端持有 <see cref="RunSnapshotSyncRoot"/>；本方法再取 Agent lock，沿用 publish 的固定

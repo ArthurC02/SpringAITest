@@ -106,6 +106,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
       AGENT_BUILDER_ENABLED: ${AGENT_BUILDER_ENABLED:-false}
       AGENT_TEST_RUN_ENABLED: ${EVIDENCE_AGENT_TEST_RUN_ENABLED:-true}
+      WORKFLOW_DESIGNER_ENABLED: ${WORKFLOW_DESIGNER_ENABLED:-false}
       TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-10.253.254.0/28}
 
   # Curl targets this proxy directly. It retains production SSE nginx settings

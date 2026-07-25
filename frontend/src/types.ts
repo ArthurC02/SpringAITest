@@ -18,6 +18,181 @@ export interface Session {
   username: string
   role: Role
   tenantCode: string
+  /** Additive JWT-derived grants. An ADMIN role alone never implies workflow.manage. */
+  capabilities?: string[]
+}
+
+// ── Workflow Designer (D4): semantic graph and canvas metadata are deliberately separate. ──
+export type WorkflowKind = 'orchestrator' | 'agent-runtime'
+export type WorkflowRuntimeVariant = 'worker' | 'verifier'
+
+export interface WorkflowPort {
+  id: string
+  dataType: string
+  required?: boolean
+  maxConnections?: number
+}
+
+export interface WorkflowNodeType {
+  type: string
+  version: string
+  title: string
+  description?: string
+  kind: 'control' | 'data' | string
+  inputs: WorkflowPort[]
+  outputs: WorkflowPort[]
+  configSchema: Record<string, unknown>
+  risk?: string
+  authoringCapability: string
+  catalogVisibility: string
+  runtimePolicy: string
+  runtimeAdapter?: string
+  workflowKinds?: WorkflowKind[]
+  runtimeVariants?: WorkflowRuntimeVariant[]
+  requiredStage?: boolean
+}
+
+export interface WorkflowGraphNode {
+  id: string
+  type: string
+  typeVersion: string
+  config: Record<string, unknown>
+}
+
+export interface WorkflowGraphEdge {
+  id: string
+  source: { nodeId: string; port: string }
+  target: { nodeId: string; port: string }
+}
+
+export interface WorkflowDefinition {
+  schemaVersion: number
+  kind: WorkflowKind
+  runtimeVariant?: WorkflowRuntimeVariant
+  nodes: WorkflowGraphNode[]
+  edges: WorkflowGraphEdge[]
+  governance: Record<string, unknown>
+}
+
+export interface WorkflowUiMetadata {
+  positions: Record<string, { x: number; y: number }>
+  viewport?: { x: number; y: number; zoom: number }
+  groups?: Record<string, string[]>
+  collapsed?: string[]
+}
+
+export interface WorkflowDraft {
+  definition: WorkflowDefinition
+  ui_metadata: WorkflowUiMetadata
+}
+
+export interface WorkflowSummary {
+  id: string
+  name: string
+  description: string
+  kind: WorkflowKind
+  enabled: boolean
+  published_revision: number | null
+  updated_at: string
+}
+
+export interface Workflow extends WorkflowSummary {
+  draft_version: number
+  draft: WorkflowDraft
+}
+
+export interface WorkflowRevision {
+  revision: number
+  created_at: string
+  created_by: string
+  definition_sha256: string
+  ui_metadata_sha256?: string
+  definition?: WorkflowDefinition
+  ui_metadata?: WorkflowUiMetadata
+}
+
+export interface WorkflowValidationIssue {
+  scope: 'node' | 'edge' | 'graph' | string
+  id?: string
+  code: string
+  message: string
+  path?: string
+}
+
+export interface WorkflowValidation {
+  valid: boolean
+  canonical_definition?: WorkflowDefinition
+  errors: WorkflowValidationIssue[]
+}
+
+export interface WorkflowTraceEntry {
+  node_id: string
+  status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped' | string
+  summary?: string
+}
+
+export interface WorkflowSimulation extends WorkflowValidation {
+  trace?: WorkflowTraceEntry[]
+}
+
+export interface OrchestratorDraft {
+  name: string
+  description: string
+  instructions: string
+  policy: {
+    dispatchMode: 'bounded-parallel'
+    joinPolicy: 'fail-fast' | 'allow-partial' | 'repair'
+    repairPolicy: 'redispatch' | 'fail'
+    aggregationPolicy: 'verified-only'
+    denialPolicy: 'fail-closed'
+  }
+  workflow: { id: string; revision: number }
+  workerPool: Array<{ agentId: string; revision: number }>
+  workerPolicy: {
+    requiredAudience: string[]
+    requiredCapabilities: string[]
+    selection: 'pinned-only'
+  }
+  context: { readOnly: true; allowedTools: string[]; knowledgeSources: string[] }
+  audience: string[]
+  capabilities: string[]
+  verifier: {
+    agentId: string
+    revision: number
+    variant: 'read-only'
+    outputContract: { type: 'verification-report'; [key: string]: unknown }
+    independent: true
+  }
+  budgets: {
+    maxContextRounds: number
+    maxTasks: number
+    maxChildRuns: number
+    maxConcurrency: number
+    maxRepairRounds: number
+    tokenBudget: number
+    timeoutSeconds: number
+  }
+}
+
+export interface OrchestratorSummary {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  published_revision: number | null
+  updated_at: string
+}
+
+export interface Orchestrator extends OrchestratorSummary {
+  draft_version: number
+  draft: OrchestratorDraft
+}
+
+export interface OrchestratorRevision {
+  revision: number
+  created_at: string
+  created_by: string
+  definition_sha256: string
 }
 
 /**

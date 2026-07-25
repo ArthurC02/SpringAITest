@@ -1,6 +1,7 @@
 using Backend.Api.Agents;
 using Backend.Api.Skills;
 using Dapper;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -515,6 +516,30 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.Single(graph["nodes"]!.AsArray(), n => n!["type"]!.GetValue<string>() == "start");
         Assert.Single(graph["nodes"]!.AsArray(), n => n!["type"]!.GetValue<string>() == "end");
         Assert.Empty(AgentDefaults.ValidateRuntimeWorkflowFixture());
+    }
+
+    [Fact]
+    public void DefaultAgentRuntimeWorkflow_MatchesSharedFixtureExactly()
+    {
+        var current=new DirectoryInfo(AppContext.BaseDirectory);string? path=null;
+        while(current is not null){var candidate=Path.Combine(current.FullName,"plans","agent-platform-redesign","fixtures","default-agent-runtime-workflow.json");if(File.Exists(candidate)){path=candidate;break;}current=current.Parent;}
+        Assert.NotNull(path);
+        var fixtureBytes=File.ReadAllBytes(path!);var backendBytes=Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition);
+        Assert.Equal(2003,fixtureBytes.Length);
+        Assert.Equal(fixtureBytes,backendBytes);
+        Assert.Equal((byte)'{',backendBytes[0]);Assert.Equal((byte)'}',backendBytes[^1]);
+        Assert.Empty(AgentDefaults.ValidateRuntimeWorkflowFixture());
+        Assert.Equal("1bcd5a670a62858a79fe7958b3a953fa922ef282200977be9ef6eacb43ed7f57",SkillHash.Sha256(AgentDefaults.RuntimeWorkflowDefinition));
+    }
+
+    [SkippableFact]
+    public async Task Bootstrap_RejectsExistingRuntimeRevisionCanonicalByteDrift()
+    {
+        _fx.SkipIfUnavailable();var id=Guid.Parse(AgentDefaults.RuntimeWorkflowId);
+        await using var connection=await _fx.DataSource!.OpenConnectionAsync();
+        await connection.ExecuteAsync("UPDATE workflow_revision SET ui_metadata_canonical=convert_to('{\"drift\":true}','UTF8') WHERE workflow_id=@id AND revision=@revision",new{id,revision=AgentDefaults.RuntimeWorkflowRevision});
+        try{await Assert.ThrowsAsync<InvalidOperationException>(()=>Backend.Api.Data.DbBootstrap.RunAsync(_fx.DataSource!,Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));}
+        finally{await connection.ExecuteAsync("UPDATE workflow_revision SET ui_metadata_canonical=convert_to('{}','UTF8') WHERE workflow_id=@id AND revision=@revision",new{id,revision=AgentDefaults.RuntimeWorkflowRevision});}
     }
 
     private sealed record RevRow(

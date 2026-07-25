@@ -61,6 +61,7 @@ from app.runtime.api import (
     AgentRuntimeFeatureGateMiddleware,
     router as agent_runtime_router,
 )
+from app.orchestration.api import router as workflow_designer_router
 from app.runtime.service import RuntimeService
 from app.settings import settings
 
@@ -199,6 +200,7 @@ app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
 app.add_middleware(BusinessRuleRequestLimitMiddleware)
 app.add_middleware(AgentRuntimeFeatureGateMiddleware)
 app.include_router(agent_runtime_router)
+app.include_router(workflow_designer_router)
 
 
 @app.exception_handler(RequestValidationError)

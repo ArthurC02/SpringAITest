@@ -19,6 +19,7 @@ import type {
 export interface FeatureFlags {
   agentBuilderEnabled: boolean
   agentTestRunEnabled?: boolean
+  workflowDesignerEnabled?: boolean
 }
 
 export function getFeatures(): Promise<FeatureFlags> {

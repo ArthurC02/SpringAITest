@@ -532,6 +532,26 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
             run.Hash,
             envelope.RootElement.GetProperty("snapshot_hash").GetString());
 
+        var runtimeWorkflowId=Guid.Parse(AgentDefaults.RuntimeWorkflowId);
+        var runtimeWorkflowBytes=Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition);
+        await connection.ExecuteAsync(
+            "UPDATE workflow_revision SET definition_canonical=convert_to('{}','UTF8')"
+            + " WHERE workflow_id=@runtimeWorkflowId AND revision=@revision",
+            new {runtimeWorkflowId,revision=AgentDefaults.RuntimeWorkflowRevision});
+        try
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(()=>Runs.CreateDirectAsync(
+                tenant,"admin-a","ADMIN",agent.Id,"corrupt workflow bytea",
+                "workflow-bytea-corrupt",default));
+        }
+        finally
+        {
+            await connection.ExecuteAsync(
+                "UPDATE workflow_revision SET definition_canonical=@runtimeWorkflowBytes"
+                + " WHERE workflow_id=@runtimeWorkflowId AND revision=@revision",
+                new {runtimeWorkflowBytes,runtimeWorkflowId,revision=AgentDefaults.RuntimeWorkflowRevision});
+        }
+
         async Task AssertRunAuthorityRejected(byte[] bytes, string hash)
         {
             await connection.ExecuteAsync(

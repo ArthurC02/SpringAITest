@@ -1,8 +1,10 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.Agents;
 using Backend.Api.Skills;
+using Backend.Api.Workflows;
 using Dapper;
 using Npgsql;
 
@@ -194,7 +196,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
             }
 
             var workflow = await conn.QuerySingleOrDefaultAsync<WorkflowRow>(new CommandDefinition(
-                "SELECT wr.schema_version AS SchemaVersion, wr.definition::text AS Definition,"
+                "SELECT wr.schema_version AS SchemaVersion, wr.definition_canonical AS CanonicalDefinition,"
                 + " wr.definition_sha256 AS DefinitionSha256,"
                 + " wr.compiler_contract_version AS CompilerContractVersion"
                 + " FROM workflow w JOIN workflow_revision wr"
@@ -220,22 +222,22 @@ public sealed class AgentRunRepository : IAgentRunRepository
             // The DB seed stores the hash of the checked-in immutable fixture bytes. Verify that
             // source first, then emit a recursively sorted definition/hash pair that Python can
             // independently recompute after JSON parsing.
-            var storedWorkflowCanonical =
-                AgentRunSnapshotBuilder.CanonicalizeJson(workflow.Definition);
-            var fixtureWorkflowCanonical =
-                AgentRunSnapshotBuilder.CanonicalizeJson(AgentDefaults.RuntimeWorkflowDefinition);
-            if (!string.Equals(
-                    storedWorkflowCanonical,
-                    fixtureWorkflowCanonical,
-                    StringComparison.Ordinal)
-                || !string.Equals(
-                    workflow.DefinitionSha256,
-                    SkillHash.Sha256(AgentDefaults.RuntimeWorkflowDefinition),
-                    StringComparison.Ordinal))
+            if (workflow.SchemaVersion != 1
+                || workflow.CompilerContractVersion != WorkflowCompilerContracts.Current
+                || workflow.CanonicalDefinition is null
+                || !SkillHash.MatchesSha256(workflow.CanonicalDefinition, workflow.DefinitionSha256)
+                || !workflow.CanonicalDefinition.AsSpan().SequenceEqual(
+                    Encoding.UTF8.GetBytes(AgentDefaults.RuntimeWorkflowDefinition)))
             {
                 throw new InvalidOperationException(
                     $"Workflow revision hash mismatch：{workflowId:D}#{workflowRevision}");
             }
+
+            var storedWorkflowCanonical = new UTF8Encoding(false, true)
+                .GetString(workflow.CanonicalDefinition);
+            _ = JsonNode.Parse(storedWorkflowCanonical)
+                ?? throw new InvalidOperationException(
+                    $"Workflow revision canonical JSON is invalid: {workflowId:D}#{workflowRevision}");
 
             var skillRows = (await conn.QueryAsync<SkillRunRow>(new CommandDefinition(
                 "SELECT ars.position AS Position, s.id AS SkillId, s.name AS Name,"
@@ -2627,7 +2629,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
 
     private sealed record WorkflowRow(
         int SchemaVersion,
-        string Definition,
+        byte[]? CanonicalDefinition,
         string DefinitionSha256,
         string CompilerContractVersion);
 

@@ -13,8 +13,10 @@ import DocumentsView from './DocumentsView'
 import AnalysisView from './AnalysisView'
 import ConfigView from './ConfigView'
 import AgentsView from './AgentsView'
+import WorkflowsView from './WorkflowsView'
+import OrchestratorsView from './OrchestratorsView'
 
-type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agents'
+type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agents' | 'workflows' | 'orchestrators'
 
 // copilot 的 switchView 只認四個原視圖(不含 agents,副駕不涉入 Agent Builder)。
 const VIEWS: View[] = ['chat', 'documents', 'analysis', 'config']
@@ -28,6 +30,8 @@ const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
 
 // Agents 入口只在 features flag 為 true 且使用者為 ADMIN 時加入(fail-closed)。
 const AGENTS_NAV = { id: 'agents' as const, icon: '🧑‍💼', label: 'Agents' }
+const WORKFLOWS_NAV = { id: 'workflows' as const, icon: '🧩', label: 'Workflow Designer' }
+const ORCHESTRATORS_NAV = { id: 'orchestrators' as const, icon: '🧭', label: 'Orchestrators' }
 
 interface Props {
   session: Session
@@ -39,9 +43,15 @@ export default function AppShell({ session, onLogout }: Props) {
   const [view, setView] = useState<View>('chat')
   const [agentBuilderEnabled, setAgentBuilderEnabled] = useState(false)
   const [agentTestRunEnabled, setAgentTestRunEnabled] = useState(false)
+  const [workflowDesignerEnabled, setWorkflowDesignerEnabled] = useState(false)
   const isAdmin = session.role === 'ADMIN'
+  // Capability comparison is exact: `workflow.manage.other` is never sufficient.
+  const canManageWorkflow = (session.capabilities ?? []).includes('workflow.manage')
   const items = NAV.filter((n) => !n.adminOnly || isAdmin)
-  const navItems = agentBuilderEnabled && isAdmin ? [...items, AGENTS_NAV] : items
+  const navItems = [
+    ...(agentBuilderEnabled && isAdmin ? [...items, AGENTS_NAV] : items),
+    ...(workflowDesignerEnabled && canManageWorkflow ? [WORKFLOWS_NAV, ORCHESTRATORS_NAV] : []),
+  ]
 
   // features flag:失敗或 false 一律 fail-closed(不顯示 Agents 入口)。登入即取一次。
   useEffect(() => {
@@ -51,12 +61,14 @@ export default function AppShell({ session, onLogout }: Props) {
         if (!cancelled) {
           setAgentBuilderEnabled(!!f.agentBuilderEnabled)
           setAgentTestRunEnabled(!!f.agentBuilderEnabled && !!f.agentTestRunEnabled)
+          setWorkflowDesignerEnabled(!!f.workflowDesignerEnabled)
         }
       })
       .catch(() => {
         if (!cancelled) {
           setAgentBuilderEnabled(false)
           setAgentTestRunEnabled(false)
+          setWorkflowDesignerEnabled(false)
         }
       })
     return () => {
@@ -71,7 +83,10 @@ export default function AppShell({ session, onLogout }: Props) {
   // 分頁標題隨視圖更新（沿用 NAV 的中文 label，不另建映射）。
   useEffect(() => {
     const label =
-      view === 'agents' ? AGENTS_NAV.label : NAV.find((n) => n.id === view)?.label ?? ''
+      view === 'agents' ? AGENTS_NAV.label
+        : view === 'workflows' ? WORKFLOWS_NAV.label
+          : view === 'orchestrators' ? ORCHESTRATORS_NAV.label
+            : NAV.find((n) => n.id === view)?.label ?? ''
     document.title = `${label} — 資料分析平台`
   }, [view])
 
@@ -237,6 +252,8 @@ export default function AppShell({ session, onLogout }: Props) {
               {view === 'agents' && isAdmin && (
                 <AgentsView isAdmin agentTestRunEnabled={agentTestRunEnabled} />
               )}
+              {view === 'workflows' && workflowDesignerEnabled && canManageWorkflow && <WorkflowsView />}
+              {view === 'orchestrators' && workflowDesignerEnabled && canManageWorkflow && <OrchestratorsView />}
             </ErrorBoundary>
           </main>
         </div>
