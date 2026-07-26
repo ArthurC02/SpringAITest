@@ -8,6 +8,7 @@ metadata/definition（backend 以此決定能不能寫）。
 import io
 import zipfile
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.engine.package import LIMITS
@@ -218,42 +219,102 @@ def test_illegal_package_name_rejected_without_expected_name():
     assert body["errors"][0]["code"] == "invalid_frontmatter"
 
 
-def test_oversize_archive_rejected_via_endpoint():
-    # off-point 檔案數：SKILL.md + max = max+1 → invalid_package（限制常數走 LIMITS 單一來源）
+def _oversize_archive() -> bytes:
+    # off-point 檔案數：SKILL.md + max = max+1（限制常數走 LIMITS 單一來源）
     files = {"SKILL.md": AGENTIC_SKILL_MD}
     files.update({f"references/f{i}.md": b"x" for i in range(LIMITS.max_file_count)})
-    resp = _post(_zip(files), "sales-helper")
-
-    body = resp.json()
-    assert body["valid"] is False
-    assert body["errors"][0]["code"] == "invalid_package"
-    assert "canonical_definition" not in body
+    return _zip(files)
 
 
-def test_path_traversal_rejected_via_endpoint():
-    raw = _zip([("SKILL.md", AGENTIC_SKILL_MD), ("../evil.md", b"x")])
-    resp = _post(raw, "sales-helper")
-
-    body = resp.json()
-    assert body["valid"] is False
-    assert body["errors"][0]["code"] == "invalid_package"
-
-
-def test_crc_failure_returns_validation_error_instead_of_500():
-    resp = _post(_corrupt_stored_skill_md_crc(), "sales-helper")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["valid"] is False
-    assert body["errors"][0]["code"] == "invalid_package"
-    assert "skill" not in body
-
-
-def test_overlong_timeout_returns_validation_error_instead_of_500():
+def _overlong_timeout_archive() -> bytes:
     md = AGENTIC_SKILL_MD.replace(
         'timeout_seconds: "30"', f'timeout_seconds: "{"9" * 10_000}"'
     )
-    resp = _post(_zip({"SKILL.md": md}), "sales-helper")
+    return _zip({"SKILL.md": md})
+
+
+@pytest.mark.parametrize(
+    "make_archive,expected_code",
+    [
+        (_oversize_archive, "invalid_package"),
+        (
+            lambda: _zip([("SKILL.md", AGENTIC_SKILL_MD), ("../evil.md", b"x")]),
+            "invalid_package",
+        ),
+        (_corrupt_stored_skill_md_crc, "invalid_package"),
+        (_overlong_timeout_archive, "invalid_frontmatter"),
+    ],
+    ids=["file-count", "path-traversal", "crc", "overlong-timeout"],
+)
+def test_package_error_returns_validation_error_instead_of_500(
+    make_archive, expected_code
+):
+    """四種內部例外來源共用 main.py:439 的 `except PackageError`：一律 200 + valid=false，
+    且不得帶任何可被寫入的 metadata（backend 以此決定能不能寫）。"""
+    resp = _post(make_archive(), "sales-helper")
+
     assert resp.status_code == 200
     body = resp.json()
     assert body["valid"] is False
-    assert body["errors"][0]["code"] == "invalid_frontmatter"
+    assert body["errors"][0]["code"] == expected_code
+    assert "skill" not in body
+    assert "canonical_definition" not in body
+    assert "package_manifest" not in body
+
+
+# ---------------------------------------------------------------------------
+# 撰寫者角色 gate：匯入路徑與 /skills/validate 同一套
+# ---------------------------------------------------------------------------
+
+SCRIPT_FLOW_YAML = (
+    "name: script-probe\n"
+    "description: 腳本探針\n"
+    "flow:\n"
+    "  - script: |\n"
+    "      note = 'ok'\n"
+)
+SCRIPT_FLOW_MD = (
+    "---\nname: script-probe\ndescription: 腳本探針\n---\n\n"
+    f"```yaml\n{SCRIPT_FLOW_YAML}\n```\n"
+)
+
+
+def test_script_flow_package_rejected_for_non_admin_author():
+    """同一份含 script 的定義，走 /skills/validate 是 forbidden_script；匯入路徑不得放行。
+
+    backend 的三個匯入入口與 platform proxy 都已是 ADMIN-only，這是最內層的縱深防禦。
+    """
+    body = _post(_zip({"SKILL.md": SCRIPT_FLOW_MD}), "script-probe", role="USER").json()
+
+    assert body["valid"] is False
+    assert [e["code"] for e in body["errors"]] == ["forbidden_script"]
+    assert "skill" not in body
+    assert "canonical_definition" not in body
+
+
+def test_script_flow_package_accepted_for_admin_author():
+    """決策表的另一半：合法作者（ADMIN）匯入同一份定義照樣通過。"""
+    body = _post(_zip({"SKILL.md": SCRIPT_FLOW_MD}), "script-probe", role="ADMIN").json()
+
+    assert body["valid"] is True
+    assert body["errors"] == []
+    assert body["skill"]["name"] == "script-probe"
+    assert body["canonical_definition"] == SCRIPT_FLOW_YAML
+
+
+def test_scriptless_flow_package_accepted_for_non_admin_author():
+    """gate 只針對 script 步驟：USER 匯入無 script 的 flow 不受影響（零追溯破壞）。"""
+    flow_yaml = (
+        "name: flow-probe\n"
+        "description: flow 匯出\n"
+        "flow:\n"
+        "  - node: query_intake@1.0\n"
+    )
+    md = (
+        "---\nname: flow-probe\ndescription: flow 匯出\n---\n\n"
+        f"```yaml\n{flow_yaml}```\n"
+    )
+    body = _post(_zip({"SKILL.md": md}), "flow-probe", role="USER").json()
+
+    assert body["valid"] is True
+    assert body["skill"]["kind"] == "flow"

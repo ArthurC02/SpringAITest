@@ -13,7 +13,25 @@ import type {
 } from './types'
 
 export const DEFAULT_RULE_GATE: RuleGate = 'pre-action'
-export const MAX_RULE_UI_DEPTH = 3
+/** Fail-safe only: used when the catalog omits `limits.maxDepth` or reports a nonsensical value. */
+const FALLBACK_RULE_UI_DEPTH = 3
+
+/**
+ * UI nesting budget. The catalog is the source of truth (server validate/publish stays the
+ * authority), so an oversized catalog value deliberately just widens authoring.
+ */
+export function ruleUiDepthLimit(
+  response:
+    | RuleFactCatalogEntry[]
+    | RuleCatalogEnvelope<RuleFactCatalogEntry>
+    | null
+    | undefined,
+): number {
+  const limit = response && !Array.isArray(response) ? response.limits?.maxDepth : undefined
+  return typeof limit === 'number' && Number.isInteger(limit) && limit > 0
+    ? limit
+    : FALLBACK_RULE_UI_DEPTH
+}
 
 export function factCatalogItems(
   response:

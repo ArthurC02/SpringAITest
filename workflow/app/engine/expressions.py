@@ -35,6 +35,24 @@ _CMP_OPS: dict[type[ast.cmpop], Callable[[Any, Any], Any]] = {
 
 _CONST_TYPES = (str, int, float, bool, type(None))
 
+# AST 巢狀深度上限。_check／_eval 都是遞迴走訪：沒有上限時，`not not not …` 這種
+# 巢狀約 500~1000 層的輸入會讓 RecursionError 穿過 ExpressionError 的攔截網 ——
+# 存檔期變成 500（違反「validate 永遠回 200 + errors[]」），執行期則是整張圖炸掉、
+# 強制附加的稽核節點永遠跑不到（違反 AT-GOV-01）。與 range() 長度、迭代次數等資源
+# 上限同一風格：固定常數、明確錯誤型別、可被既有 except 收斂成 4xx。
+MAX_AST_DEPTH = 100
+
+
+def ast_depth(node: ast.AST) -> int:
+    """AST 的最大巢狀深度。用顯式堆疊而非遞迴 —— 遞迴版自己就會先撞 RecursionError。"""
+    depth = 0
+    stack: list[tuple[ast.AST, int]] = [(node, 1)]
+    while stack:
+        current, level = stack.pop()
+        depth = max(depth, level)
+        stack.extend((child, level + 1) for child in ast.iter_child_nodes(current))
+    return depth
+
 
 def _state_key(node: ast.expr) -> str | None:
     """是 `state.<key>` 就回傳 key，否則 None（屬性鏈只允許一層）。"""
@@ -142,8 +160,13 @@ def _parse(expression: str) -> ast.expr:
     """解析並驗證，結果快取（迴圈每輪都會求值同一條條件式）。"""
     try:
         tree = ast.parse(expression, mode="eval")
-    except SyntaxError as e:
+    except (SyntaxError, MemoryError, RecursionError) as e:
+        # ast.parse 自己就會在數千層的無括號一元運算鏈上丟 MemoryError
+        # （"Parser stack overflowed"），跑在它之後的 MAX_AST_DEPTH 攔不到
         raise ExpressionError(f"條件式語法錯誤: {e}")
+    # 深度先驗：_check 自己是遞迴的，量深度必須在走訪之前、且不能用遞迴量
+    if ast_depth(tree.body) > MAX_AST_DEPTH:
+        raise ExpressionError(f"條件式的巢狀深度超過上限 {MAX_AST_DEPTH}")
     _check(tree.body)
     return tree.body
 

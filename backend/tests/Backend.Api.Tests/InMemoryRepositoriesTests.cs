@@ -1,4 +1,8 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Backend.Api.Agents;
 using Backend.Api.Data.InMemory;
+using Backend.Api.Skills;
 
 namespace Backend.Api.Tests;
 
@@ -201,17 +205,125 @@ public sealed class InMemoryRepositoriesTests
 
         var all = await repo.ListAsync("demo-a", default);
         Assert.Single(all, s => s.IsActive);
+
+        // active 是逐租戶的:demo-a 的啟用不會外溢到 demo-b。
+        Assert.Null(await repo.GetActiveAsync("demo-b", default));
     }
 
+    // 鏡射 ConfigurationSetRepositoryTests 標為「回歸(HIGH)」的 DB 版:Lite 模式跑的是這支實作,
+    // activate 不存在的 id 必須完全不動既有 active(不能靜默清空)。
     [Fact]
-    public async Task ConfigurationSet_ActiveIsPerTenant_NotShared()
+    public async Task ConfigurationSet_Activate_NonexistentId_LeavesExistingActiveUntouched()
     {
         var repo = new InMemoryConfigurationSetRepository();
         var empty = new Dictionary<string, object>();
-        var a = (await repo.CreateAsync("demo-a", "set", empty, "admin-a", default))!;
-        await repo.ActivateAsync("demo-a", a.Id, default);
+        var active = (await repo.CreateAsync("demo-a", "set-active", empty, "admin-a", default))!;
+        await repo.ActivateAsync("demo-a", active.Id, default);
 
-        // demo-b 沒有任何 active(不受 demo-a 影響)。
-        Assert.Null(await repo.GetActiveAsync("demo-b", default));
+        Assert.Null(await repo.ActivateAsync("demo-a", Guid.NewGuid(), default));
+
+        Assert.Equal(active.Id, (await repo.GetActiveAsync("demo-a", default))!.Id);
+    }
+
+    // ---- Agent:repo 層對「已標 validated 但定義/內容不合法」的縱深防禦(不走 HTTP)----
+
+    private static string AgentDefinition(
+        string systemPrompt = "你是研究助手", int timeoutSeconds = 60)
+        => AgentCanonicalizer.Canonicalize(new AgentUpsert(
+            Slug: null,
+            Name: null,
+            Description: null,
+            SystemPrompt: systemPrompt,
+            ExecutionRoles: new[] { "worker" },
+            Capabilities: null,
+            OutputContract: null,
+            Audience: new[] { "role:ADMIN" },
+            AllowedTools: null,
+            SkillBindings: null,
+            KnowledgeSources: null,
+            BusinessRules: null,
+            RuntimeLimits: new AgentRuntimeLimits(TimeoutSeconds: timeoutSeconds),
+            RuntimeWorkflow: new AgentWorkflowRef(
+                AgentDefaults.RuntimeWorkflowId, AgentDefaults.RuntimeWorkflowRevision)));
+
+    private static async Task<Agent> ValidatedAgentAsync(
+        InMemoryAgentRepository repo, string slug, string definition)
+    {
+        var agent = await repo.CreateAsync(
+            "demo-a", slug, "名稱", "說明", definition, SkillHash.Sha256(definition), "admin-a", default);
+        Assert.NotNull(agent);
+        Assert.True(await repo.MarkValidatedAsync(
+            "demo-a", agent!.Id, agent.DraftVersion, definition, SkillHash.Sha256(definition), default));
+        return agent;
+    }
+
+    [Fact]
+    public async Task RepositoryPublishAndRestore_RecheckExecutionSnapshotContract()
+    {
+        var repo = new InMemoryAgentRepository(new InMemorySkillRepository());
+        var invalidDefinition = AgentDefinition(
+            systemPrompt: new string('p', AgentExecutionContract.MaxSystemPromptLength + 1),
+            timeoutSeconds: -1);
+        var invalid = await ValidatedAgentAsync(repo, "invalid-contract", invalidDefinition);
+
+        var rejectedPublish = await repo.PublishAsync(
+            "demo-a", invalid.Id, invalid.DraftVersion,
+            invalidDefinition, SkillHash.Sha256(invalidDefinition), "admin-a", default);
+
+        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedPublish.Status);
+        Assert.Contains(rejectedPublish.Errors!, error => error.Field == "system_prompt");
+        Assert.Contains(
+            rejectedPublish.Errors!, error => error.Field == "runtime_limits.timeout_seconds");
+
+        var validDefinition = AgentDefinition();
+        var valid = await ValidatedAgentAsync(repo, "valid-contract", validDefinition);
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await repo.PublishAsync(
+                "demo-a", valid.Id, valid.DraftVersion,
+                validDefinition, SkillHash.Sha256(validDefinition), "admin-a", default)).Status);
+
+        var rejectedRestore = await repo.RestoreAsync(
+            "demo-a", valid.Id, 1,
+            invalidDefinition, SkillHash.Sha256(invalidDefinition), "admin-a", default);
+        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedRestore.Status);
+        Assert.Single(await repo.ListRevisionsAsync("demo-a", valid.Id, default));
+    }
+
+    /// <summary>
+    /// publish 的防篡改守衛:鎖定 draft 後,唯一允許的差異是 Workflow 回寫的 business_rules。
+    /// 其他任何欄位漂移都是 TOCTOU,必須以 VersionConflict 擋下而非靜默發布。
+    /// </summary>
+    [Fact]
+    public async Task Publish_RejectsDefinitionDriftBeyondBusinessRuleCanonicalization()
+    {
+        var repo = new InMemoryAgentRepository(new InMemorySkillRepository());
+        var draft = AgentDefinition();
+
+        var ruleOnlyAgent = await ValidatedAgentAsync(repo, "drift-rules-only", draft);
+        using var canonicalRules = JsonDocument.Parse(
+            """{"version":1,"rules":[{"id":"r","onUnknown":[{"action":"deny"}]}]}""");
+        var ruleOnly = AgentCanonicalizer.WithBusinessRules(draft, canonicalRules.RootElement);
+        Assert.NotEqual(draft, ruleOnly);
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await repo.PublishAsync(
+                "demo-a", ruleOnlyAgent.Id, ruleOnlyAgent.DraftVersion,
+                ruleOnly, SkillHash.Sha256(ruleOnly), "admin-a", default)).Status);
+
+        var tamperedAgent = await ValidatedAgentAsync(repo, "drift-prompt", draft);
+        var tamperedNode = JsonNode.Parse(draft)!.AsObject();
+        tamperedNode["system_prompt"] = "被竄改的 prompt";
+        var tampered = AgentCanonicalizer.CanonicalizeDefinition(tamperedNode.ToJsonString());
+        Assert.Equal(
+            AgentWriteStatus.VersionConflict,
+            (await repo.PublishAsync(
+                "demo-a", tamperedAgent.Id, tamperedAgent.DraftVersion,
+                tampered, SkillHash.Sha256(tampered), "admin-a", default)).Status);
+        Assert.Empty(await repo.ListRevisionsAsync("demo-a", tamperedAgent.Id, default));
+
+        // 守衛本身:候選不是 JSON、或根本沒有 business_rules 欄位 → 一律 false(fail closed)。
+        Assert.False(AgentCanonicalizer.IsBusinessRuleOnlyCanonicalization(draft, "not json"));
+        Assert.False(AgentCanonicalizer.IsBusinessRuleOnlyCanonicalization(draft, "{}"));
     }
 }

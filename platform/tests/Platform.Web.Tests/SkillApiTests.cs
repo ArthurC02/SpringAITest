@@ -123,29 +123,9 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Contains("restore:quarterly-qa:1", FakeSkillService.Calls);
     }
 
-    [Fact]
-    public async Task RestoreRevision_User_Returns403()
-    {
-        var user = _factory.CreateClient().WithToken(
-            _factory.IssueToken("user-a", "USER", "demo-a"));
-
-        var response = await user.PostAsync(
-            "/api/skills/quarterly-qa/revisions/1/restore", content: null);
-
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task RestoreRevision_LegacyAgenticWithoutPackage_Returns409()
-    {
-        var response = await _factory.AdminClient().PostAsync(
-            "/api/skills/legacy-agentic/revisions/1/restore", content: null);
-
-        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-        Assert.Contains(
-            "package 快照功能之前",
-            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
-    }
+    // restore 的角色把關與 legacy-package 409 都是 backend 的規則(SkillController.RestoreRevision 刻意沒有
+    // [AdminOnly]),platform 端只有 WorkflowForbiddenException/DownstreamConflictException 的狀態碼映射,
+    // 已由 GlobalExceptionHandlerTests 與 Create_Returns409_WithBackendMessage_Unchanged 覆蓋。
 
     [Fact]
     public async Task Create_Returns201_WithSkill()
@@ -225,19 +205,9 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(1, body["current_revision"]!.GetValue<int>());
     }
 
-    // USER 匯入 → 403(角色把關在 backend,同其他 skill 寫入的 [AdminOnly] 模式)。
-    [Fact]
-    public async Task Import_User_Returns403()
-    {
-        var user = _factory.CreateClient().WithToken(_factory.IssueToken("user-a", "USER", "demo-a"));
-
-        var resp = await user.PostAsync("/api/skills/sales-helper/import", Package());
-
-        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal(403, body["status"]!.GetValue<int>());
-    }
-
+    // USER 匯入 → 403(AdminOnlyAttribute),且 authorization filter 早於 body binding:
+    // 送一份超過 RequestSizeLimit 的 multipart 仍是 403(不是 413,也不是先解析完才拒絕),
+    // 並帶完整 ApiError 形狀。這同時吸收了「USER 匯入 → 403 + status:403」的等價類。
     [Fact]
     public async Task Import_UserWithOversizeMultipart_Returns403BeforeBodyBinding()
     {
@@ -254,9 +224,37 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
             "/api/skills/sales-helper/import", oversized);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(403, (await response.ReadJsonAsync())["status"]!.GetValue<int>());
         Assert.Equal(
             before,
             FakeSkillService.Calls.Count(c => c == "import:sales-helper"));
+    }
+
+    // ADMIN 超過 Web 層的 17 MiB 上限:請求在 model binding 之前就被擋掉,一個位元組都不會進到 service 層
+    // (與 SkillServiceTests 的 16 MiB 轉送前檢查是不同的兩層)。對外必須是 413 + 完整 ApiError:
+    // model binding 的自動 400「輸入驗證失敗」帶空 fieldErrors,前端無從分辨「檔案太大」與「欄位錯」。
+    // 兩條匯入路由各自掛限制,兩格都測(漏掛其中一條不會被單一代表值抓到)。
+    [Theory]
+    [InlineData("/api/skills/sales-helper/import", "import:sales-helper")]
+    [InlineData("/api/skills/import", "import:server-derived")]
+    public async Task Import_OverRequestSizeLimit_Returns413_BeforeReachingService(string path, string call)
+    {
+        var before = FakeSkillService.Calls.Count(c => c == call);
+        using var oversized = new MultipartFormDataContent();
+        oversized.Add(
+            new ByteArrayContent(new byte[17 * 1024 * 1024 + 4096]),
+            "package",
+            "oversized.zip");
+
+        var response = await _factory.AdminClient().PostAsync(path, oversized);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal(413, body["status"]!.GetValue<int>());
+        Assert.Equal("Skill 套件超過上傳大小上限（17 MiB）", body["message"]!.GetValue<string>());
+        Assert.NotNull(body["timestamp"]);
+        Assert.Empty(body["fieldErrors"]!.AsObject());
+        Assert.Equal(before, FakeSkillService.Calls.Count(c => c == call));
     }
 
     [Fact]
@@ -306,15 +304,6 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("loop 缺少 max_iterations（第 7 行）",
             body["fieldErrors"]!["unbounded_loop"]!.GetValue<string>());
         Assert.NotNull(body["timestamp"]);
-    }
-
-    [Fact] // PUT 也走同一條 422 路徑(不能只擋 POST)。
-    public async Task Update_BackendValidationFailed_Returns422()
-    {
-        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/skills/quarterly-qa", InvalidBody());
-
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
-        Assert.NotNull((await resp.ReadJsonAsync())["fieldErrors"]!["unbounded_loop"]);
     }
 
     [Fact]
@@ -418,19 +407,15 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("unbounded_loop", body["errors"]![0]!["code"]!.GetValue<string>());
         Assert.Equal(7, body["errors"]![0]!["line"]!.GetValue<int>());
 
-        // 無副作用:驗證不得寫入 backend。
+        // valid:true 分支也是 200,且 skill metadata 原樣帶回(同一路由的另一個等價類)。
+        var valid = await _factory.AdminClient().PostAsJsonAsync("/api/skills/validate", Body());
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+        var validBody = await valid.ReadJsonAsync();
+        Assert.True(validBody["valid"]!.GetValue<bool>());
+        Assert.Equal("quarterly-qa", validBody["skill"]!["name"]!.GetValue<string>());
+
+        // 無副作用:驗證(不論結果)都不得寫入 backend。
         Assert.Equal(before, FakeSkillService.Calls.Count);
-    }
-
-    [Fact]
-    public async Task Validate_Returns200_WithSkillMetadata_WhenValid()
-    {
-        var resp = await _factory.AdminClient().PostAsJsonAsync("/api/skills/validate", Body());
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.True(body["valid"]!.GetValue<bool>());
-        Assert.Equal("quarterly-qa", body["skill"]!["name"]!.GetValue<string>());
     }
 
     [Fact]
@@ -445,41 +430,8 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
     }
 
-    // AST-P1-013:catalog 帶 additive kind → Platform 原樣代理透傳(舊 consumer 忽略未知欄位仍運作)。
-    [Fact]
-    public async Task Catalog_PassesThroughKind_AdditiveField()
-    {
-        FakeWorkflowService.CatalogOverride = FakeJson.Of(
-            """[{"name":"kb-query","source":"builtin","kind":"flow","required_role":"USER"},"""
-            + """{"name":"sales-helper","source":"custom","kind":"agentic","required_role":"USER"}]""");
-        try
-        {
-            var resp = await _factory.AdminClient().GetAsync("/api/skills/catalog");
-
-            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-            var arr = (await resp.ReadJsonAsync()).AsArray();
-            Assert.Equal("flow", arr[0]!["kind"]!.GetValue<string>());
-            Assert.Equal("agentic", arr[1]!["kind"]!.GetValue<string>());
-        }
-        finally
-        {
-            FakeWorkflowService.CatalogOverride = null;
-        }
-    }
-
-    // AST-P1-011(Web 半)/ AST-P1-002:多參 agentic skill 雖不被聊天路由,仍可經 explicit invoke 執行,
-    // 回應維持 {skill, output} 且固定 answer 鍵被帶上(引擎輸出原樣穿透)。
-    [Fact]
-    public async Task Invoke_MultiParamAgenticSkill_Returns200_WithSkillOutputShape()
-    {
-        var resp = await _factory.AdminClient().PostAsJsonAsync(
-            "/api/skills/trip-planner/invoke", new { input = new { origin = "台北", destination = "東京" } });
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal("trip-planner", body["skill"]!.GetValue<string>());
-        Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
-    }
+    // additive 欄位穿透由 WorkflowServiceTests(真 WorkflowService + stub handler)覆蓋;
+    // 在這一層用 CatalogOverride 塞 JSON 再讀回來只驗到 JsonElement 序列化,不經任何 platform 分支。
 
     // invoke 的下游狀態碼映射:404 → NotFound、403 → Forbidden、422 → BadInput(400)、其他 → 502。
     [Theory]

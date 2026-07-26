@@ -121,6 +121,35 @@ def test_runtime_variant_is_required_and_verifier_rejects_worker_stages() -> Non
     ]
     assert validate(verifier).valid
 
+    worker = agent_runtime_graph()
+    worker["nodes"][4]["children"] = [
+        child
+        for child in worker["nodes"][4]["children"]
+        if child["type"] != "checkpoint_and_budget_gate"
+    ]
+    assert "missing_required_loop_stage" in codes(validate(worker))
+
+
+def test_runtime_variant_kind_matrix_and_verifier_loop_requirements() -> None:
+    not_agent_runtime = orchestrator_graph()
+    not_agent_runtime["runtimeVariant"] = "worker"
+    assert "runtime_variant_not_allowed" in codes(validate(not_agent_runtime))
+
+    unknown_variant = agent_runtime_graph()
+    unknown_variant["runtimeVariant"] = "auditor"
+    assert "invalid_runtime_variant" in codes(validate(unknown_variant))
+
+    verifier = agent_runtime_graph()
+    verifier["runtimeVariant"] = "verifier"
+    verifier["nodes"][4]["children"] = [
+        child
+        for child in verifier["nodes"][4]["children"]
+        if child["type"] == "checkpoint_and_budget_gate"
+    ]
+    result = validate(verifier)
+    assert not result.valid
+    assert "missing_required_loop_stage" in codes(result)
+
 
 def test_semantic_hash_ignores_ui_and_node_order() -> None:
     graph = agent_runtime_graph()
@@ -139,9 +168,17 @@ def test_validator_rejects_port_dangling_cycle_and_forbidden_content() -> None:
     graph["edges"][0]["source"]["port"] = "missing"
     graph["edges"].append({"id": "loopback", "source": {"nodeId": "output", "port": "out"}, "target": {"nodeId": "context", "port": "in"}})
     graph["nodes"][1]["config"] = {"system_prompt": "do not allow"}
+    graph["edges"].append(
+        {"id": "ghost", "source": {"nodeId": "output", "port": "out"}, "target": {"nodeId": "does-not-exist", "port": "in"}}
+    )
     result = validate(graph)
     assert not result.valid
-    assert {"unknown_port", "unbounded_cycle", "forbidden_embedded_content"} <= codes(result)
+    assert {
+        "unknown_port",
+        "dangling_edge",
+        "unbounded_cycle",
+        "forbidden_embedded_content",
+    } <= codes(result)
 
 
 def test_validator_rejects_unknown_versioned_schema_fields() -> None:
@@ -180,6 +217,20 @@ def test_orchestrator_visible_repair_and_audit_are_required_and_ordered() -> Non
     assert not result.valid
     assert "governance_stage_bypassed" in codes(result)
 
+    # Every required stage is present exactly once and the chain stays acyclic,
+    # but bounded_repair now runs before aggregate_results: only the ordering
+    # invariant may reject this graph.
+    reordered = orchestrator_graph()
+    by_edge = {edge["id"]: edge for edge in reordered["edges"]}
+    by_edge["e6"]["target"]["nodeId"] = "aggregate"
+    by_edge["e7"]["source"]["nodeId"] = "aggregate"
+    by_edge["e7"]["target"]["nodeId"] = "repair"
+    by_edge["e8"]["source"]["nodeId"] = "repair"
+    by_edge["e8"]["target"]["nodeId"] = "respond"
+    result = validate(reordered)
+    assert not result.valid
+    assert codes(result) == {"governance_stage_order"}
+
 
 def test_control_and_data_edges_are_separate_and_inputs_are_single_writer() -> None:
     graph = orchestrator_graph()
@@ -211,6 +262,19 @@ def test_every_control_fanout_needs_a_matching_join_without_bypass() -> None:
     result = validate(graph)
     assert not result.valid
     assert "fanout_missing_matching_join" in codes(result)
+
+    # Both branches of the sufficiency fan-out do reach the join, so a matching
+    # join exists; the audit branch may still terminate at End without it.
+    bypassing = orchestrator_graph()
+    bypassing["edges"].extend(
+        [
+            {"id": "branch-audit", "source": {"nodeId": "sufficiency", "port": "out"}, "target": {"nodeId": "audit", "port": "in"}},
+            {"id": "audit-rejoin", "source": {"nodeId": "audit", "port": "out"}, "target": {"nodeId": "join", "port": "in"}},
+        ]
+    )
+    result = validate(bypassing)
+    assert not result.valid
+    assert "fanout_branch_bypasses_join" in codes(result)
 
 
 def test_only_explicit_bounded_body_continue_exit_cycle_is_accepted() -> None:
@@ -282,13 +346,8 @@ def test_internal_catalog_validate_and_simulate_contracts() -> None:
     assert catalog.json()["nodes"]
     dispatch = next(node for node in catalog.json()["nodes"] if node["type"] == "dispatch_agents")
     assert {"in", "tasks"} == {port["id"] for port in dispatch["inputs"]}
-    tools = client.get("/tools", headers=headers)
-    assert tools.status_code == 200
-    assert all(
-        isinstance(item.get("name"), str)
-        and item.get("risk") in {"read", "low", "write", "privileged"}
-        for item in tools.json()
-    )
+    # The `/tools` catalogue contract belongs to tests/test_tools_api.py, which
+    # asserts it exactly instead of by predicate; do not re-assert it here.
     assert dispatch["workflowKinds"] == ["orchestrator"]
     assert dispatch["requiredStage"] is True
     model_step = next(node for node in catalog.json()["nodes"] if node["type"] == "model_step")

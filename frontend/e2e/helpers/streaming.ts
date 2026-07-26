@@ -10,6 +10,13 @@ export interface BrowserSseEvent {
   offsetMs: number
   event: string | null
   data: string
+  /**
+   * The literal text preceding the first `data` line's content — `data:` (no space) or
+   * `data: ` (with space). Root AGENTS.md: the two SSE endpoints deliberately differ here
+   * (`/api/chat/stream` vs AG-UI); this is what lets E-06 assert the byte-level framing
+   * survived the browser fetch/ReadableStream path, not just curl's network-layer trace.
+   */
+  rawPrefix: string | null
 }
 
 export interface BrowserStreamEvidence {
@@ -28,6 +35,49 @@ export interface BrowserStreamRequest {
   body?: string
   /** Reads the already-authenticated browser session only in page memory; never writes it. */
   includeSessionBearer?: boolean
+}
+
+/** One event extracted from a raw SSE buffer by {@link parseSseBuffer}. */
+export interface ParsedSseEvent {
+  event: string | null
+  data: string
+  rawPrefix: string | null
+}
+
+/**
+ * Pure SSE buffer parser (no DOM/fetch): given accumulated raw text, extracts every complete
+ * event (terminated by a blank line, CRLF or LF) and returns whatever partial text is left over.
+ * `readBrowserStream`'s `page.evaluate` callback below runs the identical algorithm inline —
+ * Playwright serializes that callback into the browser realm, so it cannot import this function
+ * directly, but the two must be kept in sync. This standalone copy exists so chunk-boundary,
+ * CRLF-vs-LF and multi-line `data:` edge cases can be covered by a plain Node unit test instead
+ * of only indirectly through the full three-service E-06 evidence gate.
+ */
+export function parseSseBuffer(buffer: string): { events: ParsedSseEvent[]; remaining: string } {
+  let pending = buffer
+  const events: ParsedSseEvent[] = []
+  for (;;) {
+    const separator = pending.match(/\r?\n\r?\n/)
+    if (!separator || separator.index === undefined) break
+
+    const rawEvent = pending.slice(0, separator.index)
+    pending = pending.slice(separator.index + separator[0].length)
+    const data: string[] = []
+    let event: string | null = null
+    let rawPrefix: string | null = null
+    for (const line of rawEvent.split(/\r?\n/)) {
+      if (line.startsWith('data:')) {
+        const afterColon = line.slice(5)
+        const content = afterColon.replace(/^ /, '')
+        if (rawPrefix === null) rawPrefix = afterColon.length === content.length ? 'data:' : 'data: '
+        data.push(content)
+      } else if (line.startsWith('event:')) {
+        event = line.slice(6).replace(/^ /, '')
+      }
+    }
+    if (data.length > 0) events.push({ event, data: data.join('\n'), rawPrefix })
+  }
+  return { events, remaining: pending }
 }
 
 /**
@@ -71,6 +121,8 @@ export async function readBrowserStream(
     let pending = ''
     const events: BrowserSseEvent[] = []
 
+    // Inline copy of parseSseBuffer() above (see its doc comment for why it can't be imported
+    // here) — keep both in sync.
     const takeCompleteEvents = (receivedAtMs: number) => {
       for (;;) {
         const separator = pending.match(/\r?\n\r?\n/)
@@ -80,15 +132,20 @@ export async function readBrowserStream(
         pending = pending.slice(separator.index + separator[0].length)
         const data: string[] = []
         let event: string | null = null
+        let rawPrefix: string | null = null
         for (const line of rawEvent.split(/\r?\n/)) {
           if (line.startsWith('data:')) {
-            // SSE permits one optional space after the colon; retain all content after it.
-            data.push(line.slice(5).replace(/^ /, ''))
+            // SSE permits one optional space after the colon; retain all content after it,
+            // but remember which exact prefix this line actually used.
+            const afterColon = line.slice(5)
+            const content = afterColon.replace(/^ /, '')
+            if (rawPrefix === null) rawPrefix = afterColon.length === content.length ? 'data:' : 'data: '
+            data.push(content)
           } else if (line.startsWith('event:')) {
             event = line.slice(6).replace(/^ /, '')
           }
         }
-        if (data.length > 0) events.push({ offsetMs: receivedAtMs, event, data: data.join('\n') })
+        if (data.length > 0) events.push({ offsetMs: receivedAtMs, event, data: data.join('\n'), rawPrefix })
       }
     }
 

@@ -173,6 +173,36 @@ def test_declaring_engine_key_as_writes_raises_value_error():
     assert node_registry.get("__throwaway__") is None  # 沒被登記進註冊表
 
 
+def test_appends_must_be_subset_of_writes():
+    """appends 宣告了不在 writes 的鍵 → 註冊即 ValueError（不進註冊表）。
+
+    放行的話 compiler 會替一個節點永遠寫不到的鍵掛上 operator.add reducer：
+    圖照編、trace 照記 ok，該鍵卻永遠是空的 —— 失敗必須大聲。
+    """
+    with pytest.raises(ValueError) as exc:
+        node_registry.node(
+            name="__throwaway__", writes=["y"], appends=["x"], description="錯的 appends"
+        )(lambda: None)
+
+    assert "appends" in str(exc.value)
+    assert "x" in str(exc.value)
+    assert node_registry.get("__throwaway__") is None
+
+
+def test_version_resolution_is_numeric_not_lexicographic():
+    """未指定版本 → 取數值上最新的版本（字串排序會讓 '2.0' 贏過 '10.0'）。"""
+    name = "__version_probe__"
+    try:
+        for version in ("2.0", "10.0"):
+            node_registry.node(name=name, version=version, writes=["x"])(lambda: None)
+
+        assert node_registry.get(name).version == "10.0"
+        assert node_registry.get(name, version="2.0").version == "2.0"  # 鎖版仍拿得到舊版
+    finally:
+        for version in ("2.0", "10.0"):
+            node_registry._REGISTRY.pop((name, version), None)
+
+
 def test_writes_is_required():
     """漏寫 writes → import 期 TypeError（不會靜默變成「輸出全丟棄」的節點）。"""
     with pytest.raises(TypeError):

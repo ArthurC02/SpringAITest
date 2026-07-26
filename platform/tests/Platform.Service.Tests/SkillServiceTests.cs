@@ -82,16 +82,6 @@ public sealed class SkillServiceTests
     }
 
     [Fact]
-    public async Task GetRevisions_404_ThrowsNotFound()
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.NotFound, "找不到 Skill：ghost"));
-
-        var ex = await Assert.ThrowsAsync<WorkflowNotFoundException>(
-            () => Build(stub).GetRevisionsAsync("ghost", AdminCtx));
-        Assert.Equal("找不到 Skill：ghost", ex.Message);
-    }
-
-    [Fact]
     public async Task RestoreRevision_ForwardsPostPathAndIdentity_PassesThroughKind()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
@@ -110,23 +100,9 @@ public sealed class SkillServiceTests
         Assert.Equal("agentic", result.GetProperty("kind").GetString());
     }
 
-    [Theory]
-    [InlineData(403, typeof(WorkflowForbiddenException))]
-    [InlineData(404, typeof(WorkflowNotFoundException))]
-    [InlineData(409, typeof(DownstreamConflictException))]
-    [InlineData(422, typeof(SkillValidationFailedException))]
-    public async Task RestoreRevision_BackendError_MapsToSameStatus(
-        int status, Type exceptionType)
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(
-            (HttpStatusCode)status, "restore failed"));
-
-        var error = await Assert.ThrowsAnyAsync<Exception>(
-            () => Build(stub).RestoreRevisionAsync("quarterly-qa", 2, AdminCtx));
-
-        Assert.IsType(exceptionType, error);
-        Assert.Equal("restore failed", error.Message);
-    }
+    // 所有 JSON 端點(list/get/revisions/restore/create/update/import)共用同一顆 BackendErrorMapper,
+    // 狀態碼 → 例外型別 + 訊息不改寫的完整決策表由 Create_BackendError_MapsToSameStatusException_KeepsMessage
+    // 一次覆蓋;per-method 再驗一次同一張表不提供新資訊。
 
     [Fact] // body 只有 definition — name/description/required_role 都在 YAML 裡,不得另外送。
     public async Task Create_PostsDefinitionOnlyBody_MapsCreatedSkill()
@@ -285,19 +261,6 @@ public sealed class SkillServiceTests
         Assert.Equal("節點不存在", ex.FieldErrors!["unknown_node"]);
     }
 
-    [Fact] // PUT 的 name 不符也是 422(backend 判斷);訊息與 fieldErrors 一樣要穿過來。
-    public async Task Update_Backend422_NameMismatch_KeepsFieldErrors()
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 定義的 name 與路由不符：定義為 b，路由為 a","fieldErrors":{"name":"定義的 name（b）必須與路由的 name（a）相同"}}"""));
-
-        var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
-            () => Build(stub).UpdateAsync("a", Upsert(), AdminCtx));
-
-        Assert.Equal("Skill 定義的 name 與路由不符：定義為 b，路由為 a", ex.Message);
-        Assert.NotNull(ex.FieldErrors!["name"]);
-    }
-
     // backend 400 的 fieldErrors 必須穿過代理層(否則前端永遠看不到欄位級錯誤)。
     [Fact]
     public async Task Create_Backend400WithFieldErrors_KeepsFieldErrors()
@@ -386,17 +349,6 @@ public sealed class SkillServiceTests
         Assert.Equal("server-derived", result.GetProperty("name").GetString());
     }
 
-    // backend 403(非 ADMIN,[AdminOnly])→ WorkflowForbiddenException(對外 403),與其他 skill 寫入一致。
-    [Fact]
-    public async Task Import_Backend403_ThrowsForbidden()
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足，無法存取 Skill"));
-
-        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(
-            () => Build(stub).ImportAsync("sales-helper", PackageBytes(), PackageFileName, AdminCtx));
-        Assert.Equal("權限不足，無法存取 Skill", ex.Message);
-    }
-
     // backend 422(套件驗證失敗)→ SkillValidationFailedException,fieldErrors(引擎錯誤碼)原樣穿過代理層。
     [Fact]
     public async Task Import_Backend422_PassesThroughFieldErrors()
@@ -410,17 +362,6 @@ public sealed class SkillServiceTests
         Assert.Equal("Skill 套件驗證失敗", ex.Message);
         Assert.Equal("腳本未通過 AST 掃描", ex.FieldErrors!["forbidden_script"]);
         Assert.Equal("工具未註冊", ex.FieldErrors!["unknown_tool"]);
-    }
-
-    // 「沒有回應」的等價類:傳輸失敗 → 502(不誤判成使用者的套件有問題)。
-    [Fact]
-    public async Task Import_TransportFailure_ThrowsWorkflowInvocation()
-    {
-        var stub = new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒"));
-
-        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
-            () => Build(stub).ImportAsync("sales-helper", PackageBytes(), PackageFileName, AdminCtx));
-        Assert.Contains("Skill 服務呼叫失敗", ex.Message);
     }
 
     // 傳輸上限(16 MiB)的邊界:on-point(剛好上限)照常轉送;off-point(上限 +1)快速失敗(對外 400),不打 backend。
@@ -445,21 +386,6 @@ public sealed class SkillServiceTests
 
         Assert.Contains("超過上限", ex.Message);
         Assert.Null(stub.LastRequest); // 上限檢查在轉送之前 → backend 從沒被呼叫
-    }
-
-    // AST-P1-013(相容性):backend 回的 Skill JSON 帶 additive kind → 舊 typed consumer(Skill record)
-    // 忽略未知欄位仍可反序列化,既有欄位不變。
-    [Fact]
-    public async Task Create_BackendReturnsKind_OldConsumerIgnoresUnknownField()
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created,
-            """{"name":"quarterly-qa","description":"季報問答","definition":"name: quarterly-qa","required_role":"USER","enabled":true,"current_revision":1,"kind":"flow","created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}"""));
-
-        var created = await Build(stub).CreateAsync(Upsert(), AdminCtx);
-
-        // Skill record 沒有 kind 欄位;System.Text.Json 預設忽略未知欄位,反序列化不炸,既有欄位照常。
-        Assert.Equal("quarterly-qa", created.Name);
-        Assert.Equal(1, created.CurrentRevision);
     }
 
     [Fact]

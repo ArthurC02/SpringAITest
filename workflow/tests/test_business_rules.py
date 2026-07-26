@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import ast
+import builtins
+import socket
 from copy import deepcopy
+from pathlib import Path
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.business_rules.catalog import LIMITS, catalog_response
@@ -147,6 +153,53 @@ def test_decimal_contract_rejects_exponent_and_values_outside_catalog_bounds():
     assert any(error.code == "decimal_out_of_range" for error in out_of_range.errors)
 
 
+def _amount_value(value):
+    return validate_rule_set("pre-action", _rule_set(_rule(when=_leaf(value=value))))
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [
+        # scale：剛好 18 位小數通過，19 位是 decimal_scale_exceeded（此碼過去零覆蓋）。
+        ("1." + "0" * (LIMITS["maxDecimalScale"] - 1) + "1", None),
+        ("1." + "0" * LIMITS["maxDecimalScale"] + "1", "decimal_scale_exceeded"),
+        # 整數位：剛好 20 位通過，21 位是 decimal_out_of_range。
+        ("1" + "0" * (LIMITS["maxDecimalIntegerDigits"] - 1), None),
+        ("1" + "0" * LIMITS["maxDecimalIntegerDigits"], "decimal_out_of_range"),
+        # precision 剛好 38（20 整數位 + 18 小數位）——這也是可達的最大精度。
+        (
+            "1"
+            + "0" * (LIMITS["maxDecimalIntegerDigits"] - 1)
+            + "."
+            + "0" * (LIMITS["maxDecimalScale"] - 1)
+            + "1",
+            None,
+        ),
+        ("05000", "invalid_decimal_format"),
+        ("+5000", "invalid_decimal_format"),
+        ("5000.", "invalid_decimal_format"),
+    ],
+)
+def test_decimal_scale_precision_and_leading_zero_boundaries(value, code):
+    outcome = _amount_value(value)
+
+    if code is None:
+        assert outcome.valid is True, outcome.errors
+    else:
+        assert outcome.valid is False
+        assert any(error.code == code for error in outcome.errors)
+
+
+def test_decimal_negative_zero_canonicalizes_without_sign():
+    outcome = _amount_value("-0.0")
+
+    assert outcome.valid is True, outcome.errors
+    assert outcome.canonical_rule_set is not None
+    assert canonical_to_json(outcome.canonical_rule_set)["rules"][0]["when"][
+        "value"
+    ] == "0"
+
+
 def test_a_rule_02_rejects_condition_depth_over_three():
     condition = _leaf()
     for _ in range(LIMITS["maxDepth"] + 1):
@@ -156,6 +209,18 @@ def test_a_rule_02_rejects_condition_depth_over_three():
 
     assert outcome.valid is False
     assert any(error.code == "max_depth_exceeded" for error in outcome.errors)
+
+
+def test_a_rule_02_accepts_condition_depth_exactly_at_the_limit():
+    """`validator.py` 用 `depth > maxDepth`：剛好 3 層必須通過，否則是把合法 AST 擋掉。"""
+    condition = _leaf()
+    for _ in range(LIMITS["maxDepth"]):
+        condition = {"all": [condition]}
+
+    outcome = validate_rule_set("pre-action", _rule_set(_rule(when=condition)))
+
+    assert outcome.valid is True, outcome.errors
+    assert outcome.canonical_rule_set is not None
 
 
 def test_a_rule_02_rejects_oversized_ast_without_evaluating_it():
@@ -168,6 +233,48 @@ def test_a_rule_02_rejects_oversized_ast_without_evaluating_it():
 
     assert outcome.valid is False
     assert any(error.code == "too_many_rules" for error in outcome.errors)
+
+
+def test_validator_enforces_node_action_and_rule_count_limits():
+    """三個從未被觸發過的資源上限錯誤碼，各配「剛好通過」那一側。
+
+    節點預算比規則數先到頂：每條規則固定吃 4 個節點（rule + when + then + onUnknown），
+    所以 maxNodes=256 對應剛好 64 條規則。
+    """
+    nodes_per_rule = 4
+    at_node_limit = [
+        _rule(f"r-{index}") for index in range(LIMITS["maxNodes"] // nodes_per_rule)
+    ]
+    over_node_limit = [*at_node_limit, _rule("r-overflow")]
+    at_action_limit = _rule(
+        then=[
+            {"action": "add_audit_tag", "tag": f"t{index}"}
+            for index in range(LIMITS["maxActionsPerRule"])
+        ]
+    )
+    over_action_limit = _rule(
+        then=[
+            {"action": "add_audit_tag", "tag": f"t{index}"}
+            for index in range(LIMITS["maxActionsPerRule"] + 1)
+        ]
+    )
+    at_rule_limit = [_rule(f"r-{index}") for index in range(LIMITS["maxRules"])]
+
+    assert validate_rule_set("pre-action", _rule_set(*at_node_limit)).valid is True
+    over_nodes = validate_rule_set("pre-action", _rule_set(*over_node_limit))
+    assert over_nodes.valid is False
+    assert any(error.code == "too_many_nodes" for error in over_nodes.errors)
+
+    assert validate_rule_set("pre-action", _rule_set(at_action_limit)).valid is True
+    over_actions = validate_rule_set("pre-action", _rule_set(over_action_limit))
+    assert over_actions.valid is False
+    assert any(error.code == "too_many_actions" for error in over_actions.errors)
+
+    # 剛好 maxRules 條不得產生 too_many_rules（節點上限另外先擋，見 docstring）。
+    assert not any(
+        error.code == "too_many_rules"
+        for error in validate_rule_set("pre-action", _rule_set(*at_rule_limit)).errors
+    )
 
 
 def test_a_rule_03_high_refund_requires_admin_approval():
@@ -327,39 +434,57 @@ def test_a_rule_09_prompt_injection_text_cannot_override_rule_semantics():
     assert result["decision"]["outcome"] == "require_approval"
 
 
-def test_three_valued_all_any_and_not_semantics():
-    facts: dict = {}
-    all_rules = _canonical(
-        _rule_set(
-            _rule(
-                when={
-                    "all": [
-                        _leaf(),
-                        _leaf("action.type", "eq", "refund"),
-                    ]
-                }
-            )
-        )
-    )
-    any_rules = _canonical(
-        _rule_set(
-            _rule(
-                when={
-                    "any": [
-                        _leaf(),
-                        _leaf("action.type", "eq", "refund"),
-                    ]
-                }
-            )
-        )
-    )
-    not_rules = _canonical(
-        _rule_set(_rule(when={"not": _leaf()}))
-    )
+# 三值邏輯的兩個 leaf：左邊給 decimal 比較、右邊給 enum 比較，缺 fact 即 UNKNOWN。
+_LEFT_FACTS = {"T": {"action.amount": "9000"}, "F": {"action.amount": "1000"}, "U": {}}
+_RIGHT_FACTS = {"T": {"action.type": "refund"}, "F": {"action.type": "response"}, "U": {}}
+# rule 的 then 是 require_approval、onUnknown 是預設 deny，所以條件真值可從 decision 反推：
+# true → 匹配、false → 不匹配（continue）、unknown → fail closed（deny）。
+_OUTCOME_BY_TRUTH = {
+    "true": "require_approval",
+    "false": "continue",
+    "unknown": "deny",
+}
 
-    assert evaluate("pre-action", all_rules, facts)["trace"]["rules"][0]["status"] == "unknown"
-    assert evaluate("pre-action", any_rules, facts)["trace"]["rules"][0]["status"] == "unknown"
-    assert evaluate("pre-action", not_rules, facts)["trace"]["rules"][0]["status"] == "unknown"
+
+@pytest.mark.parametrize(
+    ("kind", "left", "right", "expected"),
+    [
+        ("all", "T", "T", "true"),
+        ("all", "T", "F", "false"),
+        ("all", "T", "U", "unknown"),
+        # FALSE 短路吞掉 UNKNOWN 是刻意的 Kleene 語意，不是漏判。
+        ("all", "F", "U", "false"),
+        ("all", "F", "F", "false"),
+        ("all", "U", "U", "unknown"),
+        # TRUE 短路吞掉 UNKNOWN，同上。
+        ("any", "T", "U", "true"),
+        ("any", "T", "F", "true"),
+        ("any", "F", "U", "unknown"),
+        ("any", "F", "F", "false"),
+        ("any", "U", "U", "unknown"),
+        ("not", "T", None, "false"),
+        ("not", "F", None, "true"),
+        ("not", "U", None, "unknown"),
+    ],
+)
+def test_kleene_all_any_not_truth_table(
+    kind: str, left: str, right: str | None, expected: str
+):
+    """完整 14 格真值表：判斷順序被調換會讓 deny 與 continue 靜默互換。"""
+    left_leaf = _leaf()
+    right_leaf = _leaf("action.type", "eq", "refund")
+    condition = (
+        {"not": left_leaf} if kind == "not" else {kind: [left_leaf, right_leaf]}
+    )
+    facts = {
+        **_LEFT_FACTS[left],
+        **({} if right is None else _RIGHT_FACTS[right]),
+    }
+
+    result = evaluate("pre-action", _canonical(_rule_set(_rule(when=condition))), facts)
+
+    assert result["trace"]["rules"][0]["condition"]["result"] == expected
+    assert result["decision"]["outcome"] == _OUTCOME_BY_TRUTH[expected]
 
 
 def test_string_and_collection_limits_are_enforced_at_validation_and_runtime():
@@ -384,6 +509,37 @@ def test_string_and_collection_limits_are_enforced_at_validation_and_runtime():
     )
     assert result["decision"]["outcome"] == "deny"
     assert result["trace"]["rules"][0]["condition"]["reason"] == "invalid_fact_type"
+
+
+def test_string_and_collection_limits_accept_values_exactly_at_the_limit():
+    """三個執行點都是 `>`：剛好等於上限的值必須照常求值，不能被當成畸形輸入。"""
+    exact = "x" * LIMITS["maxStringLength"]
+    validated = validate_rule_set(
+        "pre-action",
+        _rule_set(_rule(when=_leaf("action.tool_name", "eq", exact))),
+    )
+    assert validated.valid is True, validated.errors
+
+    string_match = evaluate(
+        "pre-action",
+        _canonical(_rule_set(_rule(when=_leaf("action.tool_name", "eq", exact)))),
+        {"action.tool_name": exact},
+    )
+    collection_match = evaluate(
+        "pre-action",
+        _canonical(
+            _rule_set(
+                _rule(when=_leaf("action.requested_tools", "contains", "safe-tool"))
+            )
+        ),
+        {
+            "action.requested_tools": ["safe-tool"]
+            + ["x" * LIMITS["maxStringLength"]] * (LIMITS["maxCollectionItems"] - 1)
+        },
+    )
+
+    assert string_match["decision"]["outcome"] == "require_approval"
+    assert collection_match["decision"]["outcome"] == "require_approval"
 
 
 def test_collection_operator_values_enforce_per_item_string_limit():
@@ -496,9 +652,10 @@ def test_validation_bounds_unknown_fields_and_error_count():
     outcome = validate_rule_set("pre-action", _rule_set(*rules))
 
     assert outcome.valid is False
-    assert len(outcome.errors) <= LIMITS["maxErrors"] + 1
+    # `_State.error()` 在第 99 筆後只再塞一筆 sentinel，總數精確等於 maxErrors。
+    assert len(outcome.errors) == LIMITS["maxErrors"]
     assert any(error.code == "too_many_fields" for error in outcome.errors)
-    assert any(error.code == "too_many_errors" for error in outcome.errors)
+    assert outcome.errors[-1].code == "too_many_errors"
 
 
 def test_rule_set_version_must_be_an_integer():
@@ -759,3 +916,286 @@ def test_gate_rejects_fact_that_cannot_exist_there():
     )
 
     assert any(error.code == "fact_unavailable_at_gate" for error in outcome.errors)
+
+
+_OMIT = object()
+
+# (fact, op, value, 使條件為 true 的 fact 值, 使條件為 false 的值, 型別錯誤的值)
+# gate 固定 post-action：action.* / context.* / result.* 在該 gate 全部可用。
+_OPERATOR_CASES = [
+    ("action.type", "neq", "refund", "response", "refund", "not-in-catalog"),
+    ("action.tool_name", "in", ["alpha", "beta"], "alpha", "gamma", 5),
+    ("action.amount", "gte", "5000", "5000", "4999.99", 5000),
+    ("action.amount", "lt", "5000", "4999.99", "5000", 5000),
+    ("action.amount", "lte", "5000", "5000", "5000.01", 5000),
+    ("context.confidence", "between", [0.5, 1.5], 1.0, 2.0, "1.0"),
+    ("result.has_citations", "is_true", None, True, False, "yes"),
+    ("result.has_citations", "is_false", None, False, True, "yes"),
+    ("action.requested_tools", "is_empty", None, [], ["a"], "not-a-list"),
+    ("action.requested_tools", "contains_any", ["a"], ["a"], ["b"], "not-a-list"),
+    ("action.requested_tools", "not_exists", None, _OMIT, ["a"], "not-a-list"),
+]
+
+
+@pytest.mark.parametrize(
+    ("fact", "op", "value", "true_value", "false_value", "invalid_value"),
+    _OPERATOR_CASES,
+    ids=[f"{case[1]}-{case[0]}" for case in _OPERATOR_CASES],
+)
+def test_evaluator_covers_every_catalog_operator(
+    fact, op, value, true_value, false_value, invalid_value
+):
+    """每個 operator 的 true / false / unknown 三條求值路徑各執行一次。"""
+    rules = _canonical(
+        _rule_set(_rule(when=_leaf(fact, op, value))), gate="post-action"
+    )
+
+    def result(supplied):
+        facts = {} if supplied is _OMIT else {fact: supplied}
+        return evaluate("post-action", rules, facts)
+
+    assert result(true_value)["trace"]["rules"][0]["condition"]["result"] == "true"
+    assert result(false_value)["trace"]["rules"][0]["condition"]["result"] == "false"
+    invalid = result(invalid_value)
+    assert invalid["trace"]["rules"][0]["condition"]["result"] == "unknown"
+    assert invalid["trace"]["rules"][0]["condition"]["reason"] == "invalid_fact_type"
+    assert invalid["decision"]["outcome"] == "deny"
+    assert invalid["decision"]["fromUnknown"] is True
+
+
+def test_reference_catalog_enforces_tools_roles_and_facts_categories():
+    """skills 以外的三個類別也必須 fail closed；顯式 `facts: None` 是生產用法（policy.py）。"""
+    tools = _rule_set(
+        _rule(then=[{"action": "allow_read_tool", "tools": ["ghost-tool"]}])
+    )
+    roles = _rule_set(_rule(then=[{"action": "require_approval", "role": "USER"}]))
+    facts = _rule_set(
+        _rule(
+            on_unknown=[
+                {"action": "require_context", "facts": ["action.amount"]}
+            ]
+        )
+    )
+
+    rejected_tool = validate_rule_set("pre-action", tools, {"tools": ["ok-tool"]})
+    rejected_role = validate_rule_set("pre-action", roles, {"roles": ["ADMIN"]})
+    rejected_fact = validate_rule_set(
+        "pre-action", facts, {"facts": ["context.source_count"]}
+    )
+
+    assert rejected_tool.valid is False
+    assert any(
+        error.code == "unknown_tool_reference" for error in rejected_tool.errors
+    )
+    assert rejected_role.valid is False
+    assert any(
+        error.code == "unknown_role_reference" for error in rejected_role.errors
+    )
+    assert rejected_fact.valid is False
+    assert any(
+        error.code == "unknown_fact_reference" for error in rejected_fact.errors
+    )
+
+    assert validate_rule_set("pre-action", tools, {"tools": ["ghost-tool"]}).valid
+    assert validate_rule_set("pre-action", roles, {"roles": ["USER"]}).valid
+    assert validate_rule_set("pre-action", facts, {"facts": ["action.amount"]}).valid
+    # 顯式 None ＝ 該類別不設限（其他類別仍生效）。
+    assert validate_rule_set(
+        "pre-action",
+        facts,
+        {"skills": [], "tools": [], "roles": ["ADMIN"], "facts": None},
+    ).valid
+
+
+_INVALID_RULE_SETS = [
+    ("unknown_gate", "not-a-gate", _rule_set(_rule())),
+    ("duplicate_rule_id", "pre-action", _rule_set(_rule("dup"), _rule("dup"))),
+    ("invalid_priority", "pre-action", _rule_set(_rule(priority=10_001))),
+    ("invalid_priority", "pre-action", _rule_set(_rule(priority=-10_001))),
+    ("invalid_identifier", "pre-action", _rule_set(_rule("bad__id"))),
+    (
+        "unexpected_value",
+        "pre-action",
+        _rule_set(_rule(when=_leaf("action.amount", "exists", "5000"))),
+    ),
+    (
+        "missing_value",
+        "pre-action",
+        _rule_set(_rule(when=_leaf("action.amount", "gt", None))),
+    ),
+    (
+        "invalid_range",
+        "pre-action",
+        _rule_set(_rule(when=_leaf("action.amount", "between", ["3", "1"]))),
+    ),
+    (
+        "empty_collection",
+        "pre-action",
+        _rule_set(_rule(when=_leaf("action.tool_name", "in", []))),
+    ),
+    (
+        "empty_collection",
+        "pre-action",
+        _rule_set(_rule(then=[{"action": "allow_read_tool", "tools": []}])),
+    ),
+    ("unknown_action", "pre-action", _rule_set(_rule(then=[{"action": "nope"}]))),
+    (
+        "missing_action_parameter",
+        "pre-action",
+        _rule_set(_rule(then=[{"action": "require_approval"}])),
+    ),
+    (
+        "unknown_fact",
+        "pre-action",
+        _rule_set(_rule(when=_leaf("no.such.fact", "eq", "x"))),
+    ),
+    (
+        "unknown_operator",
+        "pre-action",
+        _rule_set(_rule(when=_leaf("action.tool_name", "nope", "x"))),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("code", "gate", "raw"),
+    _INVALID_RULE_SETS,
+    ids=[f"{case[0]}-{index}" for index, case in enumerate(_INVALID_RULE_SETS)],
+)
+def test_validator_reports_every_structural_error_code(code, gate, raw):
+    outcome = validate_rule_set(gate, raw)
+
+    assert outcome.valid is False
+    assert outcome.canonical_rule_set is None
+    assert any(error.code == code for error in outcome.errors), outcome.errors
+
+
+@pytest.mark.parametrize("priority", [10_000, -10_000, 0])
+def test_priority_bounds_are_inclusive(priority: int):
+    outcome = validate_rule_set("pre-action", _rule_set(_rule(priority=priority)))
+
+    assert outcome.valid is True, outcome.errors
+
+
+def test_simulator_rejects_more_facts_than_the_catalog_limit():
+    """maxFacts+1 走的是 early return 分支（`too_many_facts` 過去零覆蓋）。"""
+    response = client.post(
+        "/business-rules/simulate",
+        headers=auth_headers(),
+        json={
+            "gate": "pre-action",
+            "ruleSet": {"version": 1, "rules": []},
+            "facts": {
+                f"unknown.fact.{index}": "x"
+                for index in range(LIMITS["maxFacts"] + 1)
+            },
+        },
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["valid"] is False
+    assert [error["code"] for error in body["errors"]] == ["too_many_facts"]
+    assert body["simulation"] is None
+
+
+def test_business_rule_transport_accepts_exact_byte_and_depth_limits():
+    """兩個上限都是 `>`：剛好等於上限的請求必須進到驗證器,不能被傳輸層擋掉。"""
+    headers = {**auth_headers(), "content-type": "application/json"}
+    prefix = b'{"gate":"pre-action","ruleSet":{"version":1,"rules":[],"padding":"'
+    suffix = b'"}}'
+    padding = LIMITS["maxRequestBytes"] - len(prefix) - len(suffix)
+    exact_bytes = prefix + b"x" * padding + suffix
+    assert len(exact_bytes) == LIMITS["maxRequestBytes"]
+
+    at_byte_limit = client.post(
+        "/business-rules/validate", headers=headers, content=exact_bytes
+    )
+    over_byte_limit = client.post(
+        "/business-rules/validate", headers=headers, content=exact_bytes + b" "
+    )
+    exact_depth = (
+        '{"gate":"pre-action","ruleSet":'
+        + "[" * (LIMITS["maxJsonDepth"] - 1)
+        + "null"
+        + "]" * (LIMITS["maxJsonDepth"] - 1)
+        + "}"
+    )
+    at_depth_limit = client.post(
+        "/business-rules/validate", headers=headers, content=exact_depth
+    )
+
+    assert at_byte_limit.status_code == 200
+    assert at_byte_limit.json()["errors"][0]["code"] == "unknown_field"
+    assert over_byte_limit.status_code == 413
+    assert over_byte_limit.json()["detail"]["error"] == "request_too_large"
+    assert at_depth_limit.status_code == 200
+    assert at_depth_limit.json()["errors"][0]["code"] == "invalid_rule_set"
+
+
+# evaluator 及其遞移相依只允許這些非 app 模組；新增任何 I/O 能力的 import 都會讓測試變紅。
+_PURE_EVALUATOR_IMPORTS = frozenset(
+    {
+        "__future__",
+        "math",
+        "re",
+        "enum",
+        "typing",
+        "decimal",
+        "dataclasses",
+        "pydantic",
+    }
+)
+
+
+def _transitive_external_imports(module_name: str) -> set[str]:
+    import importlib
+
+    seen: set[str] = set()
+    pending = [module_name]
+    external: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        source = Path(importlib.import_module(name).__file__).read_text(
+            encoding="utf-8"
+        )
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for imported in names:
+                if imported.startswith("app."):
+                    pending.append(imported)
+                elif imported:
+                    external.add(imported.split(".")[0])
+    return external
+
+
+def test_evaluator_performs_no_io(monkeypatch: pytest.MonkeyPatch):
+    """契約寫在 docstring 不算數：注入會爆炸的 I/O,evaluator 仍必須算得出答案。"""
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("the pure evaluator must not perform I/O")
+
+    rules = _canonical(_rule_set(_rule()))
+    monkeypatch.setattr(socket, "socket", explode)
+    monkeypatch.setattr(socket, "create_connection", explode)
+    monkeypatch.setattr(builtins, "open", explode)
+    monkeypatch.setattr(httpx, "Client", explode)
+    monkeypatch.setattr(httpx, "AsyncClient", explode)
+    result = evaluate("pre-action", rules, {"action.amount": "9000"})
+    simulated = simulate("pre-action", rules, {"action.amount": "9000"})
+    monkeypatch.undo()
+
+    assert result["decision"]["outcome"] == "require_approval"
+    assert simulated == result
+    assert (
+        _transitive_external_imports("app.business_rules.evaluator")
+        <= _PURE_EVALUATOR_IMPORTS
+    )

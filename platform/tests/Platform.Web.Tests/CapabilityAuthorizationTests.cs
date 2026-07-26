@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Platform.Service.Dtos;
 using Platform.Web.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.DependencyInjection;
@@ -61,6 +62,60 @@ public sealed class CapabilityAuthorizationTests : IClassFixture<TestWebAppFacto
         Assert.False(principal.HasCapability("workflow.manage"));
     }
 
+    // capabilities 與 groups 同樣是簽發端決定大小的 wire 資料,兩道界限(數量、聚合 UTF-8 位元組)
+    // 必須對稱:超限整組 fail-closed,不回一個看起來合法的子集。
+    // 四格 = 數量 on-point/off-point + wire byte on-point/off-point。
+
+    [Fact]
+    public void GetCapabilities_ExactlyAtMaxCount_Succeeds()
+    {
+        var claims = Enumerable.Range(0, UserCapabilityContract.MaxCapabilities)
+            .Select(index => new Claim("capabilities", $"c{index:D3}"))
+            .ToArray();
+        var principal = Principal("ADMIN", claims);
+
+        Assert.Equal(UserCapabilityContract.MaxCapabilities, principal.GetCapabilities()!.Count);
+    }
+
+    [Fact]
+    public void GetCapabilities_OverMaxCountRejectsWholeSet()
+    {
+        var claims = Enumerable.Range(0, UserCapabilityContract.MaxCapabilities + 1)
+            .Select(index => new Claim("capabilities", $"c{index:D3}"))
+            .Append(new Claim("capabilities", "workflow.manage"))
+            .ToArray();
+        var principal = Principal("ADMIN", claims);
+
+        Assert.Null(principal.GetCapabilities());
+        Assert.False(principal.HasCapability("workflow.manage"));
+    }
+
+    [Fact]
+    public void GetCapabilities_ExactlyAtWireByteBound_Succeeds()
+    {
+        var capabilities = GroupSet(exceedByOneByte: false);
+        Assert.Equal(
+            UserCapabilityContract.MaxCapabilitiesWireUtf8Bytes,
+            System.Text.Encoding.UTF8.GetByteCount(string.Join(' ', capabilities)));
+        var principal = Principal(
+            "ADMIN", capabilities.Select(c => new Claim("capabilities", c)).ToArray());
+
+        Assert.Equal(capabilities, principal.GetCapabilities()!);
+    }
+
+    [Fact]
+    public void GetCapabilities_OverAggregateWireBoundRejectsWholeSet()
+    {
+        var claims = GroupSet(exceedByOneByte: true)
+            .Select(capability => new Claim("capabilities", capability))
+            .Append(new Claim("capabilities", "workflow.manage"))
+            .ToArray();
+        var principal = Principal("ADMIN", claims);
+
+        Assert.Null(principal.GetCapabilities());
+        Assert.False(principal.HasCapability("workflow.manage"));
+    }
+
     [Fact]
     public void GetGroups_RepeatedCanonicalClaimsReturnSortedAtomicSet()
     {
@@ -104,6 +159,32 @@ public sealed class CapabilityAuthorizationTests : IClassFixture<TestWebAppFacto
         var principal = Principal("ADMIN", claims);
 
         Assert.Null(principal.GetGroups());
+    }
+
+    // 上限的「放行側」:剛好 MaxGroups 筆(名稱夠短,不觸發 wire byte 上限)必須被接受;
+    // 只測 257 拒絕的話,把上限誤打成 255 之類的縮水改動不會有任何測試失敗。
+    [Fact]
+    public void GetGroups_ExactlyAtMaxCount_Succeeds()
+    {
+        var claims = Enumerable.Range(0, UserGroupContract.MaxGroups)
+            .Select(index => new Claim("groups", $"g{index:D3}"))
+            .ToArray();
+        var principal = Principal("ADMIN", claims);
+
+        Assert.Equal(UserGroupContract.MaxGroups, principal.GetGroups()!.Count);
+    }
+
+    // 聚合位元組上限的「放行側」:恰好 MaxGroupsWireUtf8Bytes(2048)必須被接受(off-point 見上一個測試)。
+    [Fact]
+    public void GetGroups_ExactlyAtWireByteBound_Succeeds()
+    {
+        var groups = GroupSet(exceedByOneByte: false);
+        Assert.Equal(
+            UserGroupContract.MaxGroupsWireUtf8Bytes,
+            System.Text.Encoding.UTF8.GetByteCount(string.Join(' ', groups)));
+        var principal = Principal("ADMIN", groups.Select(g => new Claim("groups", g)).ToArray());
+
+        Assert.Equal(groups.OrderBy(g => g, StringComparer.Ordinal), principal.GetGroups()!);
     }
 
     [Fact]

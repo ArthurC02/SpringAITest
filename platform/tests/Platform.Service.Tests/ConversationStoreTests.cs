@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 
@@ -77,6 +78,44 @@ public sealed class ConversationStoreTests
         Assert.Equal(metadata.WorkflowId, root.GetProperty("workflow_id").GetGuid());
         Assert.Equal(3, root.GetProperty("workflow_revision").GetInt32());
         Assert.Equal(metadata.RootRunId, root.GetProperty("root_run_id").GetGuid());
+    }
+
+    // 沒有 D6 lineage 的一般聊天輪:五個 lineage 欄位一律以 null 送出(不得省略、更不得殘留上一輪的值)。
+    // IConversationStore 的 5 參多載是「預設介面方法」,會靜默把 metadata 丟掉;ConversationStore 必須是
+    // 覆寫它的那一個實作,兩個多載才會走同一段 body 組裝——本案與 Add_WithRootMetadata_* 成對釘住這件事。
+    [Fact]
+    public async Task Add_WithoutMetadata_SendsNullLineageFields()
+    {
+        var stub = new StubHttpMessageHandler(_ =>
+            TestHttp.Json(HttpStatusCode.Created, "{\"id\":5,\"createdAt\":\"2026-07-12T10:00:00Z\"}"));
+
+        // 刻意經介面呼叫 4 參多載(聊天走的就是這條:D6 未命中時 TurnMetadata 為 null)。
+        IConversationStore store = Build(stub);
+        await store.AddAsync("prompt", "reply", Ctx);
+
+        using var doc = JsonDocument.Parse(stub.LastBody!);
+        var root = doc.RootElement;
+        foreach (var field in new[]
+                 {
+                     "orchestrator_id", "orchestrator_revision", "workflow_id", "workflow_revision", "root_run_id",
+                 })
+        {
+            Assert.Equal(JsonValueKind.Null, root.GetProperty(field).ValueKind);
+        }
+    }
+
+    // 讀取端的錯誤映射與寫入端同語意:HTTP 錯誤碼與傳輸層例外都是 BackendCallException(對外 500),
+    // 不得變成 WorkflowInvocationException(那會讓聊天歷史端點回 502)。
+    [Fact]
+    public async Task ListDesc_500AndTransportError_ThrowBackendCall_NotWorkflowInvocation()
+    {
+        var onError = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+        var httpError = await Assert.ThrowsAsync<BackendCallException>(() => onError.ListDescAsync(Ctx));
+        Assert.IsNotType<WorkflowInvocationException>(httpError);
+
+        var onTransport = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒")));
+        var transportError = await Assert.ThrowsAsync<BackendCallException>(() => onTransport.ListDescAsync(Ctx));
+        Assert.IsNotType<WorkflowInvocationException>(transportError);
     }
 
     [Fact]

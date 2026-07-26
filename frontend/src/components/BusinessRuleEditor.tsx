@@ -18,10 +18,10 @@ import {
   factCatalogItems,
   factsForGate,
   isRuleLeaf,
-  MAX_RULE_UI_DEPTH,
   newLeaf,
   operatorEntries,
   operatorNeedsValue,
+  ruleUiDepthLimit,
   summarizeRule,
 } from '../ruleBuilder'
 import type {
@@ -294,6 +294,7 @@ function ConditionEditor({
   onRemove: () => void
 }) {
   const kind = conditionKind(condition)
+  const maxDepth = ruleUiDepthLimit(factCatalog)
 
   function switchKind(next: 'all' | 'any' | 'not' | 'leaf') {
     if (next === kind) return
@@ -315,7 +316,7 @@ function ConditionEditor({
       <div className="rule-condition rule-condition--leaf" data-rule-path={path}>
         <div className="rule-condition__toolbar">
           <span className="muted">條件</span>
-          {depth < MAX_RULE_UI_DEPTH && (
+          {depth < maxDepth && (
             <select
               className="input rule-condition__kind"
               aria-label={`${path} 類型`}
@@ -484,9 +485,7 @@ function ConditionEditor({
           ＋ 新增條件
         </button>
       )}
-      {depth >= MAX_RULE_UI_DEPTH && (
-        <p className="muted">已達 UI 巢狀上限（{MAX_RULE_UI_DEPTH} 層）。</p>
-      )}
+      {depth >= maxDepth && <p className="muted">已達 UI 巢狀上限（{maxDepth} 層）。</p>}
     </fieldset>
   )
 }

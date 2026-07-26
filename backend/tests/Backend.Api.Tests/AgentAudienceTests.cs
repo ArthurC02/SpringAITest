@@ -39,6 +39,12 @@ public sealed class AgentAudienceTests
             "USER",
             new[] { "finance-reviewers" },
             allowLegacyPublishedRoles: true));
+        // audience 可以合法地是空陣列(Validate 對 audience 沒有非空要求)→ 空 audience 誰都不符。
+        Assert.False(AgentAudience.Matches(
+            Array.Empty<string>(),
+            "ADMIN",
+            Array.Empty<string>(),
+            allowLegacyPublishedRoles: true));
     }
 
     [Theory]
@@ -50,7 +56,7 @@ public sealed class AgentAudienceTests
     public void CanonicalGroupIdAndHeader_RejectNonCanonicalWireGrammar(
         string rawHeader)
     {
-        Assert.False(AgentAudience.IsCanonicalGroupId("operations\n"));
+        Assert.False(AgentAudience.IsCanonicalGroupId(rawHeader));
 
         var context = new DefaultHttpContext();
         context.Request.Headers[IdentityHeaders.GroupsHeader] = rawHeader;

@@ -5,9 +5,16 @@ using Backend.Api.Common;
 
 namespace Backend.Api.Auth;
 
-/// <summary>註冊請求。欄位宣告為可空字串以抑制不可空型別的隱含英文訊息,只保留指定中文驗證訊息。</summary>
+/// <summary>
+/// 註冊請求。欄位宣告為可空字串以抑制不可空型別的隱含英文訊息,只保留指定中文驗證訊息。
+/// username / tenantCode 不得含 ':':platform 的租戶隔離鍵是未逃逸的 `{tenantCode}:{userId}`,
+/// 身分含 ':' 會讓兩組不同身分撞成同一把鍵(tenant "t" + user "a:b" 與 tenant "t:a" + user "b"),
+/// 而短期記憶視窗與 mem0 uid 都用它 → 撞鍵即跨使用者記憶可見。鍵格式刻意不改(既有 mem0 uid 與
+/// 進行中的對話視窗會全斷),改在產生這兩個值的邊界擋下;platform 衍生時另有第二道 fail-closed 守門。
+/// </summary>
 public sealed record RegisterRequest(
     [NotBlank(ErrorMessage = "username 不可為空")]
+    [RegularExpression(IdentityRules.NoColon, ErrorMessage = "username 不可包含冒號")]
     string? Username,
 
     [NotBlank(ErrorMessage = "password 不可為空")]
@@ -15,18 +22,27 @@ public sealed record RegisterRequest(
     string? Password,
 
     [NotBlank(ErrorMessage = "tenantCode 不可為空")]
+    [RegularExpression(IdentityRules.NoColon, ErrorMessage = "tenantCode 不可包含冒號")]
     string? TenantCode,
 
     [NotBlank(ErrorMessage = "inviteCode 不可為空")]
     string? InviteCode);
 
-/// <summary>登入請求。</summary>
+/// <summary>登入請求(同一組身分值的另一個入口,同樣不得含 ':')。</summary>
 public sealed record LoginRequest(
     [NotBlank(ErrorMessage = "username 不可為空")]
+    [RegularExpression(IdentityRules.NoColon, ErrorMessage = "username 不可包含冒號")]
     string? Username,
 
     [NotBlank(ErrorMessage = "password 不可為空")]
     string? Password);
+
+/// <summary>身分欄位的格式規則(register/login 共用,避免兩個入口各自維護一份 pattern)。</summary>
+internal static class IdentityRules
+{
+    /// <summary>不含 platform 隔離鍵分隔字元 ':' 的字串([^:] 含換行,不順手收緊既有允許值)。</summary>
+    public const string NoColon = @"^[^:]*\z";
+}
 
 /// <summary>
 /// register 的回應 body 仍只有 { username, role, tenantCode }。

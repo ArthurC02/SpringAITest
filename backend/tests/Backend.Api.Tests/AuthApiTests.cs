@@ -186,4 +186,42 @@ public sealed class AuthApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         Assert.Equal("帳號或密碼錯誤", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
     }
+
+    // ---- 記憶鍵分隔字元:username / tenantCode 不得含 ':' ----
+    // platform 的租戶隔離鍵是未逃逸的 `{tenantCode}:{userId}`,身分含 ':' 會讓兩組不同身分撞成同一把鍵
+    // (tenant "t" + user "a:b" 與 tenant "t:a" + user "b" 同為 "t:a:b"),而短期記憶視窗與 mem0 uid 都用它
+    // → 撞鍵即跨使用者記憶可見。鍵格式刻意不改(既有 mem0 uid 與進行中的視窗會全斷),改在產生這兩個值的
+    // 邊界擋下;platform 衍生時另有第二道 fail-closed 守門。
+
+    [Theory]
+    [InlineData("bad:user", "demo-a", "username")]
+    [InlineData("baduser", "demo:a", "tenantCode")]
+    public async Task Register_Returns400_WhenIdentityContainsMemoryKeySeparator(
+        string username, string tenantCode, string field)
+    {
+        var client = _factory.CreateInternalClient();
+
+        var resp = await client.PostAsJsonAsync("/api/auth/register",
+            new { username, password = "password123", tenantCode, inviteCode = "demo-a-invite" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal($"{field} 不可包含冒號", body["fieldErrors"]![field]!.GetValue<string>());
+    }
+
+    // login 是同一組值的另一個入口:即使某筆遺留資料真的帶 ':',也不得換到一張會撞鍵的 JWT。
+    [Fact]
+    public async Task Login_Returns400_WhenUsernameContainsMemoryKeySeparator()
+    {
+        var client = _factory.CreateInternalClient();
+
+        var resp = await client.PostAsJsonAsync("/api/auth/login",
+            new { username = "user:a", password = "password123" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("username 不可包含冒號", body["fieldErrors"]!["username"]!.GetValue<string>());
+    }
 }

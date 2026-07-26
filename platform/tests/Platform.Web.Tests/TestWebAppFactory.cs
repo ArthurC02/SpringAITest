@@ -23,6 +23,8 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
     private readonly bool _workflowDesignerEnabled;
     private readonly bool _multiAgentDispatchEnabled;
     private readonly bool _agentWriteToolsEnabled;
+    private readonly bool _agentChatEnabled;
+    private readonly string _agentChatTenantAllowlist = string.Empty;
     private readonly IMem0Client? _mem0Override;
 
     public TestWebAppFactory()
@@ -34,6 +36,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         bool useDevelopmentEnvironment = false, bool agentBuilderEnabled = false,
         bool agentTestRunEnabled = false, bool workflowDesignerEnabled = false,
         bool multiAgentDispatchEnabled = false, bool agentWriteToolsEnabled = false,
+        bool agentChatEnabled = false, string agentChatTenantAllowlist = "",
         IMem0Client? mem0Override = null)
     {
         _enableRateLimiting = enableRateLimiting;
@@ -44,6 +47,8 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         _workflowDesignerEnabled = workflowDesignerEnabled;
         _multiAgentDispatchEnabled = multiAgentDispatchEnabled;
         _agentWriteToolsEnabled = agentWriteToolsEnabled;
+        _agentChatEnabled = agentChatEnabled;
+        _agentChatTenantAllowlist = agentChatTenantAllowlist;
         _mem0Override = mem0Override;
     }
 
@@ -61,8 +66,16 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", _workflowDesignerEnabled ? "true" : "false");
         builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", _multiAgentDispatchEnabled ? "true" : "false");
         builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", _agentWriteToolsEnabled ? "true" : "false");
+        // D6 chat canary:旗標與逗號分隔的伺服器端租戶白名單是兩個獨立條件(兩者皆通過才進 canary),
+        // 故兩個旋鈕分開,允許測「已啟用但租戶不在白名單」這一格。
+        builder.UseSetting("AGENT_CHAT_ENABLED", _agentChatEnabled ? "true" : "false");
+        builder.UseSetting("AGENT_CHAT_TENANT_ALLOWLIST", _agentChatTenantAllowlist);
         builder.ConfigureTestServices(services =>
         {
+            // 每個 factory 一份的重置權杖:fake 的 static 呼叫紀錄第一次被這個 factory 碰到時清空,
+            // 讓「一個測試一個 factory」的類別不會讀到前一個測試的殘留(見 FakeCallScope)。
+            services.AddSingleton<FakeCallScope>();
+
             // B-P1-06:移除 SessionIsolationKeyProvider 註冊,證明 Strict=true 的 fail-closed 真的開著——
             // 即使帶有效 JWT,AG-UI 端點仍應在存取 session store 時拋例外(對外 500),不得默默共用全域命名空間。
             if (_removeSessionIsolationProvider)

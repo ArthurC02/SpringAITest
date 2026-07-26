@@ -86,6 +86,9 @@ public sealed class BusinessRuleValidatorTests
     [InlineData("""{"valid":true,"canonicalRuleSet":{},"errors":[]}""")]
     [InlineData("""{"valid":true,"canonicalRuleSet":{"version":2,"rules":[]},"errors":[]}""")]
     [InlineData("""{"valid":true,"canonicalRuleSet":{"version":1},"errors":[]}""")]
+    [InlineData("""{"valid":true,"canonicalRuleSet":[],"errors":[]}""")]                        // 非 object
+    [InlineData("""{"valid":true,"canonicalRuleSet":{"version":"1","rules":[]},"errors":[]}""")] // version 非數字
+    [InlineData("""{"valid":true,"canonicalRuleSet":{"version":1,"rules":{}},"errors":[]}""")]   // rules 非陣列
     public async Task ValidWithIncompleteCanonicalEnvelope_IsContractFailure502(string response)
     {
         var sut = Build(Json(HttpStatusCode.OK, response));
@@ -106,6 +109,31 @@ public sealed class BusinessRuleValidatorTests
 
         Assert.Equal(502, ex.Status);
         Assert.Contains("缺少 errors", ex.Message);
+    }
+
+    /// <summary>
+    /// 「引擎不可達」的真實形態:除了 HTTP 錯誤碼,還有**完全沒有可用回應**的等價類 —
+    /// 傳輸層例外、200 但 body 不是 JSON、200 但 body 是字面 null。三者都必須 fail closed 成 502。
+    /// </summary>
+    [Fact]
+    public async Task RuleEngine_TransportFailureAndMalformedBody_FailClosedAs502()
+    {
+        var transport = await Assert.ThrowsAsync<ApiException>(() =>
+            Build(new StubHandler(_ => throw new HttpRequestException("連線被拒")))
+                .ValidateAsync("pre-action", Rules, References, "demo-a", "admin-a", "ADMIN", default));
+        Assert.Equal(502, transport.Status);
+        Assert.Contains("連線被拒", transport.Message);
+
+        var malformed = await Assert.ThrowsAsync<ApiException>(() =>
+            Build(Json(HttpStatusCode.OK, "<html>bad gateway</html>"))
+                .ValidateAsync("pre-action", Rules, References, "demo-a", "admin-a", "ADMIN", default));
+        Assert.Equal(502, malformed.Status);
+
+        var empty = await Assert.ThrowsAsync<ApiException>(() =>
+            Build(Json(HttpStatusCode.OK, "null"))
+                .ValidateAsync("pre-action", Rules, References, "demo-a", "admin-a", "ADMIN", default));
+        Assert.Equal(502, empty.Status);
+        Assert.Contains("回應內容為空", empty.Message);
     }
 
     private static StubHandler Json(HttpStatusCode status, string body)

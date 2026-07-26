@@ -529,6 +529,40 @@ def test_no_frontmatter():
     assert ei.value.errors[0].code == package.INVALID_FRONTMATTER
 
 
+def test_non_utf8_skill_md_and_script_are_controlled_errors():
+    """未信任 zip 的 bytes 不保證是文字：兩條解碼路徑都必須是受控錯誤碼，不是 500。"""
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(make_zip({"SKILL.md": b"\xff\xfe---\nname: x\n"}), None)
+    assert ei.value.errors[0].code == package.INVALID_FRONTMATTER
+    assert "UTF-8" in ei.value.errors[0].message
+
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(
+            agentic_zip(extra={"scripts/bad.py": b"\xff\xfe"}), "sales-helper"
+        )
+    assert ei.value.errors[0].code == package.FORBIDDEN_SCRIPT
+    assert "UTF-8" in ei.value.errors[0].message
+
+
+@pytest.mark.parametrize(
+    "frontmatter,fragment",
+    [
+        ("name: [unclosed", "YAML 解析失敗"),  # frontmatter 內是壞 YAML
+        ("- a\n- b", "mapping"),  # 合法 YAML 但不是 mapping
+    ],
+    ids=["broken-yaml", "not-a-mapping"],
+)
+def test_broken_frontmatter_yaml_is_invalid_frontmatter(frontmatter, fragment):
+    """frontmatter 區塊本身壞掉 → invalid_frontmatter（yaml.YAMLError 不得穿出去）。"""
+    md = f"---\n{frontmatter}\n---\n\nbody\n"
+
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(make_zip({"SKILL.md": md}), "sales-helper")
+
+    assert ei.value.errors[0].code == package.INVALID_FRONTMATTER
+    assert fragment in ei.value.errors[0].message
+
+
 def test_name_mismatch_cannot_rename_via_package():
     raw = agentic_zip(name="other-name")
     with pytest.raises(PackageError) as ei:
@@ -1144,14 +1178,6 @@ def test_flow_package_missing_yaml_block_rejected():
     assert "定義區塊" in ei.value.errors[0].message
 
 
-def test_flow_package_name_mismatch_rejected():
-    md = flow_skill_md("flow-probe", "d", "name: flow-probe\nflow:\n  - node: query_intake@1.0")
-    raw = make_zip({"SKILL.md": md})
-    with pytest.raises(PackageError) as ei:
-        package.parse_package(raw, "different-name")
-    assert ei.value.errors[0].code == package.NAME_MISMATCH
-
-
 def test_flow_frontmatter_name_must_match_route_and_embedded_definition():
     md = flow_skill_md("wrong-name", "flow 匯出", FLOW_YAML)
     raw = make_zip({"SKILL.md": md})
@@ -1159,6 +1185,22 @@ def test_flow_frontmatter_name_must_match_route_and_embedded_definition():
         package.parse_package(raw, "flow-probe")
     assert ei.value.errors[0].code == package.NAME_MISMATCH
     assert "frontmatter" in ei.value.errors[0].message
+
+
+def test_flow_definition_name_must_equal_frontmatter_name():
+    """三方比對的第三格：frontmatter name 對得上匯入路徑，但內嵌 yaml 自己改了名。
+
+    這是「用編輯內嵌定義改名」的身分繞道 —— frontmatter 那關過了，真正被存進 revision
+    的卻是另一個名字。package.py:885 擋的就是這一格（前兩格都命中 :867）。
+    """
+    definition = FLOW_YAML.replace("name: flow-probe", "name: other-flow", 1)
+    md = flow_skill_md("flow-probe", "flow 匯出", definition)
+
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(make_zip({"SKILL.md": md}), "flow-probe")
+
+    assert ei.value.errors[0].code == package.NAME_MISMATCH
+    assert "flow 定義 name" in ei.value.errors[0].message
 
 
 @pytest.mark.parametrize("description", ["", "   "])

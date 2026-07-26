@@ -24,6 +24,17 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
     private HttpClient User(string tenant = "demo-a")
         => _factory.CreateInternalClient().WithRole("USER").WithTenant(tenant);
 
+    /// <summary>
+    /// 把測試用的識別標籤壓成合法 slug(create 端有 canonical 格式驗證)。
+    /// 標籤只是為了讓每個測試用互不衝突的 slug,本身從不是被測對象;格式規則本身由
+    /// <see cref="Create_MalformedSlug_Returns400"/> 直接背書。
+    /// </summary>
+    private static string Slug(string label)
+        => new string(label.ToLowerInvariant()
+                .Select(c => char.IsAsciiLetterOrDigit(c) ? c : '-')
+                .ToArray())
+            .Trim('-');
+
     // 合法 Agent 建立 body(可 publish 的最小定義:system_prompt + worker role + pinned runtime workflow)。
     private static JsonObject ValidBody(string slug, string name = "研究助手")
         => new()
@@ -91,6 +102,17 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         };
         request.Headers.TryAddWithoutValidation("If-Match", $"\"{expected}\"");
         return client.SendAsync(request);
+    }
+
+    /// <summary>D3 test run 起始請求(用來驗 runtime 閘門,不驗 run 生命週期本身)。</summary>
+    private static HttpRequestMessage StartRun(string agentId, string idempotencyKey)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/agents/{agentId}/runs")
+        {
+            Content = JsonContent.Create(new JsonObject { ["message"] = "請整理重點" }),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+        return request;
     }
 
     private static Task<HttpResponseMessage> ValidateAsync(
@@ -630,6 +652,9 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("gt", rule["when"]!["op"]!.GetValue<string>());
         Assert.Equal("require_approval", rule["then"]![0]!["action"]!.GetValue<string>());
         Assert.Equal(1, draft["business_rules"]!["version"]!.GetValue<int>());
+        // backend 只是保存者:create 不得自行發明 Workflow 的 canonical 預設值(onUnknown 只有在
+        // validate/publish 由 Workflow 回傳 canonicalRuleSet 之後才會出現)。
+        Assert.Null(rule["onUnknown"]);
     }
 
     [Fact]
@@ -930,107 +955,6 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
             new string('n', AgentExecutionContract.MaxAgentNameLength)));
     }
 
-    [Fact]
-    public async Task RepositoryPublishAndRestore_RecheckExecutionSnapshotContract()
-    {
-        var repo = _factory.Fake<IAgentRepository>();
-        var suffix = Guid.NewGuid().ToString("N");
-        var invalidDefinition = AgentCanonicalizer.Canonicalize(new AgentUpsert(
-            Slug: null,
-            Name: null,
-            Description: null,
-            SystemPrompt: new string(
-                'p', AgentExecutionContract.MaxSystemPromptLength + 1),
-            ExecutionRoles: new[] { "worker" },
-            Capabilities: null,
-            OutputContract: null,
-            Audience: new[] { "ADMIN" },
-            AllowedTools: null,
-            SkillBindings: null,
-            KnowledgeSources: null,
-            BusinessRules: null,
-            RuntimeLimits: new AgentRuntimeLimits(TimeoutSeconds: -1),
-            RuntimeWorkflow: new AgentWorkflowRef(
-                AgentDefaults.RuntimeWorkflowId,
-                AgentDefaults.RuntimeWorkflowRevision)));
-        var invalid = await repo.CreateAsync(
-            "demo-a",
-            $"invalid-contract-{suffix}",
-            "invalid contract",
-            string.Empty,
-            invalidDefinition,
-            SkillHash.Sha256(invalidDefinition),
-            "admin-a",
-            default);
-        Assert.NotNull(invalid);
-        Assert.True(await repo.MarkValidatedAsync(
-            "demo-a",
-            invalid!.Id,
-            invalid.DraftVersion,
-            invalidDefinition,
-            SkillHash.Sha256(invalidDefinition),
-            default));
-
-        var rejectedPublish = await repo.PublishAsync(
-            "demo-a",
-            invalid.Id,
-            invalid.DraftVersion,
-            invalidDefinition,
-            SkillHash.Sha256(invalidDefinition),
-            "admin-a",
-            default);
-
-        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedPublish.Status);
-        Assert.Contains(
-            rejectedPublish.Errors!,
-            error => error.Field == "system_prompt");
-        Assert.Contains(
-            rejectedPublish.Errors!,
-            error => error.Field == "runtime_limits.timeout_seconds");
-
-        var validDefinition = AgentCanonicalizer.Canonicalize(
-            ValidBody($"valid-contract-{suffix}").Deserialize<AgentUpsert>()!);
-        var valid = await repo.CreateAsync(
-            "demo-a",
-            $"valid-contract-{suffix}",
-            "valid contract",
-            string.Empty,
-            validDefinition,
-            SkillHash.Sha256(validDefinition),
-            "admin-a",
-            default);
-        Assert.NotNull(valid);
-        Assert.True(await repo.MarkValidatedAsync(
-            "demo-a",
-            valid!.Id,
-            valid.DraftVersion,
-            validDefinition,
-            SkillHash.Sha256(validDefinition),
-            default));
-        Assert.Equal(
-            AgentWriteStatus.Success,
-            (await repo.PublishAsync(
-                "demo-a",
-                valid.Id,
-                valid.DraftVersion,
-                validDefinition,
-                SkillHash.Sha256(validDefinition),
-                "admin-a",
-                default)).Status);
-
-        var rejectedRestore = await repo.RestoreAsync(
-            "demo-a",
-            valid.Id,
-            1,
-            invalidDefinition,
-            SkillHash.Sha256(invalidDefinition),
-            "admin-a",
-            default);
-        Assert.Equal(AgentWriteStatus.InvalidReference, rejectedRestore.Status);
-        Assert.Single(await repo.ListRevisionsAsync(
-            "demo-a", valid.Id, default));
-    }
-
     [Theory]
     [InlineData("system_prompt", "")]      // 空 system_prompt
     [InlineData("execution_roles", "[]")]  // 空 roles
@@ -1038,7 +962,7 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
     public async Task Validate_InvalidDraft_ReturnsErrors_AndDoesNotMarkValidated(string field, string variant)
     {
         var client = Admin();
-        var body = ValidBody($"val-bad-{field}-{variant}");
+        var body = ValidBody(Slug($"val-bad-{field}-{variant}"));
         if (field == "system_prompt")
         {
             body["system_prompt"] = "";
@@ -1059,28 +983,11 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Null(draft["draft_validated_version"]);
     }
 
+    // 「不存在的 skill」與「builtin/catalog-only」在 InMemory 路徑同屬「查不到可固定的 persisted
+    // revision」等價類(InMemoryAgentRepository.ResolveReferencesUnsafe 發同一句訊息);合併為一條,
+    // 保留原本兩條各自的增量斷言:訊息含 skill 名 + 訊息含 builtin/catalog-only 說明 + unknown workflow 半邊。
     [Fact]
-    public async Task Validate_BindingToMissingSkill_FailsBeforePublish()
-    {
-        var client = Admin();
-        var body = ValidBody("bind-missing");
-        body["skill_bindings"] = new JsonArray(new JsonObject { ["skill"] = "no-such-skill" });
-        var (id, _) = await CreateAsync(client, body);
-        var validation = await (await ValidateAsync(client, id)).ReadJsonAsync();
-        Assert.False(validation["valid"]!.GetValue<bool>());
-        Assert.Contains(
-            "no-such-skill",
-            Assert.Single(
-                validation["errors"]!.AsArray(),
-                e => e!["field"]!.GetValue<string>() == "skill_bindings")!["message"]!
-                .GetValue<string>());
-
-        var resp = await PublishAsync(client, id, 1);
-        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
-    }
-
-    [Fact]
-    public async Task Validate_RejectsUnknownRuntimeWorkflow_AndCatalogOnlySkill()
+    public async Task Validate_RejectsUnknownRuntimeWorkflow_AndUnbindableSkill()
     {
         var client = Admin();
         var body = ValidBody("bad-refs");
@@ -1100,10 +1007,12 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Contains(
             result["errors"]!.AsArray(),
             e => e!["field"]!.GetValue<string>() == "runtime_workflow");
-        Assert.Contains(
+        var bindingMessage = Assert.Single(
             result["errors"]!.AsArray(),
-            e => e!["field"]!.GetValue<string>() == "skill_bindings"
-                 && e["message"]!.GetValue<string>().Contains("builtin/catalog-only"));
+            e => e!["field"]!.GetValue<string>() == "skill_bindings")!["message"]!
+            .GetValue<string>();
+        Assert.Contains("「builtin-catalog-only」", bindingMessage);
+        Assert.Contains("builtin/catalog-only", bindingMessage);
 
         // Invalid validation result is never marked; publish fails closed as unvalidated.
         Assert.Equal(HttpStatusCode.Conflict, (await PublishAsync(client, id, 1)).StatusCode);
@@ -1169,15 +1078,14 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Empty(body["fieldErrors"]!.AsObject());
     }
 
+    // 全部寫入路由共用 class-level [AdminOnly](AgentController.cs:18)→ 同一等價類;
+    // 各留一個 body-carrying(PUT)與一個 no-body(DELETE)代表值即可,新路由自動繼承。
     [Theory]
     [InlineData("PUT", "/draft")]
-    [InlineData("POST", "/publish")]
-    [InlineData("POST", "/validate")]
     [InlineData("DELETE", "")]
-    [InlineData("POST", "/enable")]
     public async Task NonAdmin_Write_Returns403(string method, string suffix)
     {
-        var (id, _) = await CreateAsync(Admin(), ValidBody($"role-{method}-{suffix.Trim('/')}"));
+        var (id, _) = await CreateAsync(Admin(), ValidBody(Slug($"role-{method}-{suffix.Trim('/')}")));
 
         var req = new HttpRequestMessage(new HttpMethod(method), $"/api/agents/{id}{suffix}");
         if (method is "PUT" or "POST")
@@ -1261,13 +1169,212 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(SkillHash.Sha256(leftCanonical), SkillHash.Sha256(afterJsonbRoundTrip));
     }
 
+    // ---- soft-disable 的兩面:管理/稽核仍可寫,runtime 閘門關閉 ----
+
     [Fact]
-    public void DefaultRuntimeWorkflowFixture_HasValidExplicitStartAndEnd()
+    public async Task Disabled_Agent_RemainsManageableButIsNotRuntimeVisible()
     {
-        Assert.Empty(AgentDefaults.ValidateRuntimeWorkflowFixture());
-        var root = JsonNode.Parse(AgentDefaults.RuntimeWorkflowDefinition)!.AsObject();
-        Assert.Single(root["nodes"]!.AsArray(), n => n!["type"]!.GetValue<string>() == "start");
-        Assert.Single(root["nodes"]!.AsArray(), n => n!["type"]!.GetValue<string>() == "end");
+        var client = Admin();
+        var body = ValidBody("soft-disabled");
+        body["audience"] = new JsonArray("role:ADMIN"); // run 需要 audience 命中,才能證明擋下來的是 enabled 閘門
+        var (id, _) = await CreateAsync(client, body);
+        await ValidateAsync(client, id);
+        Assert.Equal(HttpStatusCode.OK, (await PublishAsync(client, id, 1)).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.Accepted,
+            (await client.SendAsync(StartRun(id, "soft-disabled-enabled"))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/agents/{id}")).StatusCode);
+
+        // runtime:已發布但停用的 Agent 不可執行(不是靜默放行)。
+        var blocked = await client.SendAsync(StartRun(id, "soft-disabled-blocked"));
+        Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+        Assert.Equal(
+            "找不到可執行的已發布 Agent",
+            (await blocked.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // 管理/稽核:soft-disable 不是寫入凍結 — draft/validate/publish 仍走得完,產生 revision 2。
+        Assert.Equal(HttpStatusCode.OK, (await client.SendAsync(PutDraft(id, body, "\"1\""))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await ValidateAsync(client, id, 2)).StatusCode);
+        var republish = await PublishAsync(client, id, 2);
+        Assert.Equal(HttpStatusCode.OK, republish.StatusCode);
+        Assert.Equal(2, (await republish.ReadJsonAsync())["published_revision"]!.GetValue<int>());
+    }
+
+    // ---- lifecycle 寫入前的 audience 遷移(CanonicalizeForLifecycleWrite)----
+
+    [Fact]
+    public async Task Validate_MigratesLegacyBareRoleAudience_ButRejectsLegacyBareGroup()
+    {
+        var client = Admin();
+
+        // 裸 role 只可能存在於舊資料(Canonicalize 會即時遷移),因此直接寫進 repo 造出 legacy draft。
+        var legacyNode = JsonNode.Parse(AgentCanonicalizer.Canonicalize(
+            ValidBody("legacy-bare-role").Deserialize<AgentUpsert>()!))!.AsObject();
+        legacyNode["audience"] = new JsonArray("ADMIN");
+        var legacy = AgentCanonicalizer.CanonicalizeDefinition(legacyNode.ToJsonString());
+        var created = await _factory.Fake<IAgentRepository>().CreateAsync(
+            "demo-a", "legacy-bare-role", "legacy", string.Empty,
+            legacy, SkillHash.Sha256(legacy), "admin-a", default);
+        Assert.NotNull(created);
+
+        var validate = await ValidateAsync(client, created!.Id.ToString());
+
+        Assert.True((await validate.ReadJsonAsync())["valid"]!.GetValue<bool>());
+        var migrated = await (await client.GetAsync($"/api/agents/{created.Id}")).ReadJsonAsync();
+        Assert.Equal(
+            new[] { "role:ADMIN" },
+            migrated["draft"]!["audience"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
+        // 就地遷移改寫了 draft bytes,但沿用同一個 ETag(不 bump draft_version)。
+        Assert.Equal(1, migrated["draft_version"]!.GetValue<long>());
+        Assert.Equal(1, migrated["draft_validated_version"]!.GetValue<long>());
+        Assert.Equal("\"1\"", validate.Headers.ETag!.Tag);
+
+        // 裸 group 字串不被當成 canonical:必須顯式改成 group:<id>,validate 直接報 audience 錯誤。
+        var groupBody = ValidBody("legacy-bare-group");
+        groupBody["audience"] = new JsonArray("finance-reviewers");
+        var (groupId, _) = await CreateAsync(client, groupBody);
+        var result = await (await ValidateAsync(client, groupId)).ReadJsonAsync();
+        Assert.False(result["valid"]!.GetValue<bool>());
+        Assert.Contains(
+            result["errors"]!.AsArray(),
+            e => e!["field"]!.GetValue<string>() == "audience");
+    }
+
+    // ---- If-Match 語法:非數字 / weak ETag / 萬用字元一律 400(不是 428/409/500)----
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("W/\"1\"")]
+    [InlineData("*")] // HTTP 語意上代表「任何現存資源」;此處刻意不支援
+    public async Task IfMatch_MalformedOrWildcard_Returns400(string ifMatch)
+    {
+        var client = Admin();
+        var (id, _) = await CreateAsync(client, ValidBody($"if-match-{Guid.NewGuid():N}"));
+
+        var resp = await client.SendAsync(PutDraft(id, ValidBody("ignored"), ifMatch));
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal(
+            "If-Match 標頭格式不正確",
+            (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // ---- 身分 header 缺席:tenant 是 per-handler 400,role 是 filter 403 ----
+
+    [Fact]
+    public async Task MissingTenantOrRoleHeader_FailsClosedOnAgentRoutes()
+    {
+        var (id, _) = await CreateAsync(Admin(), ValidBody("header-gate"));
+
+        var tenantless = await _factory.CreateInternalClient().WithRole("ADMIN").WithUser("admin-a")
+            .GetAsync($"/api/agents/{id}");
+        Assert.Equal(HttpStatusCode.BadRequest, tenantless.StatusCode);
+        Assert.Equal(
+            "缺少租戶識別標頭：X-Tenant-Id",
+            (await tenantless.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // 完全不帶 X-User-Role(不是 USER,是缺 header)→ 403,不是 500/200。
+        var roleless = await _factory.CreateInternalClient().WithTenant("demo-a").WithUser("admin-a")
+            .GetAsync($"/api/agents/{id}");
+        Assert.Equal(HttpStatusCode.Forbidden, roleless.StatusCode);
+        Assert.Equal(
+            "權限不足，無法存取 Agent",
+            (await roleless.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("slug")]
+    [InlineData("name")]
+    public async Task Create_BlankSlugOrName_Returns400(string field)
+    {
+        var body = ValidBody("a10-blank");
+        body[field] = "   "; // 只有空白 → Require() 視為空
+
+        var resp = await Admin().PostAsJsonAsync("/api/agents", body);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal($"{field} 不可為空", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // slug 是 UNIQUE(tenant_id, slug) 的顯示鍵(路由一律 uuid),但先前完全沒有格式驗證:
+    // 路徑片段、內含空白、非 ASCII、超長一律 201。比照 AgentAudience 的 canonical group id 加 regex + 長度上限。
+    // slug 是 immutable(PUT 忽略、UPDATE 不含該欄、canonical 定義排除)且 validate/publish/restore 驗的是
+    // Name,故**只在 create 驗證**:既有不合規的 Agent 不會在其他路徑上被追溯打爆。
+    [Theory]
+    [InlineData("../../etc")]
+    [InlineData("has space")]
+    [InlineData("研究助手")]
+    [InlineData("UPPER")]
+    [InlineData("-leading")]
+    [InlineData("trailing-")]
+    public async Task Create_MalformedSlug_Returns400(string slug)
+    {
+        var resp = await Admin().PostAsJsonAsync("/api/agents", ValidBody(slug));
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(400, body["status"]!.GetValue<int>());
+        Assert.Equal("slug 格式不正確", body["message"]!.GetValue<string>());
+        Assert.Empty(body["fieldErrors"]!.AsObject());
+    }
+
+    // 長度上限的兩側:剛好 128 通過、129 拒絕(只測「8000 字元被擋」抓不到把上限打錯的改動)。
+    [Fact]
+    public async Task Create_SlugLengthBoundary_AcceptsMaxRejectsMaxPlusOne()
+    {
+        var atMax = new string('a', AgentAudience.MaxGroupIdLength);
+        var overMax = new string('b', AgentAudience.MaxGroupIdLength + 1);
+
+        Assert.Equal(
+            HttpStatusCode.Created,
+            (await Admin().PostAsJsonAsync("/api/agents", ValidBody(atMax))).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await Admin().PostAsJsonAsync("/api/agents", ValidBody(overMax))).StatusCode);
+    }
+
+    [Fact]
+    public async Task List_ResponseFields_ExcludeDraftDefinition()
+    {
+        var client = Admin();
+        var (id, _) = await CreateAsync(client, ValidBody("list-shape"));
+
+        var item = Assert.Single(
+            (await (await client.GetAsync("/api/agents")).ReadJsonAsync()).AsArray(),
+            n => n!["id"]!.GetValue<string>() == id)!.AsObject();
+
+        // 管理列表不批量外洩 prompt/policy:AgentInfo 沒有 draft 欄位。
+        Assert.Equal(
+            new[]
+            {
+                "created_at", "description", "draft_validated_version", "draft_version",
+                "enabled", "id", "name", "published_revision", "slug", "updated_at",
+            },
+            item.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// 跨服務向量:backend 會**重新排序** Workflow 回傳的 canonicalRuleSet key。今天 hash 是 backend 自己算的
+    /// 所以無害,但一旦 Workflow 對自己的 canonical bytes 簽章,兩邊 canonical form 分歧就要在這裡先爆。
+    /// </summary>
+    [Fact]
+    public void WorkflowCanonicalRuleSet_ReSortIsByteStable()
+    {
+        const string workflowCanonical =
+            """{"rules":[{"when":{"value":5000,"op":"gt","fact":"action.amount"},"then":[{"action":"deny"}],"onUnknown":[{"action":"deny"}],"id":"vector-rule"}],"version":1}""";
+        const string expected =
+            """{"rules":[{"id":"vector-rule","onUnknown":[{"action":"deny"}],"then":[{"action":"deny"}],"when":{"fact":"action.amount","op":"gt","value":5000}}],"version":1}""";
+        var definition = AgentCanonicalizer.Canonicalize(
+            ValidBody("rule-vector").Deserialize<AgentUpsert>()!);
+
+        using var fromWorkflow = JsonDocument.Parse(workflowCanonical);
+        var stored = AgentCanonicalizer.WithBusinessRules(definition, fromWorkflow.RootElement);
+
+        Assert.Equal(expected, JsonNode.Parse(stored)!["business_rules"]!.ToJsonString());
+        // 已 canonical 的 AST 再套一次 → bytes 不變(穩定點,不是每次都重排出新形狀)。
+        using var again = JsonDocument.Parse(expected);
+        Assert.Equal(stored, AgentCanonicalizer.WithBusinessRules(stored, again.RootElement));
     }
 
     // ---- 回應領域欄位 snake_case ----

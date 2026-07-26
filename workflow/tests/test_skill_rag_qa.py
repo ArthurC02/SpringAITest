@@ -63,6 +63,24 @@ def test_rag_answer_with_docs_calls_llm_and_builds_citations():
     assert call["schema"] is _RagAnswerOutput
 
 
+def test_rag_answer_llm_returns_none_with_docs_still_builds_citations():
+    """docs 非空但 LLM 失敗（回 None）：answer 退回空字串，citations 仍照 docs 建出來。
+
+    citations 建構不應依賴 LLM 是否成功——這條「部分降級」的耦合若被重構包進
+    `if answer:` 之類的條件，會靜默漏掉 citations，且沒有任何既有測試會變紅。
+    """
+    llm = RecordingLLM(output=None)
+    node = make_rag_answer_node(llm)
+    docs = [{"document_id": "doc-1", "title": "示例文件", "content": "內容片段", "score": 0.9}]
+
+    out = asyncio.run(node({"question": "問題", "docs": docs}))
+
+    assert out["answer"] == ""
+    assert out["citations"] == [
+        {"document_id": "doc-1", "title": "示例文件", "snippet": "內容片段"}
+    ]
+
+
 def test_rag_answer_multiple_docs_build_citations_in_order():
     llm = RecordingLLM(output=_RagAnswerOutput(answer="答案"))
     node = make_rag_answer_node(llm)

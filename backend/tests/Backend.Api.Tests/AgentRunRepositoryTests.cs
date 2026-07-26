@@ -1936,7 +1936,12 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
         {
             "checkpoint-legacy",
             V2CheckpointRef(lease.Lease.LeaseGeneration + 1),
+            // generation 兩側都要拒:只測 +1 的話,把比對寫成 `>=` 仍然全綠。
+            V2CheckpointRef(lease.Lease.LeaseGeneration - 1),
             $"v2:{lease.Lease.LeaseGeneration}:{new string('C', 64)}:{Guid.NewGuid():D}",
+            // hash 長度 64 的兩個 off-point。
+            $"v2:{lease.Lease.LeaseGeneration}:{new string('c', 63)}:{Guid.NewGuid():D}",
+            $"v2:{lease.Lease.LeaseGeneration}:{new string('c', 65)}:{Guid.NewGuid():D}",
             V2CheckpointRef(lease.Lease.LeaseGeneration) + "\n",
             $"v2:{lease.Lease.LeaseGeneration}:{new string('c', 64)}:{Guid.NewGuid():B}",
         };

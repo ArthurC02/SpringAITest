@@ -24,8 +24,33 @@ public sealed class AnalysisApiTests : IClassFixture<TestWebAppFactory>
         // 欄位 snake_case(document_count / chunk_count / latest_titles)。
         Assert.Equal(6, body["document_count"]!.GetValue<int>());
         Assert.Equal(6, body["chunk_count"]!.GetValue<int>());
-        // Take(5) 邊界:6 份文件 → latest_titles 只回最近 5 筆。
-        Assert.Equal(5, body["latest_titles"]!.AsArray().Count);
+        // Take(5) 邊界 + OrderByDescending(CreatedAt):必須是「最新」5 筆且由新到舊,
+        // 只驗筆數的話,誤改成 OrderBy(取最舊 5 筆)或漏排序都測不出來。
+        Assert.Equal(
+            new[] { "文件5", "文件4", "文件3", "文件2", "文件1" },
+            body["latest_titles"]!.AsArray().Select(t => t!.GetValue<string>()));
+    }
+
+    // 六個端點裡 Analysis 是唯一沒有跨租戶測試的:聚合查詢漏掉 tenant 條件會把別家文件數/切塊數/標題算進來。
+    [Fact]
+    public async Task Summary_IsTenantScoped_ExcludesOtherTenantDocuments()
+    {
+        await _factory.SeedDocumentAsync("analysis-x", "X 的文件", "內容。");
+        await _factory.SeedDocumentAsync("analysis-y", "Y 的文件一", "內容。\n\n第二段。");
+        await _factory.SeedDocumentAsync("analysis-y", "Y 的文件二", "內容。");
+
+        var x = await (await _factory.CreateInternalClient().WithTenant("analysis-x")
+            .GetAsync("/api/analysis/summary")).ReadJsonAsync();
+        var y = await (await _factory.CreateInternalClient().WithTenant("analysis-y")
+            .GetAsync("/api/analysis/summary")).ReadJsonAsync();
+
+        Assert.Equal(1, x["document_count"]!.GetValue<int>());
+        Assert.Equal(1, x["chunk_count"]!.GetValue<int>());
+        Assert.Equal(new[] { "X 的文件" }, x["latest_titles"]!.AsArray().Select(t => t!.GetValue<string>()));
+
+        Assert.Equal(2, y["document_count"]!.GetValue<int>());
+        Assert.Equal(3, y["chunk_count"]!.GetValue<int>());
+        Assert.DoesNotContain("X 的文件", y["latest_titles"]!.AsArray().Select(t => t!.GetValue<string>()));
     }
 
     [Fact]

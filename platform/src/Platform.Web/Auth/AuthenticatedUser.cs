@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text;
 using Platform.Service.Dtos;
 
 namespace Platform.Web.Auth;
@@ -38,11 +39,20 @@ public static class ClaimsPrincipalExtensions
     /// 每個 claim 必須是單一、無空白的 tag，格式不符即忽略，不能把一個 grant 擴張成多個權限。
     /// 無 capability 回 null(不是空集合)——讓 UserContext 與純三段身分的等值語意一致,下游也不帶 header。
     /// 這一份解析是 platform 對 backend capabilities claim 契約的單一事實來源(改格式兩端同步)。
+    /// 數量與聚合 wire 大小與 <see cref="GetGroups"/> 同語意:超過任一界限即整組 fail-closed
+    /// (不回一個看起來合法的子集),header 大小不由簽發端單方決定。
     /// </summary>
     public static IReadOnlyList<string>? GetCapabilities(this ClaimsPrincipal principal)
     {
-        var caps = principal.FindAll("capabilities")
-            .Select(c => c.Value)
+        var claims = principal.FindAll("capabilities").Select(c => c.Value).ToArray();
+        if (claims.Length > UserCapabilityContract.MaxCapabilities
+            || Encoding.UTF8.GetByteCount(string.Join(' ', claims))
+               > UserCapabilityContract.MaxCapabilitiesWireUtf8Bytes)
+        {
+            return null;
+        }
+
+        var caps = claims
             .Where(value => !string.IsNullOrWhiteSpace(value) && !value.Any(char.IsWhiteSpace))
             .Distinct(StringComparer.Ordinal)
             .ToArray();

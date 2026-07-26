@@ -41,6 +41,24 @@ public sealed class RetrievalApiTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull((await resp.ReadJsonAsync())["chunks"]);
     }
 
+    // query 的 [NotBlank]:null / 空字串 / 純空白都不合法(NotBlankAttribute 比 [Required] 多擋後兩者)。
+    // 沒有它,空查詢會直接進嵌入模型並回一批無意義結果。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Search_BlankQuery_Returns400_WithFieldError(string? query)
+    {
+        var client = _factory.CreateInternalClient().WithTenant("demo-a");
+
+        var resp = await client.PostAsJsonAsync("/api/retrieval/search", new { query, top_k = 4 });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("query 不可為空", body["fieldErrors"]!["query"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task Search_OmittedTopK_Returns200_UsesDefault()
     {
@@ -135,6 +153,34 @@ public sealed class RetrievalApiTests : IClassFixture<TestWebAppFactory>
             .PostAsJsonAsync("/api/retrieval/search", body);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // 兩個欄位都給了,但版本號不是 1(未來版 2 / 手滑 0):必須 400,不得退化成全租戶檢索。
+    // 上一條測的是「缺一個欄位」,這條是「都給了但版本錯」—— 同一個 if 的另一半。
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public async Task ScopedSearch_RejectsWrongContractVersion_WithSourcesPresent(int version)
+    {
+        var allowed = await _factory.SeedDocumentAsync("retrieval-version-a", "allowed", "scoped content");
+
+        var response = await _factory.CreateInternalClient()
+            .WithTenant("retrieval-version-a")
+            .PostAsJsonAsync(
+                "/api/retrieval/search",
+                new
+                {
+                    query = "anything",
+                    top_k = 4,
+                    knowledge_sources = new[] { allowed },
+                    scope_contract_version = version,
+                });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal(
+            "scope_contract_version=1 and knowledge_sources must be supplied together",
+            body["fieldErrors"]!["knowledge_sources"]!.GetValue<string>());
     }
 
     [Theory]

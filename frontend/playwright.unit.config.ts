@@ -1,8 +1,9 @@
 import { defineConfig } from '@playwright/test'
 
-/** 無瀏覽器、無外部服務的 Agent Builder model/API contract tests。 */
+/** 使用 mock API 的瀏覽器 UI/API regression tests。 */
 export default defineConfig({
   testDir: './tests',
+  testIgnore: '**/*.unit.spec.ts',
   fullyParallel: true,
   reporter: 'line',
   use: {

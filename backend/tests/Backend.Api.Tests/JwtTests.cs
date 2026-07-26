@@ -51,6 +51,22 @@ public sealed class JwtTests
         Assert.Equal(TimeSpan.FromHours(24), lifetime);
     }
 
+    // 到期邊界:platform 的驗證參數 ClockSkew=Zero,所以 exp 一過就必須立刻失效,沒有隱性寬限期。
+    // (exp == nbf 無法簽發 — JwtSecurityToken 要求 Expires > NotBefore,所以取最小可簽發壽命 1 秒。)
+    [Fact]
+    public async Task Issue_TokenPastExactExpiry_FailsPlatformValidation_WithNoClockSkewGrace()
+    {
+        var token = new JwtService(Secret, TimeSpan.FromSeconds(1)).Issue("alice", "USER", "demo-a");
+        var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
+        var jwt = handler.ReadJwtToken(token);
+        Assert.Equal(TimeSpan.FromSeconds(1), jwt.ValidTo - jwt.ValidFrom);
+
+        await Task.Delay(1_200);
+
+        Assert.Throws<SecurityTokenExpiredException>(() =>
+            handler.ValidateToken(token, PlatformParams(Secret), out _));
+    }
+
     [Fact]
     public void Issue_WithDifferentSecret_FailsPlatformValidation()
     {

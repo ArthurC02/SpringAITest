@@ -8,6 +8,18 @@ internal sealed record ValidatedOrchestratorTaskEnvelope(string Canonical, strin
 /// <summary>Single fail-closed wire contract for D5 child task authority.</summary>
 internal static class OrchestratorTaskEnvelope
 {
+    /// <summary>
+    /// The whole child-request contract in one place: both repositories and the controller call
+    /// it, so a permanently malformed child is a 400 everywhere.  A 409 would tell Workflow to
+    /// retry forever, and a 500 would not be classified as permanent at all.
+    /// </summary>
+    public static (string TaskId, string RunKind, ValidatedOrchestratorTaskEnvelope Envelope) ValidateChild(OrchestratorChildCreateRequest request)
+    {
+        var task = request.TaskId?.Trim(); var kind = request.RunKind?.Trim();
+        if (string.IsNullOrWhiteSpace(task) || task.Length > 128 || task.Any(char.IsControl) || request.Attempt < 1 || kind is not ("worker" or "verifier") || request.WriteIntent) throw new ArgumentException("Child task is invalid or not read-only");
+        return (task, kind, Validate(request.TaskEnvelope));
+    }
+
     public static ValidatedOrchestratorTaskEnvelope Validate(JsonElement? raw)
     {
         if (raw is not { ValueKind: JsonValueKind.Object } value || value.GetRawText().Length > 65_536) throw new ArgumentException("task_envelope is required and too large");

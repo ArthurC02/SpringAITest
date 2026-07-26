@@ -162,6 +162,65 @@ public sealed record OrchestratorContextAcquireResponse(
     [property: JsonPropertyName("provenance")] IReadOnlyList<JsonElement> Provenance,
     [property: JsonPropertyName("missing")] IReadOnlyList<string> Missing);
 
+/// <summary>
+/// Public root-event payloads, shared by both repositories so the two authorities cannot
+/// drift.  Redaction happens at the producer: the durable command identity is an internal
+/// execution claim, and <c>EventsAsync</c> returns payloads verbatim to owners.
+/// </summary>
+public static class OrchestratorRunEvents
+{
+    public static string ChildCreated(Guid childId, Guid agentRunId, string taskId, int attempt, string runKind)
+        => JsonSerializer.Serialize(new
+        {
+            child_id = childId,
+            agent_run_id = agentRunId,
+            task_id = taskId,
+            attempt,
+            run_kind = runKind,
+        });
+
+    /// <summary>Child output/context belongs to the child authority: only its hash and citation
+    /// count reach the public root stream.</summary>
+    public static string ChildTerminal(
+        Guid childId, Guid agentRunId, string taskId, int attempt, string runKind,
+        Guid agentId, int agentRevision, string agentSnapshotHash,
+        string status, JsonElement? result, string? errorCode)
+    {
+        var raw = result is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } value ? value.GetRawText() : null;
+        return JsonSerializer.Serialize(new
+        {
+            child_id = childId,
+            agent_run_id = agentRunId,
+            task_id = taskId,
+            attempt,
+            run_kind = runKind,
+            agent_id = agentId,
+            agent_revision = agentRevision,
+            agent_snapshot_hash = agentSnapshotHash,
+            status,
+            result_sha256 = raw is null ? null : Skills.SkillHash.Sha256(raw),
+            citations = new { count = Citations(result) },
+            error_code = Normalize(errorCode, 100),
+        });
+    }
+
+    /// <summary>Also the payload of <c>root_waiting_input</c>: both carry the reached status.</summary>
+    public static string RootTerminal(string status) => JsonSerializer.Serialize(new { status });
+
+    private static int Citations(JsonElement? result)
+        => result is { ValueKind: JsonValueKind.Object } value
+           && value.TryGetProperty("citations", out var citations)
+           && citations.ValueKind == JsonValueKind.Array
+            ? citations.GetArrayLength()
+            : 0;
+
+    private static string? Normalize(string? value, int max)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrEmpty(normalized) ? null : normalized[..Math.Min(normalized.Length, max)];
+    }
+}
+
 public interface IOrchestratorRunRepository
 {
     Task<OrchestratorRunWriteResult> CreateAsync(string tenantId, string userId, string role,

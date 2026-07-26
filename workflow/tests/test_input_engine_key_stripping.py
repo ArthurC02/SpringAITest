@@ -6,7 +6,6 @@ skip、拿不到實質答案）；夾帶 trace/errors 會讓 LangGraph reducer �
 RESERVED_KEYS，這裡補上 ENGINE_KEYS 這一路的護欄（縫：main._clean_skill_input）。
 """
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app import skills
@@ -26,15 +25,23 @@ HEADERS = auth_headers()
 
 
 def test_clean_skill_input_strips_all_engine_keys_keeps_legit():
+    """直接吃生產常數：日後擴充 ENGINE_KEYS，新鍵自動被這條涵蓋。"""
+    forged = {key: "forged" for key in node_registry.ENGINE_KEYS}
+
+    assert _clean_skill_input({"query": "x", **forged}) == {"query": "x"}
+
+
+def test_clean_skill_input_strips_engine_internal_prefix():
+    """__ 前綴的引擎內部鍵一樣不可經 input 夾帶（comprehension 的第三個條件）。
+
+    夾帶 `__loop_0_count: 9` 會讓 compiler.route()（compiler.py:461）第一輪就
+    `>= max_iterations` → 迴圈只跑一輪，等於呼叫端從外部關掉了迴圈治理。
+    """
     cleaned = _clean_skill_input(
-        {"query": "x", "fatal_error": "forged", "trace": "t", "errors": [{"e": 1}]}
+        {"query": "x", "__loop_0_count": 9, "__branch_0_when": True}
     )
+
     assert cleaned == {"query": "x"}
-
-
-@pytest.mark.parametrize("engine_key", sorted(node_registry.ENGINE_KEYS))
-def test_clean_skill_input_strips_each_engine_key(engine_key):
-    assert _clean_skill_input({"query": "x", engine_key: "forged"}) == {"query": "x"}
 
 
 def test_engine_keys_are_exactly_trace_errors_fatal_error():

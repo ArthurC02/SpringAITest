@@ -43,7 +43,7 @@ function controlledContentFrames(evidence: Awaited<ReturnType<typeof readBrowser
     return evidence.events
       .filter((frame) => frame.event !== 'error' && frame.data !== '[DONE]')
       .filter((frame) => streamCase.controlledContent.includes(frame.data.trim()))
-      .map((frame) => ({ content: frame.data.trim(), offsetMs: frame.offsetMs }))
+      .map((frame) => ({ content: frame.data.trim(), offsetMs: frame.offsetMs, rawPrefix: frame.rawPrefix }))
   }
 
   return evidence.events.flatMap((frame) => {
@@ -51,7 +51,9 @@ function controlledContentFrames(evidence: Awaited<ReturnType<typeof readBrowser
       const agui = JSON.parse(frame.data) as { type?: unknown, delta?: unknown }
       if (agui.type !== 'TEXT_MESSAGE_CONTENT' || typeof agui.delta !== 'string') return []
       const content = agui.delta.trim()
-      return streamCase.controlledContent.includes(content) ? [{ content, offsetMs: frame.offsetMs }] : []
+      return streamCase.controlledContent.includes(content)
+        ? [{ content, offsetMs: frame.offsetMs, rawPrefix: frame.rawPrefix }]
+        : []
     } catch {
       return []
     }
@@ -97,6 +99,14 @@ test.describe('E-06 browser ReadableStream evidence', () => {
       const frames = controlledContentFrames(evidence, streamCase)
       expect(frames.length, streamCase.name).toBeGreaterThanOrEqual(3)
       expect(frames.map((frame) => frame.content), streamCase.name).toEqual(streamCase.controlledContent)
+      // Byte-level framing check: root AGENTS.md requires `/api/chat/stream` to write `data:`
+      // (no space) and AG-UI to write `data: ` (with space). readBrowserStream normalizes both
+      // to the same `data` field for convenience, so without this the two formats would be
+      // indistinguishable here even if a regression collapsed them to one. `expectedFramePrefix`
+      // makes that distinction an actual assertion instead of a declared-but-unread field.
+      expect(frames.map((frame) => frame.rawPrefix), streamCase.name).toEqual(
+        frames.map(() => streamCase.expectedFramePrefix),
+      )
       expect(frames.at(-1)!.offsetMs, streamCase.name).toBeLessThan(evidence.completedMs)
 
       const firstToLastMs = frames.at(-1)!.offsetMs - frames[0].offsetMs

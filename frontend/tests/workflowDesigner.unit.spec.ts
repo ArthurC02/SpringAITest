@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from 'vitest'
 import { canConnect } from '../src/workflowDesigner/connection'
 import { patchPositions, semanticFingerprint } from '../src/workflowDesigner/graphAdapter'
 import { semanticDiff } from '../src/workflowDesigner/diff'

@@ -143,34 +143,22 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(Yaml("at217_skill"), ExtractYamlBlock(md));
     }
 
-    // ---- AT2-18:嵌入的 ```yaml 區塊內容逐 byte 等於 DB 的 definition(含 tab / 中文 / 無結尾換行 / 特殊字元)----
+    // ---- AT2-18 + AT2-19:嵌入的 ```yaml 區塊逐 byte 等於 DB 的 definition,且匯出完全不解析 definition。
+    // 兩者是同一條生產行為(SkillExporter 只做字串串接:不解析、不正規化),用一個同時「不是合法 YAML」
+    // 且含 tab / 中文 / CRLF+LF 混用 / 控制字元 / 無結尾換行的 definition 一次覆蓋兩個等價類。----
 
     [Fact]
-    public async Task Export_EmbeddedYaml_IsByteForByteIdenticalToDefinition()
+    public async Task Export_DoesNotParseDefinition_InvalidYamlStillExportsVerbatim()
     {
-        // 刻意含:tab 縮排、中文、CRLF 與 LF 混用、無結尾換行、特殊字元。
-        var definition = "name: at218_skill\r\ndescription: 有\ttab 的描述 <>&\"'\nflow:\n\t- node: x  # 無結尾換行";
+        // 未閉合括號 + 隨機符號 → 完全不是合法 YAML;同時含 tab 縮排、中文、CRLF/LF 混用、
+        // 控制字元、無結尾換行 —— 繞過 validate 直接塞進 repo。
+        var definition = "{[this is not: yaml\t@@@ \x01 未閉合\r\ndescription: 有\ttab <>&\"'\nflow:\n\t- node: x  # 無結尾換行";
         Seed("demo-a", "at218_skill", definition);
 
         var entries = await ExportZipAsync(Admin(), "at218_skill");
         var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["at218_skill/SKILL.md"]));
 
         Assert.Equal(Encoding.UTF8.GetBytes(definition), Encoding.UTF8.GetBytes(block));
-    }
-
-    // ---- AT2-19:匯出不解析 definition — 不是合法 YAML 也照樣原樣打包 ----
-
-    [Fact]
-    public async Task Export_DoesNotParseDefinition_InvalidYamlStillExportsVerbatim()
-    {
-        // 完全不是合法 YAML(未閉合括號、tab、隨機符號)—— 繞過 validate 直接塞進 repo。
-        var garbage = "{[this is not: yaml\t@@@ \x01 未閉合";
-        Seed("demo-a", "at219_skill", garbage);
-
-        var entries = await ExportZipAsync(Admin(), "at219_skill");
-        var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["at219_skill/SKILL.md"]));
-
-        Assert.Equal(Encoding.UTF8.GetBytes(garbage), Encoding.UTF8.GetBytes(block));
     }
 
     // ---- 角色:USER 也能匯出(與 GET {name} 一致,不掛 SkillAdminOnly)----
@@ -212,11 +200,11 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     // ---- name 也必須是 YAML-safe scalar:YAML 1.1 隱式 token(no/on/true)與純數字裸寫會被
     // 匯入端解成 bool/int,frontmatter name 不再是字串 → 匯出的 zip 無法再匯入。----
 
+    // 007 / 0x1f / 0b101 全部命中同一行 `char.IsAsciiDigit(s[0])`(SkillExporter.cs:112 一次收掉
+    // decimal/八進位/hex/binary)→ 數字開頭只留一個代表值;`no` 走的是另一條 ImplicitNonStrings 分支。
     [Theory]
-    [InlineData("no")]
-    [InlineData("007")]
-    [InlineData("0x1f")]  // YAML 1.1 hex → int 31
-    [InlineData("0b101")] // YAML 1.1 binary → int 5
+    [InlineData("no")]  // YAML 1.1 隱式 bool
+    [InlineData("007")] // 數字起手式(前導零八進位/hex/binary 同一分支)
     public async Task Export_SkillMd_QuotesYamlImplicitTypedName(string name)
     {
         Seed("demo-a", name, Yaml(name));
@@ -249,6 +237,82 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         Assert.DoesNotContain("simpleForm", md);
         Assert.DoesNotContain("templateId", md);
         Assert.DoesNotContain("template-stats", md);
+    }
+
+    // description 空字串是**可達**狀態:引擎未回報 description 時 WorkflowSkillValidator 預設 string.Empty。
+    // frontmatter 必須寫成顯式空字串 `description: ""` —— 裸寫 `description:` 會被匯入端解析成 null,
+    // frontmatter 就不再是「name+description 兩個字串」的標準形狀。
+    [Fact]
+    public async Task Export_BlankDescription_ProducesRoundTrippableFrontmatter()
+    {
+        const string name = "at221-blank-desc";
+        Seed("demo-a", name, Yaml(name), description: string.Empty);
+
+        var entries = await ExportZipAsync(Admin(), name);
+        var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
+
+        var lines = md.Split('\n');
+        var end = Array.IndexOf(lines, "---", 1);
+        Assert.Equal(new[] { $"name: {name}", "description: \"\"" }, lines[1..end]);
+    }
+
+    // export → import round trip:同一個 skill 匯得出來就必須匯得回去。
+    // 匯出的 zip 交給真的 WorkflowSkillPackageValidator(workflow 以 stub 取代,回報的 description
+    // 直接取自剛匯出的 frontmatter,不是測試自己寫死的值)—— 空 description 不得被判 502。
+    [Fact]
+    public async Task Export_BlankDescription_RoundTripsBackThroughPackageImportValidation()
+    {
+        const string name = "at221-roundtrip";
+        var definition = Yaml(name, description: "\"\"");
+        Seed("demo-a", name, definition, description: string.Empty);
+
+        var exported = await Admin().GetAsync($"/api/skills/{name}/export");
+        var zip = await exported.Content.ReadAsByteArrayAsync();
+        var md = Encoding.UTF8.GetString(ReadZip(zip)[$"{name}/SKILL.md"]);
+
+        // 匯入端讀 frontmatter 與第一個 ```yaml 區塊,就是 workflow 會回報的 skill metadata 與 canonical。
+        var frontmatter = ParseFrontmatter(md);
+        Assert.Equal(string.Empty, frontmatter["description"]);
+        var stub = new StubWorkflow(
+            $$"""
+              {"valid":true,"errors":[],
+               "skill":{"name":{{Json(frontmatter["name"])}},"description":{{Json(frontmatter["description"])}},
+                        "required_role":"USER","kind":"flow"},
+               "canonical_definition":{{Json(ExtractYamlBlock(md))}}}
+              """);
+
+        var result = await new WorkflowSkillPackageValidator(
+                new HttpClient(stub), "http://workflow:8001", "tok")
+            .ValidatePackageAsync(zip, $"{name}.zip", name, "demo-a", "admin-a", "ADMIN", default);
+
+        Assert.True(result.Valid);
+        Assert.Equal(string.Empty, result.Skill!.Description);
+    }
+
+    private static string Json(string value) => System.Text.Json.JsonSerializer.Serialize(value);
+
+    /// <summary>把 SKILL.md 的 frontmatter 當 YAML 解析(忠實模擬匯入端,不做字串裁切)。</summary>
+    private static Dictionary<string, string> ParseFrontmatter(string md)
+    {
+        var lines = md.Split('\n');
+        var end = Array.IndexOf(lines, "---", 1);
+        return new YamlDotNet.Serialization.DeserializerBuilder().Build()
+            .Deserialize<Dictionary<string, string>>(string.Join('\n', lines[1..end]));
+    }
+
+    /// <summary>固定回同一份 workflow /skills/validate-package 回應的 handler。</summary>
+    private sealed class StubWorkflow : HttpMessageHandler
+    {
+        private readonly string _body;
+
+        public StubWorkflow(string body) => _body = body;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(_body, Encoding.UTF8, "application/json"),
+            });
     }
 
     [Fact]

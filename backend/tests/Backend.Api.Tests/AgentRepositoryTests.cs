@@ -312,6 +312,82 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
             e.Field == "skill_bindings" && e.Message.Contains("disable-me"));
     }
 
+    /// <summary>
+    /// 「Skill 存在且 enabled,但 current_revision 沒有對應的 immutable skill_revision 列」——
+    /// 只有 Dapper 路徑造得出這個狀態(publish 的 JOIN skill_revision 失敗分支);它是 D1
+    /// 「builtin/catalog-only Skill 不可綁定」在 backend 側唯一可驗證的形態。
+    /// </summary>
+    [SkippableFact]
+    public async Task Publish_RejectsSkillWhoseCurrentRevisionHasNoImmutableRow()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-no-immutable-rev";
+        await using (var seed = await _fx.DataSource!.OpenConnectionAsync())
+        {
+            await seed.ExecuteAsync(
+                "WITH inserted AS ("
+                + " INSERT INTO skill (tenant_id, name, description, current_revision)"
+                + " VALUES (@tenant, 'catalog-only', 'binding', 2)"
+                + " RETURNING id)"
+                + " INSERT INTO skill_revision"
+                + " (skill_id, revision, definition, definition_sha256, created_by, kind)"
+                + " SELECT id, 1, 'test', @sha, 'test', 'flow' FROM inserted",
+                new { tenant, sha = SkillHash.Sha256("test") });
+        }
+
+        var def = Def(bindings: new[] { "catalog-only" });
+        var agent = await CreateValidatedAsync(tenant, "no-immutable-rev", def);
+
+        var result = await Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "p", default);
+
+        Assert.Equal(AgentWriteStatus.InvalidReference, result.Status);
+        var error = Assert.Single(result.Errors!, e => e.Field == "skill_bindings");
+        Assert.Contains("「catalog-only」", error.Message);
+        Assert.Contains("builtin/catalog-only Skill 在 D1 不可綁定", error.Message);
+
+        await using var conn = await _fx.DataSource!.OpenConnectionAsync();
+        Assert.False(await conn.ExecuteScalarAsync<bool>(
+            "SELECT EXISTS(SELECT 1 FROM agent_revision WHERE agent_id = @id)",
+            new { id = agent.Id }));
+    }
+
+    /// <summary>
+    /// publish 的防篡改守衛(Dapper 面):鎖定 draft 後唯一允許的差異是 Workflow 回寫的 business_rules;
+    /// 其他欄位漂移 → VersionConflict + 交易回滾(既沒有 revision,draft bytes 也沒被覆蓋)。
+    /// </summary>
+    [SkippableFact]
+    public async Task Publish_RejectsDefinitionDriftBeyondBusinessRuleCanonicalization()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-drift";
+        var draft = Def();
+        var agent = await CreateValidatedAsync(tenant, "drift-slug", draft);
+        var tamperedNode = JsonNode.Parse(draft)!.AsObject();
+        tamperedNode["system_prompt"] = "被竄改的 prompt";
+        var tampered = AgentCanonicalizer.CanonicalizeDefinition(tamperedNode.ToJsonString());
+
+        var rejected = await Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, tampered, Sha(tampered), "p", default);
+
+        Assert.Equal(AgentWriteStatus.VersionConflict, rejected.Status);
+        await using (var conn = await _fx.DataSource!.OpenConnectionAsync())
+        {
+            Assert.False(await conn.ExecuteScalarAsync<bool>(
+                "SELECT EXISTS(SELECT 1 FROM agent_revision WHERE agent_id = @id)",
+                new { id = agent.Id }));
+        }
+        Assert.Equal(draft, (await Repo.GetAsync(tenant, agent.Id, default))!.DraftDefinition);
+
+        using var canonicalRules = JsonDocument.Parse(
+            """{"version":1,"rules":[{"id":"r","onUnknown":[{"action":"deny"}]}]}""");
+        var ruleOnly = AgentCanonicalizer.WithBusinessRules(draft, canonicalRules.RootElement);
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await Repo.PublishAsync(
+                tenant, agent.Id, agent.DraftVersion, ruleOnly, Sha(ruleOnly), "p", default)).Status);
+    }
+
     [SkippableFact]
     public async Task PublishAndRestore_RejectDefinitionsOutsideExecutionSnapshotContract()
     {

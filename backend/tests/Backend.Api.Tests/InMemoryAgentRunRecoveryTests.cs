@@ -131,7 +131,9 @@ public sealed class InMemoryAgentRunRecoveryTests
             immediatelyAfterAck.Items,
             item => item.RunId == started.Run.Id);
 
-        clock.Advance(TimeSpan.FromSeconds(31));
+        // 邊界值:no-lease grace 判定是 `completedAt <= now.AddSeconds(-30)`,
+        // 剛好 30 秒(等號成立)就必須可回收。用 31 秒測不出把 `<=` 寫成 `<`。
+        clock.Advance(TimeSpan.FromSeconds(30));
         var executionRecovery = await runs.ClaimRecoveryAsync(
             new AgentRunRecoveryClaimRequest("replacement-worker", 20, 30),
             default);
@@ -479,7 +481,8 @@ public sealed class InMemoryAgentRunRecoveryTests
             "private input must not be returned",
             "start-key",
             default);
-        clock.Advance(TimeSpan.FromSeconds(3_601));
+        // 邊界值:timeout 3600 秒,判定是 `DeadlineAt <= now`,所以剛好 3600 秒(等號)就算逾期。
+        clock.Advance(TimeSpan.FromSeconds(3_600));
 
         var recovery = await runs.ClaimRecoveryAsync(
             new AgentRunRecoveryClaimRequest("cleanup-worker", 20, 30),
@@ -576,7 +579,8 @@ public sealed class InMemoryAgentRunRecoveryTests
             "cancel-key",
             default);
         Assert.Equal(AgentRunWriteStatus.Success, cancel.Status);
-        clock.Advance(TimeSpan.FromSeconds(3_601));
+        // 同上的 `DeadlineAt <= now` 邊界:cancel 已在前面完成,逾期仍以 deadline cleanup 為主。
+        clock.Advance(TimeSpan.FromSeconds(3_600));
 
         var cleanup = Assert.Single(
             (await runs.ClaimRecoveryAsync(
@@ -1200,6 +1204,33 @@ public sealed class InMemoryAgentRunRecoveryTests
                 (long)value.GetType().GetField("Sequence")!.GetValue(value)!)
             .Last();
         command.GetType().GetField("InputHash")!.SetValue(command, inputHash);
+    }
+
+    // has_more 是 `candidates.Length > limit`:limit 剛好等於候選數必須是 false(否則 worker 永遠
+    // 以為還有工作、無止盡輪詢),limit 少一個才是 true。N 與 N+1 兩側都要測。
+    [Theory]
+    [InlineData(2, 2, true)]
+    [InlineData(3, 3, false)]
+    public async Task Recovery_HasMoreOnlyWhenCandidatesExceedLimit(
+        int limit, int expectedItems, bool expectedHasMore)
+    {
+        var (agents, skills, agent) = await CreatePublishedAgentAsync("recovery-has-more");
+        var clock = new ManualTimeProvider(new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero));
+        var runs = new InMemoryAgentRunRepository(agents, skills, clock);
+        for (var index = 0; index < 3; index++)
+        {
+            Assert.Equal(
+                AgentRunWriteStatus.Success,
+                (await runs.CreateDirectAsync(
+                    "demo-a", "admin-a", "ADMIN", agent.Id, "m" + index, "key-" + index, default)).Status);
+        }
+        clock.Advance(TimeSpan.FromSeconds(31)); // 三筆 dispatch claim 全部過期 → 三個候選
+
+        var claimed = await runs.ClaimRecoveryAsync(
+            new AgentRunRecoveryClaimRequest("scrubber", limit, 30), default);
+
+        Assert.Equal(expectedItems, claimed.Items.Count);
+        Assert.Equal(expectedHasMore, claimed.HasMore);
     }
 
     private static string V2CheckpointRef(long generation)

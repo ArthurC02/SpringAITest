@@ -1,8 +1,9 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from 'vitest'
 import { mergeRunEvents } from '../src/agentRunDisplay'
 import {
   clearOrchestratorRunStorage,
   messageFingerprint,
+  orchestratorRunStorageKey,
   readOrchestratorRunState,
   writeOrchestratorRunState,
 } from '../src/orchestratorRunState'
@@ -36,6 +37,44 @@ test('D5 orchestrator state keeps the logical key, conversation, cursor and acti
   expect(readOrchestratorRunState('tenant:user', 'root-1', storage)).toEqual(expect.objectContaining({ runId: 'run-1', eventCursor: 7, cancelKey: 'cancel-key', cancelAccepted: true }))
   clearOrchestratorRunStorage(storage)
   expect(readOrchestratorRunState('tenant:user', 'root-1', storage)).toBeNull()
+})
+
+test('D5 orchestrator run state fails closed for a foreign scope, orchestrator, or invalid cursor', () => {
+  const record = {
+    version: 1 as const, orchestratorId: 'root-1', runId: 'run-1', conversationId: 'conversation-1',
+    startKey: 'logical-start-key', messageFingerprint: messageFingerprint('message'),
+    eventCursor: 2, cancelKey: null, cancelAccepted: false,
+  }
+
+  // A different tenant/user scope never reads another identity's active run (D6 account switch).
+  const scoped = new MemoryStorage()
+  writeOrchestratorRunState('tenant:user', record, scoped)
+  expect(readOrchestratorRunState('other:user', 'root-1', scoped)).toBeNull()
+  expect(readOrchestratorRunState('tenant:user', 'root-1', scoped)).toEqual(record)
+
+  // A record whose payload names a different Orchestrator than its key is rejected and purged,
+  // so a tampered or stale entry can never resume the wrong root.
+  const mismatchedKey = orchestratorRunStorageKey('tenant:user', 'root-2')
+  scoped.setItem(mismatchedKey, JSON.stringify({ ...record, orchestratorId: 'root-1' }))
+  expect(readOrchestratorRunState('tenant:user', 'root-2', scoped)).toBeNull()
+  expect(scoped.getItem(mismatchedKey)).toBeNull()
+
+  const rejected: Array<[string, unknown]> = [
+    ['negative cursor', { ...record, eventCursor: -1 }],
+    ['fractional cursor', { ...record, eventCursor: 1.5 }],
+    ['unsafe cursor', { ...record, eventCursor: Number.MAX_SAFE_INTEGER + 1 }],
+    ['future schema version', { ...record, version: 2 }],
+    ['blank conversation', { ...record, conversationId: '' }],
+    ['missing start key', { ...record, startKey: '' }],
+    ['non-boolean cancel flag', { ...record, cancelAccepted: 'yes' }],
+    ['malformed json', '{'],
+  ]
+  const key = orchestratorRunStorageKey('tenant:user', 'root-1')
+  for (const [label, value] of rejected) {
+    const storage = new MemoryStorage()
+    storage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value))
+    expect(readOrchestratorRunState('tenant:user', 'root-1', storage), label).toBeNull()
+  }
 })
 
 test('D5 event pages use their exclusive next_sequence cursor and dedupe replayed sequence numbers', () => {

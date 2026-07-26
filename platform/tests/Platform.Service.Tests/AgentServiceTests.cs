@@ -232,16 +232,8 @@ public sealed class AgentServiceTests
         Assert.Equal(1, sent.RootElement.GetProperty("expected_draft_version").GetInt64());
     }
 
-    [Fact]
-    public async Task Validate_ForwardsIfMatch()
-    {
-        var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, """{"valid":true}"""));
-
-        await Build(stub).ValidateAsync(AgentId, AdminCtx, "\"1\"", null);
-
-        Assert.Equal($"http://backend/api/agents/{AgentIdText}/validate", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal("\"1\"", stub.LastRequest!.Headers.IfMatch.Single().ToString());
-    }
+    // UpdateDraft/Publish/Validate 三個方法都只是把 ifMatch 參數丟進同一顆 ProxyAsync;
+    // 有 body 的兩條(語意最重)已覆蓋該分支,validate 的路徑正確性由 Web 層釘住。
 
     [Fact]
     public async Task UpdateDraft_WithoutIfMatch_DoesNotSendHeader()

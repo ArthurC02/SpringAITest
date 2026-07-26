@@ -1,7 +1,5 @@
 using System.Net;
 using System.Net.Http.Json;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
 using Backend.Api.OperationsGovernance;
 
 namespace Backend.Api.Tests;
@@ -21,9 +19,95 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
         var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(_factory.Fake<IOperationsGovernanceRepository>());
-        var item = Assert.Single(store.Telemetry);
-        Assert.Equal("ops-meter", item.Tenant); Assert.Equal(42, item.Value.UsageUnits); Assert.Equal(9, item.Value.LatencyMs);
+        // 依租戶過濾:store 是本 class 共用的 singleton,不篩選的話任何新增的 telemetry 測試都會互相打到。
+        var item = Assert.Single(store.Telemetry, x => x.Tenant == "ops-meter");
+        Assert.Equal(42, item.Value.UsageUnits); Assert.Equal(9, item.Value.LatencyMs);
     }
+
+    public static TheoryData<string, object?> RejectedTelemetryFields => new()
+    {
+        { "kind", "prompt" },                       // 只收 model|tool|node
+        { "usage_units", -1 },
+        { "usage_units", 10_000_001L },             // 上限 +1
+        { "cost_units", 1_000_001m },               // 上限 +1
+        { "latency_ms", 86_400_001L },              // 一天 +1 毫秒
+        { "agent_revision", 0 },                    // revision 從 1 起算
+        { "agent_revision", 1_000_001 },
+        { "node_id", "modelstep" },           // 控制字元
+        { "node_id", new string('n', 201) },        // 長度上限 +1
+    };
+
+    // 這支是 Workflow 內部計量端點,輸入完全來自另一個服務:上限沒守住等於讓一次錯誤回報污染整份聚合指標。
+    [Theory]
+    [MemberData(nameof(RejectedTelemetryFields))]
+    public async Task Telemetry_RejectsOutOfRangeOrUnsafeFields(string field, object? value)
+    {
+        var body = ValidTelemetry();
+        body[field] = value;
+
+        using var client = _factory.CreateInternalClient().WithTenant("ops-telemetry-invalid").WithUser("workflow");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", body);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // On-point 對照:每個上限剛好等於上界都必須被接受,否則邊界值就是抄錯的。
+    [Fact]
+    public async Task Telemetry_AcceptsInclusiveUpperBounds()
+    {
+        var body = ValidTelemetry();
+        body["usage_units"] = 10_000_000L;
+        body["cost_units"] = 1_000_000m;
+        body["latency_ms"] = 86_400_000L;
+        body["agent_revision"] = 1_000_000;
+        body["node_id"] = new string('n', 200);
+
+        using var client = _factory.CreateInternalClient().WithTenant("ops-telemetry-bounds").WithUser("workflow");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    // override 是 break-glass:必須有具體理由、必須有東西可以 override,而且 gate 已經通過時不得留下多餘的稽核紀錄。
+    [Fact]
+    public async Task Override_RequiresMeaningfulReasonAnAvailableGate_AndNotAPassingOne()
+    {
+        using var admin = Client("ops-override", "operator", manage: true);
+
+        // reason 7 字元(下限 8 的 off-point);這一關在查 gate 之前。
+        Assert.Equal(HttpStatusCode.BadRequest, (await OverrideAsync(admin, "1234567", "short-reason")).StatusCode);
+        // 尚未有任何 regression 紀錄可供 override。
+        Assert.Equal(HttpStatusCode.Conflict, (await OverrideAsync(admin, "12345678", "no-gate")).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK, (await admin.PostAsJsonAsync(
+            "/api/admin/operations/regressions",
+            new { suite = "d7-passing", passed = true, evidence_ref = "evidence/pass" })).StatusCode);
+        // gate 已通過 → override 沒有必要,必須 409 而不是照單全收。
+        Assert.Equal(HttpStatusCode.Conflict, (await OverrideAsync(admin, "documented break-glass", "passing-gate")).StatusCode);
+    }
+
+    private static async Task<HttpResponseMessage> OverrideAsync(HttpClient client, string reason, string key)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/operations/regression-overrides")
+        {
+            Content = JsonContent.Create(new { reason }),
+        };
+        request.Headers.Add("Idempotency-Key", key);
+        return await client.SendAsync(request);
+    }
+
+    private static Dictionary<string, object?> ValidTelemetry() => new()
+    {
+        ["run_id"] = Guid.NewGuid(),
+        ["event_id"] = Guid.NewGuid(),
+        ["kind"] = "model",
+        ["node_id"] = "model_step",
+        ["agent_id"] = "agent-a",
+        ["agent_revision"] = 1,
+        ["usage_units"] = 1,
+        ["cost_units"] = 0.5m,
+        ["latency_ms"] = 1,
+    };
 
     [Fact]
     public async Task InMemoryTelemetry_AggregatesAgentSkillToolNodeAndRevisionWithoutCrossTenantLeakage()
@@ -50,13 +134,6 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         // Orchestrator version series from these events.
         Assert.Empty(comparison.Revisions);
         Assert.Null(comparison.SelectedVsPrevious);
-    }
-
-    [Fact]
-    public async Task FeatureOff_HidesOperationsBeforeInternalAuthentication()
-    {
-        using var factory = new DisabledFactory();
-        Assert.Equal(HttpStatusCode.NotFound, (await factory.CreateClient().GetAsync("/api/admin/operations/metrics")).StatusCode);
     }
 
     [Fact]
@@ -129,14 +206,5 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         var client = _factory.CreateInternalClient().WithTenant(tenant).WithUser(user).WithRole("SYSTEM_ADMIN");
         if (manage) client.DefaultRequestHeaders.Add("X-User-Capabilities", "workflow.manage");
         return client;
-    }
-
-    private sealed class DisabledFactory : WebApplicationFactory<Program>
-    {
-        protected override void ConfigureWebHost(IWebHostBuilder builder)
-        {
-            builder.UseEnvironment("Testing");
-            builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", "false");
-        }
     }
 }

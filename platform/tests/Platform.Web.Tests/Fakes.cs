@@ -14,6 +14,31 @@ internal static class FakeJson
 }
 
 /// <summary>
+/// fake 的呼叫紀錄必須是 static(fake 本身註冊為 Scoped,每個請求都是新實例,實例欄位活不過一個請求),
+/// 但 static 清單從不清空會讓「模糊 Contains」被前一個測試的殘留誤判成綠。此類別是每個
+/// <see cref="TestWebAppFactory"/> 一份的重置權杖:某個 factory 第一次碰到某份清單時清空它,
+/// 之後同一 factory 內的多次請求照常累加。建 factory 是 per-test 的類別因此就得到 per-test 隔離。
+/// </summary>
+public sealed class FakeCallScope
+{
+    private readonly HashSet<object> _owned = new();
+
+    public void Own(params System.Collections.IList[] collections)
+    {
+        lock (_owned)
+        {
+            foreach (var collection in collections)
+            {
+                if (_owned.Add(collection))
+                {
+                    collection.Clear();
+                }
+            }
+        }
+    }
+}
+
+/// <summary>
 /// Web 整合測試用的 LLM 代理 fake:一律回固定字串 → 路由回覆不匹配任何工具 → 走純聊天兜底(reply 仍是「測試回覆」)。
 /// 新流程下工具改以「路由目錄」文字經路由呼叫傳入(非原生 tools 引數);測試改斷言 LastRoutingCatalog。
 /// 單例跨同一測試類的方法共用,測試以 Reset() 隔離每次請求。
@@ -404,20 +429,9 @@ public sealed class FakeSkillService : ISkillService
         string name, int revision, UserContext ctx, CancellationToken ct = default)
     {
         Calls.Add($"restore:{name}:{revision}");
-        if (ctx.Role != "ADMIN")
-        {
-            throw new WorkflowForbiddenException("權限不足，無法存取 Skill");
-        }
-
         if (name == "ghost")
         {
             throw new WorkflowNotFoundException("找不到 Skill：" + name);
-        }
-
-        if (name == "legacy-agentic")
-        {
-            throw new DownstreamConflictException(
-                $"Skill revision {name}#{revision} 建立於 package 快照功能之前，無法安全回復");
         }
 
         return Task.FromResult(FakeJson.Of(
@@ -613,6 +627,8 @@ public sealed class FakeAgentRunService : IAgentRunService
     public static UserContext? LastContext { get; set; }
     public const string RunIdText = "44444444-4444-4444-4444-444444444444";
 
+    public FakeAgentRunService(FakeCallScope scope) => scope.Own(Calls);
+
     private const string RunJson =
         """{"id":"44444444-4444-4444-4444-444444444444","status":"queued","state_version":1,"checkpoint_version":0}""";
 
@@ -700,6 +716,7 @@ public sealed class FakeOrchestratorRunService : IOrchestratorRunService
     public static readonly List<string> Calls = new();
     public const string RunIdText = "55555555-5555-5555-5555-555555555555";
     private const string Body = """{"id":"55555555-5555-5555-5555-555555555555","status":"queued","state_version":1}""";
+    public FakeOrchestratorRunService(FakeCallScope scope) => scope.Own(Calls);
     public Task<AgentProxyResponse> StartAsync(Guid id,string? message,string? conversation,System.Text.Json.JsonElement? context,string? key,UserContext user,CancellationToken ct=default)
     { Calls.Add($"start:{id:D}:{message}:{conversation}:{key}:{user.UserId}"); return Task.FromResult(new AgentProxyResponse(202,Body,null)); }
     public Task<AgentProxyResponse> GetAsync(Guid id,UserContext user,CancellationToken ct=default)
@@ -751,6 +768,8 @@ public sealed class FakeAgentService : IAgentService
     public const string GhostIdText = "22222222-2222-2222-2222-222222222222";
     public static readonly Guid ExistingId = Guid.Parse(ExistingIdText);
     public static readonly Guid GhostId = Guid.Parse(GhostIdText);
+
+    public FakeAgentService(FakeCallScope scope) => scope.Own(Calls);
 
     /// <summary>目前 draft 版本的 ETag(GET 回傳、If-Match 需相符才放行 PUT/validate)。</summary>
     public const string CurrentETag = "\"1\"";

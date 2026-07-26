@@ -42,7 +42,11 @@ from app.runtime.models import (
     RuntimeRunResult,
     SnapshotCanonicalEnvelope,
 )
-from app.runtime.tool_boundary import DirectToolDenied, invoke_approved_write_tool
+from app.runtime.tool_boundary import (
+    DirectToolDenied,
+    ToolObservation,
+    invoke_approved_write_tool,
+)
 from app.runtime.models import (
     MAX_BACKEND_RESULT_JSON_BYTES,
     backend_result_wire_size,

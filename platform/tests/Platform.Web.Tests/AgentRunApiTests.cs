@@ -137,6 +137,9 @@ public sealed class AgentRunApiTests
 
         var events = await client.GetAsync(
             $"/api/runs/{RunId}/events?afterSequence=12&limit=50");
+        // 無 query string → 前端依賴的 camelCase 參數各自套用預設值(afterSequence=0、limit=100);
+        // 這兩個數字是公開契約的一部分,改動會讓輪詢從頭重播或截斷。
+        var defaults = await client.GetAsync($"/api/runs/{RunId}/events");
         using var resume = new HttpRequestMessage(
             HttpMethod.Post,
             $"/api/runs/{RunId}/resume")
@@ -151,8 +154,10 @@ public sealed class AgentRunApiTests
         var resumed = await client.SendAsync(resume);
 
         Assert.Equal(HttpStatusCode.OK, events.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, defaults.StatusCode);
         Assert.Equal(HttpStatusCode.Accepted, resumed.StatusCode);
         Assert.Contains($"events:{RunId}:12:50", FakeAgentRunService.Calls);
+        Assert.Contains($"events:{RunId}:0:100", FakeAgentRunService.Calls);
         Assert.Contains(
             $"resume:{RunId}:details:4:resume-key",
             FakeAgentRunService.Calls);

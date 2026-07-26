@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test:unit": "playwright test --config playwright.unit.config.ts",
+    "test:unit": "npm run test:unit:logic && npm run test:unit:ui",
+    "test:unit:logic": "vitest run --config vitest.config.ts",
+    "test:unit:ui": "playwright test --config playwright.unit.config.ts",
     "preview": "vite preview",
     "test:evidence": "playwright test",
     "test:evidence:install": "playwright install --with-deps chromium"
@@ -38,6 +40,7 @@
     "@vitejs/plugin-react": "^6.0.2",
     "oxlint": "^1.69.0",
     "typescript": "~6.0.2",
-    "vite": "^8.1.0"
+    "vite": "^8.1.0",
+    "vitest": "^4.1.10"
   }
 }

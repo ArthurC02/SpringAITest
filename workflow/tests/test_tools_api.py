@@ -28,5 +28,14 @@ def test_tool_catalog_exposes_safe_builder_metadata_only():
     serialized = response.text.lower()
     assert all(
         forbidden not in serialized
-        for forbidden in ("endpoint", "token", "x-internal", "/api/", "http://", "https://")
+        for forbidden in (
+            "endpoint",
+            "token",
+            "x-internal",
+            "/api/",
+            "http://",
+            "https://",
+            "callable",
+            "args_schema",
+        )
     )

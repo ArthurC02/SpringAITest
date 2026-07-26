@@ -53,6 +53,12 @@ def parse_decimal_wire(value: object) -> tuple[str, Decimal]:
             f"Decimal scale exceeds the {MAX_DECIMAL_SCALE} digit limit.",
         )
     significant_digits = (integer_part.lstrip("0") + fraction_part).lstrip("0")
+    # Currently unreachable, kept as an independent guard. The two checks above
+    # (`:45` integer digits <= 20 and `:50` scale <= 18) already bound the total
+    # at 38 == MAX_DECIMAL_PRECISION, so `>` can never hold. It becomes reachable
+    # the moment MAX_DECIMAL_INTEGER_DIGITS + MAX_DECIMAL_SCALE is raised above
+    # MAX_DECIMAL_PRECISION, which is why the catalog still advertises
+    # `maxPrecision: 38` as its own contract rather than a derived value.
     if len(significant_digits) > MAX_DECIMAL_PRECISION:
         raise DecimalWireError(
             "decimal_precision_exceeded",

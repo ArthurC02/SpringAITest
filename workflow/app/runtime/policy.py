@@ -128,6 +128,15 @@ class PreActionPolicy:
             )
         if selected == "route_to_skill":
             skill = str(selected_action.get("skill") or "")
+            # Currently unreachable, kept as defence in depth. `__init__` (`:50`)
+            # hands the very same `pinned_skills` to the validator as the
+            # `skills` referenceCatalog, and `validator._reference_is_allowed`
+            # (`app/business_rules/validator.py:170`) turns any unpinned
+            # `route_to_skill` into an `unknown_skill_reference` error, so
+            # construction already raises PolicyError and `decide()` never sees
+            # one. It becomes reachable as soon as the validator's catalogue and
+            # the runtime pin list come from different sources (e.g. validating
+            # against a tenant catalogue while pinning from the snapshot).
             if skill not in self._pinned_skills:
                 return PolicyDecision(
                     outcome="blocked",

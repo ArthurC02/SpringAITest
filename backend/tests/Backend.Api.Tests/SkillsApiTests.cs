@@ -34,7 +34,7 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
     private static string InvalidYaml(string name)
         => $"name: {name}\ndescription: 壞的\nflow:\n  - loop:\n      body: [{FakeSkillValidator.InvalidMarker}]\n";
 
-    private static JsonObject Body(string definition) => new() { ["definition"] = definition };
+    private static JsonObject Body(string? definition) => new() { ["definition"] = definition };
 
     private async Task<JsonNode> CreateAsync(HttpClient client, string name, string description = "季報問答")
     {
@@ -176,6 +176,26 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("找不到 Skill：at403_ghost", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
     }
 
+    // UpdateAsync 的 `AND enabled`:軟刪後的名字不得靠 PUT 復活(復活只有 POST 那條路,
+    // 它才會走 revision 接續語意)。少了那個條件,PUT 會把已停用的列改回可見且完全沒有測試會紅。
+    [Fact]
+    public async Task Put_SoftDeletedSkill_Returns404()
+    {
+        var client = Admin();
+        await CreateAsync(client, "at403_deleted");
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync("/api/skills/at403_deleted")).StatusCode);
+
+        var resp = await client.PutAsJsonAsync(
+            "/api/skills/at403_deleted", Body(Yaml("at403_deleted", description: "偷偷復活")));
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Equal("找不到 Skill：at403_deleted", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // 仍然不可見,且沒有多出 revision(歷史只有軟刪前的那一筆)。
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/skills/at403_deleted")).StatusCode);
+        Assert.Single((await (await client.GetAsync("/api/skills/at403_deleted/revisions")).ReadJsonAsync()).AsArray());
+    }
+
     // ---- AT4-04:DELETE 軟刪 enabled=false 且 revision 保留 ----
 
     [Fact]
@@ -197,17 +217,10 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
         var revisions = (await (await client.GetAsync("/api/skills/at404_skill/revisions")).ReadJsonAsync()).AsArray();
         Assert.Equal(2, revisions.Count);
 
-        // 二次刪除 → 404(已停用等同不存在)。
-        Assert.Equal(HttpStatusCode.NotFound, (await client.DeleteAsync("/api/skills/at404_skill")).StatusCode);
-    }
-
-    [Fact]
-    public async Task Delete_Missing_Returns404()
-    {
-        var resp = await Admin().DeleteAsync("/api/skills/at404_ghost");
-
-        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-        Assert.Equal("找不到 Skill：at404_ghost", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+        // 二次刪除 → 404(已停用等同不存在);與「名稱從未存在」是同一分支(`!deleted → NotFound`)。
+        var again = await client.DeleteAsync("/api/skills/at404_skill");
+        Assert.Equal(HttpStatusCode.NotFound, again.StatusCode);
+        Assert.Equal("找不到 Skill：at404_skill", (await again.ReadJsonAsync())["message"]!.GetValue<string>());
     }
 
     // ---- AT4-05:路由鍵用 name ----
@@ -429,16 +442,12 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
     // 與 code 註冊工作流同名 → 409,訊息講明衝突原因。
     // catalog/validate/nodes 是 platform 的字面路由段:字面段永遠勝過 {name},
     // 這種名字的 skill 就算建得起來也永遠點不進去 → 一併擋在建立時。
+    // 清單在生產碼與測試裡都是硬寫的同一個 HashSet.Contains,不具偵測 workflow 內建名漂移的能力
+    // (沒有打 GET /workflows)→ 三類來源各留一個代表值,多的案例是零資訊。
     [Theory]
-    [InlineData("summarize")]
-    [InlineData("triage")]
-    [InlineData("rag-qa")]
-    [InlineData("analyze-report")]
-    [InlineData("kb-query")]
-    [InlineData("catalog")]
-    [InlineData("validate")]
-    [InlineData("nodes")]
-    [InlineData("template-infer")]
+    [InlineData("rag-qa")]         // workflow 內建 skill
+    [InlineData("catalog")]        // platform 的字面路由段
+    [InlineData("template-infer")] // template-* 樣板
     public async Task Post_ReservedWorkflowName_Returns409(string name)
     {
         var resp = await Admin().PostAsJsonAsync("/api/skills", Body(Yaml(name)));
@@ -450,10 +459,12 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
 
     // ---- body 驗證:definition 是唯一欄位且必填 ----
 
+    // NotBlank 的三個判斷:null(JSON null / 缺欄位)、空字串、全空白字元。
     [Theory]
+    [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
-    public async Task Post_BlankDefinition_Returns400_AndNeverReachesEngine(string definition)
+    public async Task Post_BlankDefinition_Returns400_AndNeverReachesEngine(string? definition)
     {
         var before = Validator.Calls.Count;
 

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import MethodType, SimpleNamespace
 from typing import Any
 
@@ -13,9 +14,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from app.runtime.backend import (
+    ApprovalExecutionIdentity,
     BackendRunClient,
     BackendRunConflict,
     BackendRunError,
+    EffectClaim,
     LeaseRecord,
     RecoveryClaimResponse,
     RecoveryCommand,
@@ -1583,6 +1586,407 @@ async def test_backend_execution_snapshot_preserves_numeric_lexemes(
     ) == canonical_json_bytes(
         {key: value for key, value in raw.items() if key != "snapshot_hash"}
     )
+
+
+@pytest.mark.asyncio
+async def test_lease_renewal_detects_generation_change_and_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """generation fencing 的正題：續租拿回別代的 lease ⇒ 立刻失去所有權並 drain。"""
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+
+    async def newer_generation(run_id, ctx, expected_version):
+        return LeaseRecord(
+            lease_token="stolen",
+            lease_generation=2,
+            lease_expires_at="2099-01-01T00:00:00Z",
+            run=backend.record,
+        )
+
+    async def immediate_sleep(_seconds):
+        return None
+
+    backend.claim_lease = newer_generation  # type: ignore[method-assign]
+    monkeypatch.setattr("app.runtime.manager.asyncio.sleep", immediate_sleep)
+    control = SimpleNamespace(
+        reasons=[], request_drain=lambda reason: control.reasons.append(reason)
+    )
+    handle = SimpleNamespace(
+        run_id=run_snapshot.run_id,
+        ctx=request_context(),
+        state_version=backend.record.state_version,
+        lease_token="original",
+        lease_generation=1,
+        event_ack_cursor=0,
+        cancel_requested=False,
+        lease_lost=False,
+        state_lock=asyncio.Lock(),
+        control=control,
+    )
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+    )
+
+    with pytest.raises(BackendRunConflict, match="lease generation changed"):
+        await manager._renew_lease(handle)
+
+    assert handle.lease_lost is True
+    assert control.reasons == ["lease_generation_changed", "lease_lost"]
+    # 別代的 token 不得被寫進 handle,否則後續 CAS 會用偷來的租約。
+    assert handle.lease_token == "original"
+
+
+class CommandBackend(FakeBackend):
+    def __init__(self, run_snapshot, command: RecoveryCommand):
+        super().__init__(run_snapshot)
+        self.command = command
+        self.claims: list[str] = []
+
+    async def claim_command(self, run_id, command_id, ctx):
+        self.claims.append(command_id)
+        return self.command if command_id == self.command.command_id else None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_drains_stale_generation_handle() -> None:
+    """收到新一代的命令時,舊代的 in-flight handle 必須被 drain 並移出 _handles。"""
+    run_snapshot = snapshot()
+    command = RecoveryCommand(
+        command_id="cancel-g2",
+        run_id=run_snapshot.run_id,
+        command_type="cancel",
+        input={"reason": "user"},
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        role=run_snapshot.caller.role,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        run_status="running",
+        state_version=0,
+        lease_generation=2,
+        checkpoint_generation=2,
+        checkpoint_version=1,
+        lease_token="lease-g2",
+        claim_token="claim-g2",
+        claim_expires_at="2099-01-01T00:00:00Z",
+        dispatch_attempt=1,
+    )
+    backend = CommandBackend(run_snapshot, command)
+    backend.token = command.lease_token
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+    )
+    control = SimpleNamespace(
+        reasons=[], request_drain=lambda reason: control.reasons.append(reason)
+    )
+    stale = SimpleNamespace(lease_generation=1, lease_lost=False, control=control)
+    manager._handles[run_snapshot.run_id] = stale  # type: ignore[assignment]
+
+    result = await manager.dispatch_command(
+        run_snapshot.run_id, command.command_id, request_context()
+    )
+
+    assert result.status == "cancelled"
+    assert stale.lease_lost is True
+    assert control.reasons == ["lease_generation_changed"]
+    assert run_snapshot.run_id not in manager._handles
+    assert backend.record.status == "cancelled"
+    assert backend.completed_commands == [command.command_id]
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offset_seconds", "expected"),
+    [(-1, "failed"), (0, "failed"), (3_600, "completed")],
+    ids=["deadline-passed", "deadline-equals-now", "deadline-in-future"],
+)
+async def test_deadline_at_bounds_the_run(
+    offset_seconds: int, expected: str
+) -> None:
+    """`remaining = max(0, deadline - now)`：剛好等於現在也必須立刻逾時（而非改用 agent timeout）。"""
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+    backend.record = backend.record.model_copy(
+        update={"deadline_at": deadline.isoformat().replace("+00:00", "Z")}
+    )
+    model = FakeModel([RuntimeCommand(kind="final", content="answered")])
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=model,
+    )
+
+    await manager.start(run_snapshot, "begin", request_context())
+    await wait_status(backend, expected)
+
+    state = await manager.graph.aget_state(
+        checkpoint_config(
+            tenant_id=run_snapshot.caller.tenant_id,
+            user_id=run_snapshot.caller.user_id,
+            run_id=run_snapshot.run_id,
+            snapshot_hash=run_snapshot.snapshot_hash,
+        )
+    )
+    if expected == "failed":
+        assert state.values["error_code"] == "runtime_timeout"
+        assert backend.transition_payloads[-1]["error_code"] == "runtime_timeout"
+        assert model.seen == []
+    else:
+        assert state.values["status"] == "completed"
+        assert len(model.seen) == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_audit_cursor_inconsistency_fails_closed() -> None:
+    """cursor 既非 base 也非 base+1 ⇒ 稽核序列已不可信,必須拒絕而不是硬寫。"""
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+    )
+    config = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        lease_generation=2,
+    )
+    terminal = runtime_event(
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        event_type="run_terminal",
+        node_id="supervisor",
+        event_key="runtime_preflight_invalid:g2",
+        payload={"status": "failed", "error_code": "runtime_preflight_invalid"},
+    )
+    await manager.graph.aupdate_state(
+        config,
+        {
+            "run_id": run_snapshot.run_id,
+            "snapshot_hash": run_snapshot.snapshot_hash,
+            "status": "failed",
+            "error_code": "runtime_preflight_invalid",
+            "events": [terminal.as_backend_dict()],
+            "event_cursor_base": 1,
+        },
+        as_node="finalize",
+    )
+    command = RecoveryCommand(
+        command_id="start-bad-cursor",
+        run_id=run_snapshot.run_id,
+        command_type="start",
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        role=run_snapshot.caller.role,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        run_status="running",
+        state_version=0,
+        lease_generation=2,
+        checkpoint_generation=2,
+        checkpoint_version=1,
+        event_ack_cursor=5,
+        lease_token="lease-g2",
+        claim_token="claim-bad-cursor",
+        claim_expires_at="2099-01-01T00:00:00Z",
+        dispatch_attempt=1,
+    )
+
+    with pytest.raises(Exception, match="terminal audit cursor is inconsistent"):
+        await manager._fail_owned_preflight(command, request_context())
+
+    assert backend.transition_calls == 0
+    await manager.close()
+
+
+class ApprovalBackend(FakeBackend):
+    """D7 核准執行所需的最小 Backend 表面（只在本檔使用的手寫 fake）。"""
+
+    def __init__(self, run_snapshot, checkpoint_reference: str, outcomes: list[str]):
+        super().__init__(run_snapshot)
+        self.reference = checkpoint_reference
+        self.outcomes = list(outcomes)
+        self.record = self.record.model_copy(
+            update={
+                "status": "queued",
+                "lease_generation": 2,
+                "checkpoint_generation": 2,
+                "checkpoint_ref": checkpoint_reference,
+                "checkpoint_version": 4,
+            }
+        )
+        self.token = "lease-approval"
+        self.consumed: list[str] = []
+        self.effects: list[bool] = []
+        self.execution_acks: list[tuple[str, bool]] = []
+
+    async def approval_execution_identity(self, run_id, approval_id, ctx):
+        return ApprovalExecutionIdentity(
+            user_id=self.snapshot.caller.user_id, role=self.snapshot.caller.role
+        )
+
+    async def claim_lease(self, run_id, ctx, expected_version):
+        return LeaseRecord(
+            lease_token=self.token,
+            lease_generation=2,
+            lease_expires_at="2099-01-01T00:00:00Z",
+            checkpoint_generation=2,
+            checkpoint_ref=self.reference,
+            checkpoint_version=4,
+            event_ack_cursor=0,
+            run=self.record,
+        )
+
+    async def consume_approval(
+        self, run_id, approval_id, ctx, *, action_fingerprint, lease_token, lease_generation
+    ):
+        assert lease_token == self.token
+        assert lease_generation == 2
+        self.consumed.append(action_fingerprint)
+        return EffectClaim(
+            effect_id="8f14e45f-ceea-467a-9cbe-1a2b3c4d5e6f",
+            outcome=self.outcomes.pop(0),
+        )
+
+    async def complete_effect(self, run_id, effect_id, ctx, *, succeeded):
+        self.effects.append(succeeded)
+
+    async def complete_approval_execution(
+        self, approval_id, claim_token, *, dead_letter=False
+    ):
+        self.execution_acks.append((claim_token, dead_letter))
+
+    def last_write_status(self) -> str | None:
+        writes = [
+            event
+            for event in self.events.values()
+            if event["event_type"] == "approved_write_completed"
+        ]
+        return writes[-1]["payload"]["status"] if writes else None
+
+
+@pytest.mark.asyncio
+async def test_approved_write_effect_is_consumed_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """一次核准只能產生一次副作用：Backend 不再授權時必須 fail closed,不得重跑工具。"""
+    run_snapshot = snapshot(tools=["runtime.write_evidence"])
+    monkeypatch.setattr(settings, "agent_write_tools_enabled", True)
+    monkeypatch.setattr(
+        settings, "agent_write_tools_allowlist", "runtime.write_evidence"
+    )
+    monkeypatch.setattr(
+        settings,
+        "agent_write_tools_tenant_allowlist",
+        run_snapshot.caller.tenant_id,
+    )
+
+    class Sink:
+        def __init__(self) -> None:
+            self.writes: list[tuple[str, str, str | None]] = []
+
+        async def write(self, ctx, record_id, value, *, effect_id=None):
+            self.writes.append((record_id, value, effect_id))
+            return len(self.writes)
+
+    sink = Sink()
+    backend = FakeBackend(run_snapshot)
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+        deps=SimpleNamespace(write_evidence_sink=sink),
+    )
+    config = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        lease_generation=2,
+    )
+    command = RuntimeCommand(
+        kind="tool_call",
+        name="runtime.write_evidence",
+        arguments={"record_id": "refund-1", "value": "approved"},
+    )
+    await manager.graph.aupdate_state(
+        config,
+        {
+            "run_id": run_snapshot.run_id,
+            "snapshot_hash": run_snapshot.snapshot_hash,
+            "status": "waiting_approval",
+            "pending_approval": {
+                "required_role": "ADMIN",
+                "action_fingerprint": "f" * 64,
+                "command": command.model_dump(mode="json"),
+                "active_skill_scope": None,
+            },
+        },
+        as_node="finalize",
+    )
+    seeded = await manager.graph.aget_state(config)
+    reference = checkpoint_ref(seeded.config, lease_generation=2)
+    assert reference is not None
+    approval_backend = ApprovalBackend(
+        run_snapshot, reference, ["granted", "completed", "already_consumed"]
+    )
+    manager.backend = approval_backend  # type: ignore[assignment]
+    approval_id = "3f8b2f5e-6c42-4abc-8def-0123456789ab"
+
+    granted = await manager.execute_approved_write(
+        run_snapshot.run_id,
+        approval_id,
+        request_context(),
+        execution_claim_token="claim-1",
+    )
+
+    assert granted.status == "completed"
+    assert sink.writes == [("refund-1", "approved", "8f14e45f-ceea-467a-9cbe-1a2b3c4d5e6f")]
+    assert approval_backend.effects == [True]
+    assert approval_backend.execution_acks == [("claim-1", False)]
+    assert approval_backend.record.status == "completed"
+    assert approval_backend.last_write_status() == "ok"
+
+    # 崩潰後重放：Backend 說效果已完成 ⇒ 只補記帳,絕不再跑一次工具。
+    approval_backend.record = approval_backend.record.model_copy(
+        update={"status": "queued"}
+    )
+    replayed = await manager.execute_approved_write(
+        run_snapshot.run_id,
+        approval_id,
+        request_context(),
+        execution_claim_token="claim-2",
+    )
+
+    assert replayed.status == "completed"
+    assert len(sink.writes) == 1
+    assert approval_backend.effects == [True]
+    assert approval_backend.last_write_status() == "replayed"
+
+    # Backend 不再授權（重複/過期核准）⇒ fail closed 並轉成 dead letter。
+    approval_backend.record = approval_backend.record.model_copy(
+        update={"status": "queued"}
+    )
+    with pytest.raises(RuntimeManagerConflict, match="cannot be safely resumed"):
+        await manager.execute_approved_write(
+            run_snapshot.run_id,
+            approval_id,
+            request_context(),
+            execution_claim_token="claim-3",
+        )
+
+    assert len(sink.writes) == 1
+    assert approval_backend.consumed == ["f" * 64] * 3
+    assert approval_backend.execution_acks[-1] == ("claim-3", True)
+    await manager.close()
 
 
 @pytest.mark.asyncio

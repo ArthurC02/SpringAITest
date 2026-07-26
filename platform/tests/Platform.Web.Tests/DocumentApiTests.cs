@@ -9,6 +9,27 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
 
     public DocumentApiTests(TestWebAppFactory factory) => _factory = factory;
 
+    // 類別層級 [Authorize]:三個端點在沒有 JWT 時都必須是 401,不能有任何一條漏掛。
+    [Theory]
+    [InlineData("POST", "/api/documents")]
+    [InlineData("GET", "/api/documents")]
+    [InlineData("DELETE", "/api/documents/doc-1")]
+    public async Task Endpoints_Return401_WithoutToken(string method, string path)
+    {
+        using var req = new HttpRequestMessage(new HttpMethod(method), path);
+        if (method == "POST")
+        {
+            req.Content = JsonContent.Create(new { title = "標題", text = "內容" });
+        }
+
+        var resp = await _factory.CreateClient().SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(401, body["status"]!.GetValue<int>());
+        Assert.NotNull(body["fieldErrors"]);
+    }
+
     [Fact]
     public async Task Create_Returns202_WithStatusProcessing()
     {
@@ -22,14 +43,32 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("processing", body["status"]!.GetValue<string>());
     }
 
-    [Fact]
-    public async Task Create_Returns400_WhenTitleMissing()
+    // NotBlank 的三個等價類(欄位缺漏 / 空字串 / 全空白)× 兩個必填欄位:title 與 text 各自掛
+    // 自己的 [NotBlank],兩者的驗證分支獨立,不能只測其中一個再類推另一個。
+    [Theory]
+    [InlineData("title", null)]
+    [InlineData("title", "")]
+    [InlineData("title", "   ")]
+    [InlineData("text", null)]
+    [InlineData("text", "")]
+    [InlineData("text", "   ")]
+    public async Task Create_Returns400_WhenRequiredFieldBlank(string field, string? value)
     {
-        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents", new { text = "內容" });
+        var payload = new Dictionary<string, string> { ["title"] = "標題", ["text"] = "內容" };
+        if (value is null)
+        {
+            payload.Remove(field); // 欄位完全不出現在 body 裡(與送空字串是不同輸入)。
+        }
+        else
+        {
+            payload[field] = value;
+        }
+
+        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents", payload);
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal("title 不可為空", body["fieldErrors"]!["title"]!.GetValue<string>());
+        Assert.Equal($"{field} 不可為空", body["fieldErrors"]![field]!.GetValue<string>());
     }
 
     // StringLength 邊界:on-point(上限剛好)受理,off-point(超一)回 400 fieldErrors。

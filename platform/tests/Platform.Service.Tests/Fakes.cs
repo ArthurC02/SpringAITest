@@ -61,9 +61,22 @@ public sealed class FakeConversationStore : IConversationStore
 {
     public List<(string Prompt, string Reply)> Saved { get; } = new();
     public List<UserContext> AddCalledWith { get; } = new();
+
+    /// <summary>與 <see cref="Saved"/> 同索引的 D6 lineage metadata(未帶時為 null)。必須覆寫 5 參多載才
+    /// 收得到:<see cref="IConversationStore"/> 的預設介面方法會把 metadata 丟掉。</summary>
+    public List<ChatTurnMetadata?> SavedMetadata { get; } = new();
     public List<ChatResponse> Items { get; } = new();
     public bool ThrowOnAdd { get; set; }
     private long _nextId = 1;
+
+    public async Task<ChatResponse> AddAsync(
+        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata,
+        CancellationToken ct = default)
+    {
+        var response = await AddAsync(prompt, reply, ctx, ct);
+        SavedMetadata.Add(metadata);
+        return response;
+    }
 
     public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
     {
@@ -370,13 +383,59 @@ public sealed class FakeChatIdentityAccessor : IChatIdentityAccessor
 }
 
 /// <summary>
+/// D6 短路層(<see cref="AgentChatRoutingAgent"/>)背後的 runtime fake。預設回 null —— 等同旗標關閉或
+/// resolver 選 legacy,整條管線行為與 D6 之前逐字相同。設定 <see cref="Reply"/> 即模擬 canary 命中:
+/// 該輪由 Root Orchestrator 作答並短路 SkillRouting/ChatClientAgent,但外層的 ChatTurnRecorder 仍須
+/// 照常持久化 + remember(表 4 #12)。
+/// </summary>
+public sealed class FakeAgentChatRuntime : IAgentChatRuntime
+{
+    /// <summary>非 null 時短路本輪並以此文字作答(canary 命中);null 代表 legacy。</summary>
+    public string? Reply { get; set; }
+
+    /// <summary>非 null 時,命中的那一輪一併寫入 <see cref="IChatIdentityAccessor.TurnMetadata"/>(D6 lineage)。</summary>
+    public ChatTurnMetadata? Metadata { get; set; }
+
+    /// <summary>非 null 時擲此例外(明確 orchestrator 不可用等 fail-closed 情境)。</summary>
+    public Exception? Throw { get; set; }
+
+    /// <summary>每輪收到的參數;Count 即短路層被呼叫次數(驗它確實掛在管線上)。</summary>
+    public List<(string Message, string ConversationId, Guid? OrchestratorId, string? LogicalAttemptId)> Calls { get; } = new();
+
+    public Task<AgentResponse?> RunAsync(
+        string message, string conversationId, Guid? requestedOrchestratorId,
+        IChatIdentityAccessor identity, string? logicalAttemptId = null, CancellationToken ct = default)
+    {
+        Calls.Add((message, conversationId, requestedOrchestratorId, logicalAttemptId));
+        if (Throw is not null)
+        {
+            throw Throw;
+        }
+
+        if (Reply is null)
+        {
+            return Task.FromResult<AgentResponse?>(null);
+        }
+
+        if (Metadata is not null)
+        {
+            identity.TurnMetadata = Metadata;
+        }
+
+        return Task.FromResult<AgentResponse?>(new AgentResponse(new ChatMessage(ChatRole.Assistant, Reply)));
+    }
+}
+
+/// <summary>
 /// 組出 P4 的共用「ChatAssistant」hosted agent(無 copilotInstructions,見 ChatContextProvider 拓樸注記):
 /// 一顆 <see cref="InMemoryChatHistoryProvider"/>(20 則視窗,MessagesExceed(20) 觸發,
 /// minimumPreservedTurns=1)+ 一顆 <see cref="InMemoryAgentSessionStore"/>(service 層單元測試直接以
 /// 顯式 UserContext 驅動不同 cid,不需要 IsolationKeyScopedAgentSessionStore 這層——租戶/使用者隔離
 /// 已经在 DeriveMemoryKeys 產生的 cid 字串裡)。
-/// pipeline(外→內):ChatTurnRecorder → SkillRoutingAgent → ChatClientAgent(掛 ChatContextProvider)。
-/// 三者皆需要 IServiceScopeFactory 解析 per-call 的 IMem0Client/IConversationStore/IChatIdentityAccessor/
+/// pipeline(外→內):ChatTurnRecorder → AgentChatRoutingAgent → SkillRoutingAgent → ChatClientAgent
+/// (掛 ChatContextProvider)——與 production 的兩顆 hosted agent 逐層相同(Program.cs:215-221/237-263);
+/// AgentChatRoutingAgent 是無條件掛載的,旗標關閉只讓 IAgentChatRuntime 回 null 而已,故測試管線也必須有它。
+/// 四者皆需要 IServiceScopeFactory 解析 per-call 的 IMem0Client/IConversationStore/IChatIdentityAccessor/
 /// IWorkflowService(生產環境兩顆 hosted agent 是啟動期 Singleton,不可在建構時捕捉 Scoped 服務);
 /// 測試以最小 ServiceCollection 組一個真正的 scope factory,讓傳入的 mem0/convos/identity/workflows
 /// fake 實例可被解析到。llmAgent 是 SkillRoutingAgent 路由/摘要用的「裸」<see cref="ILlmAgent"/>
@@ -390,13 +449,15 @@ internal static class TestChatAgent
         FakeConversationStore? convos = null,
         FakeChatIdentityAccessor? identity = null,
         FakeLlmAgent? llmAgent = null,
-        FakeWorkflowService? workflows = null)
+        FakeWorkflowService? workflows = null,
+        FakeAgentChatRuntime? agentChat = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton<IMem0Client>(mem0 ?? new FakeMem0Client());
         services.AddSingleton<IConversationStore>(convos ?? new FakeConversationStore());
         services.AddSingleton<IChatIdentityAccessor>(identity ?? new FakeChatIdentityAccessor());
         services.AddSingleton<IWorkflowService>(workflows ?? new FakeWorkflowService());
+        services.AddSingleton<IAgentChatRuntime>(agentChat ?? new FakeAgentChatRuntime());
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var historyProvider = new InMemoryChatHistoryProvider(new InMemoryChatHistoryProviderOptions
@@ -418,7 +479,8 @@ internal static class TestChatAgent
         var routing = new SkillRoutingAgent(
             chatClientAgent, llmAgent ?? new FakeLlmAgent(), historyProvider, scopeFactory,
             NullLogger<SkillRoutingAgent>.Instance);
-        var recorder = new ChatTurnRecorder(routing, scopeFactory, NullLogger<ChatTurnRecorder>.Instance);
+        var brain = new AgentChatRoutingAgent(routing, scopeFactory);
+        var recorder = new ChatTurnRecorder(brain, scopeFactory, NullLogger<ChatTurnRecorder>.Instance);
         var hostAgent = new AIHostAgent(recorder, new InMemoryAgentSessionStore());
         return (hostAgent, historyProvider, routing);
     }

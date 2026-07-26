@@ -1,7 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
-using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Platform.Web.Tests;
 
@@ -28,25 +29,9 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Null(body["prompt"]);
     }
 
-    [Fact]
-    public async Task Stream_Returns_EventStream_WithUnspacedDataFrame()
-    {
-        var client = _factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal("text/event-stream", resp.Content.Headers.ContentType!.MediaType);
-
-        var raw = await resp.Content.ReadAsStringAsync();
-        // 每個 chunk 是一個 "data:<value>" frame(冒號後不加空格),event 以空行結尾。
-        Assert.Contains("data:你好\n\n", raw);
-        Assert.Contains("data:世界\n\n", raw);
-        Assert.DoesNotContain("data: 你好", raw);
-    }
-
     // CSR-P1-026 / W3:以 raw bytes 斷言精確 wire contract — body 精確為 data:<value>\n\n 串接,
     // data: 後無空格、每事件空行結尾、無自訂 event type / tool JSON / trace。
+    // (逐 byte 全等已嚴格涵蓋舊 Stream_Returns_EventStream_WithUnspacedDataFrame 的 Contains 版斷言。)
     [Fact]
     public async Task Stream_ExactWireContract_RawBytes_NoSpaceAfterData()
     {
@@ -55,6 +40,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("text/event-stream", resp.Content.Headers.ContentType!.MediaType);
         var bytes = await resp.Content.ReadAsByteArrayAsync();
         var expected = System.Text.Encoding.UTF8.GetBytes("data:你好\n\ndata:世界\n\n");
         Assert.Equal(expected, bytes);
@@ -151,18 +137,26 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(expected, bytes);
     }
 
-    // M5:空字串與全空白都是 NotBlank 該擋的等價類(全空白正是 NotBlank 存在的唯一理由)。
+    // M5 + A-24:空字串與全空白都是 NotBlank 該擋的等價類(全空白正是 NotBlank 存在的唯一理由),
+    // 阻塞與串流兩條路徑皆 400 + ApiError 四鍵齊全;串流端點在寫任何 SSE bytes 之前就回 JSON。
     [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    public async Task Chat_Returns400_WhenMessageBlank(string message)
+    [InlineData("/api/chat", "")]
+    [InlineData("/api/chat", "   ")]
+    [InlineData("/api/chat/stream", "")]
+    [InlineData("/api/chat/stream", "   ")]
+    public async Task ChatAndStream_Return400_WithFullApiErrorShape_WhenMessageBlank(string path, string message)
     {
         var client = _factory.CreateClient();
 
-        var resp = await client.PostAsJsonAsync("/api/chat", new { message });
+        var resp = await client.PostAsJsonAsync(path, new { message });
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal("application/json", resp.Content.Headers.ContentType!.MediaType);
         var body = await resp.ReadJsonAsync();
+        Assert.Equal(4, body.AsObject().Count);
+        Assert.NotNull(body["timestamp"]);
+        Assert.Equal(400, body["status"]!.GetValue<int>());
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
         Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
     }
 
@@ -173,7 +167,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     private static int ToolLineCount(string catalog)
         => catalog.Split("\n\n")[^1].Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
 
-    // 五顆內建可路由 skill(鏡射 workflow GET /skills 真實回應形狀),供以下三個路由目錄端到端測試共用。
+    // 內建(builtin)+ 自訂(custom)+ 一顆 ADMIN 限定,鏡射 workflow GET /skills 的真實回應形狀。
     private const string BuiltinCatalog = """
     [
       { "name":"kb-query", "description":"可稽核的知識查詢", "required_role":"USER", "source":"builtin",
@@ -184,13 +178,19 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         "input_schema": { "text": { "type":"str", "required":true } } },
       { "name":"triage", "description":"問題分流", "required_role":"USER", "source":"builtin",
         "input_schema": { "question": { "type":"str", "required":true } } },
+      { "name":"tenant-a-private-search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
+        "input_schema": { "question_text": { "type":"str", "required":true } } },
       { "name":"analyze-report", "description":"分析報告", "required_role":"ADMIN", "source":"builtin",
         "input_schema": { "topic": { "type":"str", "required":true } } }
     ]
     """;
 
+    // W1:帶有效 JWT → JWT role claim → UserContext → 目錄過濾的 DI 全鏈(Web 層特有的接線)。
+    // builtin 與 custom 都進路由目錄、ADMIN 限定的不進,且路由目錄「恰等於」動態 Skill 目錄
+    // (行數精確,沒有殘留靜態工具混入)。ADMIN 拿得到 analyze-report 是同一段程式碼、只差 role 字串,
+    // 已在 Service 層兩處覆蓋,不在 Web 層重複。
     [Fact]
-    public async Task Chat_WithBearer_EnablesSkillTools_UserRoleGetsFour()
+    public async Task Chat_WithBearer_EnablesSkillTools_BuiltinAndCustom_AdminOnlyFiltered()
     {
         FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse(BuiltinCatalog).RootElement.Clone();
         try
@@ -200,68 +200,13 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
             var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
             var resp = await client.PostAsJsonAsync("/api/chat", new { message = "文件裡有什麼?" });
-
-            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-            var catalog = agent.LastRoutingCatalog!;
-            Assert.Equal(4, ToolLineCount(catalog));
-            Assert.Contains("kb-query", catalog);
-            Assert.DoesNotContain("analyze-report", catalog);
-        }
-        finally
-        {
-            FakeWorkflowService.CatalogOverride = null;
-        }
-    }
-
-    // W1:帶有效 JWT + 可路由目錄 → 動態 Skill 進入路由目錄(端到端經 DI 走 BuildToolsAsync → SkillCatalogToTools)。
-    [Fact]
-    public async Task Chat_WithBearer_RoutesDynamicSkillsFromCatalog()
-    {
-        FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse("""
-        [
-          { "name":"kb-query", "description":"內建檢索", "required_role":"USER", "source":"builtin",
-            "input_schema": { "query": { "type":"str", "required":true } } },
-          { "name":"tenant-a-private-search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
-            "input_schema": { "question_text": { "type":"str", "required":true } } }
-        ]
-        """).RootElement.Clone();
-        try
-        {
-            var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-            agent.Reset();
-            var client = _factory.CreateClient().WithToken(_factory.IssueToken());
-
-            var resp = await client.PostAsJsonAsync("/api/chat", new { message = "文件裡有什麼?" });
-
-            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-            var catalog = agent.LastRoutingCatalog!;
-            // 單軌後路由目錄恰等於動態 Skill 目錄(builtin + custom),沒有殘留靜態工具混入。
-            Assert.Contains("kb-query", catalog);
-            Assert.Contains("tenant-a-private-search", catalog);
-            Assert.Equal(2, ToolLineCount(catalog));
-        }
-        finally
-        {
-            FakeWorkflowService.CatalogOverride = null;
-        }
-    }
-
-    [Fact]
-    public async Task Chat_WithAdminBearer_AlsoGetsAnalyzeReportTool()
-    {
-        FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse(BuiltinCatalog).RootElement.Clone();
-        try
-        {
-            var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-            agent.Reset();
-            var client = _factory.CreateClient().WithToken(_factory.IssueToken(username: "admin-a", role: "ADMIN"));
-
-            var resp = await client.PostAsJsonAsync("/api/chat", new { message = "给我一份報告" });
 
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
             var catalog = agent.LastRoutingCatalog!;
             Assert.Equal(5, ToolLineCount(catalog));
-            Assert.Contains("analyze-report", catalog);
+            Assert.Contains("kb-query", catalog);
+            Assert.Contains("tenant-a-private-search", catalog);
+            Assert.DoesNotContain("analyze-report", catalog);
         }
         finally
         {
@@ -284,20 +229,6 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         // 證明「匿名不路由」——ILlmAgent 現在只服務路由/摘要,呼叫次數為 0 才是正確語意)。
         Assert.Null(agent.LastRoutingCatalog);
         Assert.Equal(0, agent.CompleteCallCount);
-    }
-
-    [Fact]
-    public async Task Stream_Returns400_WhenMessageBlank()
-    {
-        var client = _factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "" });
-
-        // 驗證在進入串流前就回 400 JSON(不寫任何 SSE bytes)。
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
-        Assert.Equal("application/json", resp.Content.Headers.ContentType!.MediaType);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
     }
 
     // ---- X-Auth-Invalid：AllowAnonymous 端點永遠不回 401,靠這個 header 讓前端全域登出機制打得到 ----
@@ -385,32 +316,173 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
             .Select(n => n!["id"]!.GetValue<long>())
             .ToList();
 
-        Assert.Contains(idA, ids);
+        // hist-a 是本案專屬身分 → 它的歷史「恰好」只有自己那一筆(精確集合,不是「有包含」)。
+        Assert.Equal(new[] { idA }, ids);
         Assert.DoesNotContain(idB, ids);
     }
 
-    // A-24:空白 message 在阻塞與串流兩條路徑皆 400,且 ApiError 四鍵({timestamp,status,message,fieldErrors})齊全
-    // (不只 fieldErrors 這一項),camelCase 鍵名。
-    [Fact]
-    public async Task Chat_And_Stream_Return400_WithFullApiErrorShape_WhenMessageBlank()
+    // ---- D6:AgentChatRoutingAgent 是無條件掛在兩條 pipeline 內的,旗標關閉只讓 runtime 提早回 null。 ----
+    // 因此它在呼叫 runtime「之前」讀的兩個 header(Idempotency-Key / X-Orchestrator-Id)即使在
+    // AGENT_CHAT_ENABLED=false 時也會驗證並拋例外 —— 這裡釘住那個例外對外變成什麼。
+
+    private static HttpRequestMessage ChatRequest(string path, params (string Name, string Value)[] headers)
     {
-        var client = _factory.CreateClient();
+        var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(new { message = "你好" }),
+        };
+        foreach (var (name, value) in headers)
+        {
+            request.Headers.TryAddWithoutValidation(name, value);
+        }
 
-        var chatResp = await client.PostAsJsonAsync("/api/chat", new { message = "" });
-        Assert.Equal(HttpStatusCode.BadRequest, chatResp.StatusCode);
-        AssertFullBlankMessageApiError(await chatResp.ReadJsonAsync());
-
-        var streamResp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "" });
-        Assert.Equal(HttpStatusCode.BadRequest, streamResp.StatusCode);
-        AssertFullBlankMessageApiError(await streamResp.ReadJsonAsync());
+        return request;
     }
 
-    private static void AssertFullBlankMessageApiError(JsonNode body)
+    [Theory]
+    [InlineData("one", "two", "Idempotency-Key must contain exactly one value")]  // 重複 header
+    [InlineData(null, null, "Idempotency-Key is invalid")]                        // 513 字元(off-point)
+    public async Task Chat_AmbiguousOrOversizedIdempotencyKey_Returns400_EvenWhenAgentChatDisabled(
+        string? first, string? second, string expectedMessage)
     {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        using var request = first is null
+            ? ChatRequest("/api/chat", ("Idempotency-Key", new string('x', 513)))
+            : ChatRequest("/api/chat", ("Idempotency-Key", first), ("Idempotency-Key", second!));
+
+        var resp = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
         Assert.Equal(4, body.AsObject().Count);
         Assert.NotNull(body["timestamp"]);
         Assert.Equal(400, body["status"]!.GetValue<int>());
-        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
-        Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
+        Assert.Equal(expectedMessage, body["message"]!.GetValue<string>());
+        Assert.NotNull(body["fieldErrors"]);
+    }
+
+    // 同一個壞 header 在串流端點刻意是另一個結果:ChatController 的 try/catch 已接管整個 await foreach,
+    // 所以對外是 200 + event:error 終止 frame(不是 400),且一個 data: chunk 都不會送出。
+    [Fact]
+    public async Task Stream_OversizedIdempotencyKey_EmitsErrorFrameOnly_EvenWhenAgentChatDisabled()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        using var request = ChatRequest("/api/chat/stream", ("Idempotency-Key", new string('x', 513)));
+
+        var resp = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(
+            "event:error\ndata:回覆過程發生錯誤，請稍後再試\n\n",
+            await resp.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Chat_MalformedOrchestratorIdHeader_Returns400()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        using var request = ChatRequest("/api/chat", ("X-Orchestrator-Id", "not-a-guid"));
+
+        var resp = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(4, body.AsObject().Count);
+        Assert.Equal(400, body["status"]!.GetValue<int>());
+        Assert.Equal("orchestratorId 格式錯誤", body["message"]!.GetValue<string>());
+    }
+
+    // ---- D6 canary 打開時的 Web 層 happy path(先前整層空白) ----
+
+    /// <summary>只回固定答案的 IAgentChatRuntime(真實實作的選擇閘另在 AgentChatRuntimeTests 驗);
+    /// 這裡要證明的是「Root Orchestrator 的答案照樣走完 Web 層的回應格式與持久化」。</summary>
+    private sealed class StubAgentChatRuntime : Platform.Service.Abstractions.IAgentChatRuntime
+    {
+        public string? Reply { get; init; }
+
+        public List<(string Message, string ConversationId, Guid? OrchestratorId)> Calls { get; } = new();
+
+        public Task<Microsoft.Agents.AI.AgentResponse?> RunAsync(
+            string message, string conversationId, Guid? requestedOrchestratorId,
+            Platform.Service.Abstractions.IChatIdentityAccessor identity,
+            string? logicalAttemptId = null, CancellationToken ct = default)
+        {
+            Calls.Add((message, conversationId, requestedOrchestratorId));
+            return Task.FromResult<Microsoft.Agents.AI.AgentResponse?>(Reply is null
+                ? null
+                : new Microsoft.Agents.AI.AgentResponse(
+                    new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, Reply)));
+        }
+    }
+
+    private static HttpClient AgentChatClient(TestWebAppFactory factory, StubAgentChatRuntime runtime) =>
+        factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<Platform.Service.Abstractions.IAgentChatRuntime>();
+            services.AddSingleton<Platform.Service.Abstractions.IAgentChatRuntime>(runtime);
+        })).CreateClient().WithToken(factory.IssueToken());
+
+    [Fact]
+    public async Task AgentChatEnabled_Chat_ReturnsOrchestratorAnswer_AndPersistsTurn()
+    {
+        const string answer = "Root Orchestrator 的阻塞答案";
+        var runtime = new StubAgentChatRuntime { Reply = answer };
+        await using var factory = new TestWebAppFactory(
+            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        var client = AgentChatClient(factory, runtime);
+
+        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "這季毛利率多少?" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(answer, body["reply"]!.GetValue<string>());
+        Assert.True(body["id"]!.GetValue<long>() > 0);   // 短路輪照樣持久化,拿得到 backend id
+
+        // 短路層收到的是伺服器推導出來的 conversationId(body 沒帶 → 退回 {tenant}:{user}),不是 wire 值。
+        var call = Assert.Single(runtime.Calls);
+        Assert.Equal("這季毛利率多少?", call.Message);
+        Assert.Equal("demo-a:user-a", call.ConversationId);
+        Assert.Null(call.OrchestratorId);
+
+        Assert.Single(FakeConversationStore.Saved, s => s.Response.Reply == answer);
+    }
+
+    [Fact]
+    public async Task AgentChatEnabled_Stream_WritesOrchestratorAnswerAsSseFrame()
+    {
+        const string answer = "Root Orchestrator 的串流答案";
+        var runtime = new StubAgentChatRuntime { Reply = answer };
+        await using var factory = new TestWebAppFactory(
+            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        var client = AgentChatClient(factory, runtime);
+
+        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "這季毛利率多少?" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        // D6 的答案也走同一套無空格 data: wire contract,且沒有 event:error。
+        Assert.Equal($"data:{answer}\n\n", await resp.Content.ReadAsStringAsync());
+        Assert.Single(FakeConversationStore.Saved, s => s.Response.Reply == answer);
+    }
+
+    // AGENT_CHAT_TENANT_ALLOWLIST 的解析是這道安全閘的輸入,先前零覆蓋:逗號分隔 + trim,
+    // 空項/控制字元/超長(128 為上限)一律不得進入白名單。
+    [Fact]
+    public async Task AgentChatTenantAllowlist_TrimsEntries_RejectsEmptyOversizedAndControlChars()
+    {
+        var onPoint = new string('t', 128);
+        var offPoint = new string('t', 129);
+        await using var factory = new TestWebAppFactory(
+            agentChatEnabled: true,
+            agentChatTenantAllowlist: $" demo-a , ,demo-b ,{onPoint},{offPoint},badctrl");
+
+        var options = factory.Services.GetRequiredService<Platform.Service.Options.AgentChatOptions>();
+
+        Assert.True(options.IsCanaryTenant("demo-a"));          // 前後空白被 trim 掉
+        Assert.True(options.IsCanaryTenant("demo-b"));
+        Assert.True(options.IsCanaryTenant(onPoint));           // 128 on-point:收
+        Assert.False(options.IsCanaryTenant(offPoint));         // 129 off-point:丟
+        Assert.False(options.IsCanaryTenant("badctrl"));  // 控制字元:丟
+        Assert.False(options.IsCanaryTenant(""));               // 空項不得成為成員
+        Assert.False(options.IsCanaryTenant(" demo-a "));       // 存的是 trim 後的值
     }
 }

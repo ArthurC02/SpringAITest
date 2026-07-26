@@ -12,7 +12,8 @@ namespace Backend.Api.Tests;
 /// <summary>
 /// SkillRepository 的**真 PostgreSQL**驗收(Agent Skill P0 儲存不變量,AST-P0-001/013 的 DB 級部分)。
 /// 手寫 fake 背書不了的:import 於單一 CTE/交易同時寫 definition + package + 兩個 hash、
-/// flow update 不得清除既有 package、軟刪復活、跨租戶 package 不可見、flow 匯入 package 欄為 NULL。
+/// definition-only flow update **必須清除**既有 package(SkillRepository.cs 的 `package = NULL`,
+/// 否則匯出的舊 zip 會與新 definition 漂移)、軟刪復活、跨租戶 package 不可見、flow 匯入 package 欄為 NULL。
 /// 共用 PostgresFixture(同 "Postgres" collection 序列化執行);appdb 不可達則 SkipIfUnavailable(不假綠)。
 /// 每測用自己的 "skillrepo-&lt;case&gt;-" 租戶,類內循序、前後自清(skill_revision 有 FK → 先刪 revision)。
 /// </summary>
@@ -239,6 +240,58 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         Assert.Null(revPkgSha);
     }
 
+    // ---- Dapper 路徑的併發配號:UPDATE / INSERT ON CONFLICT 都是 read-modify-write
+    // (current_revision = current_revision + 1),靠 row lock 序列化。重號會撞
+    // uq_skill_revision(23505)而不是靜默損毀,但那是「寫入直接失敗」—— 這條守的是
+    // 「正常併發下不該有人失敗,而且每個號碼的 snapshot 屬於自己那次寫入」。----
+
+    [SkippableFact]
+    public async Task Concurrent_UpdateAndImport_ProduceUniqueRevisions()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-concurrent";
+        const string name = "concurrent_skill";
+        await Repo.CreateAsync(t, Meta(name, "name: concurrent_skill\nflow: seed\n"), "admin-a", default);
+
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tasks = Enumerable.Range(0, 16).Select(index => Task.Run(async () =>
+        {
+            await start.Task;
+            var definition = $"name: {name}\nflow: v{index}\n";
+            if (index % 2 == 0)
+            {
+                var updated = await Repo.UpdateAsync(t, name, Meta(name, definition), $"u-{index}", default);
+                return (Definition: definition, Stored: updated!);
+            }
+
+            var package = Encoding.UTF8.GetBytes($"zip-{index}");
+            var imported = await Repo.ImportAsync(
+                t, Meta(name, definition, kind: "agentic"), package, SkillHash.Sha256(package),
+                $"i-{index}", default);
+            return (Definition: definition, Stored: imported!);
+        })).ToArray();
+
+        start.SetResult();
+        var writes = await Task.WhenAll(tasks);
+
+        // 每次寫入拿到唯一且連續的號碼(seed 是 1 → 2..17)。
+        Assert.Equal(
+            Enumerable.Range(2, 16),
+            writes.Select(w => w.Stored.CurrentRevision).OrderBy(r => r));
+
+        // 該號 revision 的 snapshot 屬於同一次寫入(交錯汙染 = 稽核鏈說謊)。
+        foreach (var write in writes)
+        {
+            var snapshot = await Repo.GetRevisionAsync(t, name, write.Stored.CurrentRevision, default);
+            Assert.NotNull(snapshot);
+            Assert.Equal(write.Definition, snapshot!.Definition);
+            Assert.Equal(SkillHash.Sha256(write.Definition), snapshot.DefinitionSha256);
+        }
+
+        Assert.Equal(17, (await Repo.GetAsync(t, name, default))!.CurrentRevision);
+        Assert.Equal(17, (await Repo.ListRevisionsAsync(t, name, default)).Count);
+    }
+
     // ---- B3:simple_form 的真 SQL 語意(手寫 fake 背書不了 jsonb::text/COALESCE/DO UPDATE 保留) ----
 
     private static Skill FormMeta(string name, string definition, string? simpleForm)
@@ -309,10 +362,11 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
             .GetProperty("templateId").GetString());
     }
 
-    // ---- 05 §5:DbBootstrap 遷移把自訂底線名就地改連字號,skill_revision 歷史零遺失 + 冪等 ----
+    // ---- 05 §5:DbBootstrap 遷移把自訂底線名就地改連字號,skill_revision 歷史零遺失 ----
+    // (冪等由 Migration_RewritesDefinitionNameLine_… 的 (d) 段負責,不在此重複斷言)
 
     [SkippableFact]
-    public async Task Migration_RenamesUnderscoreCustomName_PreservesRevisionHistory_AndIsIdempotent()
+    public async Task Migration_RenamesUnderscoreCustomName_PreservesRevisionHistory()
     {
         _fx.SkipIfUnavailable();
         const string t = "skillrepo-migrate";
@@ -337,11 +391,6 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         Assert.Equal(
             "name: year-compare\nflow: v1\n",
             revs.Single(r => r.Revision == 1).Definition);
-
-        // 冪等:再跑一次不再變動(改後不含底線 → 匹配 0 列)。
-        await DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance);
-        Assert.NotNull(await Repo.GetAsync(t, "year-compare", default));
-        Assert.Equal(2, (await Repo.ListRevisionsAsync(t, "year-compare", default)).Count);
     }
 
     // ---- 05 §5:遷移一併改寫定義的 ^name: 標量,守住「definition name == 身分」不變式 ----
@@ -659,5 +708,28 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         Assert.Equal(
             "name: dup-name\nflow: existing\n",
             (await Repo.GetAsync(t, "dup-name", default))!.Definition);
+    }
+
+    // ---- fail-fast 的另半邊:名字換掉底線後**仍不合標準**(此處為大寫)→ 同樣不得靜默放過。
+    // 這與「壞資料形狀跳過該列」是刻意分開的兩類:InvalidOperationException 被 savepoint 的
+    // catch-when 排除,所以會直接讓開機失敗,而不是留下一個標準不可讀的名字。----
+
+    [SkippableFact]
+    public async Task Migration_NonNormalizableName_FailsFast()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-mignorm";
+        await Repo.CreateAsync(
+            t, Meta("Bad_Name", "name: Bad_Name\nflow: v1\n"), "admin-a", default);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance));
+
+        Assert.Contains("無法把既有 Skill 名稱遷移為標準格式", error.Message);
+        Assert.Contains("Bad_Name", error.Message);
+        // 原列逐 byte 未動(不得「盡量改一半」)。
+        var kept = await Repo.GetAsync(t, "Bad_Name", default);
+        Assert.NotNull(kept);
+        Assert.Equal("name: Bad_Name\nflow: v1\n", kept!.Definition);
     }
 }

@@ -47,6 +47,7 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   let draftSaveStatus = 200
   let validateIfMatch: string | null = null
   let savedAudience: string[] | null = null
+  let agentEtag = '"1"'
 
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -64,7 +65,7 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
     if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
     if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
     if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
-      return json(route, agent, { ETag: '"1"' })
+      return json(route, agent, { ETag: agentEtag })
     }
     if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
     if (path === '/api/skills/catalog') {
@@ -180,6 +181,20 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   await expect(page.getByRole('alert')).toContainText('已被其他人更新')
   await expect(name).toBeDisabled()
   await expect(page.getByRole('button', { name: '驗證', exact: true })).toBeDisabled()
+
+  // Recovery path: the conflict lock is not permanent — reloading fetches fresh data plus a new
+  // ETag, clears the banner, re-enables the form, and every later write uses the new token.
+  draftSaveStatus = 200
+  agentEtag = '"3"'
+  validateIfMatch = null
+  await page.getByRole('button', { name: '重新載入' }).click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(name).toBeEnabled()
+  await expect(name).toHaveValue('Finance Agent')
+  const validateButton = page.getByRole('button', { name: '驗證', exact: true })
+  await expect(validateButton).toBeEnabled()
+  await validateButton.click()
+  await expect.poll(() => validateIfMatch).toBe('"3"')
 })
 
 test('USER cannot see or enter the Agents workspace when the Builder flag is enabled', async ({
@@ -221,6 +236,64 @@ test('USER cannot see or enter the Agents workspace when the Builder flag is ena
   await expect(page.getByTestId('nav-agents')).toHaveCount(0)
   await expect(page.locator('.agents-workspace')).toHaveCount(0)
   expect(agentApiRequested).toBe(false)
+})
+
+// The frontend is not the validation authority: nesting depth comes from the catalog's
+// `limits.maxDepth` (workflow `app/business_rules/catalog.py:27`), with 3 as the fail-safe
+// fallback when the catalog omits it. A server that relaxes the limit must not be silently
+// blocked by a frontend constant.
+test('catalog-provided rule limits drive nesting depth instead of a hardcoded constant', async ({
+  page,
+}) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'depth-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, agent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') {
+      return json(route, {
+        version: 1,
+        gates: ['pre-action'],
+        // The server allows deeper nesting than the frontend constant.
+        limits: { maxDepth: 5, maxNodes: 256, maxRules: 100 },
+        facts: [{
+          name: 'context.confidence', type: 'number', provenance: 'system', trustTier: 'trusted',
+          gates: ['pre-action'], operators: ['lt'], visibleValue: true,
+        }],
+        operators: [{ name: 'lt', compatibleFactTypes: ['number'], value: { kind: 'scalar', types: ['number'] } }],
+      })
+    }
+    if (path === '/api/agents/catalog/rule-actions') {
+      return json(route, {
+        actions: [{ name: 'deny', decision: 'deny', precedence: 100, parameters: [] }],
+      })
+    }
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agents').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+  await page.getByRole('button', { name: '＋ 新增空白規則' }).click()
+
+  // The root condition starts at depth 1, so two nesting steps land the leaf at depth 3.
+  await page.getByLabel('rules[0].when 類型').selectOption('all')
+  await page.getByLabel('rules[0].when.all[0] 類型').selectOption('all')
+  // Depth 3 under a catalog that permits 5: the author must still be offered further nesting.
+  await expect(page.getByLabel('rules[0].when.all[0].all[0] 類型')).toHaveCount(1)
 })
 
 test('Business Rule editor round-trips canonical AST and uses server validation/simulation', async ({

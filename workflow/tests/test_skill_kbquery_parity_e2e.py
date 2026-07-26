@@ -5,11 +5,15 @@
 業務層斷言（answer_mode／final_answer／citations…）逐字沿用已刪除的 test_kbquery_e2e.py，
 行為覆蓋不因刪圖而消失。
 
-trace 投影另外對照 _GOLDEN_TRACE 這份釘死的期望值（改造前對現行輸出跑一次、原樣入檔）：
-這是 Harness `writes` 剝除行為（output_summary）與 component_version 判定的唯一觀測點，
-原 parity 測試逐欄位比對兩張圖 trace 的價值在此保留，只是比對對象從「另一張圖」換成
-「釘死的期望值」。audit_trail.node_trace 與 trace 的結構關係（audit_feedback 落地時
-state.trace 尚未含自己這筆）另以結構性斷言驗證，不需要為 audit_trail 整份再存一份 golden。
+trace 投影原本對七案例各自的 _GOLDEN_TRACE 做全欄位逐鍵比對；維護成本（kb_query 十節點族
+任一個 state 鍵新增/改名/搬動都要重新產生全部 7 份快照，失敗訊息只會是「兩個超長 dict
+不相等」，看不出真正改了什麼）與所守的觀測點（Harness `writes` 剝除行為／output_summary
+與 component_version 判定）不成比例。收斂為：只留 single_value_lookup 一個代表案例做
+全欄位 golden 比對，作為該觀測點的唯一錨點；其餘六案例改用 `_assert_audit_trail_structure`
+（audit_feedback 恆為 trace 最後一筆、audit_trail.node_trace 與 trace 的結構關係——這正是
+原本 golden trace 全比對真正在守的東西）加上案例特有的局部斷言（重試三案例驗
+retrieval_planner 在 trace 中的重複次數＝迴圈實際跑的輪數；blank_query 案例驗 skipped
+節點集合）。業務層斷言（各測試函式開頭那幾行）完全不動。
 """
 
 import asyncio
@@ -32,7 +36,7 @@ QUERY_2025Q3 = "2025Q3 稅後淨利是多少？"
 # error_code/component_version）皆為確定性，一律比對
 TRACE_NONDETERMINISTIC = {"start_time", "end_time", "latency_ms"}
 
-# 七案例的 trace 投影釘死期望值（改造前對現行輸出跑一次、原樣入檔，見模組 docstring）。
+# 唯一保留全欄位快照比對的代表案例（改造前對現行輸出跑一次、原樣入檔，見模組 docstring）。
 _GOLDEN_TRACE = {'single_value_lookup': [{'node_name': 'query_intake',
                           'status': 'ok',
                           'input_summary': 'errors,query,retrieval_plans,tenant_id,trace',
@@ -92,463 +96,7 @@ _GOLDEN_TRACE = {'single_value_lookup': [{'node_name': 'query_intake',
                           'input_summary': 'answer_format_policy,answer_mode,assumption_note,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_',
                           'output_summary': 'audit_trail,improvement_backlog,issue_label,regression_test_item',
                           'error_code': '',
-                          'component_version': ''}],
- 'table_cell_lookup': [{'node_name': 'query_intake',
-                        'status': 'ok',
-                        'input_summary': 'errors,query,retrieval_plans,tenant_id,trace',
-                        'output_summary': 'answer_format_policy,max_retrieval_attempts,original_query,query_id,query_timestamp,retrieval_attempt,session_context,system_entrypoint,user_role',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'query_rewrite',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,original_query,query,query_id,query_timestamp,retrieval_attempt,retrieval_plans,session_context,system_entrypoint,tenant_id,trace,user_role',
-                        'output_summary': 'normalized_query,query_variants,rewrite_reason',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'intent_classification',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,retrieval_attempt,retrieval_plans,rewrite_reason,session_context,system',
-                        'output_summary': 'intent_type,question_type,requires_calculation,requires_multi_doc,requires_table',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'context_resolver',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,errors,intent_type,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,question_type,requires_calculation,requires_multi_doc,requi',
-                        'output_summary': 'canonical_metric,context_warnings,excluded_terms,metric_terms,target_period,unresolved_context,version_policy',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'retrieval_planner',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,query_varian',
-                        'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'source_retrieval_rerank',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,quer',
-                        'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'data_locator',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query',
-                        'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'evidence_verification',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval',
-                        'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'answer_composer',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                        'output_summary': 'answer_format_policy,answer_mode,assumption_note,final_answer,source_citations',
-                        'error_code': '',
-                        'component_version': ''},
-                       {'node_name': 'audit_feedback',
-                        'status': 'ok',
-                        'input_summary': 'answer_format_policy,answer_mode,assumption_note,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_',
-                        'output_summary': 'audit_trail,improvement_backlog,issue_label,regression_test_item',
-                        'error_code': '',
-                        'component_version': ''}],
- 'cross_document_comparison': [{'node_name': 'query_intake',
-                                'status': 'ok',
-                                'input_summary': 'errors,query,retrieval_plans,tenant_id,trace',
-                                'output_summary': 'answer_format_policy,max_retrieval_attempts,original_query,query_id,query_timestamp,retrieval_attempt,session_context,system_entrypoint,user_role',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'query_rewrite',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,original_query,query,query_id,query_timestamp,retrieval_attempt,retrieval_plans,session_context,system_entrypoint,tenant_id,trace,user_role',
-                                'output_summary': 'normalized_query,query_variants,rewrite_reason',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'intent_classification',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,retrieval_attempt,retrieval_plans,rewrite_reason,session_context,system',
-                                'output_summary': 'intent_type,question_type,requires_calculation,requires_multi_doc,requires_table',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'context_resolver',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,errors,intent_type,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,question_type,requires_calculation,requires_multi_doc,requi',
-                                'output_summary': 'canonical_metric,context_warnings,excluded_terms,metric_terms,target_period,unresolved_context,version_policy',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'retrieval_planner',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,query_varian',
-                                'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'source_retrieval_rerank',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,quer',
-                                'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'data_locator',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query',
-                                'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'evidence_verification',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval',
-                                'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'answer_composer',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                'output_summary': 'answer_format_policy,answer_mode,assumption_note,final_answer,source_citations',
-                                'error_code': '',
-                                'component_version': ''},
-                               {'node_name': 'audit_feedback',
-                                'status': 'ok',
-                                'input_summary': 'answer_format_policy,answer_mode,assumption_note,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_',
-                                'output_summary': 'audit_trail,improvement_backlog,issue_label,regression_test_item',
-                                'error_code': '',
-                                'component_version': ''}],
- 'retry_then_success': [{'node_name': 'query_intake',
-                         'status': 'ok',
-                         'input_summary': 'errors,query,retrieval_plans,tenant_id,trace',
-                         'output_summary': 'answer_format_policy,max_retrieval_attempts,original_query,query_id,query_timestamp,retrieval_attempt,session_context,system_entrypoint,user_role',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'query_rewrite',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,original_query,query,query_id,query_timestamp,retrieval_attempt,retrieval_plans,session_context,system_entrypoint,tenant_id,trace,user_role',
-                         'output_summary': 'normalized_query,query_variants,rewrite_reason',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'intent_classification',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,retrieval_attempt,retrieval_plans,rewrite_reason,session_context,system',
-                         'output_summary': 'intent_type,question_type,requires_calculation,requires_multi_doc,requires_table',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'context_resolver',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,errors,intent_type,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,question_type,requires_calculation,requires_multi_doc,requi',
-                         'output_summary': 'canonical_metric,context_warnings,excluded_terms,metric_terms,target_period,unresolved_context,version_policy',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'retrieval_planner',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,query_varian',
-                         'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'source_retrieval_rerank',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,quer',
-                         'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'data_locator',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query',
-                         'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'evidence_verification',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval',
-                         'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'retrieval_planner',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                         'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'source_retrieval_rerank',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                         'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'data_locator',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                         'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'evidence_verification',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                         'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'answer_composer',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                         'output_summary': 'answer_format_policy,answer_mode,assumption_note,final_answer,source_citations',
-                         'error_code': '',
-                         'component_version': ''},
-                        {'node_name': 'audit_feedback',
-                         'status': 'ok',
-                         'input_summary': 'answer_format_policy,answer_mode,assumption_note,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_',
-                         'output_summary': 'audit_trail,improvement_backlog,issue_label,regression_test_item',
-                         'error_code': '',
-                         'component_version': ''}],
- 'retry_exhausted_safe_abstain': [{'node_name': 'query_intake',
-                                   'status': 'ok',
-                                   'input_summary': 'errors,query,retrieval_plans,tenant_id,trace',
-                                   'output_summary': 'answer_format_policy,max_retrieval_attempts,original_query,query_id,query_timestamp,retrieval_attempt,session_context,system_entrypoint,user_role',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'query_rewrite',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,original_query,query,query_id,query_timestamp,retrieval_attempt,retrieval_plans,session_context,system_entrypoint,tenant_id,trace,user_role',
-                                   'output_summary': 'normalized_query,query_variants,rewrite_reason',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'intent_classification',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,retrieval_attempt,retrieval_plans,rewrite_reason,session_context,system',
-                                   'output_summary': 'intent_type,question_type,requires_calculation,requires_multi_doc,requires_table',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'context_resolver',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,errors,intent_type,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,question_type,requires_calculation,requires_multi_doc,requi',
-                                   'output_summary': 'canonical_metric,context_warnings,excluded_terms,metric_terms,target_period,unresolved_context,version_policy',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'retrieval_planner',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,query_varian',
-                                   'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'source_retrieval_rerank',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,quer',
-                                   'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'data_locator',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query',
-                                   'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'evidence_verification',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval',
-                                   'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'retrieval_planner',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                   'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'source_retrieval_rerank',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                   'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'data_locator',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                   'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'evidence_verification',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                   'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'answer_composer',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                   'output_summary': 'answer_format_policy,answer_mode,assumption_note,final_answer,source_citations',
-                                   'error_code': '',
-                                   'component_version': ''},
-                                  {'node_name': 'audit_feedback',
-                                   'status': 'ok',
-                                   'input_summary': 'answer_format_policy,answer_mode,assumption_note,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_',
-                                   'output_summary': 'audit_trail,improvement_backlog,issue_label,regression_test_item',
-                                   'error_code': '',
-                                   'component_version': ''}],
- 'retry_cap_prevents_infinite_loop': [{'node_name': 'query_intake',
-                                       'status': 'ok',
-                                       'input_summary': 'errors,query,retrieval_plans,tenant_id,trace',
-                                       'output_summary': 'answer_format_policy,max_retrieval_attempts,original_query,query_id,query_timestamp,retrieval_attempt,session_context,system_entrypoint,user_role',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'query_rewrite',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,original_query,query,query_id,query_timestamp,retrieval_attempt,retrieval_plans,session_context,system_entrypoint,tenant_id,trace,user_role',
-                                       'output_summary': 'normalized_query,query_variants,rewrite_reason',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'intent_classification',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,errors,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,retrieval_attempt,retrieval_plans,rewrite_reason,session_context,system',
-                                       'output_summary': 'intent_type,question_type,requires_calculation,requires_multi_doc,requires_table',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'context_resolver',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,errors,intent_type,max_retrieval_attempts,normalized_query,original_query,query,query_id,query_timestamp,query_variants,question_type,requires_calculation,requires_multi_doc,requi',
-                                       'output_summary': 'canonical_metric,context_warnings,excluded_terms,metric_terms,target_period,unresolved_context,version_policy',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'retrieval_planner',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,query_varian',
-                                       'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'source_retrieval_rerank',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query,query,query_id,query_timestamp,quer',
-                                       'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'data_locator',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval_attempts,metric_terms,normalized_query,original_query',
-                                       'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'evidence_verification',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,context_warnings,errors,excluded_terms,filters,intent_type,max_retrieval',
-                                       'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'retrieval_planner',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'source_retrieval_rerank',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'data_locator',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'evidence_verification',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'retrieval_planner',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'filters,rerank_policy,retrieval_attempt,retrieval_plan,retrieval_plans,source_priority,top_k',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'source_retrieval_rerank',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'candidate_documents,candidate_pages,ranked_sources',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'data_locator',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'calculation_result,calculation_trace,candidate_answer,page_evidence,selected_evidence,table_cell_evidence,text_claims',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'evidence_verification',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'confidence,failure_codes,failure_reason,verification_result,verified_evidence',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'answer_composer',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_terms,failure_codes,failure_',
-                                       'output_summary': 'answer_format_policy,answer_mode,assumption_note,final_answer,source_citations',
-                                       'error_code': '',
-                                       'component_version': ''},
-                                      {'node_name': 'audit_feedback',
-                                       'status': 'ok',
-                                       'input_summary': 'answer_format_policy,answer_mode,assumption_note,calculation_result,calculation_trace,candidate_answer,candidate_documents,candidate_pages,canonical_metric,confidence,context_warnings,errors,excluded_',
-                                       'output_summary': 'audit_trail,improvement_backlog,issue_label,regression_test_item',
-                                       'error_code': '',
-                                       'component_version': ''}],
- 'blank_query_fatal_short_circuit': [{'node_name': 'query_intake',
-                                      'status': 'error',
-                                      'input_summary': 'errors,query,retrieval_plans,tenant_id,trace',
-                                      'output_summary': '',
-                                      'error_code': 'ValueError',
-                                      'component_version': ''},
-                                     {'node_name': 'query_rewrite',
-                                      'status': 'skipped',
-                                      'input_summary': '',
-                                      'output_summary': '',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'intent_classification',
-                                      'status': 'skipped',
-                                      'input_summary': '',
-                                      'output_summary': '',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'context_resolver',
-                                      'status': 'skipped',
-                                      'input_summary': '',
-                                      'output_summary': '',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'retrieval_planner',
-                                      'status': 'skipped',
-                                      'input_summary': '',
-                                      'output_summary': '',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'source_retrieval_rerank',
-                                      'status': 'skipped',
-                                      'input_summary': '',
-                                      'output_summary': '',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'data_locator',
-                                      'status': 'skipped',
-                                      'input_summary': '',
-                                      'output_summary': '',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'evidence_verification',
-                                      'status': 'skipped',
-                                      'input_summary': '',
-                                      'output_summary': '',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'answer_composer',
-                                      'status': 'ok',
-                                      'input_summary': 'errors,fatal_error,query,retrieval_plans,tenant_id,trace',
-                                      'output_summary': 'answer_format_policy,answer_mode,assumption_note,final_answer,source_citations',
-                                      'error_code': '',
-                                      'component_version': ''},
-                                     {'node_name': 'audit_feedback',
-                                      'status': 'ok',
-                                      'input_summary': 'answer_format_policy,answer_mode,assumption_note,errors,fatal_error,final_answer,query,retrieval_plans,source_citations,tenant_id,trace',
-                                      'output_summary': 'audit_trail,improvement_backlog,issue_label,regression_test_item',
-                                      'error_code': '',
-                                      'component_version': ''}]}
+                          'component_version': ''}]}
 
 
 def _trace_projection(entries) -> list[dict]:
@@ -573,18 +121,33 @@ def _assert_audit_landed(deps, result):
     assert "audit_feedback" in node_names
 
 
-def _assert_golden_trace(case: str, result: dict) -> None:
-    """trace 投影對照釘死的期望值 + audit_trail.node_trace 與 trace 的結構性關係。
+def _assert_audit_trail_structure(result: dict) -> None:
+    """七案例共通的結構不變式（Harness `writes` 剝除行為與 component_version 判定的真正
+    觀測點）：audit_feedback 恆為 trace 最後一筆；audit_trail.node_trace 落地時
+    state["trace"] 尚未含 audit_feedback 自己這筆（trace 用 operator.add，節點回傳後才
+    追加），因此 node_trace 恰為 trace 少最後一筆。非代表案例改用此結構性斷言取代全欄位
+    golden trace 比對，見模組 docstring。
+    """
+    trace_projection = _trace_projection(result["trace"])
+    assert result["trace"][-1].node_name == "audit_feedback"
+    assert _trace_projection(result["audit_trail"].node_trace) == trace_projection[:-1]
 
-    node_trace 落地時（audit_feedback 節點內）state["trace"] 尚未含 audit_feedback
-    自己這筆（trace 用 operator.add，節點回傳後才追加），因此 node_trace 少最後一筆。
+
+def _assert_golden_trace(case: str, result: dict) -> None:
+    """唯一的全欄位快照比對（僅 single_value_lookup 使用）：trace 投影逐鍵對照
+    _GOLDEN_TRACE 釘死的期望值，並額外核對結構不變式。
     """
     trace_projection = _trace_projection(result["trace"])
     assert trace_projection == _GOLDEN_TRACE[case]
-    assert result["trace"][-1].node_name == "audit_feedback"
-    assert (
-        _trace_projection(result["audit_trail"].node_trace) == trace_projection[:-1]
-    )
+    _assert_audit_trail_structure(result)
+
+
+def _count_node_runs(result: dict, node_name: str) -> int:
+    """trace 中某節點被排進去的次數：重試迴圈每跑一輪，該節點就會在 trace 多一筆同名
+    entry，藉此從 trace 結構（而非只看 state 累積欄位如 retrieval_plans 長度）獨立驗證
+    迴圈確實重複執行了幾輪，且沒有多跑一輪。
+    """
+    return sum(1 for t in result["trace"] if t.node_name == node_name)
 
 
 def test_skill_e2e_single_value_lookup_success():
@@ -614,7 +177,7 @@ def test_skill_e2e_table_cell_lookup_success():
     assert citation.column == "2025Q3"
     assert "1234" in result["final_answer"]
     _assert_audit_landed(deps, result)
-    _assert_golden_trace("table_cell_lookup", result)
+    _assert_audit_trail_structure(result)
 
 
 def test_skill_e2e_cross_document_comparison_success():
@@ -635,7 +198,7 @@ def test_skill_e2e_cross_document_comparison_success():
     assert "1,100" in result["final_answer"]
     assert "1,234" in result["final_answer"]
     _assert_audit_landed(deps, result)
-    _assert_golden_trace("cross_document_comparison", result)
+    _assert_audit_trail_structure(result)
 
 
 def test_skill_e2e_retry_then_success():
@@ -654,7 +217,8 @@ def test_skill_e2e_retry_then_success():
     assert "PERIOD_MISMATCH" in result["retrieval_plans"][1].adjustment_reason
     assert "1,234" in result["final_answer"]
     _assert_audit_landed(deps, result)
-    _assert_golden_trace("retry_then_success", result)
+    _assert_audit_trail_structure(result)
+    assert _count_node_runs(result, "retrieval_planner") == 2  # 迴圈確實跑了兩輪
 
 
 def test_skill_e2e_retry_exhausted_safe_abstain():
@@ -671,7 +235,8 @@ def test_skill_e2e_retry_exhausted_safe_abstain():
     assert result["regression_test_item"].question == QUERY_2025Q3
     assert result["improvement_backlog"]
     _assert_audit_landed(deps, result)
-    _assert_golden_trace("retry_exhausted_safe_abstain", result)
+    _assert_audit_trail_structure(result)
+    assert _count_node_runs(result, "retrieval_planner") == 2  # 耗盡即停，不多跑一輪
 
 
 def test_skill_e2e_retry_cap_prevents_infinite_loop():
@@ -689,7 +254,8 @@ def test_skill_e2e_retry_cap_prevents_infinite_loop():
     assert result["answer_mode"] == AnswerMode.ABSTAIN
     assert len(result["retrieval_plans"]) == 3
     _assert_audit_landed(deps, result)
-    _assert_golden_trace("retry_cap_prevents_infinite_loop", result)
+    _assert_audit_trail_structure(result)
+    assert _count_node_runs(result, "retrieval_planner") == 3  # 恰好 3 輪，不多跑第 4 輪
 
 
 def test_skill_e2e_blank_query_fatal_short_circuit():
@@ -704,7 +270,7 @@ def test_skill_e2e_blank_query_fatal_short_circuit():
     assert result["errors"]
     assert result["fatal_error"].startswith("query_intake")
     _assert_audit_landed(deps, result)
-    _assert_golden_trace("blank_query_fatal_short_circuit", result)
+    _assert_audit_trail_structure(result)
 
     skipped = {t.node_name for t in result["trace"] if t.status == "skipped"}
     assert {

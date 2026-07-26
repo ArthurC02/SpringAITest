@@ -90,63 +90,19 @@ public sealed class ChatBehaviorBaselineTests
         Assert.Equal("本季毛利率是 32.8%。", remembered.AiReply);
     }
 
-    // ================================================================
-    // A-02:路由未命中的另一半決策表 — 零 invoke + 正常回覆,不擲例外
-    // P2:純聊天兜底改跑共用 hosted agent,回覆改由 FakeChatClient 決定(FakeLlmAgent 只負責兩次路由)。
-    // ================================================================
-    [Fact]
-    public async Task A02_RoutingNone_NoSkillInvoked_RepliesNormally()
-    {
-        var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("NONE");
-        agent.Responses.Enqueue("NONE");
-        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
-
-        var wf = new FakeWorkflowService { Catalog = Cat(SingleSkillCatalog) };
-        var svc = Build(agent, wf, chatClient: chatClient);
-
-        var reply = await svc.ChatAsync("你好呀", "u1", "c1", UserA);
-
-        Assert.Empty(wf.SkillInvokes);
-        Assert.Equal("純聊天回覆", reply.Reply);
-    }
-
-    // ================================================================
-    // A-03:目錄失敗 best-effort(含傳輸例外等價類);四例皆回正常回覆、不擲例外、無 invoke
-    // ================================================================
-    public static IEnumerable<object[]> CatalogFailureErrors() => new[]
-    {
-        new object[] { new WorkflowInvocationException("工作流服務呼叫失敗：HTTP 502") },
-        new object[] { new HttpRequestException("connection reset") },
-        new object[] { new TaskCanceledException("timeout") },
-        new object[] { new WorkflowInvocationException("工作流服務呼叫失敗：回應不是有效 JSON") }, // 壞 JSON
-    };
-
-    [Theory]
-    [MemberData(nameof(CatalogFailureErrors))]
-    public async Task A03_CatalogFailure_BestEffort_RepliesNormally_NoSkillInvoked(Exception error)
-    {
-        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
-        var wf = new FakeWorkflowService { ThrowOnCatalog = error };
-        var svc = Build(new FakeLlmAgent(), wf, chatClient: chatClient);
-
-        var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
-
-        Assert.Equal("純聊天回覆", reply.Reply);
-        Assert.Empty(wf.SkillInvokes);
-    }
+    // A-02(路由 NONE → 零 invoke + 正常回覆)由 ChatSkillRoutingTests.Routing_RetryExhausted_BothNone
+    // 覆蓋(超集:另驗路由呼叫次數與護欄 Instructions)。
+    // A-03(目錄失敗 best-effort,4 種例外)由 ChatSkillRoutingTests.CatalogFailure_ToolsEmpty_ChatDoesNotThrow
+    // 逐項覆蓋(同 4 個例外型別、同層、同 fake)。
 
     // ================================================================
     // A-04:單一工具失敗不炸整輪(含傳輸例外等價類);經 ChatAsync 驅動,不直接呼叫 tool.InvokeAsync
+    // 六種例外全部落在 SkillRoutingAgent 同一個 catch-all,留「下游領域例外」與「傳輸層例外」兩個代表。
     // ================================================================
     public static IEnumerable<object[]> SkillInvokeFailureErrors() => new[]
     {
-        new object[] { new WorkflowNotFoundException("找不到 Skill：s") },
-        new object[] { new WorkflowForbiddenException("權限不足") },
-        new object[] { new WorkflowBadInputException("輸入不符") },
-        new object[] { new WorkflowInvocationException("工作流服務呼叫失敗：HTTP 500") },
-        new object[] { new HttpRequestException("connection reset") },
-        new object[] { new TaskCanceledException("timeout") },
+        new object[] { new WorkflowNotFoundException("找不到 Skill：s") },   // 下游領域例外
+        new object[] { new HttpRequestException("connection reset") },       // 傳輸層例外
     };
 
     [Theory]
@@ -251,156 +207,41 @@ public sealed class ChatBehaviorBaselineTests
         Assert.Empty(mem0.Remembered);
     }
 
+    // A-07(builtin template-* 不可路由 / custom 同前綴可路由)是同一個合取條件的兩側,已由
+    // ChatSkillRoutingTests.BuiltinTemplateSkeletons_AreNeverRouted_ButRealSkillsAre 與
+    // CustomSkill_WithTemplatePrefix_IsNotFiltered 在 BuildToolsAsync 層分別覆蓋。
+
     // ================================================================
-    // A-07:內建 template-* 骨架永不可路由,同前綴的 custom skill 可路由
+    // A-08:input_schema 天花板(SingleRequiredStringKey)的「可路由」正向端到端 —— 只帶必填鍵、回覆是摘要。
+    // 三種負向 shape 是 ChatSkillRoutingTests.NonSingleRequiredString_IsSkipped(6 種形狀)的子集,不重複。
     // ================================================================
     [Fact]
-    public async Task A07_BuiltinTemplatePrefix_NeverRouted_CustomSamePrefix_IsRouted()
+    public async Task A08_SingleRequiredStringWithOptionals_IsRouted_InvokedWithOnlyRequiredKey()
     {
+        var agent = new FakeLlmAgent();
+        agent.Responses.Enqueue("weird-skill");
+        agent.Responses.Enqueue("摘要輸出");
         var wf = new FakeWorkflowService
         {
             Catalog = Cat("""
-            [
-              { "name":"template-infer", "description":"骨架", "required_role":"USER", "source":"builtin",
-                "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"template-x", "description":"自訂骨架同名前綴", "required_role":"USER", "source":"custom",
-                "input_schema": { "query": { "type":"str", "required":true } } }
-            ]
-            """),
-            SkillOutputByName = new()
-            {
-                ["template-x"] = Cat("""{ "skill":"template-x", "output": { "business_result":"custom 命中" } }"""),
-            },
-        };
-
-        // 第一輪:路由試圖選 builtin template-infer(它根本不在路由表裡,兩次嘗試都無法命中)。
-        var agent1 = new FakeLlmAgent();
-        agent1.Responses.Enqueue("template-infer");
-        agent1.Responses.Enqueue("template-infer");
-        await Build(agent1, wf).ChatAsync("骨架問題", "u1", "c1", UserA);
-
-        Assert.Empty(wf.SkillInvokes);
-
-        // 第二輪:路由選 custom template-x(同前綴但 source=custom,不受過濾)。
-        var agent2 = new FakeLlmAgent();
-        agent2.Responses.Enqueue("template-x");
-        agent2.Responses.Enqueue("custom 摘要");
-        await Build(agent2, wf).ChatAsync("custom 問題", "u2", "c2", UserA);
-
-        Assert.Equal(new[] { "template-x" }, wf.SkillInvokes.Select(i => i.Name).ToArray());
-    }
-
-    // ================================================================
-    // A-08:input_schema 天花板(SingleRequiredStringKey)— 三種形狀靜默跳過,一種可路由且只帶必填鍵
-    // ================================================================
-    public static IEnumerable<object[]> SchemaVariants() => new object[][]
-    {
-        new object[] { "null", false },                                                                       // input_schema=null
-        new object[] { """{ "a": { "type":"str", "required":true }, "b": { "type":"str", "required":true } }""", false }, // 兩個必填
-        new object[] { """{ "n": { "type":"int", "required":true } }""", false },                              // 必填非字串
-        new object[] { """{ "query": { "type":"str", "required":true }, "top_k": { "type":"int", "required":false } }""", true }, // 單必填字串+多選填
-    };
-
-    [Theory]
-    [MemberData(nameof(SchemaVariants))]
-    public async Task A08_SchemaShape_GatesRouting_SilentlySkippedOrInvokedWithOnlyRequiredKey(
-        string schemaJson, bool shouldInvoke)
-    {
-        var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService
-        {
-            Catalog = Cat($$"""
             [ { "name":"weird-skill", "description":"x", "required_role":"USER", "source":"custom",
-                "input_schema": {{schemaJson}} } ]
+                "input_schema": { "query": { "type":"str", "required":true }, "top_k": { "type":"int", "required":false } } } ]
             """),
             SkillOutput = Cat("""{ "skill":"weird-skill", "output": { "business_result":"命中" } }"""),
         };
-        var chatClient = new FakeChatClient();
-        var svc = Build(agent, wf, chatClient: chatClient);
-
-        if (shouldInvoke)
-        {
-            agent.Responses.Enqueue("weird-skill");
-            agent.Responses.Enqueue("摘要輸出");
-        }
-        else
-        {
-            chatClient.Response = "純聊天回覆"; // 工具不存在,兩次路由皆無法命中,退純聊天兜底(FakeChatClient 接手)。
-        }
+        var svc = Build(agent, wf, chatClient: new FakeChatClient());
 
         var reply = await svc.ChatAsync("原文問句", "u1", "c1", UserA);
 
-        if (shouldInvoke)
-        {
-            var invoke = Assert.Single(wf.SkillInvokes);
-            Assert.Equal(new[] { "query" }, invoke.Input.Keys.ToArray()); // 只帶必填鍵,不捏造 optional
-            Assert.Equal("原文問句", invoke.Input["query"].GetString());
-            Assert.Equal("摘要輸出", reply.Reply);
-        }
-        else
-        {
-            Assert.Empty(wf.SkillInvokes);
-            Assert.Equal("純聊天回覆", reply.Reply);
-        }
-    }
-
-    // ================================================================
-    // A-09:路由最多重試兩次的 on/off-point
-    // ================================================================
-    [Fact]
-    public async Task A09a_FirstAttemptNone_SecondAttemptHits_RetrySucceeds()
-    {
-        var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("NONE");
-        agent.Responses.Enqueue("kb-query");
-        agent.Responses.Enqueue("摘要輸出");
-        var wf = new FakeWorkflowService
-        {
-            Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
-        };
-        var svc = Build(agent, wf);
-
-        var reply = await svc.ChatAsync("這季毛利率?", "u1", "c1", UserA);
-
+        var invoke = Assert.Single(wf.SkillInvokes);
+        Assert.Equal(new[] { "query" }, invoke.Input.Keys.ToArray()); // 只帶必填鍵,不捏造 optional
+        Assert.Equal("原文問句", invoke.Input["query"].GetString());
         Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
     }
 
-    [Fact]
-    public async Task A09b_BothAttemptsNone_ExhaustsRetry_FallsBackToPlainChat()
-    {
-        var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("NONE");
-        agent.Responses.Enqueue("NONE");
-        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SingleSkillCatalog) };
-        var svc = Build(agent, wf, chatClient: chatClient);
-
-        var reply = await svc.ChatAsync("你好呀", "u1", "c1", UserA);
-
-        Assert.Equal("純聊天回覆", reply.Reply);
-        Assert.Empty(wf.SkillInvokes);
-    }
-
-    [Fact]
-    public async Task A09c_FirstAttemptHits_NoWastedRetry()
-    {
-        var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("kb-query");
-        agent.Responses.Enqueue("摘要輸出");
-        var wf = new FakeWorkflowService
-        {
-            Catalog = Cat(SingleSkillCatalog),
-            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
-        };
-        var svc = Build(agent, wf);
-
-        var reply = await svc.ChatAsync("這季毛利率?", "u1", "c1", UserA);
-
-        Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
-    }
+    // A-09(路由重試 on/off-point 三格)由 ChatSkillRoutingTests.Routing_RetriesOnce_* /
+    // Routing_RetryExhausted_* / Routing_FirstAttemptHits_* 逐項覆蓋,且更強(另斷言 CompleteCalls.Count,
+    // 抓得到「多打一次 LLM」的迴歸)。
 
     // ================================================================
     // A-10:寬鬆比對先全等再取最長名(kb-query 而非其前綴 kb)
@@ -658,6 +499,9 @@ public sealed class ChatBehaviorBaselineTests
         {
             Assert.Contains(chatClient.LastMessages!, m => m.Text == $"hist{i}");
         }
+        // 裁的只有「最舊」那一個 turn:第一輪自己的交換(user + assistant)必須完整保留。
+        Assert.Contains(chatClient.LastMessages!, m => m.Text == "第一輪觸發");
+        Assert.Contains(chatClient.LastMessages!, m => m.Text == "第一輪回覆");
         Assert.Equal("第二輪確認", chatClient.LastMessages!.Last().Text);
     }
 

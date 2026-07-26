@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.engine import compiler, node_registry
+from app.engine.harness import CONFIG_SEED_KEYS
 from app.engine.script_runner import ScriptTraceEntry
 from app.engine.skill import Skill
 from app.nodes.kbquery.adapters import StaticGlossary
@@ -219,6 +220,43 @@ def test_script_cannot_forge_engine_keys(key):
     assert result["next_ran"] is True  # 後續節點照跑（沒被假 fatal 短路）
     assert result["trace"][0].node_name == "script"  # trace 沒被字串蓋掉
     assert all(e["error"] != "forged" for e in result.get("errors", []))
+
+
+# 每個 Configuration Set 執行參數鍵的（伺服器注入的真值, script 想竄改的值）。
+CONFIG_SEED_VALUES: dict[str, tuple] = {"retrieval_top_k": (3, 99)}
+
+
+@pytest.mark.parametrize("key", sorted(CONFIG_SEED_KEYS))
+def test_script_cannot_forge_config_seed_keys(key):
+    """FORBIDDEN_WRITE_KEYS 的第四個來源集合：invoke 期由 active Configuration Set
+    注入的只讀執行參數。寫得進去 = script 可以自己放大 retrieval_top_k，繞過租戶設定。
+
+    直接吃生產常數：日後新增 seed 鍵會自動被涵蓋（缺 seed 值即在第一行 assert 出局）。
+    """
+    assert set(CONFIG_SEED_VALUES) == set(CONFIG_SEED_KEYS)
+    authentic, forged = CONFIG_SEED_VALUES[key]
+
+    result = _run(
+        [{"script": f"state[{key!r}] = {forged!r}\nstate['ran'] = True"}],
+        {key: authentic},
+    )
+
+    assert result["ran"] is True  # script 有跑（不是整段被拒）
+    assert result[key] == authentic
+
+
+def test_script_runtime_exception_becomes_fatal_not_500():
+    """script 內的執行期例外（除零）→ 受控的 fatal 短路 + 稽核照樣落地，不是未捕捉 500。"""
+    deps = _deps()
+    result = _run([{"script": "state['x'] = 1 / 0"}, {"node": "s_next"}], deps=deps)
+
+    entry = _script_entry(result)
+    assert entry.status == "error"
+    assert entry.error_code == "ZeroDivisionError"
+    assert "x" not in result  # 失敗的 script 一個鍵都不落
+    assert "next_ran" not in result  # 後續節點被短路
+    assert _traced(result)[-1] == "audit_feedback"
+    assert len(deps.audit_repo.saved) == 1
 
 
 def test_script_cannot_see_engine_internal_keys_at_runtime():

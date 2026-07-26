@@ -51,7 +51,9 @@ class BackendWriteEvidenceSink:
             response.raise_for_status()
             body = response.json()
             version = body.get("version") if isinstance(body, dict) else None
-            if not isinstance(version, int) or version < 1:
+            # `bool` is an `int` subclass, so JSON `true` would otherwise be
+            # accepted as version 1 and handed back as a durable version number.
+            if not isinstance(version, int) or isinstance(version, bool) or version < 1:
                 raise WriteEvidenceError("Backend returned invalid durable evidence")
             return version
         except WriteEvidenceError:

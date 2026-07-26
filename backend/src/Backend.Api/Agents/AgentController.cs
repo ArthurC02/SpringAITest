@@ -48,7 +48,7 @@ public sealed class AgentController : ControllerBase
     public async Task<ActionResult<AgentResponse>> Create([FromBody] AgentUpsert request, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
-        var slug = Require(request.Slug, "slug");
+        var slug = RequireCanonicalSlug(request.Slug);
         var name = Require(request.Name, "name");
 
         var canonical = AgentCanonicalizer.Canonicalize(request);
@@ -309,6 +309,21 @@ public sealed class AgentController : ControllerBase
         => string.IsNullOrWhiteSpace(value)
             ? throw new ApiException(StatusCodes.Status400BadRequest, $"{field} 不可為空")
             : value.Trim();
+
+    /// <summary>
+    /// slug 格式驗證,比照 <see cref="AgentAudience"/> 的 canonical group id(regex + 長度上限)。
+    /// slug 不進 URL/檔案路徑/canonical 定義(路由一律 uuid),所以這不是路徑穿越防護,而是
+    /// UNIQUE(tenant_id, slug) 這個顯示鍵的形狀約束。
+    /// **只在 create 驗證**:slug 是 immutable(PUT 忽略、所有 UPDATE 不含該欄、canonical 定義排除),
+    /// 而 validate/publish/restore 驗的是 Name —— 既有不合規的 Agent 因此不會在任何其他路徑上被追溯打爆。
+    /// </summary>
+    private static string RequireCanonicalSlug(string? value)
+    {
+        var slug = Require(value, "slug");
+        return AgentAudience.IsCanonicalGroupId(slug)
+            ? slug
+            : throw new ApiException(StatusCodes.Status400BadRequest, "slug 格式不正確");
+    }
 
     private static ApiException NotFound(Guid id) => ApiErrors.NotFound(" Agent", id);
 

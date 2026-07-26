@@ -1,0 +1,229 @@
+import { expect, test, type Page, type Route } from '@playwright/test'
+
+// Sidebar/view gating decision table for the feature flags that had no frontend coverage:
+// D4 `workflowDesignerEnabled` x exact `workflow.manage`, D7 `agentWriteToolsEnabled`,
+// D6 `agentChatEnabled`, D5 `multiAgentDispatchEnabled`, and the fail-closed catch when
+// `GET /api/features` rejects. Authority is `src/components/AppShell.tsx`.
+// UI hiding is UX, not security — but every case also asserts the gated API is never called.
+//
+// Every scenario carries a `control` entry that its flags DO open. Without one, a negative
+// assertion would already be satisfied by the pre-response render (all flags start false),
+// i.e. it would pass without the features response ever having been applied.
+
+const CHAT = /聊天/
+const DOCUMENTS = /文件/
+const ANALYSIS = /分析/
+const CONFIG = /系統設定/
+const WORKFLOWS = /Workflow Designer/
+const ORCHESTRATORS = /Orchestrators/
+const APPROVALS = /Approvals/
+const OPERATIONS = /Operations/
+
+const ADMIN_BASE = [CHAT, DOCUMENTS, ANALYSIS, CONFIG]
+const USER_BASE = [CHAT, DOCUMENTS, ANALYSIS]
+
+interface Scenario {
+  name: string
+  role?: 'ADMIN' | 'USER'
+  capabilities: string[]
+  features: Record<string, boolean> | 'reject'
+  expected: RegExp[]
+  /** Nav entry proving the features response was applied before the negatives are checked. */
+  control: string | null
+  /** Path prefixes that must never be requested for this combination. */
+  forbidden: string[]
+}
+
+async function json(route: Route, body: unknown, status = 200) {
+  await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+}
+
+async function mountShell(
+  page: Page,
+  scenario: Pick<Scenario, 'role' | 'capabilities' | 'features'>,
+): Promise<string[]> {
+  const requested: string[] = []
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    requested.push(path)
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'token',
+        username: 'tester',
+        role: scenario.role ?? 'ADMIN',
+        tenantCode: 'demo',
+        capabilities: scenario.capabilities,
+      })
+    }
+    if (path === '/api/features') {
+      return scenario.features === 'reject'
+        ? json(route, { timestamp: '2026-07-25T00:00:00Z', status: 500, message: 'features 無法取得', fieldErrors: {} }, 500)
+        : json(route, scenario.features)
+    }
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('tester')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  return requested
+}
+
+const scenarios: Scenario[] = [
+  {
+    name: 'exact workflow.manage opens the D4 entries',
+    capabilities: ['workflow.manage'],
+    features: { workflowDesignerEnabled: true, agentWriteToolsEnabled: true },
+    expected: [...ADMIN_BASE, WORKFLOWS, ORCHESTRATORS, APPROVALS, OPERATIONS],
+    control: 'nav-workflows',
+    forbidden: [],
+  },
+  {
+    name: 'ADMIN alone never opens the D4 entries',
+    capabilities: [],
+    features: { workflowDesignerEnabled: true, agentWriteToolsEnabled: true },
+    expected: [...ADMIN_BASE, APPROVALS],
+    control: 'nav-approvals',
+    forbidden: ['/api/admin/workflows', '/api/admin/orchestrators'],
+  },
+  {
+    name: 'a capability that merely starts with workflow.manage is not a match',
+    capabilities: ['workflow.manage.other'],
+    features: { workflowDesignerEnabled: true, agentWriteToolsEnabled: true },
+    expected: [...ADMIN_BASE, APPROVALS],
+    control: 'nav-approvals',
+    forbidden: ['/api/admin/workflows', '/api/admin/orchestrators'],
+  },
+  {
+    name: 'the disabled D4 flag closes the entries even with the capability',
+    capabilities: ['workflow.manage'],
+    features: { workflowDesignerEnabled: false, agentWriteToolsEnabled: true },
+    expected: [...ADMIN_BASE, APPROVALS, OPERATIONS],
+    control: 'nav-operations',
+    forbidden: ['/api/admin/workflows', '/api/admin/orchestrators'],
+  },
+  {
+    name: 'disabled write tools hide both Approvals and Operations',
+    capabilities: ['workflow.manage'],
+    features: { workflowDesignerEnabled: true, agentWriteToolsEnabled: false },
+    expected: [...ADMIN_BASE, WORKFLOWS, ORCHESTRATORS],
+    control: 'nav-workflows',
+    forbidden: ['/api/runs', '/api/admin/operations'],
+  },
+  {
+    name: 'enabled write tools give a plain USER Approvals but never Operations',
+    role: 'USER',
+    capabilities: [],
+    features: { agentWriteToolsEnabled: true },
+    expected: [...USER_BASE, APPROVALS],
+    control: 'nav-approvals',
+    forbidden: ['/api/admin/operations'],
+  },
+  {
+    name: 'Operations additionally requires workflow.manage',
+    capabilities: ['workflow.manage'],
+    features: { agentWriteToolsEnabled: true },
+    expected: [...ADMIN_BASE, APPROVALS, OPERATIONS],
+    control: 'nav-operations',
+    forbidden: [],
+  },
+  {
+    name: 'the disabled Agent Builder flag hides the workspace from an ADMIN',
+    capabilities: [],
+    features: { agentBuilderEnabled: false, agentWriteToolsEnabled: true },
+    expected: [...ADMIN_BASE, APPROVALS],
+    control: 'nav-approvals',
+    forbidden: ['/api/agents'],
+  },
+  {
+    name: 'a rejected features response fails closed on every flag',
+    capabilities: ['workflow.manage'],
+    features: 'reject',
+    expected: ADMIN_BASE,
+    control: null,
+    forbidden: ['/api/agents', '/api/admin/workflows', '/api/admin/orchestrators', '/api/admin/operations', '/api/chat/orchestrators'],
+  },
+]
+
+for (const scenario of scenarios) {
+  test(`sidebar gating — ${scenario.name}`, async ({ page }) => {
+    const requested = await mountShell(page, scenario)
+    if (scenario.control) {
+      await expect(page.getByTestId(scenario.control)).toBeVisible()
+    } else {
+      // A rejected response opens nothing, so there is no positive marker: wait until the
+      // request was answered and give the catch branch a render before asserting absence.
+      await expect.poll(() => requested.includes('/api/features')).toBe(true)
+      await page.waitForTimeout(300)
+    }
+    await expect(page.locator('nav[aria-label="主選單"] button')).toHaveText(scenario.expected)
+    for (const prefix of scenario.forbidden) {
+      expect(requested.filter((path) => path.startsWith(prefix)), prefix).toEqual([])
+    }
+  })
+}
+
+test('a disabled agentChatEnabled flag never requests the Orchestrator chat catalog', async ({ page }) => {
+  const requested = await mountShell(page, {
+    capabilities: [],
+    features: { agentChatEnabled: false, agentWriteToolsEnabled: true },
+  })
+  await expect(page.getByTestId('nav-approvals')).toBeVisible()
+  await expect(page.getByLabel('選擇協作 Orchestrator')).toHaveCount(0)
+  // The global flag is the first gate: a non-canary deployment must not even attempt the
+  // authenticated catalog route, so a 404 never has to be relied on for legacy behaviour.
+  expect(requested.filter((path) => path === '/api/chat/orchestrators')).toEqual([])
+})
+
+const orchestratorWire = {
+  id: 'o1',
+  name: 'Root',
+  description: 'Published collaboration runtime',
+  enabled: true,
+  draft_version: 1,
+  published_revision: 1,
+  updated_at: '2026-07-25T00:00:00Z',
+  definition: { workflow: { id: 'w1', revision: 1 } },
+}
+
+for (const multiAgentDispatchEnabled of [true, false]) {
+  test(`D5 test-run console follows multiAgentDispatchEnabled=${multiAgentDispatchEnabled}`, async ({ page }) => {
+    let runApiRequested = false
+    await page.route('**/api/**', async (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (!path.startsWith('/api/')) return route.continue()
+      if (path === '/api/auth/login') {
+        return json(route, {
+          token: 'token', username: 'tester', role: 'ADMIN', tenantCode: 'demo',
+          capabilities: ['workflow.manage'],
+        })
+      }
+      if (path === '/api/features') {
+        return json(route, { workflowDesignerEnabled: true, multiAgentDispatchEnabled })
+      }
+      if (path === '/api/admin/orchestrators') return json(route, [orchestratorWire])
+      if (path === '/api/admin/orchestrators/o1') return json(route, orchestratorWire)
+      if (path.includes('/runs')) {
+        runApiRequested = true
+        return json(route, {}, 404)
+      }
+      return json(route, [])
+    })
+
+    await page.goto('/')
+    await page.getByTestId('auth-username').fill('tester')
+    await page.getByTestId('auth-password').fill('password123')
+    await page.getByTestId('auth-submit').click()
+    await page.getByTestId('nav-orchestrators').click()
+    await page.getByRole('button', { name: '編輯' }).click()
+    // Reaching the editor already proves the flags resolved, and the draft-loaded actions
+    // prove the editor body rendered — so the console check sees a settled tree.
+    await expect(page.getByRole('heading', { name: 'Root', level: 2 })).toBeVisible()
+    await expect(page.getByRole('button', { name: '驗證' })).toBeVisible()
+
+    await expect(page.locator('.agent-test-console')).toHaveCount(multiAgentDispatchEnabled ? 1 : 0)
+    expect(runApiRequested).toBe(false)
+  })
+}

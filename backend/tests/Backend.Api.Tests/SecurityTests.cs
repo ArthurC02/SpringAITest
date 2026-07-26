@@ -52,10 +52,17 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("custom-token", InternalTokenResolver.Resolve("custom-token"));
     }
 
-    [Fact]
-    public async Task Health_NoToken_Returns200()
+    // /health 在 token 檢查之前就 return:缺 token 與帶錯 token 都必須 200(順序改錯就會爆)。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("nope")]
+    public async Task Health_AnyToken_Returns200(string? token)
     {
         var client = _factory.CreateClient();
+        if (token is not null)
+        {
+            client.DefaultRequestHeaders.Add(InternalTokenMiddleware.HeaderName, token);
+        }
 
         var resp = await client.GetAsync("/health");
 

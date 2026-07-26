@@ -26,14 +26,16 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull(body["fieldErrors"]);
     }
 
+    // AllowAnonymous 端點的契約是「空陣列,不是 401」——只驗 200 會漏掉「匿名讀到別人歷史」這個等價類。
     [Fact]
-    public async Task ChatHistory_WithoutToken_Returns200()
+    public async Task ChatHistory_WithoutToken_Returns200_EmptyArray()
     {
         var client = _factory.CreateClient();
 
         var resp = await client.GetAsync("/api/chat/history");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Empty((await resp.ReadJsonAsync()).AsArray());
     }
 
     [Fact]

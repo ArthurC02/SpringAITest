@@ -1,3 +1,4 @@
+using System.Text;
 using Backend.Api.Files;
 
 namespace Backend.Api.Tests;
@@ -54,6 +55,24 @@ public sealed class ChunkingTests
         var chunks = Chunking.SplitText(new string('a', len), maxChars: 10, overlap: 4);
 
         Assert.Equal(expectedChunks, chunks.Count);
+    }
+
+    // 非 BMP 字元(emoji、CJK 擴展區罕用字)在 UTF-16 是 surrogate pair。切點若落在 pair 中間,
+    // 會切出孤兒 surrogate:轉 UTF-8 時靜默換成替代字元(不拋例外的資料損毀)。
+    // 5 個 code point = 10 個 UTF-16 char,maxChars=3 讓每個視窗邊界都落在 pair 中間。
+    [Theory]
+    [InlineData("😀")]  // U+1F600
+    [InlineData("𠀀")]  // U+20000(CJK 擴展 B)
+    public void SplitText_NonBmpAtMaxCharsBoundary_KeepsCodePointsIntact(string codePoint)
+    {
+        var text = string.Concat(Enumerable.Repeat(codePoint, 5));
+
+        var chunks = Chunking.SplitText(text, maxChars: 3, overlap: 0);
+
+        // 孤兒 surrogate 無法編成合法 UTF-8,會在往返時變成 U+FFFD —— 這就是損毀本身。
+        Assert.All(chunks, c => Assert.Equal(c, Encoding.UTF8.GetString(Encoding.UTF8.GetBytes(c))));
+        // 且切法不得靜默丟字:overlap=0 時串回來必須逐字等於原文。
+        Assert.Equal(text, string.Concat(chunks));
     }
 
     [Fact]

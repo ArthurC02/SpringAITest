@@ -415,7 +415,12 @@ def test_compiler_rejects_out_of_range_loop_bound(max_iterations):
 
 
 def test_compiler_rejects_invalid_expression():
-    """條件式的白名單在編譯期也是硬規則（繞過 validate 一樣過不了）。"""
+    """條件式的白名單在編譯期也是硬規則（繞過 validate 一樣過不了）。
+
+    contract：compile() 對「作者寫錯的定義」一律拋 SkillCompileError —— 未知節點、
+    未知 tool、缺 max_iterations、forbidden_script 全都是這個型別，條件式不該例外。
+    型別放寬成 `in {SkillCompileError, ExpressionError}` 等於把這個不對稱藏起來。
+    """
     skill = skill_mod.Skill.model_validate(
         {
             "name": "probe-skill",
@@ -430,10 +435,10 @@ def test_compiler_rejects_invalid_expression():
         }
     )
 
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(compiler.SkillCompileError) as exc:
         compiler.compile(skill, deps=None)
 
-    assert exc.type.__name__ in {"SkillCompileError", "ExpressionError"}
+    assert "os.system" in str(exc.value) or "名稱" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------

@@ -73,10 +73,9 @@ public sealed class ChatSkillRoutingTests
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
-        var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Contains("kb-query", names);
-        Assert.Contains("tenant-a-private-search", names);
-        Assert.DoesNotContain("admin-report", names);
+        // 精確集合 + 順序(不是只驗「有/沒有」):多一支、少一支、順序被打亂都要紅。
+        // builtin(kb-query)與 custom(tenant-a-private-search)在路由地位相同,ADMIN 的那支必須不在。
+        Assert.Equal(new[] { "kb-query", "tenant-a-private-search" }, tools!.Select(t => t.Name).ToArray());
 
         // catalog 恰呼叫一次,並收到 tenant A / USER 身分。
         var ctx = Assert.Single(wf.CatalogContexts);
@@ -93,63 +92,14 @@ public sealed class ChatSkillRoutingTests
 
         var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
 
-        var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Contains("kb-query", names);
-        Assert.Contains("tenant-a-private-search", names);
-        Assert.Contains("admin-report", names);
+        Assert.Equal(
+            new[] { "kb-query", "tenant-a-private-search", "admin-report" },
+            tools!.Select(t => t.Name).ToArray());
     }
 
-    // ---- T3 / CSR-P1-003:匿名裸聊且不讀目錄 ----
-    [Fact]
-    public async Task Anonymous_ReturnsNullTools_AndNeverReadsCatalog()
-    {
-        var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
-
-        await svc.ChatAsync("問題", "u1", "c1"); // userCtx = null
-
-        Assert.Empty(wf.CatalogContexts);   // 目錄一次都沒讀
-        Assert.Empty(wf.SkillInvokes);
-    }
-
-    [Fact]
-    public async Task Anonymous_Stream_NeverReadsCatalog()
-    {
-        var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
-
-        await foreach (var _ in svc.StreamChatAsync("問題", "u1", "c1"))
-        {
-        }
-
-        Assert.Empty(wf.CatalogContexts);
-    }
-
-    // ---- T4 / CSR-P1-004:builtin 與 custom 路由地位相同 ----
-    [Fact]
-    public async Task BuiltinAndCustom_BothBecomeTools_SourceDoesNotMatter()
-    {
-        var wf = new FakeWorkflowService
-        {
-            Catalog = Cat("""
-            [
-              { "name":"kb-query", "description":"內建檢索", "required_role":"USER", "source":"builtin",
-                "input_schema": { "query": { "type":"str", "required":true } } },
-              { "name":"tenant-a-private-search", "description":"自訂檢索", "required_role":"USER", "source":"custom",
-                "input_schema": { "question_text": { "type":"str", "required":true } } }
-            ]
-            """),
-        };
-        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
-
-        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-
-        var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Contains("kb-query", names);
-        Assert.Contains("tenant-a-private-search", names);
-    }
+    // 匿名不讀目錄/不執行 skill(阻塞 + 串流兩半)由 ChatBehaviorBaselineTests.A06a/A06b 覆蓋(超集);
+    // 「匿名時 BuildToolsAsync 回 null(不是空清單)」由 ChatServiceTests.Chat_Anonymous_BuildsNoTools 覆蓋。
+    // builtin 與 custom 路由地位相同已由上面兩案的精確集合斷言涵蓋(SampleCatalog 兩種 source 都有)。
 
     // ---- T5 / CSR-P1-009,010:schema 天花板,非單一必填字串一律跳過 ----
     [Theory]
@@ -288,25 +238,9 @@ public sealed class ChatSkillRoutingTests
         Assert.DoesNotContain("trip-planner", names);  // 多參 agentic → 不路由(kind 未使其成為例外)。
     }
 
-    // 多參 agentic 雖不被路由,仍可經 explicit invoke 執行並回 {skill, output}(含固定 answer 鍵)。
-    [Fact]
-    public async Task MultiParamAgentic_NotRouted_ButExplicitInvokeSucceeds()
-    {
-        var wf = new FakeWorkflowService
-        {
-            SkillOutput = Cat("""{ "skill":"trip-planner", "output": { "answer":"建議行程已產生" } }"""),
-        };
-
-        var input = new Dictionary<string, JsonElement>
-        {
-            ["origin"] = JsonSerializer.SerializeToElement("台北"),
-            ["destination"] = JsonSerializer.SerializeToElement("東京"),
-        };
-        var result = await wf.InvokeSkillAsync("trip-planner", input, UserA);
-
-        Assert.Equal("trip-planner", result.GetProperty("skill").GetString());
-        Assert.Equal("建議行程已產生", result.GetProperty("output").GetProperty("answer").GetString());
-    }
+    // (刪除:原「多參 agentic 仍可 explicit invoke」一案直接呼叫 FakeWorkflowService.InvokeSkillAsync,
+    //  完全沒有執行到任何 production 程式碼,只驗證 fake 會回傳自己被設定的值——套套邏輯。
+    //  「多參 agentic 不被路由」這一半由上一案覆蓋。)
 
     // ---- T7 / CSR-P1-008,015:呼叫正確 Skill、輸入鍵與身分 ----
     [Fact]
@@ -475,14 +409,11 @@ public sealed class ChatSkillRoutingTests
     }
 
     // ---- T9 / CSR-P1-023:單一 Skill invoke 失敗不炸整輪 ----
+    // 六種例外都落在 InvokeSkillToolAsync 同一個 catch-all,留「下游領域例外」與「傳輸層例外」兩個代表。
     public static IEnumerable<object[]> SkillInvokeErrors() => new[]
     {
-        new object[] { new WorkflowNotFoundException("找不到 Skill：s") },
-        new object[] { new WorkflowForbiddenException("權限不足") },
-        new object[] { new WorkflowBadInputException("輸入不符") },
-        new object[] { new WorkflowInvocationException("工作流服務呼叫失敗：HTTP 500") },
-        new object[] { new HttpRequestException("connection reset") },
-        new object[] { new TaskCanceledException("timeout") },
+        new object[] { new WorkflowNotFoundException("找不到 Skill：s") },   // 下游領域例外
+        new object[] { new HttpRequestException("connection reset") },       // 傳輸層例外
     };
 
     [Theory]
@@ -530,21 +461,9 @@ public sealed class ChatSkillRoutingTests
         Assert.Empty(tools!);
     }
 
-    // ---- T11 / CSR-P1-019:路由回 NONE → 純聊天 ----
-    [Fact]
-    public async Task NoToolSelected_PlainChatReply_ZeroSkillInvokes()
-    {
-        // 路由回覆 = 此字串 → 不匹配任何工具 → NONE;純聊天兜底改由共用 hosted agent 回覆(chatClient.Response)。
-        var agent = new FakeLlmAgent { Response = "純聊天回覆" };
-        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf, chatClient);
-
-        var reply = await svc.ChatAsync("寒暄", "u1", "c1", UserA);
-
-        Assert.Equal("純聊天回覆", reply.Reply);
-        Assert.Empty(wf.SkillInvokes);   // 未命中工具 → 不執行任何 skill
-    }
+    // T11 / CSR-P1-019(路由未命中 → 純聊天、零 skill invoke)由本檔
+    // RoutedPath_NoneReply_FallsBackToGuardedPlainChat(另驗護欄 Instructions)與
+    // Routing_RetryExhausted_BothNone(另驗路由呼叫次數)覆蓋。
 
     // ---- CSR-P1-014:description 帶正確輸入提示 ----
     [Fact]
@@ -586,19 +505,8 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal(("demo-a:user-a", "問題", "最終答案"), Assert.Single(mem0.Remembered));
     }
 
-    // ---- CSR-P1-030:無快取的 P1 邊界 — 每輪一次、兩輪合計兩次 ----
-    [Fact]
-    public async Task TwoRounds_CatalogFetchedExactlyTwice()
-    {
-        var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
-        var svc = Build(agent, wf);
-
-        await svc.ChatAsync("第一問", "u1", "c1", UserA);
-        await svc.ChatAsync("第二問", "u1", "c1", UserA);
-
-        Assert.Equal(2, wf.CatalogContexts.Count);
-    }
+    // CSR-P1-030(無快取:每輪取一次、兩輪合計兩次)由本檔
+    // BlockingAndStream_SameRoutingCatalog_CatalogFetchedOncePerRound 的 Equal(2, CatalogContexts.Count) 覆蓋。
 
     // ============================================================================
     // 路由 → 執行 → 摘要 orchestration(新流程:LLM 只 ROUTE + SUMMARIZE,不心算)
@@ -755,25 +663,8 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal("本季毛利率32.8%", Assert.Single(convos.Saved).Reply);
     }
 
-    // 寬鬆比對:路由回覆含工具名稱 token(非全等)仍能命中(HIT 路徑,不受 P2 影響)。
-    [Fact]
-    public async Task RoutedPath_LenientMatch_ReplyContainsToolName_StillRoutes()
-    {
-        var agent = new FakeLlmAgent();
-        agent.Responses.Enqueue("我建議使用 kb-query 這個工具");   // 非全等,含 token
-        agent.Responses.Enqueue("摘要輸出");
-        var wf = new FakeWorkflowService
-        {
-            Catalog = Cat(SampleCatalog),
-            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
-        };
-        var svc = Build(agent, wf);
-
-        var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
-
-        Assert.Equal("摘要輸出", reply.Reply);
-        Assert.Equal("kb-query", Assert.Single(wf.SkillInvokes).Name);
-    }
+    // 寬鬆比對(路由回覆只含工具名 token)由 ChatBehaviorBaselineTests.A10 覆蓋,且嚴格更強:
+    // 它的目錄同時有 kb 與 kb-query,能抓到「取最短前綴」的迴歸;此處 SampleCatalog 只有一個 kb-query,分辨不出。
 
     // ---- 路由重試(NONE/無命中一次後再試一次;最多兩次) ----
 

@@ -10,26 +10,33 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Npgsql;
 
 namespace Backend.Api.Tests;
 
+/// <summary>
+/// D7 governance/metrics/redaction 的**真 Dapper + HTTP** 驗收。
+/// 隔離手段是租戶前綴(每跑一次都是新的隨機 "d7-ops-&lt;guid&gt;",且 repository 的每一條查詢都帶
+/// tenant_id 條件),不是獨立資料庫 —— 因此本類自己負責前後清理殘留,比照
+/// OrchestratorRunRepositoryPostgresTests。曾經用「資料庫名須以 d7evidence_ 開頭」當護欄,
+/// 結果是日常與 CI 一律 skipped、整條 Dapper D7 路徑零覆蓋,比殘留更糟。
+/// </summary>
 [Collection("Postgres")]
-public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture)
+public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture) : IAsyncLifetime
 {
+    private const string TenantPrefix = "d7-ops-";
+
+    // CleanupAsync 自己在 appdb 不可達時是 no-op,所以 lifetime 不丟 SkipException
+    // (skip 的判定留在測試方法本體,由 SkippableFact 的 discoverer 正確回報 Skipped)。
+    public Task InitializeAsync() => CleanupAsync();
+
+    public Task DisposeAsync() => CleanupAsync();
+
     [SkippableFact]
     public async Task D7_DapperHttp_ReleaseGateRolloutTelemetryMetricsAndRedaction()
     {
         fixture.SkipIfUnavailable();
-        var configured = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING");
-        Skip.If(
-            string.IsNullOrWhiteSpace(configured)
-            || !(new NpgsqlConnectionStringBuilder(configured).Database ?? string.Empty).StartsWith(
-                "d7evidence_",
-                StringComparison.Ordinal),
-            "D7 governance HTTP evidence requires the verifier's isolated database.");
 
-        var tenant = "d7-ops-" + Guid.NewGuid().ToString("N");
+        var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
         var otherTenant = tenant + "-other";
         var run = await CreateRunAsync(tenant);
         var roots = await SeedRootMetricsAsync(tenant, run.Run!.Id);
@@ -153,6 +160,33 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
         Assert.Equal(0, otherMetrics["multi_agent"]!["root_runs"]!.GetValue<int>());
 
         Assert.Equal(2, roots.Length);
+    }
+
+    /// <summary>租戶前綴清理:依外鍵相依由葉往根刪,讓共用的 springaitest 不留 D7 殘列。</summary>
+    private async Task CleanupAsync()
+    {
+        if (!fixture.Available) return;
+        await using var connection = await fixture.DataSource!.OpenConnectionAsync();
+        await connection.ExecuteAsync(
+            """
+            DELETE FROM operations_execution_metric WHERE tenant_id LIKE @prefix;
+            DELETE FROM agent_run_event WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE @prefix);
+            DELETE FROM agent_run_command WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE @prefix);
+            DELETE FROM agent_run_skill WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE @prefix);
+            DELETE FROM orchestrator_run_child WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id LIKE @prefix);
+            DELETE FROM agent_run WHERE tenant_id LIKE @prefix;
+            DELETE FROM orchestrator_run_event WHERE run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id LIKE @prefix);
+            DELETE FROM orchestrator_run_command WHERE run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id LIKE @prefix);
+            DELETE FROM orchestrator_run WHERE tenant_id LIKE @prefix;
+            DELETE FROM agent_revision_skill WHERE agent_id IN (SELECT id FROM agent WHERE tenant_id LIKE @prefix);
+            DELETE FROM agent_revision WHERE agent_id IN (SELECT id FROM agent WHERE tenant_id LIKE @prefix);
+            DELETE FROM agent WHERE tenant_id LIKE @prefix;
+            DELETE FROM operations_regression_override WHERE tenant_id LIKE @prefix;
+            DELETE FROM operations_regression_result WHERE tenant_id LIKE @prefix;
+            DELETE FROM operations_release_audit WHERE tenant_id LIKE @prefix;
+            DELETE FROM tenant_runtime_binding WHERE tenant_id LIKE @prefix;
+            """,
+            new { prefix = TenantPrefix + "%" });
     }
 
     private async Task<AgentRunWriteResult> CreateRunAsync(string tenant)

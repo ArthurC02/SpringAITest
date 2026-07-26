@@ -269,6 +269,17 @@ def test_cpu_bound_loop_times_out():
         _run("x = 0\nfor i in range(1000000):\n    x = i * i", timeout_ms=1)
 
 
+def test_timeout_without_cooperative_checkpoint_still_exits_step():
+    """沒有 for 迴圈（＝沒有協作式檢查點）的 CPU-bound 運算，步驟一樣出得了場。
+
+    _Budget.iterate 只在 for 每一輪驗逾時；單一運算式（此處約 160ms 的大整數次方）
+    完全繞過它。讓步驟出場的是 script_runner 的 asyncio.timeout —— 執行緒本身中斷不了
+    （§5.0 明載的邊界），這裡驗的正是「呼叫端不會被卡住」這一半。
+    """
+    with pytest.raises(ScriptTimeout):
+        _run("state['x'] = 3 ** 10 ** 6", timeout_ms=1)
+
+
 # ---------------------------------------------------------------------------
 # state 寫入大小上限 256KB（AT3-13 的沙箱那一半）
 # ---------------------------------------------------------------------------
@@ -292,6 +303,19 @@ def test_state_write_size_off_by_one_rejected():
     """邊界 off-point：多一個位元組就拒絕。"""
     with pytest.raises(ScriptLimitExceeded):
         _run(f"state['big'] = 'x' * {MAX_WRITE_BYTES - 1}")
+
+
+def test_state_write_size_cap_is_aggregate_across_keys():
+    """256KB 是**所有**寫入鍵的加總，不是單鍵上限：拆成兩個鍵不得繞過。"""
+    half = MAX_WRITE_BYTES // 2
+
+    # on-point：兩個值序列化後（各含 json 的兩個引號）合計恰好 256KB → 放行
+    writes = _run(f"state['a'] = 'x' * {half - 2}\nstate['b'] = 'x' * {half - 2}")
+    assert len(writes["a"]) + len(writes["b"]) == MAX_WRITE_BYTES - 4
+
+    # off-point：每個各多兩個字元 → 合計 262148 > 262144 → 拒絕
+    with pytest.raises(ScriptLimitExceeded):
+        _run(f"state['a'] = 'x' * {half}\nstate['b'] = 'x' * {half}")
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +347,23 @@ def test_scan_reports_read_write_keys_and_sha256():
     assert contract.reads == ("a",)
     assert contract.writes == ("b",)
     assert len(contract.sha256) == 64
+
+
+def test_state_alias_does_not_escape_static_read_contract():
+    """誠實邊界：`d = state` 之後的讀取不會進 contract.reads（靜態稽核看不見這次讀取）。
+
+    不是安全洞（值仍只留在深拷貝上、寫入照樣過 written() 的保留鍵過濾），但 trace 的
+    input_summary 與存檔期的資料流檢查會漏記這個鍵。釘住現狀：若日後改成「拒絕 state
+    別名」（expr() 只在 Subscript/Call 的 value 位置允許 Name state），這條會大聲失敗，
+    提醒回來更新契約，而不是靜悄悄地改變稽核語義。
+    """
+    source = "d = state\nstate['leak'] = d['tenant_id']"
+
+    contract = scan(source)
+    assert contract.reads == ()  # ← 靜態契約看不到 tenant_id 這次讀取
+    assert contract.writes == ("leak",)
+
+    assert _run(source, {"tenant_id": "t-1"}) == {"leak": "t-1"}  # 但值確實讀得到
 
 
 def test_script_cannot_reach_out_of_state_by_mutating_nested_objects():

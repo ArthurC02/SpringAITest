@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text.Json;
-using Platform.Service;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
@@ -121,8 +120,9 @@ public sealed class WorkflowServiceTests
     [Fact] // 引擎契約:validate 一律回 200,valid/errors 在 body — 代理層不得把 valid:false 轉成錯誤。
     public async Task ValidateSkill_PostsDefinition_ReturnsBodyVerbatim_EvenWhenInvalid()
     {
+        // skill metadata 內的 additive kind 一併原樣穿透(AST-P1-013)。
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            "{\"valid\":false,\"errors\":[{\"code\":\"unbounded_loop\",\"line\":7}]}"));
+            """{"valid":false,"errors":[{"code":"unbounded_loop","line":7}],"skill":{"name":"sales-helper","required_role":"USER","kind":"agentic"}}"""));
 
         var result = await Build(stub).ValidateSkillAsync("name: x\nflow: []\n", Ctx);
 
@@ -130,6 +130,7 @@ public sealed class WorkflowServiceTests
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
         Assert.False(result.GetProperty("valid").GetBoolean());
         Assert.Equal("unbounded_loop", result.GetProperty("errors")[0].GetProperty("code").GetString());
+        Assert.Equal("agentic", result.GetProperty("skill").GetProperty("kind").GetString());
 
         using var doc = JsonDocument.Parse(stub.LastBody!);
         Assert.Equal("name: x\nflow: []\n", doc.RootElement.GetProperty("definition").GetString());
@@ -147,9 +148,10 @@ public sealed class WorkflowServiceTests
     [Fact]
     public async Task GetSkillCatalog_GetsSkillsPath_PassesArrayThrough()
     {
+        // 含 additive 的 kind:代理層不套 DTO,未知欄位原樣穿透,既有欄位不受影響(AST-P1-013)。
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            "[{\"name\":\"kb-query\",\"source\":\"builtin\",\"revision\":null,\"bindable\":false},"
-            + "{\"name\":\"quarterly-qa\",\"source\":\"custom\",\"revision\":3,\"bindable\":true}]"));
+            "[{\"name\":\"kb-query\",\"source\":\"builtin\",\"kind\":\"flow\",\"revision\":null,\"bindable\":false},"
+            + "{\"name\":\"quarterly-qa\",\"source\":\"custom\",\"kind\":\"agentic\",\"revision\":3,\"bindable\":true}]"));
 
         var result = await Build(stub).GetSkillCatalogAsync(Ctx);
 
@@ -158,26 +160,11 @@ public sealed class WorkflowServiceTests
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
         Assert.Equal(2, result.GetArrayLength());
         Assert.Equal("builtin", result[0].GetProperty("source").GetString());
+        Assert.Equal("flow", result[0].GetProperty("kind").GetString());
         Assert.False(result[0].GetProperty("bindable").GetBoolean());
         Assert.Equal("custom", result[1].GetProperty("source").GetString());
-        Assert.True(result[1].GetProperty("bindable").GetBoolean());
-    }
-
-    // AST-P1-013:catalog 帶 additive kind → 原樣穿透(代理層不套 DTO,不吞未知欄位);既有 source 等欄位不變。
-    [Fact]
-    public async Task GetSkillCatalog_PassesThroughKind_AndExistingFields()
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            """[{"name":"kb-query","source":"builtin","kind":"flow","required_role":"USER"},"""
-            + """{"name":"sales-helper","source":"custom","kind":"agentic","required_role":"USER"}]"""));
-
-        var result = await Build(stub).GetSkillCatalogAsync(Ctx);
-
-        Assert.Equal("flow", result[0].GetProperty("kind").GetString());
         Assert.Equal("agentic", result[1].GetProperty("kind").GetString());
-        // 既有欄位不因新增 kind 而受影響。
-        Assert.Equal("builtin", result[0].GetProperty("source").GetString());
-        Assert.Equal("custom", result[1].GetProperty("source").GetString());
+        Assert.True(result[1].GetProperty("bindable").GetBoolean());
     }
 
     [Fact]
@@ -307,33 +294,6 @@ public sealed class WorkflowServiceTests
             "Business Rule request exceeds the allowed size or nesting depth",
             error.Message);
         Assert.DoesNotContain("internal detail", error.Message);
-    }
-
-    // AST-P1-013:validate 回應的 skill 中繼資料帶 kind → 原樣穿透;既有 valid/errors/skill 形狀不變。
-    [Fact]
-    public async Task ValidateSkill_PassesThroughKind_InSkillMetadata()
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            """{"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"x","required_role":"USER","kind":"agentic"}}"""));
-
-        var result = await Build(stub).ValidateSkillAsync("kind: agentic\n", Ctx);
-
-        Assert.True(result.GetProperty("valid").GetBoolean());
-        Assert.Equal("agentic", result.GetProperty("skill").GetProperty("kind").GetString());
-    }
-
-    // AST-P1-002(Platform half):explicit invoke 一個 agentic skill → {skill, output} 形狀原樣穿透,
-    // 固定的 answer 鍵在 output 內被帶上(引擎輸出鍵由引擎定義,代理層不改寫)。
-    [Fact]
-    public async Task InvokeSkill_AgenticSkill_ReturnsSkillOutputShape_WithAnswerKey()
-    {
-        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            """{"skill":"sales-helper","output":{"answer":"本季毛利率 32.8%"}}"""));
-
-        var result = await Build(stub).InvokeSkillAsync("sales-helper", Input(), Ctx);
-
-        Assert.Equal("sales-helper", result.GetProperty("skill").GetString());
-        Assert.Equal("本季毛利率 32.8%", result.GetProperty("output").GetProperty("answer").GetString());
     }
 
     [Fact]

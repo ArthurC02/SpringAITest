@@ -107,6 +107,38 @@ def test_incompatible_comparison_raises_instead_of_silently_false():
         evaluate("state.confidence < 0.7", {})
 
 
+@pytest.mark.parametrize("expr", ["state.x is None", "state.x is not None"])
+def test_is_operator_is_rejected_with_actionable_message(expr):
+    """`is` / `is not` 不在 _CMP_OPS：作者最可能寫的存在性判斷形式，訊息必須點名運算子。
+
+    決策表另一半是 `state.no_such_key == None`（上面的白名單參數已涵蓋）——
+    訊息若退化成籠統的「不支援的語法: Compare」，編輯器就沒辦法告訴作者改用 `== None`。
+    """
+    for phase in (lambda: validate(expr), lambda: evaluate(expr, {"x": None})):
+        with pytest.raises(ExpressionError, match="比較運算子"):
+            phase()
+
+
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        ({"x": 5}, True),  # 兩段都成立
+        ({"x": 0}, False),  # 第一段就不成立（右段不需成立）
+        ({"x": 20}, False),  # 第一段成立、第二段不成立（走 left = right 那一輪）
+    ],
+    ids=["inside", "below", "above"],
+)
+def test_chained_comparison(state, expected):
+    """`1 < state.x < 10` 是單一 Compare 節點的多運算子形式（_eval 的 left = right 迴圈）。"""
+    assert evaluate("1 < state.x < 10", state) is expected
+
+
+def test_chained_comparison_type_error_mid_chain_raises():
+    """鏈的後半段才踩到不相容比較 → 一樣是明確的 ExpressionError，不靜默當成 False。"""
+    with pytest.raises(ExpressionError, match="不相容的比較"):
+        evaluate("state.a < state.b < state.c", {"a": 1, "b": 2, "c": "x"})
+
+
 def test_validate_accepts_state_key_with_single_underscore():
     """單底線鍵是合法領域鍵（只有 __ 前綴屬引擎保留）。"""
     expressions.validate("state._internal_ish == 1")

@@ -2504,35 +2504,6 @@ public sealed class AgentRunRepository : IAgentRunRepository
             ? v.GetRawText()
             : null;
 
-    // Root event payloads are deliberately redacted. Child output/context belongs
-    // to the child authority, never to the public root event stream.
-    private static string SafeChildTerminalPayload(
-        (Guid Id, string Task, int Attempt, string Kind, Guid AgentId, int AgentRevision, string SnapshotHash) child,
-        Guid agentRunId, string status, JsonElement? result, string? errorCode)
-    {
-        var raw = JsonText(result);
-        var citationCount = result is { ValueKind: JsonValueKind.Object } value
-            && value.TryGetProperty("citations", out var citations)
-            && citations.ValueKind == JsonValueKind.Array
-            ? citations.GetArrayLength()
-            : 0;
-        return JsonSerializer.Serialize(new
-        {
-            child_id = child.Id,
-            agent_run_id = agentRunId,
-            task_id = child.Task,
-            attempt = child.Attempt,
-            run_kind = child.Kind,
-            agent_id = child.AgentId,
-            agent_revision = child.AgentRevision,
-            agent_snapshot_hash = child.SnapshotHash,
-            status,
-            result_sha256 = raw is null ? null : SkillHash.Sha256(raw),
-            citations = new { count = citationCount },
-            error_code = Normalize(errorCode, 100),
-        });
-    }
-
     private static string? Normalize(string? value, int max)
     {
         var normalized = value?.Trim();
@@ -2645,7 +2616,11 @@ public sealed class AgentRunRepository : IAgentRunRepository
             return;
         }
 
-        var payload = SafeChildTerminalPayload(child, run.Id, status, result, errorCode);
+        // Root event payloads are deliberately redacted; the generator is shared with the
+        // lite repository so the two authorities cannot drift.
+        var payload = OrchestratorRuns.OrchestratorRunEvents.ChildTerminal(
+            child.Id, run.Id, child.Task, child.Attempt, child.Kind,
+            child.AgentId, child.AgentRevision, child.SnapshotHash, status, result, errorCode);
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO orchestrator_run_event(run_id,sequence,event_type,snapshot_sha256,payload)"
             + " VALUES(@orchestratorRootRunId,"

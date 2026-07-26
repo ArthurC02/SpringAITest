@@ -27,16 +27,63 @@ public sealed class RuntimeDiscoveryReplayRouteTests : IClassFixture<RuntimeDisc
         client.DefaultRequestHeaders.Add("Idempotency-Key", "route-attempt");
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, (await client.GetAsync("/api/chat-runs/replay")).StatusCode);
+        // message 前後空白由 controller 正規化後才交給 repository 比對(stub 只認 "details")。
         var response = await client.PostAsJsonAsync("/api/chat-runs/replay", new
         {
             conversation_id = "route-conversation", message = "  details  ",
-            candidates = new[] { new { operation = "resume", fingerprint = new string('a', 64) } },
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.True(body.RootElement.GetProperty("replayed").GetBoolean());
         Assert.Equal(Factory.Command, body.RootElement.GetProperty("command_id").GetGuid());
+    }
+
+    // 決策表的另外三格:repository 回 mismatch / ambiguous / 查無 → 409 / 409 / 404。
+    // 只測 200 的話,controller 把三種結果都當成 200 也不會有測試變紅。
+    [Theory]
+    [InlineData("mismatched", HttpStatusCode.Conflict)]
+    [InlineData("ambiguous", HttpStatusCode.Conflict)]
+    [InlineData("absent", HttpStatusCode.NotFound)]
+    public async Task Replay_MapsLookupOutcomesToStatusCodes(string message, HttpStatusCode expected)
+    {
+        using var client = Authenticated();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/chat-runs/replay", new { conversation_id = "route-conversation", message });
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    // Idempotency-Key 是這條 replay 路由的邏輯嘗試識別:重複、缺少、空白都必須 400,
+    // 否則兩個不同嘗試會被當成同一個 replay。
+    [Fact]
+    public async Task Replay_RequiresExactlyOneIdempotencyKey()
+    {
+        using var noKey = _factory.CreateClient();
+        noKey.DefaultRequestHeaders.Add("X-Internal-Token", TestWebAppFactory.InternalToken);
+        noKey.DefaultRequestHeaders.Add("X-Tenant-Id", "route-tenant");
+        noKey.DefaultRequestHeaders.Add("X-User-Id", "route-user");
+        var body = new { conversation_id = "route-conversation", message = "details" };
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await noKey.PostAsJsonAsync("/api/chat-runs/replay", body)).StatusCode);
+
+        using var duplicated = Authenticated();
+        duplicated.DefaultRequestHeaders.Add("Idempotency-Key", "route-attempt-2");
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await duplicated.PostAsJsonAsync("/api/chat-runs/replay", body)).StatusCode);
+    }
+
+    private HttpClient Authenticated()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Internal-Token", TestWebAppFactory.InternalToken);
+        client.DefaultRequestHeaders.Add("X-Tenant-Id", "route-tenant");
+        client.DefaultRequestHeaders.Add("X-User-Id", "route-user");
+        client.DefaultRequestHeaders.Add("Idempotency-Key", "route-attempt");
+        return client;
     }
 
     public sealed class Factory : WebApplicationFactory<Program>
@@ -69,9 +116,17 @@ public sealed class RuntimeDiscoveryReplayRouteTests : IClassFixture<RuntimeDisc
             new string('b', 64), "completed", false, 1, DateTime.UtcNow.AddMinutes(1),
             JsonDocument.Parse("{}").RootElement.Clone(), DateTime.UtcNow, DateTime.UtcNow, Factory.Command,
             JsonDocument.Parse("""{"aggregate":{"answer":"ok"}}""").RootElement.Clone());
+        // 以 message 腳本化四種查詢結果,讓 controller 的整張映射表都能被驗到。
         public Task<OrchestratorRunActiveLookup> FindByIdempotencyKeyAsync(string tenant, string user, string key, OrchestratorRunReplayRequest replay, CancellationToken ct) =>
-            Task.FromResult(tenant == "route-tenant" && user == "route-user" && key == "route-attempt" && replay.Message == "details"
-                ? new OrchestratorRunActiveLookup(Response, Factory.Command) : new OrchestratorRunActiveLookup(null, IsMismatch: true));
+            Task.FromResult(tenant == "route-tenant" && user == "route-user" && key == "route-attempt"
+                ? replay.Message switch
+                {
+                    "details" => new OrchestratorRunActiveLookup(Response, Factory.Command),
+                    "ambiguous" => new OrchestratorRunActiveLookup(null, IsAmbiguous: true),
+                    "absent" => new OrchestratorRunActiveLookup(null),
+                    _ => new OrchestratorRunActiveLookup(null, IsMismatch: true),
+                }
+                : new OrchestratorRunActiveLookup(null, IsMismatch: true));
         public Task<OrchestratorRunWriteResult> CreateAsync(string a,string b,string c,IReadOnlyCollection<string>d,IReadOnlyCollection<string>e,Guid f,string g,string h,string i,CancellationToken j)=>throw new NotSupportedException();
         public Task<OrchestratorRunResponse?> GetAsync(string a,string b,Guid c,CancellationToken d)=>throw new NotSupportedException();
         public Task<OrchestratorRunActiveLookup> FindActiveAsync(string a,string b,string c,CancellationToken d)=>throw new NotSupportedException();

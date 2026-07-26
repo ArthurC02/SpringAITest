@@ -213,15 +213,9 @@ public sealed class AgentApiTests : IDisposable
         Assert.Equal(428, (await resp.ReadJsonAsync())["status"]!.GetValue<int>());
     }
 
-    [Fact]
-    public async Task Validate_StaleIfMatch_Returns409_Passthrough()
-    {
-        var resp = await _factory.AdminClient().SendAsync(Req(
-            "POST", ExistingPath + "/validate", ifMatch: "\"999\""));
-
-        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
-        Assert.Equal(409, (await resp.ReadJsonAsync())["status"]!.GetValue<int>());
-    }
+    // validate 的「舊 If-Match → 409」與 UpdateDraft 走同一個 IfMatch 屬性與同一個 Write():
+    // 409 的等價類由 UpdateDraft_StaleIfMatch_Returns409_Passthrough 覆蓋;此處只留 428
+    // (AGENTS.md 明列 draft update 與 validate 兩個 action 都必須要求 If-Match)。
 
     [Fact]
     public async Task BearerRepeatedCapabilityClaims_AreParsedByMiddlewareIntoDownstreamUserContext()
@@ -319,36 +313,9 @@ public sealed class AgentApiTests : IDisposable
         Assert.Equal(2, (await resp.ReadJsonAsync())["published_revision"]!.GetValue<int>());
     }
 
-    [Fact]
-    public async Task Admin_CanCompleteValidatePublishRestoreDeactivateLifecycle()
-    {
-        var client = _factory.AdminClient();
-
-        var validate = await client.SendAsync(Req(
-            "POST",
-            ExistingPath + "/validate",
-            ifMatch: FakeAgentService.CurrentETag));
-        Assert.Equal(HttpStatusCode.OK, validate.StatusCode);
-
-        var publish = await client.SendAsync(Req(
-            "POST",
-            ExistingPath + "/publish",
-            ifMatch: FakeAgentService.CurrentETag,
-            body: new { expected_draft_version = 1 }));
-        Assert.Equal(HttpStatusCode.OK, publish.StatusCode);
-        Assert.Equal(1, (await publish.ReadJsonAsync())["published_revision"]!.GetValue<int>());
-
-        var revisions = await client.GetAsync(ExistingPath + "/revisions");
-        Assert.Equal(HttpStatusCode.OK, revisions.StatusCode);
-        Assert.Single((await revisions.ReadJsonAsync()).AsArray());
-
-        var restore = await client.PostAsync(ExistingPath + "/revisions/1/restore", content: null);
-        Assert.Equal(HttpStatusCode.OK, restore.StatusCode);
-        Assert.Equal(2, (await restore.ReadJsonAsync())["published_revision"]!.GetValue<int>());
-
-        var deactivate = await client.DeleteAsync(ExistingPath);
-        Assert.Equal(HttpStatusCode.NoContent, deactivate.StatusCode);
-    }
+    // 生命週期(validate → publish → revisions → restore → deactivate)的狀態機不變量無法在這一層驗:
+    // FakeAgentService 是無狀態的,每個動作的回應與呼叫順序無關。真正的順序契約在 backend 的
+    // AgentsApiTests / AgentRepositoryTests;此處保留的是每個 action 各自的穿透行為。
 
     [Theory]
     [InlineData("GET", "/api/agents/catalog/rule-facts")]

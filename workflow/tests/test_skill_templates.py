@@ -321,3 +321,21 @@ def test_topk_slot_override_is_carried_to_retrieve(monkeypatch):
     llm = RecordingLLM(output=_NlLogicOutput(result="x"))
     _invoke(patched, make_deps({}, llm=llm), query="q")
     assert captured["json"]["top_k"] == 17
+
+
+def test_topk_slot_override_zero_is_carried_to_retrieve(monkeypatch):
+    """把 # __SLOT_topK__ 那行 patch 成 0 → 通用 retrieve 仍實收 0（BVT，決策表 2 缺口）。
+
+    retrieve.py 用 `top_k is not None` 當守衛（非真值判斷）：0 是 falsy 但合法的覆寫值。
+    若日後被「簡化」成 `if top_k:`，0 會被誤判成「未覆寫」而靜默退回骨架/全域預設值，
+    且沒有任何既有測試會變紅（上一測試只覆蓋 17 這個真值為真的案例）。
+    """
+    captured: dict = {}
+    _install_fake_retrieve(monkeypatch, captured=captured)
+    raw = skills.get("template-compare").definition
+    patched = patch_topk(raw, 0)
+    patched = patch_rule(patched, COMPARE_NL_RULE)
+    assert skill_mod.validate_source(patched).valid is True
+    llm = RecordingLLM(output=_NlLogicOutput(result="x"))
+    _invoke(patched, make_deps({}, llm=llm), query="q")
+    assert captured["json"]["top_k"] == 0

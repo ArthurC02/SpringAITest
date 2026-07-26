@@ -84,7 +84,7 @@ public sealed class DocumentProcessorTests
     {
         // 雙重故障:嵌入失敗 → 進 catch 想標 failed,但 MarkFailedAsync 本身也拋(例如 DB 瞬斷)。
         // 訊息仍要被消費者 ack(不重試),故 ProcessAsync 整體不得拋出;兩段錯誤都要落日誌。
-        var repo = new ThrowingMarkFailedRagRepository(new FakeRagRepository());
+        var repo = new FaultyRagRepository(new FakeRagRepository(), FaultyRagStep.MarkFailed);
         var logger = new RecordingLogger<DocumentProcessor>();
         var processor = new DocumentProcessor(repo, new ThrowingEmbeddingProvider(), logger);
         var id = Guid.NewGuid().ToString();
@@ -110,6 +110,37 @@ public sealed class DocumentProcessorTests
         Assert.Equal("ready", doc.Status);
         Assert.Equal(1, doc.ChunkCount);
     }
+
+    // 第一步(讀狀態 / 建 processing 列)就失敗,與「嵌入失敗」是不同結果:文件列根本沒被建立,
+    // MarkFailedAsync 對不存在的 id 是 no-op,訊息仍被 ack 丟棄 → 完全沒有稽核痕跡。
+    // 這是刻意接受的現況(見 DocumentProcessor 的 ponytail 註解),用測試釘住以免無意間變成拋例外/無限重投。
+    [Theory]
+    [InlineData(FaultyRagStep.GetStatus)]
+    [InlineData(FaultyRagStep.InsertProcessing)]
+    public async Task Process_FailureBeforeInsert_LeavesNoDocumentRow_DoesNotThrow(FaultyRagStep step)
+    {
+        var inner = new FakeRagRepository();
+        var repo = new FaultyRagRepository(inner, step);
+        var embeddings = new CountingEmbeddingProvider();
+        var logger = new RecordingLogger<DocumentProcessor>();
+        var processor = new DocumentProcessor(repo, embeddings, logger);
+
+        await processor.ProcessAsync(Message(Guid.NewGuid().ToString()), CancellationToken.None);
+
+        Assert.Empty(await inner.ListDocumentsAsync("demo-a", CancellationToken.None));
+        Assert.Equal(0, embeddings.DocumentCalls);
+        Assert.Contains(logger.Messages, m => m.Contains("文件處理失敗"));
+        // MarkFailedAsync 沒有拋例外(它是 no-op),所以第二段錯誤訊息不該出現。
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("標記文件 failed 狀態時發生錯誤"));
+    }
+}
+
+/// <summary>FaultyRagRepository 要在哪一步拋例外。</summary>
+public enum FaultyRagStep
+{
+    GetStatus,
+    InsertProcessing,
+    MarkFailed,
 }
 
 /// <summary>嵌入時拋例外,用來驗 DocumentProcessor 的 failed 路徑。</summary>
@@ -139,20 +170,39 @@ public sealed class CountingEmbeddingProvider : IEmbeddingProvider
 }
 
 /// <summary>
-/// 包一層 IRagRepository:其餘方法都委派給內層 fake,唯獨 MarkFailedAsync 拋例外 ——
-/// 用來重現「嵌入失敗 → 想標 failed 但連 MarkFailedAsync 都失敗」的雙重故障路徑。
+/// 包一層 IRagRepository:其餘方法都委派給內層 fake,唯獨指定的那一步拋例外 ——
+/// 用來注入「第一步就故障」與「嵌入失敗 → 連 MarkFailedAsync 都失敗」兩種故障路徑。
 /// </summary>
-public sealed class ThrowingMarkFailedRagRepository : IRagRepository
+public sealed class FaultyRagRepository : IRagRepository
 {
     private readonly IRagRepository _inner;
+    private readonly FaultyRagStep _failingStep;
 
-    public ThrowingMarkFailedRagRepository(IRagRepository inner) => _inner = inner;
+    public FaultyRagRepository(IRagRepository inner, FaultyRagStep failingStep)
+    {
+        _inner = inner;
+        _failingStep = failingStep;
+    }
+
+    private void FailIf(FaultyRagStep step)
+    {
+        if (_failingStep == step)
+        {
+            throw new InvalidOperationException($"DB 不可達:{step}");
+        }
+    }
 
     public Task<string?> GetDocumentStatusAsync(string documentId, string tenantId, CancellationToken ct)
-        => _inner.GetDocumentStatusAsync(documentId, tenantId, ct);
+    {
+        FailIf(FaultyRagStep.GetStatus);
+        return _inner.GetDocumentStatusAsync(documentId, tenantId, ct);
+    }
 
     public Task InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct)
-        => _inner.InsertProcessingDocumentAsync(documentId, tenantId, title, ct);
+    {
+        FailIf(FaultyRagStep.InsertProcessing);
+        return _inner.InsertProcessingDocumentAsync(documentId, tenantId, title, ct);
+    }
 
     public Task CompleteDocumentAsync(
         string documentId, string tenantId, IReadOnlyList<string> chunks, IReadOnlyList<float[]> embeddings,
@@ -160,7 +210,10 @@ public sealed class ThrowingMarkFailedRagRepository : IRagRepository
         => _inner.CompleteDocumentAsync(documentId, tenantId, chunks, embeddings, ct);
 
     public Task MarkFailedAsync(string documentId, string tenantId, CancellationToken ct)
-        => throw new InvalidOperationException("DB 不可達,無法標記 failed");
+    {
+        FailIf(FaultyRagStep.MarkFailed);
+        return _inner.MarkFailedAsync(documentId, tenantId, ct);
+    }
 
     public Task<IReadOnlyList<DocumentInfo>> ListDocumentsAsync(string tenantId, CancellationToken ct)
         => _inner.ListDocumentsAsync(tenantId, ct);

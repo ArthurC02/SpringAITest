@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
@@ -25,11 +24,22 @@ public sealed class OrchestratorRunService(
         var allocated=await Send(HttpMethod.Post,$"/api/admin/orchestrators/{id:D}/runs",ctx,new { message, conversation_id=conversation },key,ct);
         if(allocated.Status is >=200 and <300 && TryDispatch(allocated.Body,out var runId,out var commandId))
             await DispatchBestEffortAsync(runId,commandId,ctx,ct);
-        return allocated;
+        return Redact(allocated);
     }
-    public Task<AgentProxyResponse> GetAsync(Guid id,UserContext ctx,CancellationToken ct=default)=>Send(HttpMethod.Get,$"/api/orchestrator-runs/{id:D}",ctx,null,null,ct);
+    public async Task<AgentProxyResponse> GetAsync(Guid id,UserContext ctx,CancellationToken ct=default)=>Redact(await Send(HttpMethod.Get,$"/api/orchestrator-runs/{id:D}",ctx,null,null,ct));
     public Task<AgentProxyResponse> EventsAsync(Guid id,long after,int limit,UserContext ctx,CancellationToken ct=default)=>Send(HttpMethod.Get,$"/api/orchestrator-runs/{id:D}/events?after_sequence={after.ToString(CultureInfo.InvariantCulture)}&limit={limit.ToString(CultureInfo.InvariantCulture)}",ctx,null,null,ct);
-    public Task<AgentProxyResponse> CancelAsync(Guid id,string? reason,string? key,UserContext ctx,CancellationToken ct=default)=>Send(HttpMethod.Post,$"/api/orchestrator-runs/{id:D}/cancel",ctx,new { reason },key,ct);
+    public async Task<AgentProxyResponse> CancelAsync(Guid id,string? reason,string? key,UserContext ctx,CancellationToken ct=default)=>Redact(await Send(HttpMethod.Post,$"/api/orchestrator-runs/{id:D}/cancel",ctx,new { reason },key,ct));
+    /// <summary>The durable command identity is an internal execution claim, never a public API:
+    /// strip it from every public run body (D3 AgentRunService.StripInternalCommandMetadata posture).
+    /// Backend returns it on start/cancel accept and on the owner-readable run row, so all three go
+    /// through here; events carry a different DTO with no top-level command id.</summary>
+    private static AgentProxyResponse Redact(AgentProxyResponse response)
+    {
+        if(response.Status is <200 or >=300)return response;
+        try{ if(JsonNode.Parse(response.Body) is JsonObject run && run.Remove("command_id")) return response with { Body=run.ToJsonString(Json) }; }
+        catch(JsonException){ /* a non-JSON accepted body carries no top-level command_id to strip */ }
+        return response;
+    }
     private async Task<AgentProxyResponse> Send(HttpMethod method,string path,UserContext ctx,object? body,string? key,CancellationToken ct)
     { using var request=backend.BuildRequest(method,path,ctx,body);if(!string.IsNullOrWhiteSpace(key))request.Headers.TryAddWithoutValidation("Idempotency-Key",key);using var response=await backend.SendAsync(request,ex=>new WorkflowInvocationException("Orchestrator run Backend unavailable",ex),ct);if((int)response.StatusCode>=500)throw new WorkflowInvocationException($"Orchestrator run Backend HTTP {(int)response.StatusCode}");return new AgentProxyResponse((int)response.StatusCode,await response.Content.ReadAsStringAsync(ct),response.Headers.ETag?.ToString()); }
     private static bool TryDispatch(string body,out Guid runId,out Guid commandId)

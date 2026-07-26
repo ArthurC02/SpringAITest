@@ -96,6 +96,12 @@ async def invoke_pinned_legacy_flow(
     )
     _validate_steps(artifact.skill, artifact.skill.flow, effective, runtime_deps)
     tool_calls_bound = _tool_call_bound(artifact.skill.flow)
+    # Currently unreachable, kept for the day tool steps are re-allowed.
+    # `_validate_steps` above rejects every `tool` step (`:177`) and every node
+    # with a non-empty `requires_tools` (`:182`), which are the only two terms
+    # `_tool_call_bound` (`:220`) can add, so it is always 0 here; the caller
+    # also clamps `remaining_tool_rounds` to >= 0 (`app/runtime/graph.py:607`).
+    # Relaxing either rejection in `_validate_steps` re-arms this guard.
     if tool_calls_bound > remaining_tool_rounds:
         raise LegacyFlowDenied("legacy flow exceeds the remaining tool budget")
     cleaned = {

@@ -432,10 +432,14 @@ async def validate_package(
     /definition —— backend 以「有沒有 skill/canonical_definition」決定能不能寫。
 
     Workflow 是 SKILL.md 的唯一 parser 與語意 validator（規格 R3）；backend 不另做一套。
+
+    撰寫者角色 gate：與 /skills/validate 同樣帶入呼叫者真實角色，非 ADMIN 匯入含 script
+    步驟的 flow 定義即驗證失敗。呼叫端（backend 三個匯入入口、platform proxy）本身已是
+    ADMIN-only，這是同一條寫入路徑最內層的縱深防禦。
     """
     raw = await package_file.read()
     try:
-        parsed = package.parse_package(raw, expected_name)
+        parsed = package.parse_package(raw, expected_name, author_role=ctx.role)
     except package.PackageError as e:
         return ValidatePackageResult(valid=False, errors=list(e.errors))
 

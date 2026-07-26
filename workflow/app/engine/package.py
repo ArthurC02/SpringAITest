@@ -856,6 +856,7 @@ def _parse_flow(
     sha256: str,
     meta: Mapping[str, Any],
     body: str,
+    author_role: str | None = None,
 ) -> ValidatedPackage:
     """flow package（§3.1）：單一自包含 SKILL.md —— 定義嵌在 body 的第一個 ```yaml 區塊。
 
@@ -877,8 +878,10 @@ def _parse_flow(
             "flow package 的 SKILL.md body 缺少 ```yaml 定義區塊",
         )
 
-    # 既有 YAML validator（不另做一套）；抽出的原文作 definition，不重新序列化
-    result = validate_source(definition)
+    # 既有 YAML validator（不另做一套）；抽出的原文作 definition，不重新序列化。
+    # author_role 帶入時同 /skills/validate 啟用 script 撰寫者角色 gate（None → 不檢查，
+    # 供 runtime 載入既有 package 的路徑沿用）。
+    result = validate_source(definition, author_role=author_role)
     if not result.valid:
         raise PackageError(list(result.errors))
     skill = parse_source(definition)
@@ -904,7 +907,11 @@ def _parse_flow(
 
 
 def parse_package(
-    raw: bytes, expected_name: str | None = None, limits: PackageLimits = LIMITS
+    raw: bytes,
+    expected_name: str | None = None,
+    limits: PackageLimits = LIMITS,
+    *,
+    author_role: str | None = None,
 ) -> ValidatedPackage:
     """解析上傳的 package zip → ValidatedPackage；任何違規 raise PackageError（零副作用）。
 
@@ -912,6 +919,10 @@ def parse_package(
     `metadata.kind: agentic` → agentic；否則 → flow（定義嵌在 body 的 ```yaml 區塊，§3.1）。
     expected_name 是 optional transport guard：None 時由 SKILL.md 唯一決定名稱；有值時嚴格核對。
     sha256 為原始 zip bytes 的雜湊。
+
+    author_role 是寫入路徑（匯入端點）才帶的撰寫者身分，與 /skills/validate 同一套 gate：
+    非 ADMIN 匯入含 script 步驟的 flow 定義即驗證失敗。runtime 載入既有 package 的路徑
+    （artifacts/package_reader）不帶，gate 關閉，既有資料照常載入。
     """
     if len(raw) > MAX_PACKAGE_RAW_BYTES:
         raise PackageError.of(
@@ -954,4 +965,4 @@ def parse_package(
         return _parse_agentic(
             entries, expected_name, sha256, meta, body, scripts, resources
         )
-    return _parse_flow(entries, expected_name, sha256, meta, body)
+    return _parse_flow(entries, expected_name, sha256, meta, body, author_role)

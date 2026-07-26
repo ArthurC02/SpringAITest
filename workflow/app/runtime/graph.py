@@ -1144,9 +1144,12 @@ def _readable_resource_paths(artifact: LoadedSkillArtifact) -> list[str]:
 
 
 def _budget_error(state: RuntimeState, limits: EffectiveLimits) -> str | None:
+    # Every `max_*` budget is an inclusive upper bound on what has already been
+    # consumed: spending exactly the budget stops the run. The three comparators
+    # must stay identical, otherwise `max_context_rounds=N` silently allows N+1.
     if int(state.get("step_count") or 0) >= limits.step_budget:
         return "step_budget_exceeded"
-    if int(state.get("context_rounds") or 0) > limits.max_context_rounds:
+    if int(state.get("context_rounds") or 0) >= limits.max_context_rounds:
         return "context_budget_exceeded"
     if int(state.get("estimated_tokens") or 0) >= limits.token_budget:
         return "token_budget_exceeded"

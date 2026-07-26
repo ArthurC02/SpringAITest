@@ -115,7 +115,8 @@ public sealed class WorkflowSkillPackageValidator : ISkillPackageValidator
 
             var meta = new SkillMetadata(
                 validatedSkill.Name,
-                validatedSkill.Description!,
+                // 與 definition-only 寫入同一個預設:缺席/空 → string.Empty(見 ValidateSuccessContract)。
+                validatedSkill.Description ?? string.Empty,
                 validatedSkill.RequiredRole!,
                 validatedSkill.Kind!);
 
@@ -147,10 +148,9 @@ public sealed class WorkflowSkillPackageValidator : ISkillPackageValidator
             throw Violation($"skill.name 必須等於 expected_name '{expectedName}'");
         }
 
-        if (string.IsNullOrWhiteSpace(body.Skill.Description))
-        {
-            throw Violation("skill.description 必須是非空字串");
-        }
+        // description 刻意不要求非空:definition-only 寫入允許缺席(WorkflowSkillValidator 預設 string.Empty),
+        // SkillExporter 會把它匯出成 `description: ""`,再要求非空就變成「自己匯出的 zip 匯不回來」。
+        // 寫入端不改成必填 —— 那會讓既有沒寫 description 的 flow skill 每次 PUT 都失敗(追溯破壞)。
 
         if (body.Skill.Kind is not ("flow" or "agentic"))
         {

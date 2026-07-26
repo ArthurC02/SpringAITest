@@ -13,6 +13,7 @@ namespace Backend.Api.Data.InMemory;
 public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprovalRepository
 {
     private readonly IAgentRunRepository _agentRuns;
+    private readonly IAgentRunApprovalDecisionTransition _transition;
     private readonly TimeProvider _timeProvider;
     private readonly object _gate = new();
     private readonly Dictionary<Guid, AgentRunApprovalResponse> _items = new();
@@ -28,6 +29,11 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
     public InMemoryAgentRunApprovalRepository(IAgentRunRepository agentRuns, TimeProvider? timeProvider = null)
     {
         _agentRuns = agentRuns;
+        // Verify the terminalization seam once, at assembly time.  Testing for it per call site
+        // silently fails open the moment one of them forgets the else branch: the run is never
+        // terminalized while the caller still sees success.
+        _transition = agentRuns as IAgentRunApprovalDecisionTransition
+            ?? throw new ArgumentException("D7 核准狀態機需要 IAgentRunApprovalDecisionTransition", nameof(agentRuns));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -82,8 +88,25 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
         {
             if (!_items.TryGetValue(approvalId, out item!) || item.RunId != runId || !_runs.TryGetValue(runId, out run) || run.Tenant != tenantId) return new(AgentRunApprovalWriteStatus.NotFound);
             if (_decisions.Contains(key) || item.Status != "pending") return new(AgentRunApprovalWriteStatus.Replay, item);
-            if (item.ExpiresAt <= UtcNow()) expired = true;
-            if (!string.Equals(item.RequiredRole, approverRole, StringComparison.Ordinal) || item.SelfApprovalForbidden && item.RequestedBy == approverId) return new(AgentRunApprovalWriteStatus.Forbidden, item);
+            expired = item.ExpiresAt <= UtcNow();
+            // Expiry outranks the role/SoD check, exactly as the PostgreSQL
+            // authority orders it: expiry is a terminal decision, and returning
+            // Forbidden first would strand the run in waiting_approval forever.
+            if (!expired && (!string.Equals(item.RequiredRole, approverRole, StringComparison.Ordinal) || item.SelfApprovalForbidden && item.RequestedBy == approverId)) return new(AgentRunApprovalWriteStatus.Forbidden, item);
+        }
+        // Expiry is resolved before the run row is read, exactly as the PostgreSQL
+        // authority orders it: an expired approval is terminal regardless of the
+        // run's own readability or cancellation state.
+        if (expired)
+        {
+            await _transition.FailApprovalRunAsync(tenantId, run.Owner, runId, AgentRunApprovalFailure.ApprovalExpired, ct);
+            lock (_gate)
+            {
+                var current = _items.GetValueOrDefault(approvalId);
+                if (current is not null && current.Status == "pending") _items[approvalId] = current with { Status = "expired" };
+                _runs[runId] = (run.Tenant, run.Owner, AgentRunStatuses.Failed);
+                return new(AgentRunApprovalWriteStatus.Expired, _items.GetValueOrDefault(approvalId));
+            }
         }
         var record = await _agentRuns.GetAsync(tenantId, run.Owner, runId, ct);
         if (record is null) return new(AgentRunApprovalWriteStatus.NotFound);
@@ -96,21 +119,8 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
             }
             return new(AgentRunApprovalWriteStatus.InvalidState, _items.GetValueOrDefault(approvalId), Message: "run cancellation was requested");
         }
-        if (expired)
-        {
-            if (_agentRuns is IAgentRunApprovalDecisionTransition expiryTransition)
-                await expiryTransition.ResolveApprovalAsync(tenantId, run.Owner, runId, record.StateVersion, false, ct);
-            lock (_gate)
-            {
-                var current = _items.GetValueOrDefault(approvalId);
-                if (current is not null && current.Status == "pending") _items[approvalId] = current with { Status = "expired" };
-                _runs[runId] = (run.Tenant, run.Owner, AgentRunStatuses.Failed);
-                return new(AgentRunApprovalWriteStatus.Expired, _items.GetValueOrDefault(approvalId));
-            }
-        }
-        var moved = _agentRuns is IAgentRunApprovalDecisionTransition decisionTransition
-            ? await decisionTransition.ResolveApprovalAsync(tenantId, run.Owner, runId, record.StateVersion, approve, ct)
-            : new AgentRunWriteResult(AgentRunWriteStatus.Conflict, Message: "approval decision transition is unavailable");
+        if (record.Status != AgentRunStatuses.WaitingApproval) return new(AgentRunApprovalWriteStatus.InvalidState, item);
+        var moved = await _transition.ResolveApprovalAsync(tenantId, run.Owner, runId, record.StateVersion, approve, ct);
         if (moved.Status != AgentRunWriteStatus.Success)
         {
             // The narrow state transition sees cancel_requested under the
@@ -239,8 +249,12 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
                 return null;
         }
         var current = await _agentRuns.GetAsync(tenantId, run.Owner, runId, ct);
+        AgentRunApprovalExecuteClaim? claim;
+        bool expired;
         lock (_gate)
-            return ClaimExecuteLocked(tenantId, runId, approvalId, current?.CancelRequested ?? true);
+            claim = ClaimExecuteLocked(tenantId, runId, approvalId, current?.CancelRequested ?? true, out expired);
+        if (expired) await FailExpiredWriteAsync(tenantId, run.Owner, runId, ct);
+        return claim;
     }
 
     public async Task<IReadOnlyList<AgentRunApprovalExecuteClaim>> ClaimExecuteRecoveryAsync(int limit, CancellationToken ct)
@@ -267,14 +281,26 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
         foreach (var candidate in candidates)
         {
             var current = await _agentRuns.GetAsync(candidate.Tenant, candidate.Owner, candidate.RunId, ct);
+            bool expired;
             lock (_gate)
             {
-                var claim = ClaimExecuteLocked(candidate.Tenant, candidate.RunId, candidate.ApprovalId, current?.CancelRequested ?? true);
+                var claim = ClaimExecuteLocked(candidate.Tenant, candidate.RunId, candidate.ApprovalId, current?.CancelRequested ?? true, out expired);
                 if (claim is not null) result.Add(claim);
             }
+            if (expired) await FailExpiredWriteAsync(candidate.Tenant, candidate.Owner, candidate.RunId, ct);
         }
         return result;
     }
+
+    /// <summary>
+    /// Third statement of the PostgreSQL authority's reconcile
+    /// (<see cref="AgentRunApprovalRepository"/>'s ReconcileTerminalExecutionsAsync): once the
+    /// execute command is dead-lettered for expiry, nothing will ever claim it again, so a still
+    /// active run must be terminalized here or it stays queued forever.  It runs outside
+    /// <c>_gate</c> because the AgentRun aggregate takes its own lock.
+    /// </summary>
+    private Task FailExpiredWriteAsync(string tenantId, string userId, Guid runId, CancellationToken ct)
+        => _transition.FailApprovalRunAsync(tenantId, userId, runId, AgentRunApprovalFailure.ApprovalExpiredBeforeWrite, ct);
 
     public async Task<AgentRunApprovalWriteStatus> CompleteExecuteAsync(Guid approvalId, string claimToken, bool deadLetter, CancellationToken ct)
     {
@@ -289,24 +315,27 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
             _executions[approvalId] = execution with { Status = deadLetter ? "dead_letter" : "completed" };
             if (!deadLetter) return AgentRunApprovalWriteStatus.Success;
         }
-        var current = await _agentRuns.GetAsync(run.Tenant, run.Owner, runId, ct);
-        if (current is not null && !current.CancelRequested
-            && current.Status is AgentRunStatuses.Queued or AgentRunStatuses.Running)
-        {
-            await _agentRuns.TransitionAsync(run.Tenant, run.Owner, current.Id,
-                new AgentRunTransitionRequest(current.StateVersion, AgentRunStatuses.Failed), ct);
-        }
+        // A dead-lettered approved write terminalizes its run, exactly as the
+        // PostgreSQL authority does.  The generic worker transition cannot express
+        // this: it has no lease and promotes no checkpoint.
+        await _transition.FailApprovalRunAsync(run.Tenant, run.Owner, runId, AgentRunApprovalFailure.ApprovedWriteUnrecoverable, ct);
         return AgentRunApprovalWriteStatus.Success;
     }
 
-    private AgentRunApprovalExecuteClaim? ClaimExecuteLocked(string tenantId, Guid runId, Guid approvalId, bool cancelRequested = false)
+    private AgentRunApprovalExecuteClaim? ClaimExecuteLocked(string tenantId, Guid runId, Guid approvalId, bool cancelRequested, out bool expiredBeforeWrite)
     {
+        expiredBeforeWrite = false;
         if (!_executions.TryGetValue(approvalId, out var execution) || !_items.TryGetValue(approvalId, out var item)
             || !_runs.TryGetValue(runId, out var run) || item.RunId != runId || run.Tenant != tenantId) return null;
         if (cancelRequested || item.ExpiresAt <= UtcNow() || run.Status is AgentRunStatuses.Completed or AgentRunStatuses.Failed or AgentRunStatuses.Cancelled)
         {
+            var reclaimable = execution.Status is "queued" or "claimed";
             _executions[approvalId] = execution with { Status = "dead_letter" };
-            if (item.ExpiresAt <= UtcNow() && item.Status is ("approved" or "consumed")) _items[approvalId] = item with { Status = "expired" };
+            if (item.ExpiresAt <= UtcNow())
+            {
+                if (item.Status is "approved" or "consumed") _items[approvalId] = item with { Status = "expired" };
+                expiredBeforeWrite = reclaimable;
+            }
             return null;
         }
         if (execution.Status is "completed" or "dead_letter" || execution.Status == "claimed" && execution.ClaimExpiresAt > UtcNow()) return null;

@@ -45,10 +45,12 @@ public sealed class AgentRunSnapshotContractTests
 
         var plusOne = CanonicalSnapshotWithExactBytes(
             AgentExecutionContract.MaxSnapshotCanonicalBytes + 1);
-        Assert.Throws<InvalidOperationException>(() =>
+        var rejected = Assert.Throws<InvalidOperationException>(() =>
             AgentRunSnapshotBuilder.CreateExecutionArtifact(
                 plusOne,
                 SkillHash.Sha256(Encoding.UTF8.GetBytes(plusOne))));
+        // ReadAuthoritativeSnapshot 有 5 種原因都拋同一型別;不驗訊息的話雜湊算錯也會讓這條假綠。
+        Assert.Contains("canonical UTF-8 bytes", rejected.Message);
     }
 
     [Fact]
@@ -126,6 +128,10 @@ public sealed class AgentRunSnapshotContractTests
         Assert.Equal(
             built.SnapshotHash,
             envelope.RootElement.GetProperty("snapshot_hash").GetString());
+        // envelope 回音是自我一致的;獨立重算才證明 hash 真的蓋住這份聚合上限的 bytes。
+        Assert.Equal(
+            built.SnapshotHash,
+            SkillHash.Sha256(Encoding.UTF8.GetBytes(built.StoredSnapshot)));
     }
 
     [Fact]
@@ -220,6 +226,111 @@ public sealed class AgentRunSnapshotContractTests
             Convert.FromBase64String(envelope.RootElement
                 .GetProperty("snapshot_canonical_base64")
                 .GetString()!));
+    }
+
+    /// <summary>
+    /// backend/AGENTS.md:「Legacy rows missing canonical bytes fail closed;JSONB is never a fallback」。
+    /// 這七條分支是那句話在程式碼裡的唯一防線 — 若有人把缺 bytes 改成回落讀 jsonb,今天全部仍會綠。
+    /// </summary>
+    [Fact]
+    public void AuthoritativeDefinition_FailsClosedOnEveryTamperedForm()
+    {
+        var valid = DefinitionWithPadding(
+            string.Empty, Array.Empty<AgentRevisionSkillInfo>());
+        var validBytes = Encoding.UTF8.GetBytes(valid);
+        var validSha = SkillHash.Sha256(validBytes);
+        Assert.Equal(valid, Read(validBytes, validSha)); // happy path 先自證
+
+        Assert.Contains(
+            "lacks authoritative canonical definition bytes",
+            Rejected(null, validSha));
+        var overCap = Encoding.UTF8.GetBytes(
+            DefinitionWithExactBytes(
+                AgentExecutionContract.MaxCanonicalDefinitionBytes + 1));
+        Assert.Contains(
+            "exceeds its byte limit",
+            Rejected(overCap, SkillHash.Sha256(overCap)));
+        Assert.Contains(
+            "hash mismatch",
+            Rejected(validBytes, new string('0', 64)));
+
+        var withBom = new byte[] { 0xEF, 0xBB, 0xBF }.Concat(validBytes).ToArray();
+        Assert.Contains(
+            "must not contain a UTF-8 BOM",
+            Rejected(withBom, SkillHash.Sha256(withBom)));
+
+        var badShape = Encoding.UTF8.GetBytes("""{"system_prompt":"only"}""");
+        Assert.Contains(
+            "invalid root schema",
+            Rejected(badShape, SkillHash.Sha256(badShape)));
+
+        var reordered = Encoding.UTF8.GetBytes(new JsonObject(
+            JsonNode.Parse(valid)!.AsObject()
+                .Reverse()
+                .Select(p => KeyValuePair.Create(p.Key, p.Value?.DeepClone()))).ToJsonString());
+        Assert.Contains(
+            "are not canonical JSON",
+            Rejected(reordered, SkillHash.Sha256(reordered)));
+
+        var invalidUtf8 = validBytes.Concat(new byte[] { 0xFF }).ToArray();
+        Assert.Contains(
+            "not strict UTF-8 JSON",
+            Rejected(invalidUtf8, SkillHash.Sha256(invalidUtf8)));
+
+        static string Read(byte[]? bytes, string sha)
+            => AgentCanonicalizer.ReadAuthoritativeDefinition(bytes, sha, "Agent draft");
+
+        static string Rejected(byte[]? bytes, string sha)
+            => Assert.Throws<InvalidOperationException>(() => Read(bytes, sha)).Message;
+    }
+
+    /// <summary>
+    /// 同理的 run snapshot 側:`HasSnapshotShape` 的六個必要 key 逐一被拿掉都必須拒收,
+    /// 否則 Workflow 可能拿到缺 caller/mode 的快照仍照跑。
+    /// </summary>
+    [Fact]
+    public void AuthoritativeSnapshot_FailsClosedOnTamperedBytesAndMissingRequiredKeys()
+    {
+        var valid = CanonicalSnapshotWithExactBytes(512);
+        var validBytes = Encoding.UTF8.GetBytes(valid);
+        var validSha = SkillHash.Sha256(validBytes);
+        Assert.Equal(valid, AgentRunSnapshotBuilder.ReadAuthoritativeSnapshot(validBytes, validSha));
+
+        Assert.Contains(
+            "lacks authoritative canonical snapshot bytes",
+            Rejected(null, validSha));
+        Assert.Contains("hash mismatch", Rejected(validBytes, new string('0', 64)));
+
+        var withBom = new byte[] { 0xEF, 0xBB, 0xBF }.Concat(validBytes).ToArray();
+        Assert.Contains(
+            "must not contain a UTF-8 BOM",
+            Rejected(withBom, SkillHash.Sha256(withBom)));
+
+        var reordered = Encoding.UTF8.GetBytes(new JsonObject(
+            JsonNode.Parse(valid)!.AsObject()
+                .Reverse()
+                .Select(p => KeyValuePair.Create(p.Key, p.Value?.DeepClone()))).ToJsonString());
+        Assert.Contains("are not canonical JSON", Rejected(reordered, SkillHash.Sha256(reordered)));
+
+        foreach (var required in new[] { "run_id", "agent", "workflow", "skills", "caller", "mode" })
+        {
+            var stripped = JsonNode.Parse(valid)!.AsObject();
+            stripped.Remove(required);
+            var bytes = Encoding.UTF8.GetBytes(
+                AgentRunSnapshotBuilder.CanonicalizeJson(stripped.ToJsonString()));
+            Assert.Contains(
+                "invalid root schema",
+                Rejected(bytes, SkillHash.Sha256(bytes)));
+        }
+
+        var invalidUtf8 = validBytes.Concat(new byte[] { 0xFF }).ToArray();
+        Assert.Contains(
+            "not strict UTF-8 JSON",
+            Rejected(invalidUtf8, SkillHash.Sha256(invalidUtf8)));
+
+        static string Rejected(byte[]? bytes, string sha)
+            => Assert.Throws<InvalidOperationException>(
+                () => AgentRunSnapshotBuilder.ReadAuthoritativeSnapshot(bytes, sha)).Message;
     }
 
     private static string DefinitionWithExactBytes(int targetBytes)

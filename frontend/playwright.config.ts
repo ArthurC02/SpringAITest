@@ -17,6 +17,10 @@ export default defineConfig({
   reporter: [
     ['line'],
     ['junit', { outputFile: path.join(evidenceDir, 'junit', 'playwright.xml') }],
+    // Fail-closed even when this npm script is run directly, without the PS1 harness that
+    // otherwise turns a skip into BLOCKED by reading the JUnit report. See the reporter's
+    // own doc comment for why a skip must never let `npm run test:evidence` exit 0.
+    ['./evidenceSkipGuardReporter.ts'],
   ],
   use: {
     baseURL: process.env.PW_BASE_URL ?? 'http://127.0.0.1:5173',

@@ -63,6 +63,24 @@ public sealed class SkillPackageMigrationTests
         Assert.Equal(decoyText, entries[decoy]);
     }
 
+    // 兩個合法位置同時存在時的第一優先序:root `SKILL.md` 勝過 `{name}/SKILL.md`
+    // (SelectSkillMdName 的順序)。順序反過來的話,遷移會改到資料夾下那份、留下沒改到的 root
+    // frontmatter —— 匯入端讀 root,等於遷移靜默失效。
+    [Fact]
+    public void Rewrite_RootAndFolderedSkillMd_PrefersRootSkillMd()
+    {
+        const string folderedText = "---\nname: foldered_name\ndescription: d\n---\n資料夾下那份\n";
+        var package = Zip(($"{Name}/SKILL.md", folderedText), ("SKILL.md", SkillMd("sales_helper")));
+
+        Assert.True(SkillPackageMigration.PackageNeedsRewrite(package, Name, "flow"));
+        var migrated = SkillPackageMigration.Rewrite(package, Name, "flow");
+
+        var entries = ReadZip(migrated.Bytes);
+        Assert.Contains($"name: {Name}\n", entries["SKILL.md"]);
+        Assert.DoesNotContain("sales_helper", entries["SKILL.md"]);
+        Assert.Equal(folderedText, entries[$"{Name}/SKILL.md"]); // 另一份原封不動
+    }
+
     // 已標準的 package + 巢狀誘餌 → 不得誤判為需要改寫(否則每次啟動都重壓縮、破壞 byte 契約)。
     [Fact]
     public void PackageNeedsRewrite_StandardPackageWithNestedDecoy_IsFalse()

@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging.Abstractions;
 using Platform.Service.Dtos;
+using Platform.Service.Exceptions;
 using Platform.Service.Options;
 
 namespace Platform.Service.Tests;
@@ -185,31 +186,8 @@ public sealed class AgentRunServiceTests
         Assert.Equal(CommandId, workflowBody.RootElement.GetProperty("command_id").GetGuid());
     }
 
-    [Fact]
-    public async Task Resume_TrimsMessageOnlyInDurableBackendAllocation()
-    {
-        string? backendBody = null;
-        var backend = new StubHttpMessageHandler(request =>
-        {
-            backendBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
-            return Command(
-                $$"""{"id":"{{RunIdText}}","status":"queued","state_version":7}""");
-        });
-        var workflow = new StubHttpMessageHandler(_ =>
-            Json(HttpStatusCode.Accepted, "{}"));
-
-        await Build(backend, workflow).ResumeAsync(
-            RunId,
-            new string(' ', 20_000) + "x" + new string(' ', 20_000),
-            3,
-            "trimmed-resume",
-            Admin);
-
-        using var backendJson = JsonDocument.Parse(backendBody!);
-        using var workflowJson = JsonDocument.Parse(workflow.LastBody!);
-        Assert.Equal("x", backendJson.RootElement.GetProperty("message").GetString());
-        Assert.Equal(new[] { "command_id" }, workflowJson.RootElement.EnumerateObject().Select(p => p.Name));
-    }
+    // Resume 的 message?.Trim() 是 Start 的同一行語意(AgentRunService.cs 兩個 caller);
+    // resume 側的 trim 另由 ReplayedCommand_ReturnsOriginalRun_WithoutWorkflowOrAck 驗過。
 
     [Fact]
     public async Task Cancel_PersistsFirst_ThenKicksWorkflowWithOnlyCommandId()
@@ -345,6 +323,168 @@ public sealed class AgentRunServiceTests
 
         Assert.Equal(202, result.Status);
         Assert.Equal(new[] { $"/api/runs/{RunIdText}/resume" }, backendPaths);
+    }
+
+    // ---- D7 approvals(service 層之前 0 覆蓋;reject 分支在 platform 從未被執行過)----
+
+    [Fact]
+    public async Task Approvals_ForwardsListPathAndSignedIdentity()
+    {
+        var backend = new StubHttpMessageHandler(_ => Json(
+            HttpStatusCode.OK, """[{"id":"66666666-6666-4666-8666-666666666666","status":"pending"}]"""));
+        var workflow = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException("讀取待審清單不得觸發 Workflow"));
+
+        var result = await Build(backend, workflow).ApprovalsAsync(RunId, Admin);
+
+        Assert.Equal($"http://backend/api/runs/{RunIdText}/approvals", backend.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Get, backend.LastRequest.Method);
+        Assert.Equal("demo-a", backend.Header("X-Tenant-Id"));
+        Assert.Equal("admin-a", backend.Header("X-User-Id"));
+        Assert.Equal(200, result.Status);
+    }
+
+    /// <summary>
+    /// approve 走 /approve 後綴、reason 去頭尾空白、Idempotency-Key 原樣轉發,成功後 best-effort kick
+    /// Workflow 的一次性寫入執行;reject 走 /reject 後綴且**絕不**觸發該 kick(拒絕不得產生任何效果)。
+    /// </summary>
+    [Theory]
+    [InlineData(true, "approve", 1)]
+    [InlineData(false, "reject", 0)]
+    public async Task DecideApproval_UsesDecisionSuffix_AndOnlyApproveKicksWorkflow(
+        bool approve, string expectedSuffix, int expectedWorkflowCalls)
+    {
+        var approvalId = Guid.Parse("66666666-6666-4666-8666-666666666666");
+        string? backendBody = null;
+        string? idempotencyKey = null;
+        var backend = new StubHttpMessageHandler(request =>
+        {
+            backendBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            idempotencyKey = request.Headers.TryGetValues("Idempotency-Key", out var values)
+                ? values.Single()
+                : null;
+            return Json(HttpStatusCode.Accepted, """{"id":"66666666-6666-4666-8666-666666666666","status":"decided"}""");
+        });
+        var workflowCalls = 0;
+        var workflow = new StubHttpMessageHandler(_ =>
+        {
+            workflowCalls++;
+            return Json(HttpStatusCode.Accepted, "{}");
+        });
+
+        var result = await Build(backend, workflow).DecideApprovalAsync(
+            RunId, approvalId, approve, "  已複核  ", "approval-attempt-1", Admin);
+
+        Assert.Equal(202, result.Status);
+        Assert.Equal(
+            $"http://backend/api/runs/{RunIdText}/approvals/{approvalId:D}/{expectedSuffix}",
+            backend.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("approval-attempt-1", idempotencyKey);
+        using (var sent = JsonDocument.Parse(backendBody!))
+        {
+            Assert.Equal("已複核", sent.RootElement.GetProperty("reason").GetString());
+        }
+
+        Assert.Equal(expectedWorkflowCalls, workflowCalls);
+        if (expectedWorkflowCalls > 0)
+        {
+            Assert.Equal(
+                $"http://workflow/agent-runs/{RunIdText}/approvals/{approvalId:D}/execute",
+                workflow.LastRequest!.RequestUri!.ToString());
+        }
+    }
+
+    /// <summary>Backend 拒絕(SoD/過期/非 waiting)原樣穿透,且失敗的決策不得觸發一次性寫入。</summary>
+    [Theory]
+    [InlineData(403)]
+    [InlineData(404)]
+    [InlineData(409)]
+    public async Task DecideApproval_BackendRejection_PassesThroughWithoutKick(int status)
+    {
+        var backend = new StubHttpMessageHandler(_ => Json(
+            (HttpStatusCode)status, $$"""{"status":{{status}},"message":"下游決策訊息"}"""));
+        var workflowCalls = 0;
+        var workflow = new StubHttpMessageHandler(_ =>
+        {
+            workflowCalls++;
+            return Json(HttpStatusCode.Accepted, "{}");
+        });
+
+        var result = await Build(backend, workflow).DecideApprovalAsync(
+            RunId, Guid.Parse("66666666-6666-4666-8666-666666666666"), true, "r", "k", Admin);
+
+        Assert.Equal(status, result.Status);
+        Assert.Contains("下游決策訊息", result.Body, StringComparison.Ordinal);
+        Assert.Equal(0, workflowCalls);
+    }
+
+    /// <summary>核准已耐久落地後,Workflow kick 是 best-effort:掛掉也不得改寫已回給審批者的狀態碼。</summary>
+    [Fact]
+    public async Task DecideApproval_ApprovedWriteKickFails_KeepsDurableDecisionStatus()
+    {
+        var backend = new StubHttpMessageHandler(_ => Json(
+            HttpStatusCode.Accepted, """{"id":"66666666-6666-4666-8666-666666666666","status":"approved"}"""));
+        var workflow = new StubHttpMessageHandler(_ =>
+            throw new HttpRequestException("workflow unavailable"));
+
+        var result = await Build(backend, workflow).DecideApprovalAsync(
+            RunId, Guid.Parse("66666666-6666-4666-8666-666666666666"), true, null, null, Admin);
+
+        Assert.Equal(202, result.Status);
+        Assert.Contains("approved", result.Body, StringComparison.Ordinal);
+    }
+
+    // ---- Backend 命令 metadata 不可信時的受控失敗(全部收斂成 502,不得靜默跳過 dispatch)----
+
+    [Theory]
+    [InlineData("missing-dispatch-header")]
+    [InlineData("non-boolean-dispatch-header")]
+    [InlineData("missing-command-id-header")]
+    [InlineData("non-guid-command-id")]
+    [InlineData("body-missing-id")]
+    [InlineData("backend-5xx")]
+    public async Task BackendCommandMetadata_Invalid_MapsToControlledFailure(string scenario)
+    {
+        var backend = new StubHttpMessageHandler(_ =>
+        {
+            if (scenario == "backend-5xx")
+            {
+                return Json(HttpStatusCode.InternalServerError, """{"detail":"secret"}""");
+            }
+
+            var body = scenario == "body-missing-id"
+                ? """{"status":"queued","command_id":"55555555-5555-5555-5555-555555555555"}"""
+                : $$"""{"id":"{{RunIdText}}","status":"queued","command_id":"{{CommandIdText}}"}""";
+            var response = Json(HttpStatusCode.Accepted, body);
+            if (scenario != "missing-dispatch-header")
+            {
+                response.Headers.TryAddWithoutValidation(
+                    "X-Agent-Run-Dispatch-Required",
+                    scenario == "non-boolean-dispatch-header" ? "yes" : "True");
+            }
+
+            if (scenario != "missing-command-id-header")
+            {
+                response.Headers.TryAddWithoutValidation(
+                    "X-Agent-Run-Command-Id",
+                    scenario == "non-guid-command-id" ? "not-a-guid" : CommandIdText);
+            }
+
+            return response;
+        });
+        var workflowCalls = 0;
+        var workflow = new StubHttpMessageHandler(_ =>
+        {
+            workflowCalls++;
+            return Json(HttpStatusCode.Accepted, "{}");
+        });
+
+        var error = await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(backend, workflow).StartAsync(AgentId, "hello", "metadata-" + scenario, Admin));
+
+        Assert.StartsWith("Agent 執行服務失敗：", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, workflowCalls);
     }
 
     [Fact]

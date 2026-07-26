@@ -92,6 +92,114 @@ public sealed class ChatContextProviderAndRecorderTests
         Assert.Empty(convos.Saved);
     }
 
+    // ================================================================
+    // D6:AgentChatRoutingAgent 短路(canary 命中)那一輪的 recorder 語意(表 4 #12/#13)。
+    // recorder 掛在短路層「之外」(Program.cs:218-221/261-263),所以就算本輪完全沒經過 SkillRoutingAgent
+    // 與 ChatClientAgent,持久化 + mem0 remember 仍必須各發生恰好一次,且帶上 Root Orchestrator 的 lineage。
+    // ================================================================
+
+    private static readonly ChatTurnMetadata RootLineage = new(
+        Guid.Parse("11111111-1111-1111-1111-111111111111"),
+        2,
+        Guid.Parse("22222222-2222-2222-2222-222222222222"),
+        3,
+        Guid.Parse("33333333-3333-3333-3333-333333333333"));
+
+    private const string RoutableCatalog = """
+    [ { "name":"kb-query", "description":"知識庫檢索", "required_role":"USER", "source":"builtin",
+        "input_schema": { "query": { "type":"str", "required":true } } } ]
+    """;
+
+    private static FakeWorkflowService RoutableWorkflows() => new()
+    {
+        Catalog = System.Text.Json.JsonDocument.Parse(RoutableCatalog).RootElement.Clone(),
+    };
+
+    [Fact]
+    public async Task AgentChatRouted_ShortCircuits_StillPersistsAndRemembersExactlyOnce_WithLineage()
+    {
+        var chatClient = new FakeChatClient();
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore();
+        var workflows = RoutableWorkflows();
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "d6-hit", UserA);
+        var agentChat = new FakeAgentChatRuntime
+        {
+            Reply = "Root Orchestrator 的答案",
+            Metadata = RootLineage,
+        };
+        var (hostAgent, _, _) = TestChatAgent.Build(
+            chatClient, mem0, convos, identity, workflows: workflows, agentChat: agentChat);
+
+        var session = await hostAgent.GetOrCreateSessionAsync("d6-hit");
+        var response = await hostAgent.RunAsync("這季毛利率多少?", session);
+
+        Assert.Equal("Root Orchestrator 的答案", response.Text);
+
+        // 短路層拿到的是「已推導」的 conversationId(含租戶:使用者前綴),不是 body 原值。
+        var call = Assert.Single(agentChat.Calls);
+        Assert.Equal("這季毛利率多少?", call.Message);
+        Assert.Equal("demo-a:user-a:d6-hit", call.ConversationId);
+
+        // 這一輪完全不經過 skill 路由與 ChatClientAgent(短路的定義)。
+        Assert.Empty(workflows.CatalogContexts);
+        Assert.Empty(chatClient.Calls);
+
+        // 但 recorder 在外側,持久化與 remember 各恰好一次,且 D6 lineage 有交給 store。
+        Assert.Equal(("這季毛利率多少?", "Root Orchestrator 的答案"), Assert.Single(convos.Saved));
+        Assert.Same(RootLineage, Assert.Single(convos.SavedMetadata));
+        Assert.Equal(
+            ("demo-a:user-a", "這季毛利率多少?", "Root Orchestrator 的答案"),
+            Assert.Single(mem0.Remembered));
+    }
+
+    // 阻塞半:持久化失敗 → 只留訊號(由 ChatService 升級成 500),不 remember —— 與 legacy 路徑同語意。
+    [Fact]
+    public async Task AgentChatRouted_BlockingPersistFailure_SignalsFailure_DoesNotRemember()
+    {
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore { ThrowOnAdd = true };
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "d6-persist-fail", UserA);
+        var agentChat = new FakeAgentChatRuntime { Reply = "Root 答案", Metadata = RootLineage };
+        var (hostAgent, _, _) = TestChatAgent.Build(
+            new FakeChatClient(), mem0, convos, identity, agentChat: agentChat);
+
+        var session = await hostAgent.GetOrCreateSessionAsync("d6-persist-fail");
+        var response = await hostAgent.RunAsync("問題", session);
+
+        Assert.Equal("Root 答案", response.Text);
+        Assert.IsType<Platform.Service.Exceptions.BackendCallException>(identity.PersistFailure);
+        Assert.Empty(mem0.Remembered);
+    }
+
+    // 串流半:持久化 best-effort —— 已送出的短路答案照常送達,且仍 remember(與阻塞刻意不同)。
+    [Fact]
+    public async Task AgentChatRouted_StreamingPersistFailure_IsBestEffort_StillStreamsAndRemembers()
+    {
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore { ThrowOnAdd = true };
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "d6-stream-persist-fail", UserA);
+        var agentChat = new FakeAgentChatRuntime { Reply = "Root 串流答案", Metadata = RootLineage };
+        var (hostAgent, _, _) = TestChatAgent.Build(
+            new FakeChatClient(), mem0, convos, identity, agentChat: agentChat);
+
+        var session = await hostAgent.GetOrCreateSessionAsync("d6-stream-persist-fail");
+        var collected = new List<string>();
+        await foreach (var update in hostAgent.RunStreamingAsync("問題", session))
+        {
+            collected.Add(update.Text ?? string.Empty);
+        }
+
+        Assert.Equal("Root 串流答案", string.Concat(collected));
+        Assert.IsType<Platform.Service.Exceptions.BackendCallException>(identity.PersistFailure);
+        Assert.Equal(
+            ("demo-a:user-a", "問題", "Root 串流答案"),
+            Assert.Single(mem0.Remembered));
+    }
+
     [Fact]
     public async Task Mem0Recall_CallerRequestedCancellation_Propagates()
     {

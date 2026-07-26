@@ -47,10 +47,10 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、**Agent Registry proxy**、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 509 個（Service 294 + Web 215）+ 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能、**Agent Registry CRUD/publish/revisions**、appdb 永久儲存;測試用 xUnit 326 個、手寫 fake repository（未引入 mocking 套件）。
-- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定），`AGENT_BUILDER_ENABLED` 開啟時提供 ADMIN-only Agents workspace；`WORKFLOW_DESIGNER_ENABLED` 開啟且帳號具 `workflow.manage` 時，另提供 Workflow Designer 與 Orchestrator Registry；再開啟 `MULTI_AGENT_DISPATCH_ENABLED` 後可執行 durable Root Orchestrator 測試並在 Designer 查看唯讀 root/child trace。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint + vite build + Playwright regression tests。
-- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、安全 Skill/Tool catalogs、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 665 個。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、**Agent Registry proxy**、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 660 個（Service 334 + Web 326）+ 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能、**Agent Registry CRUD/publish/revisions**、appdb 永久儲存;測試用 xUnit 694 個（所有 PostgreSQL 相依測試現在都跑，採租戶前綴隔離 + IAsyncLifetime 清理，0 個 skipped）、手寫 fake repository（未引入 mocking 套件）。
+- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定），`AGENT_BUILDER_ENABLED` 開啟時提供 ADMIN-only Agents workspace；`WORKFLOW_DESIGNER_ENABLED` 開啟且帳號具 `workflow.manage` 時，另提供 Workflow Designer 與 Orchestrator Registry；再開啟 `MULTI_AGENT_DISPATCH_ENABLED` 後可執行 durable Root Orchestrator 測試並在 Designer 查看唯讀 root/child trace。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint + vite build + Vitest logic tests 42 個 + Playwright UI regression tests 35 個（合計 77 個 unit tests）+ 4 個 evidence tests。
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、安全 Skill/Tool catalogs、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 1135 個（3 個 skipped）。
 
 > .NET 後端需 .NET SDK 10 以上才能建置（`dotnet --version` 應顯示 `10.x`）。
 
@@ -221,7 +221,7 @@ workflow                                  Skill 引擎層
 | ---- | ----------- | --------------------- | --------------------------------------------------------------------------------------------- |
 | 平台 | Service     | `ChatServiceTests`    | xUnit + 手寫 fake HttpMessageHandler（BackendClient 代理行為）                                |
 | 平台 | Web         | `ChatControllerTests` | xUnit + WebApplicationFactory（整合測試）                                                     |
-| 核心 | Backend.Api | 326 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking、Agent Registry 等單元測試 |
+| 核心 | Backend.Api | 694 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking、Agent Registry 等單元測試（所有 PostgreSQL 相依測試現在都跑，0 個 skipped） |
 
 ## 可觀測性架構（LiteLLM 閘道 + Langfuse）
 

@@ -92,6 +92,32 @@ public sealed class SkillImportPipelineTests : IClassFixture<SkillImportPipeline
         Assert.True(IndexOf(_factory.Backend.Body!, UploadedBytes) >= 0);
     }
 
+    // 缺檔的兩個 null 分支(SkillController.ReadPackageAsync / PackageFileName):ADMIN 送出沒有 package 檔位的
+    // multipart 時,platform 不得自己回 400,而是轉送「空 bytes + package.zip」讓 backend 依角色 → 檔案的順序判。
+    // (USER 早已被 [AdminOnly] 擋掉,所以這條路徑只有 ADMIN 走得到。)
+    [Fact]
+    public async Task Import_NoFilePart_ForwardsEmptyPackageAndDefaultFileName()
+    {
+        _factory.Backend.Reset(HttpStatusCode.BadRequest,
+            """{"timestamp":"2026-07-25T00:00:00Z","status":400,"message":"缺少 package 檔案","fieldErrors":{}}""");
+        using var noFile = new MultipartFormDataContent();
+        noFile.Add(new StringContent("ignored"), "note");
+
+        var response = await _factory.AdminClient().PostAsync(
+            "/api/skills/sales-helper/import", noFile);
+
+        // backend 才是判定者:platform 原樣把它的 400 帶回去。
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("缺少 package 檔案", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // 轉送出去的仍是一份合法 multipart,含名為 package、檔名 package.zip 的空檔位。
+        Assert.Equal("/api/skills/sales-helper/import", _factory.Backend.Path);
+        var forwarded = Encoding.UTF8.GetString(_factory.Backend.Body!);
+        Assert.Contains("name=package", forwarded);
+        Assert.Contains("package.zip", forwarded);
+        Assert.DoesNotContain("ignored", forwarded);
+    }
+
     /// <summary>在 haystack 位元組序列中尋找 needle 的起始索引;找不到回 -1。</summary>
     private static int IndexOf(byte[] haystack, byte[] needle)
     {

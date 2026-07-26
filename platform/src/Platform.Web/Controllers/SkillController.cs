@@ -1,9 +1,11 @@
 using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
+using Platform.Service.Exceptions;
 using Platform.Web.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 
 namespace Platform.Web.Controllers;
 
@@ -76,8 +78,9 @@ public sealed class SkillController : ControllerBase
     /// </summary>
     [HttpPost("{name}/import")]
     [AdminOnly]
-    [RequestSizeLimit(17L * 1024 * 1024)]
-    [RequestFormLimits(MultipartBodyLengthLimit = 17L * 1024 * 1024)]
+    [PackageTooLarge]
+    [RequestSizeLimit(PackageSizeLimitBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = PackageSizeLimitBytes)]
     public async Task<ActionResult<JsonElement>> Import(string name, IFormFile? package, CancellationToken ct)
         => Ok(await _skills.ImportAsync(
             name, await ReadPackageAsync(package, ct), PackageFileName(package),
@@ -86,12 +89,41 @@ public sealed class SkillController : ControllerBase
     /// <summary>Server-derived 匯入：不接受 client route name，由 backend/workflow 從 package 推導。</summary>
     [HttpPost("import")]
     [AdminOnly]
-    [RequestSizeLimit(17L * 1024 * 1024)]
-    [RequestFormLimits(MultipartBodyLengthLimit = 17L * 1024 * 1024)]
+    [PackageTooLarge]
+    [RequestSizeLimit(PackageSizeLimitBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = PackageSizeLimitBytes)]
     public async Task<ActionResult<JsonElement>> Import(IFormFile? package, CancellationToken ct)
         => Ok(await _skills.ImportAsync(
             await ReadPackageAsync(package, ct), PackageFileName(package),
             User.ToUserContext(), ct));
+
+    private const long PackageSizeLimitBytes = 17L * 1024 * 1024;
+
+    /// <summary>
+    /// 匯入路徑的上傳大小上限對外語意 = 413。沒有這一層時,超限會被 form model binding 攔下,
+    /// 落到 [ApiController] 的自動 400「輸入驗證失敗」+ 空 fieldErrors,前端無從提示「檔案太大」。
+    /// 刻意只掛在這兩條路由,不動全域例外對照表(那會改掉所有端點的 form/body 過大狀態碼)。
+    /// resource filter 晚於所有 authorization filter,所以 USER 的超大上傳仍固定 403(不洩漏上傳限制)。
+    /// 訊息與 Business Rule payload 的 413 明確可區分(那條說的是 payload,這條說的是 Skill 套件)。
+    /// ponytail: 只看 Content-Length —— 瀏覽器送 FormData 一定會帶;沒帶(chunked)時仍由
+    /// [RequestSizeLimit] 兜底成 400,需要 chunked 也精確時再補讀取端計數。
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Method)]
+    private sealed class PackageTooLargeAttribute : Attribute, IResourceFilter
+    {
+        public void OnResourceExecuting(ResourceExecutingContext context)
+        {
+            if (context.HttpContext.Request.ContentLength > PackageSizeLimitBytes)
+            {
+                throw new WorkflowPayloadTooLargeException(
+                    $"Skill 套件超過上傳大小上限（{PackageSizeLimitBytes / (1024 * 1024)} MiB）");
+            }
+        }
+
+        public void OnResourceExecuted(ResourceExecutedContext context)
+        {
+        }
+    }
 
     private static async Task<byte[]> ReadPackageAsync(IFormFile? package, CancellationToken ct)
     {

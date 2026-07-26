@@ -29,10 +29,20 @@ test.describe('D4 management wire adapters', () => {
     const responses = [workflowWire, workflowWire, workflowWire, { valid: false, errors: [{ field: 'definition', message: 'bad', node_id: 'n1' }] }, { valid: true, canonicalDefinition: workflowDraft.definition, trace: [{ nodeId: 'n1', status: 'passed' }] }, workflowWire, workflowWire, { catalogVersion: '1', nodes: [{ type: 'start', version: '1.0', title: 'Start', kind: 'control', inputs: [], outputs: [], configSchema: {}, authoringCapability: 'workflow.manage', catalogVisibility: 'system-admin', runtimePolicy: 'run.control' }] }]
     globalThis.fetch = async (input, init) => { calls.push({ path: String(input), init }); return new Response(JSON.stringify(responses.shift()), { status: 200, headers: { 'Content-Type': 'application/json', ETag: '"4"' } }) }
     try {
-      await createWorkflow({ name: 'Root', kind: 'orchestrator', draft: workflowDraft }); const get = await getWorkflow('w1'); await putWorkflowDraft('w1', get.data, workflowDraft, '"4"'); const validation = await validateWorkflow('w1', '"4"'); const simulation = await simulateWorkflow('w1', '"4"'); await publishWorkflow('w1', 4, '"4"'); await restoreWorkflowRevision('w1', 1); const catalog = await listWorkflowNodeCatalog()
+      await createWorkflow({ name: 'Root', kind: 'orchestrator', draft: workflowDraft }); const get = await getWorkflow('w1'); await putWorkflowDraft('w1', get.data, workflowDraft, '"4"'); const validation = await validateWorkflow('w1', '"4"'); const simulation = await simulateWorkflow('w1', '"4"'); await publishWorkflow('w1', 4, '"4"'); const restored = await restoreWorkflowRevision('w1', 1); const catalog = await listWorkflowNodeCatalog()
+      // Creation has nothing to lock against, so If-Match must be omitted rather than sent empty.
+      expect(calls[0].path).toBe('/api/admin/workflows'); expect(calls[0].init?.method).toBe('POST'); expect(new Headers(calls[0].init?.headers).get('If-Match')).toBeNull()
       expect(JSON.parse(String(calls[0].init?.body))).toEqual({ name: 'Root', kind: 'orchestrator', definition: workflowDraft.definition, ui_metadata: workflowDraft.ui_metadata })
+      expect(calls[2].path).toBe('/api/admin/workflows/w1/draft'); expect(new Headers(calls[2].init?.headers).get('If-Match')).toBe('"4"')
       expect(JSON.parse(String(calls[2].init?.body))).toEqual({ name: 'Root', kind: 'orchestrator', definition: workflowDraft.definition, ui_metadata: workflowDraft.ui_metadata })
-      expect(new Headers(calls[3].init?.headers).get('If-Match')).toBe('"4"'); expect(JSON.parse(String(calls[5].init?.body))).toEqual({ expected_draft_version: 4 })
+      expect(calls[3].path).toBe('/api/admin/workflows/w1/validate'); expect(new Headers(calls[3].init?.headers).get('If-Match')).toBe('"4"')
+      expect(calls[4].path).toBe('/api/admin/workflows/w1/simulate'); expect(new Headers(calls[4].init?.headers).get('If-Match')).toBe('"4"')
+      // Publish carries both guards: the expected draft version in the body and the ETag in If-Match.
+      expect(calls[5].path).toBe('/api/admin/workflows/w1/publish'); expect(new Headers(calls[5].init?.headers).get('If-Match')).toBe('"4"'); expect(JSON.parse(String(calls[5].init?.body))).toEqual({ expected_draft_version: 4 })
+      // Restore republishes an old revision as a new one: no If-Match, no body, decoded like any workflow.
+      expect(calls[6]).toMatchObject({ path: '/api/admin/workflows/w1/revisions/1/restore', init: { method: 'POST' } }); expect(calls[6].init?.body).toBeUndefined(); expect(new Headers(calls[6].init?.headers).get('If-Match')).toBeNull()
+      expect(restored).toEqual(decodeWorkflow(workflowWire)); expect(restored.draft.definition).toEqual(workflowDraft.definition)
+      expect(calls[7].path).toBe('/api/admin/workflows/catalog/nodes')
       expect(validation.errors[0]).toMatchObject({ scope: 'node', id: 'n1', code: 'definition' }); expect(simulation.trace).toEqual([{ node_id: 'n1', status: 'passed', summary: undefined }]); expect(catalog).toHaveLength(1)
     } finally { globalThis.fetch = original }
   })

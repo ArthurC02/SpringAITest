@@ -38,6 +38,18 @@ public sealed class JwtTests
         Assert.ThrowsAny<SecurityTokenException>(() => Service().Validate(token));
     }
 
+    // ValidateLifetime 同時管 nbf 與 exp:「尚未生效」是與「已過期」不同的例外型別與判斷分支。
+    [Fact]
+    public void Validate_Rejects_NotYetValidToken()
+    {
+        var token = TestTokens.Mint(
+            "alice", "USER", "demo-a",
+            notBefore: DateTime.UtcNow.AddHours(1),
+            expires: DateTime.UtcNow.AddHours(2));
+
+        Assert.ThrowsAny<SecurityTokenNotYetValidException>(() => Service().Validate(token));
+    }
+
     [Fact]
     public void Validate_Rejects_TamperedToken()
     {

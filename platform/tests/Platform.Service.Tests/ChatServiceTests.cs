@@ -97,51 +97,24 @@ public sealed class ChatServiceTests
     private const string GuardPrompt =
         "回答前先判斷問題類型，不要急著搶答。若問題涉及任何數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，你「必須」先呼叫對應的 skill 工具，並只依工具回傳的結果作答。嚴禁在未呼叫工具的情況下自行給出數字；嚴禁自己做任何算術（加減乘除、百分比、成長率）——這類計算一律交給工具，因為你自行心算常常算錯。若沒有合適的工具、文件未提供該數據、或你無法確定，請直接說「查無此數據」，不要編造或估算。只有純聊天或不涉及數字的問題，才可直接回答。";
 
+    // mem0 有記憶時的注入形狀由 ChatContextProviderAndRecorderTests.TP3_1 覆蓋(超集:另驗訊息列無 System 角色);
+    // 「同一 conversationId 第二輪看得到第一輪」由 ChatBehaviorBaselineTests.A18 覆蓋。此處只留 mem0 為空白的邊界。
+
+    // mem0 recall 回「純空白」(不是 null/空字串)時,ChatContextProvider 的 IsNullOrWhiteSpace 必須把它當成
+    // 無記憶,不可把空白接進 Instructions。務必用「已登入」身分驅動——匿名時 mem0 分支整段不執行
+    // (ChatContextProvider:57),RecallResult 這個前置根本不會被讀到,測不到本案宣稱的那條分支。
     [Fact]
-    public async Task Chat_InjectsSystemMemory_WhenMem0HasResults()
+    public async Task Chat_LoggedIn_Mem0RecallIsWhitespaceOnly_InstructionsAreGuardOnly()
     {
         var chatClient = new FakeChatClient();
-        var mem0 = new FakeMem0Client { RecallResult = "- 使用者喜歡貓\n" };
+        var mem0 = new FakeMem0Client { RecallResult = "   " };
         var svc = Build(new FakeLlmAgent(), mem0, new FakeConversationStore(), chatClient: chatClient);
 
         await svc.ChatAsync("問題", "u1", "c1", UserA);
 
-        // 護欄永遠打頭;mem0 前言緊接在後,一個換行相接,同一則 Instructions 字串(不再是第二則訊息)。
-        var instructions = chatClient.LastOptions!.Instructions!;
-        Assert.StartsWith(GuardPrompt, instructions);
-        Assert.Contains("以下是你先前記住、關於這位使用者的長期記憶", instructions);
-        Assert.Contains("使用者喜歡貓", instructions);
-
-        // Instructions 不進訊息列(N4):訊息列中不應出現護欄/mem0 文字。
-        Assert.DoesNotContain(chatClient.LastMessages!, m => (m.Text ?? "").Contains(GuardPrompt));
-    }
-
-    [Fact]
-    public async Task Chat_GuardIsFirstSystemMessage_WhenMem0Empty()
-    {
-        var chatClient = new FakeChatClient();
-        var svc = Build(new FakeLlmAgent(), new FakeMem0Client { RecallResult = string.Empty }, new FakeConversationStore(), chatClient: chatClient);
-
-        await svc.ChatAsync("問題", "u1", "c1");
-
-        // mem0 無記憶時,Instructions 就只有護欄本身。
+        // 前置確實被讀到了(已登入才會 recall);Instructions 仍只有護欄本身,沒有空白前言。
+        Assert.Single(mem0.Recalled);
         Assert.Equal(GuardPrompt, chatClient.LastOptions!.Instructions);
-    }
-
-    [Fact]
-    public async Task Chat_ShortTermMemory_CarriesPriorExchange()
-    {
-        var chatClient = new FakeChatClient { Response = "第一答" };
-        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), new FakeConversationStore(), chatClient: chatClient);
-
-        await svc.ChatAsync("第一問", "u1", "c1");
-        chatClient.Response = "第二答";
-        await svc.ChatAsync("第二問", "u1", "c1");
-
-        // 第二輪送進共用 agent 的訊息列應包含上一輪的 user 與 assistant(框架 session 管理,取代自寫 store)。
-        Assert.Contains(chatClient.LastMessages!, m => m.Role == ChatRole.User && m.Text == "第一問");
-        Assert.Contains(chatClient.LastMessages!, m => m.Role == ChatRole.Assistant && m.Text == "第一答");
-        Assert.Equal("第二問", chatClient.LastMessages!.Last().Text);
     }
 
     [Fact]
@@ -252,21 +225,41 @@ public sealed class ChatServiceTests
         Assert.Single(mem0.Remembered);
     }
 
-    [Fact]
-    public async Task History_ReturnsStoreListDesc()
+    /// <summary>只記錄 ListDescAsync 收到的身分、並「原樣」回傳預設清單的 store,用來驗 ChatService.HistoryAsync
+    /// 只是轉呼叫(排序是 backend 的職責,見 ConversationStoreTests.ListDesc_MapsItems_PreservesBackendOrder)。
+    /// 共用的 FakeConversationStore 自己會 OrderByDescending,無法用來證明「不自己排序」。</summary>
+    private sealed class RecordingConversationStore : Platform.Service.Abstractions.IConversationStore
     {
-        var convos = new FakeConversationStore();
+        public List<UserContext> ListCalls { get; } = new();
+        public List<ChatResponse> Items { get; } = new();
+
+        public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
+            => throw new NotSupportedException("本 fake 只服務歷史查詢");
+
+        public Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)
+        {
+            ListCalls.Add(ctx);
+            return Task.FromResult<IReadOnlyList<ChatResponse>>(Items);
+        }
+    }
+
+    [Fact]
+    public async Task History_LoggedIn_DelegatesToStoreWithCallerIdentity_AndReturnsBackendOrderUnchanged()
+    {
+        var store = new RecordingConversationStore();
         var baseTime = new DateTime(2026, 7, 11, 8, 0, 0, DateTimeKind.Utc);
-        convos.Items.Add(new ChatResponse(1, "r1", baseTime));
-        convos.Items.Add(new ChatResponse(2, "r2", baseTime.AddMinutes(1)));
-        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), convos);
+        // 刻意以「非 DESC」的順序回,證明 ChatService 不會自己重排(排序責任在 backend)。
+        store.Items.Add(new ChatResponse(1, "r1", baseTime));
+        store.Items.Add(new ChatResponse(2, "r2", baseTime.AddMinutes(1)));
+        var (hostAgent, _, _) = TestChatAgent.Build();
+        var svc = new ChatService(
+            hostAgent, store, new FakeChatIdentityAccessor(), new LlmOptions(), NullLogger<ChatService>.Instance);
 
         var history = await svc.HistoryAsync(UserA);
 
-        Assert.Equal(2, history.Count);
-        Assert.Equal(2, history[0].Id);
-        Assert.Equal("r2", history[0].Reply);
-        Assert.Equal("r1", history[1].Reply);
+        Assert.Same(UserA, Assert.Single(store.ListCalls));
+        Assert.Equal(new[] { 1L, 2L }, history.Select(h => h.Id).ToArray());
+        Assert.Equal(new[] { "r1", "r2" }, history.Select(h => h.Reply).ToArray());
     }
 
     // ---- H1:uid / cid fallback 決策表(NormalizeUser:空白→"default";NormalizeConversation:空白→uid) ----
@@ -333,53 +326,27 @@ public sealed class ChatServiceTests
 
     // ---- Skill 聊天工具(單軌:動態目錄,已登入才掛;每個工具轉呼叫對應 skill) ----
 
+    // 角色過濾(USER 恰得 4 個內建、ADMIN 另得 analyze-report)已由 ChatSkillRoutingTests 的
+    // User_GetsUserSkills_* / Admin_GetsUserAndAdminSkills 以精確集合斷言覆蓋,此處不重複。
+
+    // 內建 skill 走 /skills/{name}/invoke 且用 schema 挑出的必填鍵。五個內建名走的是同兩行程式碼
+    // (SingleRequiredStringKey → InvokeSkillToolAsync),差別只在目錄資料,故留一筆代表;
+    // 「鍵名與工具名不同」這個唯一有資訊量的情況由
+    // ChatSkillRoutingTests.SelectedTool_InvokesCorrectSkill_WithInputKeyAndIdentity(question_text)覆蓋。
     [Fact]
-    public async Task Chat_UserRole_GetsFourBuiltinSkills_TemplateAndAdminOnlyFiltered()
-    {
-        var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
-        var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
-
-        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-
-        var names = tools!.Select(t => t.Name).ToArray();
-        Assert.Equal(new[] { "kb-query", "rag-qa", "summarize", "triage" }, names);
-    }
-
-    [Fact]
-    public async Task Chat_AdminRole_AlsoGetsAnalyzeReportSkill()
+    public async Task BuiltinSkill_InvokesSkillEndpoint_WithItsInputKey()
     {
         var agent = new FakeLlmAgent();
         var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
         var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
-
-        Assert.Equal(5, tools!.Count);
-        Assert.Contains(tools!, t => t.Name == "analyze-report");
-        Assert.DoesNotContain(tools!, t => t.Name == "template-infer");
-    }
-
-    // 每個內建 skill 都要用對輸入 key,走 /skills/{name}/invoke。
-    [Theory]
-    [InlineData("kb-query", "query")]
-    [InlineData("rag-qa", "question")]
-    [InlineData("summarize", "text")]
-    [InlineData("triage", "question")]
-    [InlineData("analyze-report", "topic")]
-    public async Task EachBuiltinSkill_InvokesSkillEndpoint_WithItsInputKey(string skillName, string inputKey)
-    {
-        var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
-        var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
-
-        var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == skillName);
+        var tool = tools!.Single(t => t.Name == "rag-qa");
 
         await tool.InvokeAsync("輸入內容", CancellationToken.None);
 
-        Assert.Equal(skillName, workflows.LastSkillInvoke!.Value.Name);
-        Assert.Equal("輸入內容", workflows.LastSkillInvoke!.Value.Input[inputKey].GetString());
+        Assert.Equal("rag-qa", workflows.LastSkillInvoke!.Value.Name);
+        Assert.Equal("輸入內容", workflows.LastSkillInvoke!.Value.Input["question"].GetString());
     }
 
     [Fact]
@@ -391,20 +358,8 @@ public sealed class ChatServiceTests
         Assert.Null(await routing.BuildToolsAsync(null, CancellationToken.None));
     }
 
-    [Fact]
-    public async Task StreamChat_WithUserContext_RoutesWithSkillCatalog()
-    {
-        var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
-        var svc = Build(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
-
-        await foreach (var _ in svc.StreamChatAsync("問題", "u1", "c1", UserA))
-        {
-        }
-
-        // 串流也先路由:第一次(阻塞)CompleteAsync 的 system 目錄列出可用工具。
-        Assert.Contains(agent.CompleteCalls, m => m.Count > 0 && m[0].Content.Contains("kb-query"));
-    }
+    // 串流也先路由、且與阻塞用同一份目錄:由
+    // ChatSkillRoutingTests.BlockingAndStream_SameRoutingCatalog_CatalogFetchedOncePerRound 覆蓋(超集)。
 
     [Fact]
     public async Task KbQuerySkill_Abstains_FallsBackToRagQaSkill_WithHonestLabel()
@@ -442,47 +397,8 @@ public sealed class ChatServiceTests
         Assert.Equal("寵物守則對貓的規定?", workflows.SkillInvokes[1].Input["question"].GetString());
     }
 
-    [Fact]
-    public async Task KbQuerySkill_AnswersNormally_DoesNotFallBackToRagQa()
-    {
-        var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService
-        {
-            Catalog = Cat(BuiltinCatalog),
-            SkillOutputByName = new()
-            {
-                ["kb-query"] = JsonSerializer.SerializeToElement(new
-                {
-                    skill = "kb-query",
-                    output = new { answer_mode = "ANSWER", final_answer = "有憑據的答案" },
-                }),
-            },
-        };
-        var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
-
-        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-        var tool = tools!.Single(t => t.Name == "kb-query");
-
-        var result = await tool.InvokeAsync("q", CancellationToken.None);
-
-        Assert.Equal("有憑據的答案", result);
-        Assert.Single(workflows.SkillInvokes); // 沒棄答就不兜底
-    }
-
-    [Fact]
-    public async Task CatalogFailure_ToolsListIsEmpty_ChatStillRepliesNormally()
-    {
-        var chatClient = new FakeChatClient { Response = "純聊天回覆" };
-        var workflows = new FakeWorkflowService { ThrowOnCatalog = new InvalidOperationException("目錄爆炸") };
-        var (svc, routing) = BuildRouting(new FakeLlmAgent(), new FakeMem0Client(), new FakeConversationStore(), workflows: workflows, chatClient: chatClient);
-
-        // 目錄取得失敗 → 這輪無工具(不再有靜態工具可退了),但聊天仍正常回覆(純聊天兜底接手)。
-        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
-        Assert.Empty(tools!);
-
-        var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
-        Assert.Equal("純聊天回覆", reply.Reply);
-    }
+    // ANSWER 不兜底(棄答邏輯的 off-point)由 ChatBehaviorBaselineTests.A12 覆蓋;
+    // 目錄取得失敗仍正常回覆由 ChatSkillRoutingTests.CatalogFailure_ToolsEmpty_ChatDoesNotThrow(4 種例外)覆蓋。
 
     [Fact]
     public async Task Fallback_ConversationOnly_UserBlank_SkipsMem0_WindowUsesCid()
@@ -526,35 +442,8 @@ public sealed class ChatServiceTests
     }
 
     // ---- 匿名不持久化到 backend:對話記錄以 (tenant_id, user_id) 隔離,匿名沒有身分可歸屬 ----
-    // (短期記憶本身仍會延續,見 Fallback_BothBlank_UseDefault_ForMem0AndSharedWindow——這是刻意的,
-    // 對稱於現行 IChatMemoryStore 不分登入與否的行為;此處驗的是「backend 持久化」這一層不同的東西)。
-
-    [Fact]
-    public async Task Chat_Anonymous_DoesNotCallAddAsync()
-    {
-        var convos = new FakeConversationStore();
-        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), convos, chatClient: new FakeChatClient { Response = "匿名回覆" });
-
-        var response = await svc.ChatAsync("嗨", "u1", "c1"); // userCtx = null
-
-        Assert.Equal("匿名回覆", response.Reply);
-        Assert.Empty(convos.Saved);
-        Assert.Empty(convos.AddCalledWith);
-    }
-
-    [Fact]
-    public async Task StreamChat_Anonymous_DoesNotCallAddAsync()
-    {
-        var convos = new FakeConversationStore();
-        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), convos, chatClient: new FakeChatClient { Chunks = new[] { "甲", "乙" } });
-
-        await foreach (var _ in svc.StreamChatAsync("嗨", "u1", "c1")) // userCtx = null
-        {
-        }
-
-        Assert.Empty(convos.Saved);
-        Assert.Empty(convos.AddCalledWith);
-    }
+    // 阻塞/串流兩半由 ChatBehaviorBaselineTests.A06a/A06b 覆蓋(超集:另驗不讀目錄、不 recall、不 remember);
+    // 短期記憶本身仍會延續是刻意的(見上方 Fallback_* 各案),與「backend 持久化」是不同的一層。
 
     [Fact]
     public async Task History_Anonymous_ReturnsEmpty_WithoutCallingStore()
@@ -568,67 +457,52 @@ public sealed class ChatServiceTests
         Assert.Empty(history);
     }
 
-    // ---- A-19 等價(補 G6):短期記憶視窗 20 則 on-point / 21 則 off-point,於 ChatService 層驗證 ----
-    // 前置以 historyProvider.SetMessages 直接播種「已累積出 20 則歷史」這個前置狀態(取代已刪除的
-    // InMemoryChatMemoryStore.Append 播種方式);受測動作(再發一輪)仍經 ChatAsync 驅動,斷言送進
-    // 共用 hosted agent 的 messages。匿名 + 非空白 conversationId 時 cid 直接等於 conversationId
-    // (ChatService.DeriveMemoryKeys),故不需計算租戶前綴格式。
+    // A-19(20 on-point / 21 off-point)在 ChatService 層由 ChatBehaviorBaselineTests.A19a/A19b 覆蓋,
+    // 在 hostAgent 層由 ChatSessionWindowTests.Window_At20/At21 覆蓋;同一邊界不需要第三份。
+
+    // ---- D6:明確 Orchestrator 的聊天 session key 帶上它的 ID,A/B 兩顆的歷史不得互相混入 ----
+    // (ChatService.OrchestratorSessionKey;契約見 root AGENTS.md D6「Explicit Orchestrator chat session
+    // keys include its ID so A/B histories do not mix」。範圍內先前沒有任何呼叫傳過 orchestratorId。)
+
+    private static readonly Guid OrchestratorA = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private static readonly Guid OrchestratorB = Guid.Parse("22222222-2222-2222-2222-222222222222");
 
     [Fact]
-    public async Task A19a_History20_OnPoint_AllRetained()
+    public async Task ExplicitOrchestrator_SessionKeyIsNamespaced_HistoriesDoNotMix()
     {
-        var chatClient = new FakeChatClient { Response = "本輪回覆" };
-        var (svc, hostAgent, historyProvider) = BuildWithAgent(new FakeLlmAgent(), new FakeMem0Client(), new FakeConversationStore(), chatClient: chatClient);
+        var chatClient = new FakeChatClient { Response = "答" };
+        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), new FakeConversationStore(), chatClient: chatClient);
 
-        var session = await hostAgent.GetOrCreateSessionAsync("conv-a19a");
-        var seeded = new List<ChatMessage>();
-        for (var i = 0; i < 20; i++)
-        {
-            seeded.Add(new ChatMessage(i % 2 == 0 ? ChatRole.User : ChatRole.Assistant, $"hist{i}"));
-        }
-        historyProvider.SetMessages(session, seeded);
-        await hostAgent.SaveSessionAsync("conv-a19a", session);
+        // 同一個 userId/conversationId,只有 orchestratorId 不同 → 必須是三個不同的短期視窗。
+        await svc.ChatAsync("legacy 問", "u1", "c1", UserA);
+        await svc.ChatAsync("A 的問題", "u1", "c1", UserA, orchestratorId: OrchestratorA);
+        Assert.DoesNotContain(chatClient.LastMessages!, m => m.Text == "legacy 問");
 
-        await svc.ChatAsync("本輪提問", "", "conv-a19a"); // 匿名,cid == conversationId
+        await svc.ChatAsync("B 的問題", "u1", "c1", UserA, orchestratorId: OrchestratorB);
+        Assert.DoesNotContain(chatClient.LastMessages!, m => m.Text == "A 的問題");
+        Assert.DoesNotContain(chatClient.LastMessages!, m => m.Text == "legacy 問");
 
-        for (var i = 0; i < 20; i++)
-        {
-            Assert.Contains(chatClient.LastMessages!, m => m.Text == $"hist{i}");
-        }
-        Assert.Equal("本輪提問", chatClient.LastMessages!.Last().Text);
+        // 但同一顆 orchestrator 的下一輪仍看得到自己的歷史(不是每輪都新開視窗)。
+        await svc.ChatAsync("A 的追問", "u1", "c1", UserA, orchestratorId: OrchestratorA);
+        Assert.Contains(chatClient.LastMessages!, m => m.Text == "A 的問題");
+        Assert.DoesNotContain(chatClient.LastMessages!, m => m.Text == "B 的問題");
     }
 
     [Fact]
-    public async Task A19b_History21_OffPoint_OldestTurnTrimmed_OtherRetained()
+    public async Task ExplicitOrchestrator_Streaming_SessionKeyIsNamespaced_HistoriesDoNotMix()
     {
-        var chatClient = new FakeChatClient { Response = "第一輪回覆" };
-        var (svc, hostAgent, historyProvider) = BuildWithAgent(new FakeLlmAgent(), new FakeMem0Client(), new FakeConversationStore(), chatClient: chatClient);
+        var chatClient = new FakeChatClient { Chunks = new[] { "甲" } };
+        var svc = Build(new FakeLlmAgent(), new FakeMem0Client(), new FakeConversationStore(), chatClient: chatClient);
 
-        var session = await hostAgent.GetOrCreateSessionAsync("conv-a19b");
-        var seeded = new List<ChatMessage>();
-        for (var i = 0; i < 20; i++)
+        await foreach (var _ in svc.StreamChatAsync("legacy 串流問", "u1", "c1", UserA))
         {
-            seeded.Add(new ChatMessage(i % 2 == 0 ? ChatRole.User : ChatRole.Assistant, $"hist{i}"));
         }
-        historyProvider.SetMessages(session, seeded);
-        await hostAgent.SaveSessionAsync("conv-a19b", session);
-
-        // 第一輪:20(已存)+ 2(這輪 user+assistant)= 22,觸發裁切——但裁切發生在這輪「回覆之後」寫回
-        // session 的階段,這一輪自己送出的訊息列仍是裁切前的完整 20+1(與 spike 實測一致)。
-        await svc.ChatAsync("第一輪觸發", "", "conv-a19b");
-
-        chatClient.Response = "第二輪回覆";
-        // 第二輪才看得到裁切後的結果:最舊整個 turn(hist0/hist1)被裁掉,其餘 18 則 + 第一輪交換皆保留。
-        await svc.ChatAsync("第二輪確認", "", "conv-a19b");
-
-        Assert.DoesNotContain(chatClient.LastMessages!, m => m.Text == "hist0");
-        Assert.DoesNotContain(chatClient.LastMessages!, m => m.Text == "hist1");
-        for (var i = 2; i < 20; i++)
+        await foreach (var _ in svc.StreamChatAsync(
+            "A 的串流問", "u1", "c1", UserA, orchestratorId: OrchestratorA))
         {
-            Assert.Contains(chatClient.LastMessages!, m => m.Text == $"hist{i}");
         }
-        Assert.Contains(chatClient.LastMessages!, m => m.Text == "第一輪觸發");
-        Assert.Contains(chatClient.LastMessages!, m => m.Text == "第一輪回覆");
-        Assert.Equal("第二輪確認", chatClient.LastMessages!.Last().Text);
+
+        Assert.DoesNotContain(chatClient.LastMessages!, m => m.Text == "legacy 串流問");
+        Assert.Equal("A 的串流問", chatClient.LastMessages!.Last().Text);
     }
 }

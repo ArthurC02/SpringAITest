@@ -87,7 +87,9 @@ public sealed class OrchestratorRunRepositoryTests
         Assert.Null(await runs.CreateChildAsync("t", "u", created.Run.Id,
             new OrchestratorChildCreateRequest("research-a", 1, "worker", workerId, 1,
                 TaskEnvelope: TaskEnvelope(), TokenCap: AgentExecutionContract.DefaultTokenBudget), default));
-        Assert.Null(await runs.CreateChildAsync("t", "u", created.Run.Id,
+        // 畸形/非唯讀的 child 請求在生產倉儲是 ArgumentException(OrchestratorRunRepository.cs:244);
+        // lite 若回 null 會被 controller 轉成 409,讓 Workflow 誤判成可重試的暫時性衝突。
+        await Assert.ThrowsAsync<ArgumentException>(() => runs.CreateChildAsync("t", "u", created.Run.Id,
             new OrchestratorChildCreateRequest("write", 1, "worker", workerId, 1,
                 WriteIntent: true, TaskEnvelope: TaskEnvelope(), TokenCap: AgentExecutionContract.DefaultTokenBudget), default));
 
@@ -220,6 +222,239 @@ public sealed class OrchestratorRunRepositoryTests
         Assert.Single(terminal, x => x.Status == OrchestratorRunWriteStatus.Success);
         var terminalEvents = await runs.EventsAsync("t", "u", cas.Run.Id, 0, 20, default);
         Assert.Equal(1, terminalEvents!.Events.Count(x => x.EventType == "root_terminal"));
+        // Dapper 的 root 終局事件帶 {status}(OrchestratorRunRepository.cs:299),前端的 trace
+        // 就是靠它判定 root 收尾狀態(orchestratorTrace.ts:60-62);lite 回空物件會讓它靜靜變成 null。
+        Assert.Equal("completed",
+            Assert.Single(terminalEvents.Events, x => x.EventType == "root_terminal").Payload.GetProperty("status").GetString());
+    }
+
+    // 兩個獨立的預算判定各自用寬鬆的另一個把它孤立出來:上限剛好 2 的兩個 child 必須成功,第 3 個必須被拒。
+    // 既有測試的兩個 Assert.Null 其實是重複 task 與 write_intent 造成的,預算這條分支從未被走到。
+    [Theory]
+    [InlineData(5, 2)]  // max_child_runs = 2 是唯一有效的上限
+    [InlineData(2, 5)]  // max_concurrency = 2 是唯一有效的上限
+    public async Task Child_BudgetCaps_AllowExactlyTheLimit_AndRejectTheNext(int maxConcurrency, int maxChildRuns)
+    {
+        var fixture = await FixtureAsync(maxChildRuns: maxChildRuns, maxConcurrency: maxConcurrency, maxTasks: 5);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "budget", "plan", "budget-key", default);
+        Assert.Equal(OrchestratorRunWriteStatus.Success, created.Status);
+
+        Assert.NotNull(await ChildAsync(fixture, created.Run!.Id, "task-1"));
+        Assert.NotNull(await ChildAsync(fixture, created.Run.Id, "task-2"));
+        Assert.Null(await ChildAsync(fixture, created.Run.Id, "task-3"));
+    }
+
+    // AcquireContext 是 root AGENTS.md 明列的「絕不回 caller/model 自創 context」邊界:
+    // 沒有伺服器擁有的唯讀 adapter 時必須回 ready:false 並列出缺什麼,而不是回一個空的成功。
+    [Fact]
+    public async Task AcquireContext_WithoutServerOwnedAdapter_ReturnsNotReadyWithMissingSources()
+    {
+        const string source = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        var fixture = await FixtureAsync(contextTools: ["search_documents"], knowledgeSources: [source]);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "ctx", "plan", "ctx-key", default);
+        var runId = created.Run!.Id;
+        var empty = JsonDocument.Parse("{}").RootElement.Clone();
+        var request = new OrchestratorContextAcquireRequest(1, empty, ["search_documents"], [source]);
+
+        var result = await fixture.Runs.AcquireContextAsync("t", "u", runId, request, default);
+
+        Assert.NotNull(result);
+        Assert.False(result!.Ready);
+        Assert.Equal(new[] { "context-tool:search_documents", "knowledge-source:" + source }, result.Missing);
+        Assert.Equal("{}", result.Context.GetRawText());
+
+        // 授權集合與 snapshot 權威不符 / context_round < 1 / current_context 非物件 / 非擁有者 → 一律 null(fail closed)。
+        Assert.Null(await fixture.Runs.AcquireContextAsync("t", "u", runId, request with { AllowedTools = ["other_tool"] }, default));
+        Assert.Null(await fixture.Runs.AcquireContextAsync("t", "u", runId, request with { AllowedKnowledgeSources = [] }, default));
+        Assert.Null(await fixture.Runs.AcquireContextAsync("t", "u", runId, request with { ContextRound = 0 }, default));
+        Assert.Null(await fixture.Runs.AcquireContextAsync("t", "u", runId, request with { CurrentContext = null }, default));
+        Assert.Null(await fixture.Runs.AcquireContextAsync("t", "other-user", runId, request, default));
+        Assert.Null(await fixture.Runs.AcquireContextAsync("other-tenant", "u", runId, request, default));
+    }
+
+    // child 狀態是從 D3 run 鏡射過來的:轉終局時必須恰好補一筆 child_terminal 事件(連呼兩次不得重複),
+    // 並把 result 裡的 citations 抽出來。重複事件會讓 root 的聚合把同一個 child 算兩次。
+    [Fact]
+    public async Task ChildStatus_MirrorsTerminalOnce_AndExtractsCitations()
+    {
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(agentRuns: childRuns);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "mirror", "plan", "mirror-key", default);
+        var runId = created.Run!.Id;
+        var child = await ChildAsync(fixture, runId, "task-1");
+        Assert.NotNull(child);
+
+        var queued = await fixture.Runs.GetChildAsync("t", "u", runId, child!.Id, default);
+        Assert.Equal("queued", queued!.Status);
+        Assert.Equal("[]", queued.Citations.GetRawText());
+
+        childRuns.Complete("""{"answer":"ok","citations":[{"document_id":"d1"}]}""");
+        var terminal = await fixture.Runs.GetChildAsync("t", "u", runId, child.Id, default);
+        Assert.Equal("completed", terminal!.Status);
+        Assert.Equal("""[{"document_id":"d1"}]""", terminal.Citations.GetRawText());
+        var afterFirstRead = (await fixture.Runs.EventsAsync("t", "u", runId, 0, 50, default))!
+            .Events.Count(x => x.EventType == "child_terminal");
+        Assert.Equal(1, afterFirstRead);
+
+        // child_terminal 的 payload 也是共用產生器的產物(AgentRunRepository.cs:2509 的 12 欄),
+        // 前端 trace 從中讀 task_id/attempt/run_kind/status;lite 只給 3 欄會讓它靜靜降級成 null。
+        var payload = Assert.Single(
+            (await fixture.Runs.EventsAsync("t", "u", runId, 0, 50, default))!.Events,
+            x => x.EventType == "child_terminal").Payload;
+        Assert.Equal(child.Id, payload.GetProperty("child_id").GetGuid());
+        Assert.Equal(child.AgentRunId, payload.GetProperty("agent_run_id").GetGuid());
+        Assert.Equal("task-1", payload.GetProperty("task_id").GetString());
+        Assert.Equal(1, payload.GetProperty("attempt").GetInt32());
+        Assert.Equal("worker", payload.GetProperty("run_kind").GetString());
+        Assert.Equal(fixture.WorkerId, payload.GetProperty("agent_id").GetGuid());
+        Assert.Equal(1, payload.GetProperty("agent_revision").GetInt32());
+        Assert.Equal(child.AgentSnapshotHash, payload.GetProperty("agent_snapshot_hash").GetString());
+        Assert.Equal("completed", payload.GetProperty("status").GetString());
+        // 結果本體屬於 child authority:root 事件只留雜湊與 citation 數量。
+        Assert.Equal(Backend.Api.Skills.SkillHash.Sha256("""{"answer":"ok","citations":[{"document_id":"d1"}]}"""),
+            payload.GetProperty("result_sha256").GetString());
+        Assert.Equal(1, payload.GetProperty("citations").GetProperty("count").GetInt32());
+        Assert.Equal(JsonValueKind.Null, payload.GetProperty("error_code").ValueKind);
+        Assert.False(payload.TryGetProperty("output", out _));
+
+        // 再讀一次不得重複追加。
+        Assert.Equal("completed", (await fixture.Runs.GetChildAsync("t", "u", runId, child.Id, default))!.Status);
+        Assert.Equal(1, (await fixture.Runs.EventsAsync("t", "u", runId, 0, 50, default))!
+            .Events.Count(x => x.EventType == "child_terminal"));
+        // 跨租戶/非擁有者/不存在的 child 都不得洩漏存在性。
+        Assert.Null(await fixture.Runs.GetChildAsync("t", "other-user", runId, child.Id, default));
+        Assert.Null(await fixture.Runs.GetChildAsync("t", "u", runId, Guid.NewGuid(), default));
+    }
+
+    // 公開事件是 server-redacted 的:child_created 的 payload 只能帶對外可見的譜系欄位,
+    // 耐久命令 id 是內部執行憑據(平台的 Redact 只剝頂層鍵、且 events 不經 Redact,漏在這裡就直接外洩)。
+    // 兩份倉儲必須產出同一份 payload 形狀,否則 in-memory 的空物件會讓斷言恆真。
+    [Fact]
+    public async Task ChildCreatedEvent_CarriesLineageWithoutTheDurableCommandId()
+    {
+        var fixture = await FixtureAsync();
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "events", "plan", "events-key", default);
+        var child = await ChildAsync(fixture, created.Run!.Id, "task-1");
+        Assert.NotNull(child);
+
+        var events = await fixture.Runs.EventsAsync("t", "u", created.Run.Id, 0, 20, default);
+        var payload = Assert.Single(events!.Events, x => x.EventType == "child_created").Payload;
+
+        Assert.Equal(child!.Id, payload.GetProperty("child_id").GetGuid());
+        Assert.Equal(child.AgentRunId, payload.GetProperty("agent_run_id").GetGuid());
+        Assert.Equal("task-1", payload.GetProperty("task_id").GetString());
+        Assert.Equal(1, payload.GetProperty("attempt").GetInt32());
+        Assert.Equal("worker", payload.GetProperty("run_kind").GetString());
+        Assert.False(payload.TryGetProperty("command_id", out _));
+    }
+
+    // 共用產生器是兩份倉儲唯一的事實來源,真正要鎖的是「欄位集合 + 命名 + 序列」。
+    // Dapper 端的呼叫點需要整套租戶 Agent/Workflow/Skill revision fixture 才能走到,代價不對稱;
+    // 直接對純函式斷言輸出字串,一次鎖住兩邊(in-memory 的形狀測試只間接鎖了一邊)。
+    [Fact]
+    public void RootEventPayloads_AreExactAndRedacted()
+    {
+        var childId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        var agentRunId = Guid.Parse("22222222-2222-4222-8222-222222222222");
+        var agentId = Guid.Parse("33333333-3333-4333-8333-333333333333");
+        var result = JsonDocument.Parse("""{"citations":[{"document_id":"d1"},{"document_id":"d2"}]}""").RootElement;
+
+        Assert.Equal(
+            """{"child_id":"11111111-1111-4111-8111-111111111111","agent_run_id":"22222222-2222-4222-8222-222222222222","task_id":"task-1","attempt":2,"run_kind":"worker"}""",
+            OrchestratorRunEvents.ChildCreated(childId, agentRunId, "task-1", 2, "worker"));
+
+        Assert.Equal(
+            $$"""{"child_id":"11111111-1111-4111-8111-111111111111","agent_run_id":"22222222-2222-4222-8222-222222222222","task_id":"task-1","attempt":2,"run_kind":"verifier","agent_id":"33333333-3333-4333-8333-333333333333","agent_revision":7,"agent_snapshot_hash":"{{new string('a', 64)}}","status":"failed","result_sha256":"{{Backend.Api.Skills.SkillHash.Sha256(result.GetRawText())}}","citations":{"count":2},"error_code":"boom"}""",
+            OrchestratorRunEvents.ChildTerminal(childId, agentRunId, "task-1", 2, "verifier", agentId, 7,
+                new string('a', 64), "failed", result, "  boom  "));
+
+        // 沒有結果時雜湊是 null(不得變成空字串的雜湊),error_code 過長要截斷到 100。
+        Assert.Equal(
+            $$"""{"child_id":"11111111-1111-4111-8111-111111111111","agent_run_id":"22222222-2222-4222-8222-222222222222","task_id":"t","attempt":1,"run_kind":"worker","agent_id":"33333333-3333-4333-8333-333333333333","agent_revision":1,"agent_snapshot_hash":"h","status":"cancelled","result_sha256":null,"citations":{"count":0},"error_code":"{{new string('e', 100)}}"}""",
+            OrchestratorRunEvents.ChildTerminal(childId, agentRunId, "t", 1, "worker", agentId, 1, "h",
+                "cancelled", null, new string('e', 101)));
+
+        Assert.Equal("""{"status":"completed"}""", OrchestratorRunEvents.RootTerminal("completed"));
+    }
+
+    private sealed record RunFixture(InMemoryOrchestratorRunRepository Runs, Guid OrchestratorId, Guid WorkerId);
+
+    private static async Task<RunFixture> FixtureAsync(
+        int maxTasks = 2, int maxChildRuns = 3, int maxConcurrency = 1,
+        string[]? contextTools = null, string[]? knowledgeSources = null,
+        IAgentRunRepository? agentRuns = null)
+    {
+        var workflows = new Data.InMemory.InMemoryWorkflowRepository();
+        var root = await workflows.CreateAsync("t", "root", "orchestrator", "{\"schemaVersion\":1}", "{}", "u", default);
+        Assert.True(await workflows.MarkValidatedAsync("t", root.Workflow!.Id, 1, "{\"schemaVersion\":1}", "{}", default));
+        await workflows.PublishAsync("t", root.Workflow.Id, 1, "{\"schemaVersion\":1}", "{}", WorkflowCompilerContracts.Current, "u", default);
+        var workerWorkflow = await CreateWorkflow(workflows, "worker", "agent-runtime");
+        var verifierWorkflow = await CreateWorkflow(workflows, "verifier", "agent-runtime");
+        var workerId = Guid.NewGuid();
+        var verifierId = Guid.NewGuid();
+        var orchestrators = new StubOrchestrators(
+            Guid.NewGuid(),
+            Definition(root.Workflow.Id, workerId, verifierId, maxTasks, maxChildRuns, maxConcurrency, contextTools, knowledgeSources));
+        var agents = new StubAgents(workerId, verifierId, workerWorkflow, verifierWorkflow);
+        return new RunFixture(
+            new InMemoryOrchestratorRunRepository(orchestrators, workflows, agents, agentRuns),
+            orchestrators.Id,
+            workerId);
+    }
+
+    private static Task<OrchestratorChildResponse?> ChildAsync(RunFixture fixture, Guid rootRunId, string taskId)
+        => fixture.Runs.CreateChildAsync("t", "u", rootRunId,
+            new OrchestratorChildCreateRequest(taskId, 1, "worker", fixture.WorkerId, 1,
+                TaskEnvelope: TaskEnvelope(), TokenCap: AgentExecutionContract.DefaultTokenBudget), default);
+
+    /// <summary>
+    /// 手寫的 D3 child run 假實作:只提供 GetChildAsync 鏡射所需的建立與讀取,
+    /// 其餘方法刻意不支援(走到就代表 orchestrator 用了不該用的路徑)。
+    /// </summary>
+    private sealed class ScriptedChildAgentRuns : IAgentRunRepository, IOrchestratorChildRunRepository
+    {
+        private AgentRunResponse? _run;
+
+        public Task<AgentRunWriteResult> CreateOrchestratorChildAsync(
+            string tenantId, string userId, string role, IReadOnlyCollection<string> groups,
+            IReadOnlyCollection<string> capabilityClaims, PublishedAgentSnapshotSource agent,
+            WorkflowSnapshotSource workflow, OrchestratorChildSnapshotProvenance provenance,
+            string runKind, int tokenCap, JsonElement taskEnvelope, string idempotencyKey, CancellationToken ct)
+        {
+            _run = new AgentRunResponse(
+                Guid.NewGuid(), provenance.RootRunId, provenance.RootRunId, provenance.TaskId, runKind,
+                agent.AgentId, agent.Revision, workflow.WorkflowId, workflow.Revision, agent.DefinitionSha256,
+                "queued", 1, 0, 0, null, 0, 0, false, null, null, null, null, 0, null,
+                DateTime.UtcNow, DateTime.UtcNow.AddMinutes(10), DateTime.UtcNow, null, [],
+                JsonDocument.Parse("{}").RootElement.Clone());
+            return Task.FromResult(new AgentRunWriteResult(
+                AgentRunWriteStatus.Success, _run, Dispatch: new AgentRunCommandDispatch(Guid.NewGuid(), "claim", DateTime.UtcNow.AddSeconds(30), 1)));
+        }
+
+        public void Complete(string resultJson) => _run = _run! with
+        {
+            Status = "completed",
+            Result = JsonDocument.Parse(resultJson).RootElement.Clone(),
+        };
+
+        public Task<AgentRunResponse?> GetAsync(string t, string u, Guid id, CancellationToken ct)
+            => Task.FromResult(_run is not null && _run.Id == id ? _run : null);
+
+        public Task<AgentRunWriteResult> CreateDirectAsync(string a, string b, string c, IReadOnlyCollection<string> d, IReadOnlyCollection<string> e, Guid f, string g, string h, CancellationToken i) => throw new NotSupportedException();
+        public Task<string?> GetExecutionArtifactAsync(string a, string b, Guid c, CancellationToken d) => throw new NotSupportedException();
+        public Task<AgentRunEventsResponse?> GetEventsAsync(string a, string b, Guid c, long d, int e, CancellationToken f) => throw new NotSupportedException();
+        public Task<AgentRunWriteResult> ResumeAsync(string a, string b, Guid c, string d, long e, string f, CancellationToken g) => throw new NotSupportedException();
+        public Task<AgentRunWriteResult> CancelAsync(string a, string b, Guid c, string? d, string e, CancellationToken f) => throw new NotSupportedException();
+        public Task<AgentRunWriteResult> TransitionAsync(string a, string b, Guid c, AgentRunTransitionRequest d, CancellationToken e) => throw new NotSupportedException();
+        public Task<AgentRunWriteResult> AppendEventsAsync(string a, string b, Guid c, AgentRunEventsAppendRequest d, CancellationToken e) => throw new NotSupportedException();
+        public Task<AgentRunLeaseResult> ClaimLeaseAsync(string a, string b, Guid c, AgentRunLeaseRequest d, CancellationToken e) => throw new NotSupportedException();
+        public Task<AgentRunCommandClaimResult> ClaimCommandAsync(string a, string b, Guid c, Guid d, AgentRunCommandClaimRequest e, CancellationToken f) => throw new NotSupportedException();
+        public Task<AgentRunDispatchCompleteStatus> CompleteDispatchAsync(string a, string b, Guid c, Guid d, string e, CancellationToken f) => throw new NotSupportedException();
+        public Task<AgentRunRecoveryClaimResponse> ClaimRecoveryAsync(AgentRunRecoveryClaimRequest a, CancellationToken b) => throw new NotSupportedException();
     }
 
     private static void SetDeadline(InMemoryOrchestratorRunRepository repository, Guid runId, DateTime deadline)
@@ -234,7 +469,10 @@ public sealed class OrchestratorRunRepositoryTests
     private static async Task<Guid> CreateWorkflow(Data.InMemory.InMemoryWorkflowRepository workflows, string name, string kind)
     { var item = await workflows.CreateAsync("t", name, kind, "{\"schemaVersion\":1}", "{}", "u", default); await workflows.MarkValidatedAsync("t", item.Workflow!.Id, 1, "{\"schemaVersion\":1}", "{}", default); await workflows.PublishAsync("t", item.Workflow.Id, 1, "{\"schemaVersion\":1}", "{}", WorkflowCompilerContracts.Current, "u", default); return item.Workflow.Id; }
     private static JsonElement TaskEnvelope() => JsonDocument.Parse("""{"objective":"research","required_capabilities":["research"],"context":{"query":"q"},"context_provenance":[{"context_key":"query","source_type":"caller","source_id":"user","observed_at":"2026-01-01T00:00:00Z","content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"write_intent":false,"delegation_depth":0,"repair_of":null}""").RootElement.Clone();
-    private static string Definition(Guid workflow, Guid worker, Guid verifier) => new JsonObject
+    private static string Definition(
+        Guid workflow, Guid worker, Guid verifier,
+        int maxTasks = 2, int maxChildRuns = 3, int maxConcurrency = 1,
+        string[]? contextTools = null, string[]? knowledgeSources = null) => new JsonObject
     {
         ["instructions"] = "root",
         ["policy"] = new JsonObject { { "dispatchMode", "bounded-parallel" }, { "joinPolicy", "repair" }, { "repairPolicy", "redispatch" }, { "aggregationPolicy", "verified-only" }, { "denialPolicy", "fail-closed" } },
@@ -242,10 +480,15 @@ public sealed class OrchestratorRunRepositoryTests
         ["verifier"] = new JsonObject { { "agentId", verifier.ToString("D") }, { "revision", 1 }, { "variant", "read-only" }, { "independent", true }, { "outputContract", new JsonObject { { "type", "verification-report" } } } },
         ["workerPool"] = new JsonArray(new JsonObject { { "agentId", worker.ToString("D") }, { "revision", 1 } }),
         ["workerPolicy"] = new JsonObject { { "requiredAudience", new JsonArray() }, { "requiredCapabilities", new JsonArray() }, { "selection", "pinned-only" } },
-        ["context"] = new JsonObject { { "readOnly", true }, { "allowedTools", new JsonArray() }, { "knowledgeSources", new JsonArray() } },
+        ["context"] = new JsonObject
+        {
+            { "readOnly", true },
+            { "allowedTools", new JsonArray((contextTools ?? []).Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()) },
+            { "knowledgeSources", new JsonArray((knowledgeSources ?? []).Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()) },
+        },
         ["audience"] = new JsonArray(),
         ["capabilities"] = new JsonArray(),
-        ["budgets"] = new JsonObject { { "maxContextRounds", 1 }, { "maxTasks", 2 }, { "maxChildRuns", 3 }, { "maxConcurrency", 1 }, { "maxRepairRounds", 1 }, { "tokenBudget", 10 }, { "timeoutSeconds", 10 } },
+        ["budgets"] = new JsonObject { { "maxContextRounds", 1 }, { "maxTasks", maxTasks }, { "maxChildRuns", maxChildRuns }, { "maxConcurrency", maxConcurrency }, { "maxRepairRounds", 1 }, { "tokenBudget", 10 }, { "timeoutSeconds", 10 } },
     }.ToJsonString();
 
     private sealed class StubOrchestrators(Guid id, string definition, params Guid[] additionalIds) : IOrchestratorRepository

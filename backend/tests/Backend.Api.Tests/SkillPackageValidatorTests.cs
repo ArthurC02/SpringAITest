@@ -126,6 +126,27 @@ public sealed class SkillPackageValidatorTests
         Assert.Contains("name: sales-helper", result.CanonicalDefinition);
     }
 
+    // description 空/缺席不是違約:definition-only 寫入允許缺席、SkillExporter 匯出成 `description: ""`,
+    // 要求非空會讓 backend 自己匯出的 zip 匯不回來。export → import 的整條 round trip 由
+    // SkillExportTests.Export_BlankDescription_RoundTripsBackThroughPackageImportValidation 背書。
+    [Theory]
+    [InlineData("\"\"")]
+    [InlineData("null")]
+    public async Task Valid_BlankOrMissingDescription_IsAccepted_AsEmptyString(string descriptionJson)
+    {
+        var body =
+            $$"""
+              {"valid":true,"errors":[],
+               "skill":{"name":"sales-helper","description":{{descriptionJson}},"required_role":"USER","kind":"flow"},
+               "canonical_definition":"name: sales-helper\ndescription: \"\"\nflow: []\n"}
+              """;
+
+        var result = await Validate(Json(HttpStatusCode.OK, body));
+
+        Assert.True(result.Valid);
+        Assert.Equal(string.Empty, result.Skill!.Description);
+    }
+
     [Fact]
     public async Task Valid_FlowRequiresExplicitKindAndRole()
     {
@@ -163,16 +184,15 @@ public sealed class SkillPackageValidatorTests
 
     // ---- 服務故障三等價類:HTTP 錯誤碼、無法解析 body、傳輸例外(沒有回應)→ 全部 502 ----
 
-    [Theory]
-    [InlineData(404)]
-    [InlineData(500)]
-    [InlineData(503)]
-    public async Task DownstreamHttpError_Throws502(int status)
+    // 所有非 2xx 走同一行 `!resp.IsSuccessStatusCode`(無 4xx/5xx 分流)→ 一個代表值即可。
+    [Fact]
+    public async Task DownstreamHttpError_Throws502()
     {
-        var ex = await Assert.ThrowsAsync<ApiException>(() => Validate(Json((HttpStatusCode)status, "{}")));
+        var ex = await Assert.ThrowsAsync<ApiException>(
+            () => Validate(Json(HttpStatusCode.ServiceUnavailable, "{}")));
 
         Assert.Equal(502, ex.Status);
-        Assert.Contains("HTTP " + status, ex.Message);
+        Assert.Contains("HTTP 503", ex.Message);
     }
 
     [Fact]
@@ -206,43 +226,58 @@ public sealed class SkillPackageValidatorTests
         Assert.Contains("canonical_definition", ex.Message);
     }
 
-    public static TheoryData<string> InvalidSuccessContracts => new()
+    // 每格帶自己的 detail 片段:只斷言「引擎回應違反契約」的話,任何一項檢查被短路掉
+    // (或檢查順序被改成先撞別項)測試照樣綠 —— 那等於沒測到「哪一格」在守。
+    // 具名路徑(expected_name="sales-helper")下 :144-148 的 name 檢查先拋,
+    // 因此 canonical.name 不一致那格在此不可達,由 DerivedNameResponse_CanonicalIdentityMismatch_Throws502 覆蓋。
+    public static TheoryData<string, string> InvalidSuccessContracts => new()
     {
-        // route name mismatch
-        """
-        {"valid":true,"errors":[],"skill":{"name":"other","description":"d","required_role":"USER","kind":"flow"},"canonical_definition":"name: other\ndescription: d\nflow: []\n"}
-        """,
-        // blank description
-        """
-        {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":" ","required_role":"USER","kind":"flow"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
-        """,
-        // missing kind (must not default)
-        """
-        {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"USER"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
-        """,
-        // invalid kind enum
-        """
-        {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"USER","kind":"script"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
-        """,
-        // canonical identity mismatch
-        """
-        {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"USER","kind":"flow"},"canonical_definition":"name: other\ndescription: d\nflow: []\n"}
-        """,
-        // canonical kind mismatch
-        """
-        {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"USER","kind":"agentic"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
-        """,
+        {
+            // route name mismatch
+            """
+            {"valid":true,"errors":[],"skill":{"name":"other","description":"d","required_role":"USER","kind":"flow"},"canonical_definition":"name: other\ndescription: d\nflow: []\n"}
+            """,
+            "skill.name 必須等於 expected_name 'sales-helper'"
+        },
+        {
+            // missing kind (must not default)
+            """
+            {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"USER"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
+            """,
+            "skill.kind 必須是 flow 或 agentic"
+        },
+        {
+            // invalid kind enum
+            """
+            {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"USER","kind":"script"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
+            """,
+            "skill.kind 必須是 flow 或 agentic"
+        },
+        {
+            // invalid required_role enum
+            """
+            {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"SUPERADMIN","kind":"flow"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
+            """,
+            "skill.required_role 必須是 USER 或 ADMIN"
+        },
+        {
+            // canonical kind mismatch
+            """
+            {"valid":true,"errors":[],"skill":{"name":"sales-helper","description":"d","required_role":"USER","kind":"agentic"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
+            """,
+            "canonical_definition kind 與 skill.kind 不一致"
+        },
     };
 
     [Theory]
     [MemberData(nameof(InvalidSuccessContracts))]
-    public async Task ValidResponseContractViolation_Throws502(string body)
+    public async Task ValidResponseContractViolation_Throws502(string body, string detail)
     {
         var error = await Assert.ThrowsAsync<ApiException>(
             () => Validate(Json(HttpStatusCode.OK, body)));
 
         Assert.Equal(502, error.Status);
-        Assert.Contains("引擎回應違反契約", error.Message);
+        Assert.Equal("Skill 套件驗證服務呼叫失敗：引擎回應違反契約（" + detail + "）", error.Message);
     }
 
     /// <summary>可控回應、可捕捉最後一次請求(含 multipart body 字串)的 HttpMessageHandler。</summary>

@@ -10,18 +10,27 @@ import pytest
 
 from app.engine.harness import harnessed as traced
 from app.nodes.kbquery import calculator
-from app.nodes.kbquery.adapters import ScoreReranker, StaticGlossary
+from app.nodes.kbquery.adapters import (
+    LangChainStructuredLLM,
+    ScoreReranker,
+    StaticGlossary,
+)
 from app.nodes.kbquery.locators import TableCellLocator
 from app.nodes.kbquery.models import (
     AnswerMode,
+    CalculationTrace,
     Evidence,
     FailureCode,
+    IntentOutput,
     IntentType,
     QueryRewriteOutput,
+    RetrievalPlan,
+    SourceResult,
     VerificationResult,
 )
 from app.nodes.kbquery.nodes.answer_composer import make_answer_composer_node
 from app.nodes.kbquery.nodes.context_resolver import make_context_resolver_node
+from app.nodes.kbquery.nodes.data_locator import make_data_locator_node
 from app.nodes.kbquery.nodes.evidence_verification import (
     make_evidence_verification_node,
 )
@@ -29,6 +38,9 @@ from app.nodes.kbquery.nodes.intent_classification import classify_by_rules
 from app.nodes.kbquery.nodes.query_intake import make_query_intake_node
 from app.nodes.kbquery.nodes.query_rewrite import make_query_rewrite_node
 from app.nodes.kbquery.nodes.retrieval_planner import make_retrieval_planner_node
+from app.nodes.kbquery.nodes.source_retrieval_rerank import (
+    make_source_retrieval_rerank_node,
+)
 from tests.kbquery_fakes import (
     TABLE_2025,
     TEXT_2025Q3,
@@ -160,6 +172,14 @@ def test_classify_by_rules(question, expected):
     """【規格 5】關鍵詞規則分類：先中先贏，無法判斷回 UNKNOWN。"""
     intent, _ = classify_by_rules(question)
     assert intent == expected
+
+
+def test_classify_by_rules_first_match_wins_on_overlap():
+    """【規格 5】同時命中多組關鍵詞（比較詞 + factoid 詞）時，_RULES 列表順序決定優先權：
+    COMPARISON 排在 SINGLE_VALUE_LOOKUP 之前，先中先贏。"""
+    intent, label = classify_by_rules("比較 2025Q3 稅後淨利金額")
+    assert intent == IntentType.COMPARISON
+    assert label == "comparison"
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +332,119 @@ def test_table_cell_locator_exact_cell():
 
 
 # ---------------------------------------------------------------------------
+# Source Retrieval & Rerank：未串接方法略過、去重保留高分
+# ---------------------------------------------------------------------------
+
+
+def test_source_retrieval_rerank_dedup_and_unwired_method_skipped():
+    """未串接的檢索方法（keyword）被 debug log 略過、不 raise；同一來源重複結果
+    去重時保留 original_score 較高者——目前只有 vector 接線，這是讓 kb-query
+    在其餘方法接上前仍能正常運作的關鍵防護。"""
+    dup_low = SourceResult(
+        source_id="fin-2025q3#c1",
+        document_id="doc-fin-2025q3",
+        document_title="2025Q3 財務季報",
+        page=3,
+        source_type="text",
+        retrieval_method="vector",
+        original_score=0.5,
+    )
+    dup_high = dup_low.model_copy(update={"original_score": 0.9})
+    plan = RetrievalPlan(methods=["vector", "keyword"], source_priority=["vector"])
+    node = make_source_retrieval_rerank_node(
+        {"vector": FakeSearch(lambda q, f: [dup_low, dup_high])}, ScoreReranker()
+    )
+    out = asyncio.run(
+        node(
+            {
+                "retrieval_plan": plan,
+                "normalized_query": "2025Q3 稅後淨利",
+                "tenant_id": "t-test",
+            }
+        )
+    )
+    # keyword 沒有對應 searcher：若未略過會 raise，能跑到這裡本身就是斷言的一部分
+    assert len(out["ranked_sources"]) == 1
+    assert out["ranked_sources"][0].original_score == 0.9
+
+
+# ---------------------------------------------------------------------------
+# Data Locator：差異與比率公式規則
+# ---------------------------------------------------------------------------
+
+
+class _FixedLocator:
+    """假 EvidenceLocatorPort：依 source_id 回傳預先準備好的 Evidence。"""
+
+    def __init__(self, evidences_by_source_id: dict[str, Evidence]):
+        self._by_id = evidences_by_source_id
+
+    def locate(self, source, *, context):
+        e = self._by_id.get(source.source_id)
+        return [e] if e is not None else []
+
+
+def test_data_locator_formula_rules_diff_and_ratio():
+    """【_FORMULA_RULES】「差/差異」與「比率/占比」公式規則各驗一次——先前只有
+    「成長率」被 revenue_qa 整合測試間接練到,這兩條規則完全沒有專屬測試。"""
+    earlier = Evidence(
+        source_id="s-early",
+        document_id="doc",
+        document_title="t",
+        source_type="text",
+        period="2025Q2",
+        exact_value="1100.0",
+    )
+    later = Evidence(
+        source_id="s-late",
+        document_id="doc",
+        document_title="t",
+        source_type="text",
+        period="2025Q3",
+        exact_value="1234.0",
+    )
+    sources = [
+        SourceResult(
+            source_id="s-early",
+            document_id="doc",
+            document_title="t",
+            source_type="text",
+            retrieval_method="vector",
+            original_score=0.5,
+        ),
+        SourceResult(
+            source_id="s-late",
+            document_id="doc",
+            document_title="t",
+            source_type="text",
+            retrieval_method="vector",
+            original_score=0.5,
+        ),
+    ]
+    locator = _FixedLocator({"s-early": earlier, "s-late": later})
+    node = make_data_locator_node({"text": locator})
+    base_state = {
+        "ranked_sources": sources,
+        "requires_calculation": True,
+        "requires_multi_doc": True,
+        "target_period": ["2025Q2", "2025Q3"],
+        "canonical_metric": "稅後淨利",
+    }
+
+    diff_out = asyncio.run(
+        node({**base_state, "normalized_query": "稅後淨利差異是多少"})
+    )
+    assert diff_out["calculation_trace"].formula == "a - b"
+    assert diff_out["calculation_result"] == pytest.approx(134.0)
+
+    ratio_out = asyncio.run(
+        node({**base_state, "normalized_query": "稅後淨利比率是多少"})
+    )
+    assert ratio_out["calculation_trace"].formula == "a / b"
+    assert ratio_out["calculation_result"] == pytest.approx(1234.0 / 1100.0)
+
+
+# ---------------------------------------------------------------------------
 # Evidence Verification
 # ---------------------------------------------------------------------------
 
@@ -379,6 +512,233 @@ def test_verification_table_cell_mismatch_not_pass():
     assert FailureCode.TABLE_CELL_MISMATCH in out["failure_codes"]
 
 
+def test_verification_passes_with_consistent_evidence():
+    """【決策表1，正面覆蓋】期間/指標/數值皆一致、可追溯的乾淨證據必須 PASS——
+    先前整個範圍內沒有任何節點級測試直接餵乾淨證據確認 PASS 分支，一個把
+    PASS 改成永不回傳的迴歸不會被抓到。"""
+    evidence = Evidence(
+        source_id="fin-2025q3#c1",
+        document_id="doc-fin-2025q3",
+        document_title="2025Q3 財務季報",
+        source_type="text",
+        page_number=3,
+        exact_excerpt="2025Q3 稅後淨利為 1234.0 百萬元",
+        exact_value="1234.0",
+        metric="稅後淨利",
+        period="2025Q3",
+        unit="百萬元",
+        locator_score=0.9,
+    )
+    node = make_evidence_verification_node()
+    out = asyncio.run(
+        node(
+            {
+                "selected_evidence": [evidence],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+                "excluded_terms": [],
+                "candidate_answer": "稅後淨利 2025Q3 為 1234.0 百萬元",
+            }
+        )
+    )
+    assert out["verification_result"] == VerificationResult.PASS
+    assert out["verified_evidence"] == [evidence]
+    assert out["failure_codes"] == []
+    assert out["confidence"] > 0
+
+
+def test_verification_hard_fail_codes():
+    """【決策表1】CONFLICTING_EVIDENCE 與 CALCULATION_ERROR 屬 hard_fail 集合，
+    必須產出 FAIL 而非 RETRY——先前這是 kb-query 閘門唯一會走到 FAIL 的入口，
+    卻完全零覆蓋（composer 只用假 state 測「已知 FAIL」，沒人驗證誰真的會產出它）。"""
+    node = make_evidence_verification_node()
+
+    conflicting_a = Evidence(
+        source_id="fin-2025q3#c1",
+        document_id="doc-a",
+        document_title="A",
+        source_type="text",
+        page_number=1,
+        exact_excerpt="x",
+        exact_value="1234.0",
+        metric="稅後淨利",
+        period="2025Q3",
+    )
+    conflicting_b = Evidence(
+        source_id="fin-2025q3#c2",
+        document_id="doc-b",
+        document_title="B",
+        source_type="text",
+        page_number=2,
+        exact_excerpt="y",
+        exact_value="9999.0",
+        metric="稅後淨利",
+        period="2025Q3",
+    )
+    out_conflict = asyncio.run(
+        node(
+            {
+                "selected_evidence": [conflicting_a, conflicting_b],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+            }
+        )
+    )
+    assert out_conflict["verification_result"] == VerificationResult.FAIL
+    assert FailureCode.CONFLICTING_EVIDENCE in out_conflict["failure_codes"]
+
+    evidence = Evidence(
+        source_id="fin-2025q3#c3",
+        document_id="doc-c",
+        document_title="C",
+        source_type="text",
+        page_number=1,
+        exact_excerpt="z",
+        exact_value="1234.0",
+        metric="稅後淨利",
+        period="2025Q3",
+    )
+    bad_trace = CalculationTrace(
+        formula="a + b", inputs={"a": 1.0, "b": 2.0}, result=999.0
+    )
+    out_calc = asyncio.run(
+        node(
+            {
+                "selected_evidence": [evidence],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+                "requires_calculation": True,
+                "calculation_trace": bad_trace,
+            }
+        )
+    )
+    assert out_calc["verification_result"] == VerificationResult.FAIL
+    assert FailureCode.CALCULATION_ERROR in out_calc["failure_codes"]
+
+
+def test_verification_metric_mismatch_and_excluded_term_version_mismatch():
+    """【決策表1】規則2 METRIC_MISMATCH（指標不符）與規則3 排除詞命中—口徑類
+    VERSION_MISMATCH 各驗一次，先前兩者皆零覆蓋。"""
+    node = make_evidence_verification_node()
+
+    wrong_metric = Evidence(
+        source_id="e1",
+        document_id="doc-1",
+        document_title="財報",
+        source_type="text",
+        page_number=1,
+        exact_excerpt="x",
+        metric="逾放比",
+        period="2025Q3",
+    )
+    out_metric = asyncio.run(
+        node(
+            {
+                "selected_evidence": [wrong_metric],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+            }
+        )
+    )
+    assert out_metric["verification_result"] == VerificationResult.RETRY
+    assert FailureCode.METRIC_MISMATCH in out_metric["failure_codes"]
+
+    version_hit = Evidence(
+        source_id="e2",
+        document_id="doc-2",
+        document_title="2025Q3 稅前淨利報告",
+        source_type="text",
+        page_number=1,
+        exact_excerpt="x",
+        metric="稅後淨利",
+        period="2025Q3",
+    )
+    out_version = asyncio.run(
+        node(
+            {
+                "selected_evidence": [version_hit],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+                "excluded_terms": ["稅前"],
+            }
+        )
+    )
+    assert out_version["verification_result"] == VerificationResult.RETRY
+    assert FailureCode.VERSION_MISMATCH in out_version["failure_codes"]
+
+
+def test_verification_source_not_traceable():
+    """【決策表1】規則5 不可追溯：缺 document_id，或缺頁碼/摘錄/表格定位（非
+    structured）時判 SOURCE_NOT_TRACEABLE，先前零覆蓋。"""
+    node = make_evidence_verification_node()
+
+    no_locator = Evidence(
+        source_id="e1",
+        document_id="doc-1",
+        document_title="財報",
+        source_type="text",
+        metric="稅後淨利",
+        period="2025Q3",
+    )  # 無 page_number、無 exact_excerpt、非 structured
+    out = asyncio.run(
+        node(
+            {
+                "selected_evidence": [no_locator],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+            }
+        )
+    )
+    assert out["verification_result"] == VerificationResult.RETRY
+    assert FailureCode.SOURCE_NOT_TRACEABLE in out["failure_codes"]
+
+    no_document_id = no_locator.model_copy(
+        update={"document_id": "", "page_number": 1}
+    )
+    out2 = asyncio.run(
+        node(
+            {
+                "selected_evidence": [no_document_id],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+            }
+        )
+    )
+    assert FailureCode.SOURCE_NOT_TRACEABLE in out2["failure_codes"]
+
+
+# ---------------------------------------------------------------------------
+# Structured LLM Adapter：吞下非 schema 相容的回應
+# ---------------------------------------------------------------------------
+
+
+def test_langchain_structured_llm_swallows_malformed_response():
+    """【決策表：nl_extract/nl_logic BVT 缺口收斂點】LangChainStructuredLLM.structured()
+    對「LLM 回傳非 schema 相容內容」（非 JSON／缺欄位／多餘欄位都收斂成同一個
+    Exception 分支）必須吞下例外回 None，不能讓 LLM 失敗中斷流程——先前全部
+    測試都用手寫 Fake 繞過這顆真實 adapter，這是整個範圍內唯一直接測到它的案例。"""
+
+    class _BrokenStructuredClient:
+        async def ainvoke(self, messages):
+            raise ValueError("malformed llm response")
+
+    class _BrokenChatClient:
+        def with_structured_output(self, schema):
+            return _BrokenStructuredClient()
+
+    llm = LangChainStructuredLLM()
+    llm._client = _BrokenChatClient()  # 繞過 get_llm()，直接注入壞掉的底層 client
+    result = asyncio.run(llm.structured("sys", "user", IntentOutput))
+    assert result is None
+
+
 # ---------------------------------------------------------------------------
 # Answer Composer
 # ---------------------------------------------------------------------------
@@ -434,6 +794,38 @@ def test_composer_pass_includes_citation():
     assert citation.row == "稅後淨利"
     assert citation.column == "2025Q3"
     assert "【引用】" in out["final_answer"]
+
+
+def test_verification_fatal_error_overrides_pass_in_composer():
+    """【決策表2】answer_composer.py 的短路優先序：即使 verification_result=PASS
+    且證據齊全，只要 fatal_error 已設定就仍必須 ABSTAIN——先前沒有任何測試驗證
+    這個優先序，一個把判斷順序顛倒的迴歸不會被抓到。"""
+    evidence = Evidence(
+        source_id="fin-2025q3#t1",
+        document_id="doc-fin-2025q3",
+        document_title="2025Q3 財務季報",
+        source_type="table",
+        page_number=12,
+        exact_value="1234.0",
+        row_identifier="稅後淨利",
+        column_identifier="2025Q3",
+        metric="稅後淨利",
+        period="2025Q3",
+        unit="百萬元",
+    )
+    out = asyncio.run(
+        make_answer_composer_node()(
+            {
+                "fatal_error": "data_locator: boom",
+                "verification_result": VerificationResult.PASS,
+                "verified_evidence": [evidence],
+                "candidate_answer": "稅後淨利 2025Q3 為 1234.0百萬元",
+            }
+        )
+    )
+    assert out["answer_mode"] == AnswerMode.ABSTAIN
+    assert out["final_answer"].startswith("【無法提供答案】")
+    assert out["source_citations"] == []
 
 
 # ---------------------------------------------------------------------------

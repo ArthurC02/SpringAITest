@@ -13,6 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.engine import compiler, tool_registry
+from app.engine.script_runner import (
+    MAX_TIMEOUT_MS,
+    RestrictedInProcessRunner,
+    ScriptLimits,
+    ScriptTimeout,
+)
 from app.engine.skill import UNKNOWN_TOOL, Skill, validate_definition
 from app.engine.tool_registry import ToolContext, ToolNotAllowed, ToolTraceEntry
 
@@ -92,19 +98,24 @@ def test_tool_risk_defaults_to_privileged_and_rejects_unknown_value():
             return None
 
 
-def test_all_production_tools_have_explicit_expected_risk():
+def test_all_production_tools_have_explicit_expected_kind_and_risk():
+    """整個 registry 的 name → (kind, risk) 等值比對：新 tool 進來就必須有人同時決定兩者。
+
+    變更偵測是刻意的（D4 root context tool 只准 read/low）：加 tool 時請更新這張字典，
+    不要放寬成 `<=`。kind 併進同一張表 —— 兩者都是「宣告即契約」，分開驗只是多一次走訪。
+    """
     assert {
-        spec.name: spec.risk
+        spec.name: (spec.kind, spec.risk)
         for spec in tool_registry.all_specs()
         if spec.name != PROBE_TOOL
     } == {
-        "backend.retrieval_search": "read",
-        "local.calculator": "low",
-        "local.glossary": "read",
-        "local.rerank": "low",
+        "backend.retrieval_search": ("http", "read"),
+        "local.calculator": ("local", "low"),
+        "local.glossary": ("local", "read"),
+        "local.rerank": ("local", "low"),
         # D7's sole write tool is registered as write-risk and remains
         # unreachable unless both server allowlists enable it.
-        "runtime.write_evidence": "write",
+        "runtime.write_evidence": ("local", "write"),
     }
 
 
@@ -290,6 +301,41 @@ def test_tool_bag_rejects_before_scheduling_the_call(probe_calls):
     assert probe_calls == []
 
 
+def test_tool_call_exceeding_script_timeout_becomes_script_timeout():
+    """卡住的 tool 不得讓 script 步驟無限等待：ToolBag 的預算到期 → ScriptTimeout。
+
+    script 跑在 worker thread、tool 在事件圈，因此有兩個到期點（script_runner 的
+    asyncio.timeout 與 ToolBag.call 的 future.result(timeout=)）。這裡刻意把步驟預算
+    放到上限、只讓 tool 預算到期 —— 測的是 tool_registry.py:250 那一行，而不是步驟逾時。
+    """
+    name = "local.slow-probe"
+
+    @tool_registry.tool(name=name, kind="local", description="慢 tool", risk="read")
+    async def slow(ctx: ToolContext) -> dict:
+        await asyncio.sleep(5)  # 遠大於 tool 預算；asyncio.run 收尾時會取消這條 task
+        return {"never": True}
+
+    async def scenario():
+        bag = tool_registry.ToolBag(
+            ctx=ToolContext(tenant_id="t1"),
+            allowed={name},
+            loop=asyncio.get_running_loop(),
+            timeout_s=0.05,  # tool 預算：先到期的那個
+        )
+        with pytest.raises(ScriptTimeout):
+            await RestrictedInProcessRunner().run(
+                f"state['out'] = tools.call('{name}')",
+                {},
+                bag,
+                ScriptLimits(timeout_ms=MAX_TIMEOUT_MS),  # 步驟預算 10s：不會先到期
+            )
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        tool_registry._REGISTRY.pop(name, None)
+
+
 def test_tool_declared_in_flow_is_allowed_without_uses_tools(probe_calls):
     """決策表另一半：`tool:` 步驟宣告在 flow 裡就是白名單的一部分（flow 是靜態可稽核的）。"""
     result = _run({"flow": [{"tool": PROBE_TOOL, "args": {"x": 1}, "save_as": "out"}]})
@@ -381,26 +427,25 @@ def test_tool_step_cannot_save_into_reserved_key(save_as):
 
 
 # ---------------------------------------------------------------------------
-# 註冊契約與初始 4 個 tool（規格 §6.1／§6.2）
+# 註冊契約（規格 §6.1）
 # ---------------------------------------------------------------------------
 
 
-def test_initial_four_tools_are_registered():
-    """【規格 §6.2】初始 Tool 清單。"""
-    names = {spec.name for spec in tool_registry.all_specs()}
+def test_args_schema_declaring_argument_absent_from_callable_is_rejected():
+    """args_schema 宣告了 callable 沒有的參數 → 註冊即 ValueError（不進 registry）。
 
-    assert {
-        "backend.retrieval_search",
-        "local.calculator",
-        "local.glossary",
-        "local.rerank",
-        "runtime.write_evidence",
-    } <= names
+    放行的話，Builder 的 tool 目錄會顯示一個永遠會 TypeError 的參數，且錯誤要到執行期
+    才浮出來。決策表另一半由 local.identity_probe（args_schema 與具名參數相符）覆蓋。
+    """
+    name = "local.bad-args-schema-probe"
 
+    with pytest.raises(ValueError, match="absent from its callable"):
 
-def test_tool_kinds():
-    assert tool_registry.get("backend.retrieval_search").kind == "http"
-    assert tool_registry.get("local.calculator").kind == "local"
+        @tool_registry.tool(name=name, kind="local", args_schema={"nope": int})
+        async def bad_schema(ctx: ToolContext, x: int = 0) -> None:
+            return None
+
+    assert tool_registry.get(name) is None
 
 
 def test_duplicate_tool_name_raises_value_error():

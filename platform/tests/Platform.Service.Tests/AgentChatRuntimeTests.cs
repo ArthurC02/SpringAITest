@@ -15,23 +15,78 @@ public sealed class AgentChatRuntimeTests
     private static readonly Guid Run = Guid.Parse("22222222-2222-2222-2222-222222222222");
     private static readonly Guid Command = Guid.Parse("33333333-3333-3333-3333-333333333333");
 
+    // ---- canary 選擇閘:Enabled 與「租戶在 allowlist」是兩個獨立條件,各自單獨可否決 ----
+    // 每一案只讓一個條件不成立(另一個成立),否則 IsCanaryTenant 掉了其中一半也不會有測試變紅。
+
     [Fact]
-    public async Task Disabled_ReturnsLegacyWithoutCallingBackend()
+    public async Task DisabledFlag_AllowlistedTenant_UsesLegacyWithoutCallingBackend()
     {
         var handler = new QueueHandler();
-        var result = await Build(handler, new AgentChatOptions())
+        var result = await Build(handler, DisabledButAllowlisted())
             .RunAsync("hello", "c1", null, Identity());
         Assert.Null(result);
         Assert.Empty(handler.Requests);
     }
 
     [Fact]
-    public async Task ExplicitSelectionOutsideCanary_FailsClosed()
+    public async Task DisabledFlag_AllowlistedTenant_ExplicitSelection_FailsClosed()
     {
         var handler = new QueueHandler();
         await Assert.ThrowsAsync<WorkflowNotFoundException>(
-            () => Build(handler, new AgentChatOptions())
+            () => Build(handler, DisabledButAllowlisted())
                 .RunAsync("hello", "c1", Orchestrator, Identity()));
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task EnabledButTenantNotAllowlisted_UsesLegacy_WithoutCallingBackend()
+    {
+        var handler = new QueueHandler();
+        var result = await Build(handler, EnabledFor("tenant-other"))
+            .RunAsync("hello", "c1", null, Identity());
+        Assert.Null(result);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task EnabledButTenantNotAllowlisted_ExplicitSelection_FailsClosed()
+    {
+        var handler = new QueueHandler();
+        await Assert.ThrowsAsync<WorkflowNotFoundException>(
+            () => Build(handler, EnabledFor("tenant-other"))
+                .RunAsync("hello", "c1", Orchestrator, Identity()));
+        Assert.Empty(handler.Requests);
+    }
+
+    // allowlist 比對是 StringComparer.Ordinal:只差大小寫的租戶不得被放進 canary。
+    [Fact]
+    public async Task TenantAllowlist_IsCaseSensitive_DifferentCaseStaysLegacy()
+    {
+        var handler = new QueueHandler();
+        var result = await Build(handler, EnabledFor("TENANT-A"))
+            .RunAsync("hello", "c1", null, Identity());
+        Assert.Null(result);
+        Assert.Empty(handler.Requests);
+    }
+
+    // 匿名沒有可授權的身分:即使旗標開著、目標租戶在 allowlist,也一律留在 legacy;明確指定則 fail-closed。
+    [Fact]
+    public async Task Anonymous_EnabledAllowlistedTenant_UsesLegacy_WithoutCallingBackend()
+    {
+        var handler = new QueueHandler();
+        var result = await Build(handler, Enabled())
+            .RunAsync("hello", "c1", null, AnonymousIdentity());
+        Assert.Null(result);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Anonymous_ExplicitSelection_FailsClosed()
+    {
+        var handler = new QueueHandler();
+        await Assert.ThrowsAsync<WorkflowNotFoundException>(
+            () => Build(handler, Enabled())
+                .RunAsync("hello", "c1", Orchestrator, AnonymousIdentity()));
         Assert.Empty(handler.Requests);
     }
 
@@ -73,6 +128,38 @@ public sealed class AgentChatRuntimeTests
         Assert.Contains(Command.ToString(), workflow.Requests[0].Body, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(Run, identity.TurnMetadata!.RootRunId);
         Assert.Equal(Orchestrator, identity.TurnMetadata.OrchestratorId);
+    }
+
+    // 明確指定 Orchestrator 卻被 resolver 判成 legacy:必須 409 conflict,絕不靜默降級成 legacy 聊天。
+    [Fact]
+    public async Task ExplicitOrchestrator_ResolverReturnsLegacy_Conflicts_WithoutAllocating()
+    {
+        var backend = new QueueHandler(
+            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            Json(HttpStatusCode.OK, """{"mode":"legacy"}"""));
+
+        await Assert.ThrowsAsync<DownstreamConflictException>(
+            () => Build(backend, Enabled()).RunAsync("hello", "c1", Orchestrator, Identity()));
+
+        Assert.Equal(
+            ["/api/chat-runs/active", "/api/runtime-discovery/resolve"],
+            backend.Requests.Select(x => x.Path));
+    }
+
+    // 既有 active root 正在跑(running/queued)且選擇相同:只輪詢該 run,不 resume、不 allocate。
+    [Fact]
+    public async Task ActiveRunningRoot_PollsExistingRun_WithoutResumeOrAllocate()
+    {
+        var backend = new QueueHandler(
+            Json(HttpStatusCode.OK, Active(Orchestrator, "running", "{}")),
+            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", """{"aggregate":{"answer":"done"}}""")));
+
+        var result = await Build(backend, Enabled()).RunAsync("next turn", "c1", null, Identity());
+
+        Assert.Equal("done", result!.Text);
+        Assert.Equal(
+            ["/api/chat-runs/active", $"/api/chat-runs/{Run:D}"],
+            backend.Requests.Select(x => x.Path));
     }
 
     [Fact]
@@ -321,6 +408,95 @@ public sealed class AgentChatRuntimeTests
         Assert.Contains("\"message\":\"details\"", backend.Requests[0].Body);
     }
 
+    // ---- 終端狀態 render(PollAsync 的 switch 與 RenderResult/RenderClarification 的每個分支)----
+
+    // 非成功終端狀態與未知狀態:一律拋 WorkflowInvocationException,不得把它當成可回給使用者的答案。
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    [InlineData("timed_out")]
+    [InlineData("not-a-real-status")]
+    public async Task Poll_NonSuccessTerminalStatus_Throws(string status)
+    {
+        var backend = new QueueHandler(
+            Json(HttpStatusCode.OK, Active(Orchestrator, status, "{}")),
+            Json(HttpStatusCode.OK, Active(Orchestrator, status, "{}")));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(backend, Enabled()).RunAsync("hello", "c1", null, Identity()));
+    }
+
+    // completed 但 result 不是 {aggregate:{answer:string}} 的形狀:如實回傳原始 JSON,不得吞成空字串。
+    [Theory]
+    [InlineData("""{"aggregate":"plain text"}""", "\"plain text\"")]          // aggregate 非 object
+    [InlineData("""{"answer":"no aggregate"}""", """{"answer":"no aggregate"}""")]  // 完全沒有 aggregate
+    public async Task Poll_CompletedWithoutAggregateAnswer_RendersRawResult(string result, string expected)
+    {
+        var backend = new QueueHandler(
+            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", result)),
+            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", result)));
+
+        var response = await Build(backend, Enabled()).RunAsync("hello", "c1", null, Identity());
+
+        Assert.Equal(expected, response!.Text);
+    }
+
+    [Fact]
+    public async Task Poll_CompletedWithoutResult_Throws()
+    {
+        var backend = new QueueHandler(
+            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", "null")),
+            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", "null")));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(backend, Enabled()).RunAsync("hello", "c1", null, Identity()));
+    }
+
+    // waiting_input 卻沒有可問的問題(缺 clarification / 全是空白字串):拋例外,不得回一句空話給使用者。
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("""{"clarification":[]}""")]
+    [InlineData("""{"clarification":["  ","\t"]}""")]
+    public async Task Poll_WaitingWithoutClarification_Throws(string result)
+    {
+        var waiting = Active(Orchestrator, "waiting_input", result);
+        var backend = new QueueHandler(
+            Json(HttpStatusCode.OK, waiting),
+            Json(HttpStatusCode.OK, waiting));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(backend, Enabled()).RunAsync("same turn", "c1", null, Identity(), "retry-token"));
+    }
+
+    // 呼叫端(瀏覽器)斷線:停止輪詢並原樣傳播取消,但絕不對 durable run 送出 cancel 命令
+    // ——契約明文「client disconnect detaches from polling and does not cancel the durable run」。
+    [Fact]
+    public async Task CallerCancellation_StopsPolling_WithoutCancellingDurableRun()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var running = Active(Orchestrator, "running", "{}");
+        var backend = new QueueHandler(
+            Json(HttpStatusCode.OK, running),   // active 查詢
+            Json(HttpStatusCode.OK, running),   // 第一次輪詢 → 呼叫端此時斷線
+            Json(HttpStatusCode.OK, running))   // 若還繼續輪詢才會用到(不該用到)
+        {
+            OnRequest = request =>
+            {
+                if (request.Path == $"/api/chat-runs/{Run:D}")
+                    cancellation.Cancel();
+            },
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Build(backend, Enabled())
+                .RunAsync("hello", "c1", null, Identity(), null, cancellation.Token));
+
+        Assert.Equal(
+            ["/api/chat-runs/active", $"/api/chat-runs/{Run:D}"],
+            backend.Requests.Select(x => x.Path));
+        Assert.DoesNotContain(backend.Requests, x => x.Path.EndsWith("/cancel", StringComparison.Ordinal));
+    }
+
     private static AgentChatRuntime Build(
         QueueHandler backendHandler, AgentChatOptions options, QueueHandler? workflowHandler = null)
     {
@@ -341,6 +517,13 @@ public sealed class AgentChatRuntimeTests
         TenantAllowlist = new HashSet<string>(["tenant-a"], StringComparer.Ordinal),
     };
 
+    /// <summary>只有旗標關閉這一個否決條件成立(租戶仍在 allowlist),用來單獨釘住 Enabled 那一半。</summary>
+    private static AgentChatOptions DisabledButAllowlisted() => new()
+    {
+        Enabled = false,
+        TenantAllowlist = new HashSet<string>(["tenant-a"], StringComparer.Ordinal),
+    };
+
     private static AgentChatOptions EnabledFor(string tenant) => new()
     {
         Enabled = true,
@@ -351,6 +534,14 @@ public sealed class AgentChatRuntimeTests
     {
         var identity = new FakeChatIdentityAccessor();
         identity.SetRequestKeys(null, conversation, user ?? User);
+        return identity;
+    }
+
+    /// <summary>匿名呼叫者:CurrentUser 為 null(沒有可授權、可歸屬的身分)。</summary>
+    private static FakeChatIdentityAccessor AnonymousIdentity()
+    {
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys(null, "c1", null);
         return identity;
     }
 
@@ -380,15 +571,20 @@ public sealed class AgentChatRuntimeTests
         private readonly Queue<HttpResponseMessage> _responses = new(responses);
         public List<CapturedRequest> Requests { get; } = [];
 
+        /// <summary>每個請求記錄後執行,供「請求進行中呼叫端斷線」這類時序測試觸發外部事件。</summary>
+        public Action<CapturedRequest>? OnRequest { get; set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Requests.Add(new(
+            var captured = new CapturedRequest(
                 request.RequestUri!.AbsolutePath,
                 request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken),
                 request.Headers.TryGetValues("Idempotency-Key", out var values)
                     ? values.Single()
-                    : null));
+                    : null);
+            Requests.Add(captured);
+            OnRequest?.Invoke(captured);
             if (_responses.Count == 0)
                 throw new InvalidOperationException("Unexpected request");
             return _responses.Dequeue();

@@ -1810,6 +1810,45 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
         }
     }
 
+    public Task FailApprovalRunAsync(string tenantId, string userId, Guid runId, AgentRunApprovalFailure failure, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            var entry = Find(tenantId, userId, runId);
+            // Same WHERE clause as the PostgreSQL authority in each case: expiry terminalizes its
+            // run even when cancellation was requested (whether the approval was still pending or
+            // already approved but never executed), while a dead-lettered write leaves a
+            // cancel-requested run to its cancel command.
+            var eligible = entry is not null && failure switch
+            {
+                AgentRunApprovalFailure.ApprovalExpired => entry.Status == AgentRunStatuses.WaitingApproval,
+                AgentRunApprovalFailure.ApprovalExpiredBeforeWrite => entry.Status is AgentRunStatuses.Queued or AgentRunStatuses.Running,
+                _ => entry.Status is AgentRunStatuses.Queued or AgentRunStatuses.Running && entry.CancelRequestedAt is null,
+            };
+            if (!eligible)
+            {
+                return Task.CompletedTask;
+            }
+
+            var now = UtcNow();
+            entry!.Status = AgentRunStatuses.Failed;
+            entry.StateVersion++;
+            (entry.ErrorCode, entry.ErrorMessage) = failure switch
+            {
+                AgentRunApprovalFailure.ApprovalExpired => ("approval_expired", "Approval expired before a decision."),
+                AgentRunApprovalFailure.ApprovalExpiredBeforeWrite => ("approval_expired", "Approval expired before the write could execute."),
+                _ => ("approved_write_unrecoverable", "Approved write could not be safely resumed."),
+            };
+            entry.CompletedAt = now;
+            entry.UpdatedAt = now;
+            entry.LeaseOwner = null;
+            entry.LeaseTokenHash = null;
+            entry.LeaseExpiresAt = null;
+            entry.LeaseCommandId = null;
+            return Task.CompletedTask;
+        }
+    }
+
     private static bool HasValue(JsonObject definition, string field, string value)
         => definition[field] is JsonArray values
            && values.Any(v => string.Equals(v?.GetValue<string>(), value, StringComparison.Ordinal));

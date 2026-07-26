@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from 'vitest'
 import { decideRunApproval, normalizeRunApproval, normalizeRunApprovals } from '../src/api/runApprovals'
 
 test.describe('D7 approval public projection', () => {

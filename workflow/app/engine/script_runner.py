@@ -46,7 +46,13 @@ from functools import lru_cache
 from types import CodeType
 from typing import Any, Protocol
 
-from app.engine.harness import CONFIG_SEED_KEYS, IDENTITY_KEYS, IMMUTABLE_KEYS
+from app.engine.expressions import MAX_AST_DEPTH, ast_depth
+from app.engine.harness import (
+    CONFIG_SEED_KEYS,
+    IDENTITY_KEYS,
+    IMMUTABLE_KEYS,
+    RUNTIME_AUTHORITY_KEYS,
+)
 from app.engine.node_registry import ENGINE_KEYS
 from app.engine.models import TraceEntry
 
@@ -62,9 +68,16 @@ MAX_ALLOC = 10**6  # range() 長度上限（唯一完整可界定的配置護欄
 
 # script 一律不得寫入的鍵：身分鍵（換租戶）、不可變鍵（偽造稽核的原始問題）、
 # 引擎鍵（偽造 trace / fatal_error 可繞過短路與稽核）、Configuration Set 執行參數
-# （竄改 retrieval_top_k 等伺服器注入的只讀 seed）。__ 前綴另外擋（引擎內部鍵）。
+# （竄改 retrieval_top_k 等伺服器注入的只讀 seed）、D3 授權鍵（關掉 enforce_data_scope
+# 或放寬 knowledge_sources 就是替後續 tool 步驟的 ToolContext 提權）。
+# 這五組即 skill.RESERVED_KEYS ∪ ENGINE_KEYS —— tool 步驟的 save_as 走 writable_key()
+# 擋的是同一組鍵，script 這條路不得比它寬。__ 前綴另外擋（引擎內部鍵）。
 FORBIDDEN_WRITE_KEYS = frozenset(
-    IDENTITY_KEYS | IMMUTABLE_KEYS | ENGINE_KEYS | CONFIG_SEED_KEYS
+    IDENTITY_KEYS
+    | IMMUTABLE_KEYS
+    | ENGINE_KEYS
+    | CONFIG_SEED_KEYS
+    | RUNTIME_AUTHORITY_KEYS
 )
 
 # 白名單 builtins（規格 §5.2 逐字）。random/time/datetime 這類非確定性來源不在此列。
@@ -407,8 +420,15 @@ def _prepare(source: str) -> tuple[ScriptContract, CodeType]:
         raise ScriptViolation("script 不可為空")
     try:
         tree = ast.parse(source, mode="exec")
-    except SyntaxError as e:
+    except (SyntaxError, MemoryError, RecursionError) as e:
+        # 同 expressions._parse：parser 自己的堆疊溢位是 MemoryError，
+        # 早於下面的 MAX_AST_DEPTH 發生
         raise ScriptViolation(f"script 語法錯誤: {e}")
+    # 深度先驗（與 expressions 共用同一個上限與量法）：_Analyser 是遞迴走訪，
+    # 沒有這道護欄時巢狀輸入會讓 RecursionError 逃出白名單的攔截網 ——
+    # /skills/validate-package 這個未信任 zip 的信任邊界會直接 500。
+    if ast_depth(tree) > MAX_AST_DEPTH:
+        raise ScriptViolation(f"script 的巢狀深度超過上限 {MAX_AST_DEPTH}")
 
     analyser = _Analyser()
     analyser.run(tree)

@@ -159,6 +159,20 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
         Assert.DoesNotContain("Skill", message);
     }
 
+    // 缺 X-User-Role(不是 USER,是完全不帶 header)與 USER 同屬「非 ADMIN」等價類 → 一樣 403。
+    [Fact]
+    public async Task ProtectedEndpoint_MissingRoleHeader_Returns403()
+    {
+        var roleless = _factory.CreateInternalClient().WithTenant("demo-a");
+
+        var resp = await roleless.GetAsync(Path);
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        Assert.Equal(
+            "權限不足，需要管理員權限",
+            (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
     // ---- SSR-P4-007:跨租戶 GET/PUT/DELETE/activate 全 404;tenant-b 不受影響;list 只見自己 ----
 
     [Fact]
@@ -196,6 +210,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("kb_query.top_k", 0, HttpStatusCode.UnprocessableEntity)]
     [InlineData("kb_query.top_k", -3, HttpStatusCode.UnprocessableEntity)]
     [InlineData("kb_query.max_retrieval_attempts", 1, HttpStatusCode.Created)]
+    [InlineData("kb_query.max_retrieval_attempts", 1000000, HttpStatusCode.Created)] // 與姊妹鍵一致:無上限
     [InlineData("kb_query.max_retrieval_attempts", 0, HttpStatusCode.UnprocessableEntity)]
     [InlineData("workflow.timeout_seconds", 1, HttpStatusCode.Created)]
     [InlineData("workflow.timeout_seconds", 3600, HttpStatusCode.Created)]
@@ -303,6 +318,21 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
         // 零寫入。
         var list = (await (await Admin().GetAsync(Path)).ReadJsonAsync()).AsArray();
         Assert.DoesNotContain(list, n => n!["name"]!.GetValue<string>() == "p4_partial");
+    }
+
+    [Fact] // 驗證迴圈累積所有錯誤才丟:兩個非法鍵必須同時出現在 fieldErrors,不是只報第一個
+    public async Task MultipleInvalidKeys_ReturnsAllFieldErrors()
+    {
+        var resp = await Admin().PostAsJsonAsync(Path, Body("p4_multi_invalid", new JsonObject
+        {
+            ["bogus.one"] = 1,
+            ["retrieval.top_k"] = 0, // 白名單鍵但越界
+        }));
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var fieldErrors = (await resp.ReadJsonAsync())["fieldErrors"]!.AsObject();
+        Assert.NotNull(fieldErrors["bogus.one"]);
+        Assert.NotNull(fieldErrors["retrieval.top_k"]);
     }
 
     // ---- active 端點(協調者補列):USER 可讀、無 active 404、跨租戶只見自己 ----

@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text.Json;
-using Platform.Service;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 
@@ -64,6 +63,16 @@ public sealed class ConfigServiceTests
     public async Task Update_500_ThrowsWorkflowInvocation()
     {
         var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() =>
+            svc.UpdateAsync("a", new ConfigUpdateRequest("2"), AdminCtx));
+    }
+
+    // 「沒有回應」與「回了 500」是兩條不同的程式路徑(WrapTransport vs MapErrorAsync),對外同為 502。
+    [Fact]
+    public async Task Update_TransportFailure_ThrowsWorkflowInvocation()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("backend 不可達")));
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(() =>
             svc.UpdateAsync("a", new ConfigUpdateRequest("2"), AdminCtx));

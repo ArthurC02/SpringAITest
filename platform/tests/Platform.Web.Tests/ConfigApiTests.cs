@@ -49,10 +49,18 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("權限不足，無法修改系統組態", body["message"]!.GetValue<string>());
     }
 
-    [Fact]
-    public async Task Update_Returns400_WhenValueMissing()
+    // NotBlank 的三個等價類:欄位缺漏(null)、空字串、全空白 —— 內建 Required 只擋前者。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Update_Returns400_WhenValueBlank(string? value)
     {
-        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/config/chat_model", new { });
+        var payload = value is null
+            ? new Dictionary<string, string>()
+            : new Dictionary<string, string> { ["value"] = value };
+
+        var resp = await _factory.AdminClient().PutAsJsonAsync("/api/config/chat_model", payload);
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();

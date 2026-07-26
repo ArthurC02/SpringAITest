@@ -53,6 +53,30 @@ public sealed class FeaturesApiTests
         Assert.True(body["agentTestRunEnabled"]!.GetValue<bool>());
     }
 
+    // AND 閘的另一半:子旗標自己開、父旗標維持預設關 → 仍必須關(fail-closed)。
+    // 只測「兩者皆開」的話,把 && 誤改成獨立旗標不會有任何測試失敗。
+    [Fact]
+    public async Task Features_TestRun_TrueWithoutBuilderEnabled_StaysFalse()
+    {
+        using var factory = new TestWebAppFactory(agentTestRunEnabled: true);
+
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+
+        Assert.False(body["agentBuilderEnabled"]!.GetValue<bool>());
+        Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Features_MultiAgentDispatch_TrueWithoutWorkflowDesigner_StaysFalse()
+    {
+        using var factory = new TestWebAppFactory(multiAgentDispatchEnabled: true);
+
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+
+        Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
+        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+    }
+
     [Fact]
     public async Task Features_WorkflowDesignerFlagIsIndependent()
     {
@@ -74,6 +98,17 @@ public sealed class FeaturesApiTests
             multiAgentDispatchEnabled: true);
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
         Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Features_AgentChatFlagIsIndependent()
+    {
+        using var factory = new TestWebAppFactory(
+            agentChatEnabled: true,
+            agentChatTenantAllowlist: "tenant-x");
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+        Assert.True(body["agentChatEnabled"]!.GetValue<bool>());
+        Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
     }
 
     [Fact]

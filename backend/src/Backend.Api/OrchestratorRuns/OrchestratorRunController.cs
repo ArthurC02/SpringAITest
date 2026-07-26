@@ -35,10 +35,10 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
     { var result = await runs.CompleteDispatchAsync(Request.RequireTenant(), CurrentUser(), runId, commandId, request.ClaimToken ?? "", ct); return result switch { OrchestratorRunDispatchCompleteStatus.Success => NoContent(), OrchestratorRunDispatchCompleteStatus.NotFound => throw Missing(), _ => throw new ApiException(409, "Orchestrator command claim conflicted") }; }
     [HttpPost("orchestrator-runs/recovery/claim")]
     public async Task<IActionResult> Recover(OrchestratorRunRecoveryClaimRequest request, CancellationToken ct)
-        => Ok(await runs.ClaimRecoveryAsync(request.WorkerId?.Trim() ?? "", request.Limit, request.LeaseSeconds, ct));
+    { var workerId = Worker(request.WorkerId, request.Limit, request.LeaseSeconds); return Ok(await runs.ClaimRecoveryAsync(workerId, request.Limit, request.LeaseSeconds, ct)); }
     [HttpPost("orchestrator-runs/{runId:guid}/children")]
     public async Task<IActionResult> CreateChild(Guid runId, OrchestratorChildCreateRequest request, CancellationToken ct)
-        => Ok(await runs.CreateChildAsync(Request.RequireTenant(), CurrentUser(), runId, request, ct) ?? throw new ApiException(409, "Child task is not authorized by the immutable root snapshot"));
+    { Child(request); return Ok(await runs.CreateChildAsync(Request.RequireTenant(), CurrentUser(), runId, request, ct) ?? throw new ApiException(409, "Child task is not authorized by the immutable root snapshot")); }
     [HttpGet("orchestrator-runs/{runId:guid}/children/{childId:guid}")]
     public async Task<IActionResult> ChildStatus(Guid runId, Guid childId, CancellationToken ct)
         => Ok(await runs.GetChildAsync(Request.RequireTenant(), CurrentUser(), runId, childId, ct) ?? throw Missing());
@@ -50,6 +50,14 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
         => Ok(await runs.AcquireContextAsync(Request.RequireTenant(), CurrentUser(), runId, request, ct) ?? throw new ApiException(409, "Context acquisition authority is invalid"));
     private IActionResult Accepted(OrchestratorRunWriteResult r) { if (r.Status == OrchestratorRunWriteStatus.NotFound) throw Missing(); if (r.Status is OrchestratorRunWriteStatus.Conflict or OrchestratorRunWriteStatus.InvalidState) throw new ApiException(409, r.Message ?? "Orchestrator run state conflict"); Response.Headers["X-Orchestrator-Run-Replayed"] = r.Replayed ? "true" : "false"; if (r.Dispatch is not null) Response.Headers["X-Orchestrator-Run-Command-Id"] = r.Dispatch.CommandId.ToString("D"); return StatusCode(202, r.Run! with { CommandId = r.Dispatch?.CommandId }); }
     private void RequireSystemAdmin() { if (!Request.HasCapability("workflow.manage")) throw new ApiException(403, "workflow.manage capability is required"); }
+    // The recovery repositories throw on these bounds; validate them here so an invalid
+    // Workflow scanner request is a 400 ApiError instead of a 500.
+    private static string Worker(string? workerId, int limit, int leaseSeconds)
+    { var x = workerId?.Trim(); if (string.IsNullOrEmpty(x) || x.Length > 256 || limit is < 1 or > 100 || leaseSeconds is < 1 or > 300) throw new ApiException(400, "worker_id、limit 或 lease_seconds 無效"); return x; }
+    // Both repositories throw on a malformed child request; a 500 would look retryable to Workflow
+    // while a 409 would be retried forever. Surface the same fixed messages as a permanent 400.
+    private static void Child(OrchestratorChildCreateRequest request)
+    { try { OrchestratorTaskEnvelope.ValidateChild(request); } catch (ArgumentException e) { throw new ApiException(400, e.Message); } }
     private string CurrentUser() => Request.UserId() ?? throw new ApiException(400, "X-User-Id is required");
     private string Key() { var x = Request.Headers["Idempotency-Key"].ToString().Trim(); if (x.Length is < 1 or > 128 || x.Any(char.IsControl)) throw new ApiException(400, "Idempotency-Key is required"); return x; }
     private static string Message(string? x) { x = x?.Trim(); if (string.IsNullOrEmpty(x) || x.Length > 16384) throw new ApiException(400, "message is required"); return x; }

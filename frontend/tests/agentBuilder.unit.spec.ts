@@ -1,9 +1,13 @@
-import { expect, test } from '@playwright/test'
+// Audience principals are validated against a regex that is duplicated verbatim from the server:
+// `src/agentBuilder.ts:19` AUDIENCE_GROUP_ID === platform `src/Platform.Service/Dtos/UserContext.cs:34`
+// CanonicalGroupIdRegex, whose 126-char middle class also encodes UserGroupContract.MaxGroupIdLength = 128.
+// The frontend is not the authority; these boundary cases exist so that relaxing/tightening the
+// server rule without updating this copy fails here instead of silently blocking legal authoring.
+import { expect, test } from 'vitest'
 import {
   audiencePrincipalError,
   businessRuleCount,
   createEmptyAgentDraft,
-  isAgentEditorLocked,
   isSkillBindable,
   nextAgentRevision,
   normalizeAgentDraft,
@@ -11,10 +15,12 @@ import {
   parseOutputContract,
 } from '../src/agentBuilder'
 import {
+  putAgentDraft,
   simulateBusinessRules,
   validateAgent,
   validateBusinessRules,
 } from '../src/api/agents'
+import { ApiError } from '../src/api/http'
 import {
   actionCatalogItems,
   canonicalRulesFromValidation,
@@ -23,6 +29,7 @@ import {
   factCatalogItems,
   factsForGate,
   operatorEntries,
+  ruleUiDepthLimit,
   summarizeRule,
 } from '../src/ruleBuilder'
 import type {
@@ -65,13 +72,16 @@ test.describe('Agent Builder model contracts', () => {
     expect(normalized.runtime_workflow).toEqual({ id: 'workflow-id', revision: 4 })
   })
 
-  test('defaults new agents to explicit fail-closed sets and tenant roles', () => {
+  test('defaults new agents to explicit fail-closed sets, tenant roles, and revision r1', () => {
     const draft = createEmptyAgentDraft()
     expect(draft.allowed_tools).toEqual([])
     expect(draft.knowledge_sources).toEqual([])
     expect(draft.capabilities).toEqual([])
     expect(draft.audience).toEqual(['role:USER', 'role:ADMIN'])
     expect(businessRuleCount(draft.business_rules)).toBe(0)
+    // A never-published Agent previews r1, not r0; an existing one previews published + 1.
+    expect(nextAgentRevision(null)).toBe(1)
+    expect(nextAgentRevision(4)).toBe(5)
   })
 
   test('uses server bindable metadata instead of source/name guesses', () => {
@@ -96,18 +106,6 @@ test.describe('Agent Builder model contracts', () => {
     expect(parseOutputContract('{').error).toBeTruthy()
   })
 
-  test('locks editing for pending writes and unresolved conflicts', () => {
-    expect(isAgentEditorLocked(false, false, false)).toBe(false)
-    expect(isAgentEditorLocked(false, true, false)).toBe(true)
-    expect(isAgentEditorLocked(false, false, true)).toBe(true)
-    expect(isAgentEditorLocked(true, false, false)).toBe(true)
-  })
-
-  test('previews the next immutable Agent revision', () => {
-    expect(nextAgentRevision(null)).toBe(1)
-    expect(nextAgentRevision(4)).toBe(5)
-  })
-
   test('normalizes legacy role principals and validates canonical role/group audiences', () => {
     expect(
       normalizeAudiencePrincipals([
@@ -124,6 +122,16 @@ test.describe('Agent Builder model contracts', () => {
     expect(audiencePrincipalError(['group:*'])).toContain('wildcard')
     expect(audiencePrincipalError(['group:Finance Reviewers'])).toContain('格式錯誤')
     expect(audiencePrincipalError(['role:OWNER'])).toContain('格式錯誤')
+    // An empty audience is deliberately not a client-side error: the server owns "who may see this".
+    expect(audiencePrincipalError([])).toBeNull()
+    // Group id length boundary: the shared regex admits 1 + 126 + 1 = 128 characters, matching
+    // platform's UserGroupContract.MaxGroupIdLength. 129 must fail on both sides.
+    expect(audiencePrincipalError([`group:${'a'.repeat(128)}`])).toBeNull()
+    expect(audiencePrincipalError([`group:${'a'.repeat(129)}`])).toContain('格式錯誤')
+    // A single character is the shortest legal id; separators may not sit on either edge.
+    expect(audiencePrincipalError(['group:a'])).toBeNull()
+    expect(audiencePrincipalError(['group:-finance'])).toContain('格式錯誤')
+    expect(audiencePrincipalError(['group:finance-'])).toContain('格式錯誤')
   })
 
   test('preserves canonical Business Rule AST including nested groups and unknown handling', () => {
@@ -226,8 +234,26 @@ test.describe('Business Rule catalog-driven rendering helpers', () => {
     expect(defaultTypedValue('decimal')).toBe('0')
     expect(defaultTypedValue('number')).toBe(0)
     expect(defaultTypedValue('integer')).toBe(0)
-    const exact = '9007199254740993.01'
-    expect(JSON.parse(JSON.stringify({ amount: exact }))).toEqual({ amount: exact })
+    expect(defaultTypedValue('boolean')).toBe(false)
+    expect(defaultTypedValue('string')).toBe('')
+    // A catalog enum wins over the type default and is handed back byte-identically —
+    // a decimal seed must never round-trip through Number.
+    expect(defaultTypedValue('decimal', ['9007199254740993.01'])).toBe('9007199254740993.01')
+    // collection is resolved before the enum branch: a multi-select starts empty, not preselected.
+    expect(defaultTypedValue('collection', ['a', 'b'])).toEqual([])
+  })
+
+  test('nesting depth follows the catalog limit and fails safe to 3, never to 0', () => {
+    expect(ruleUiDepthLimit({ ...factsResponse, limits: { maxDepth: 5 } })).toBe(5)
+    // Absent catalog, absent limits, absent field, and every nonsensical value fall back to 3 —
+    // a 0/NaN limit must never collapse the editor to "no nesting at all".
+    expect(ruleUiDepthLimit(null)).toBe(3)
+    expect(ruleUiDepthLimit([fact])).toBe(3)
+    expect(ruleUiDepthLimit(factsResponse)).toBe(3)
+    expect(ruleUiDepthLimit({ limits: {} })).toBe(3)
+    expect(ruleUiDepthLimit({ limits: { maxDepth: 0 } })).toBe(3)
+    expect(ruleUiDepthLimit({ limits: { maxDepth: Number.NaN } })).toBe(3)
+    expect(ruleUiDepthLimit({ limits: { maxDepth: 2.5 } })).toBe(3)
   })
 
   test('omits optional action parameters until the author supplies them', () => {
@@ -242,27 +268,63 @@ test.describe('Business Rule catalog-driven rendering helpers', () => {
 })
 
 test.describe('Agent API concurrency contract', () => {
-  test('validate forwards the current ETag in If-Match', async () => {
+  test('a missing or stale ETag surfaces the server ApiError instead of a silent overwrite', async () => {
     const originalFetch = globalThis.fetch
-    let observedIfMatch: string | null = null
-    let observedPath = ''
+    const observed: Array<{ path: string; ifMatch: string | null }> = []
+    const responses: Array<{ status: number; body: unknown }> = [
+      {
+        status: 428,
+        body: {
+          timestamp: '2026-07-24T00:00:00Z',
+          status: 428,
+          message: '需要 If-Match 才能修改草稿。',
+          fieldErrors: {},
+        },
+      },
+      {
+        status: 409,
+        body: {
+          timestamp: '2026-07-24T00:00:00Z',
+          status: 409,
+          message: 'draft 版本衝突',
+          fieldErrors: { draft_version: '此 Agent 已被其他人更新。' },
+        },
+      },
+    ]
     globalThis.fetch = async (input, init) => {
-      observedPath = String(input)
-      observedIfMatch = new Headers(init?.headers).get('If-Match')
-      return new Response(JSON.stringify({ valid: true, errors: [] }), {
-        status: 200,
+      observed.push({ path: String(input), ifMatch: new Headers(init?.headers).get('If-Match') })
+      const next = responses.shift()!
+      return new Response(JSON.stringify(next.body), {
+        status: next.status,
         headers: { 'Content-Type': 'application/json' },
       })
     }
 
     try {
-      await expect(validateAgent('agent-id', '"7"')).resolves.toEqual({ valid: true, errors: [] })
+      // No captured ETag → the header is omitted entirely, which is exactly what the server 428s on.
+      const missing = await validateAgent('agent-id', null).catch((error: unknown) => error)
+      expect(missing).toBeInstanceOf(ApiError)
+      expect((missing as ApiError).status).toBe(428)
+      expect((missing as ApiError).message).toBe('需要 If-Match 才能修改草稿。')
+
+      // Stale ETag → 409 keeps the server message and fieldErrors so the conflict banner can render.
+      const stale = await putAgentDraft('agent-id', createEmptyAgentDraft(), '"1"').catch(
+        (error: unknown) => error,
+      )
+      expect(stale).toBeInstanceOf(ApiError)
+      expect((stale as ApiError).status).toBe(409)
+      expect((stale as ApiError).message).toBe('draft 版本衝突')
+      expect((stale as ApiError).fieldErrors).toEqual({
+        draft_version: '此 Agent 已被其他人更新。',
+      })
     } finally {
       globalThis.fetch = originalFetch
     }
 
-    expect(observedPath).toBe('/api/agents/agent-id/validate')
-    expect(observedIfMatch).toBe('"7"')
+    expect(observed).toEqual([
+      { path: '/api/agents/agent-id/validate', ifMatch: null },
+      { path: '/api/agents/agent-id/draft', ifMatch: '"1"' },
+    ])
   })
 
   test('Business Rule validation and simulation use public Platform paths and canonical envelopes', async () => {

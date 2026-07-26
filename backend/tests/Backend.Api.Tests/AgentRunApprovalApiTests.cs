@@ -47,6 +47,50 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.Conflict, (await DecideAsync(approver, runId, approvalId, true, "business-approval")).StatusCode);
     }
 
+    /// <summary>
+    /// GET /api/runs/{runId}/approvals 是 root AGENTS.md 點名的 approver 入口。兩件事必須釘住:
+    /// ① 瀏覽器投影不得洩漏 action_fingerprint / checkpoint_ref / requested_by / reason(公開遮蔽契約);
+    /// ② 清單依角色過濾,且跨租戶不洩漏存在性(404,不是空陣列)。
+    /// </summary>
+    [Fact]
+    public async Task ApprovalList_IsRoleFilteredTenantScoped_AndRedactsSensitiveFields()
+    {
+        using var admin = Client("demo-a", "admin-a", "ADMIN");
+        var agent = await PublishedUserAgentAsync(admin);
+        using var owner = Client("demo-a", "admin-a", "ADMIN");
+        var running = await StartRunningAsync(owner, agent);
+        var runId = running.Run["id"]!.GetValue<string>();
+        var approval = await CreateApprovalAsync(owner, running, new string('a', 64), "USER");
+        var approvalId = approval["id"]!.GetValue<string>();
+
+        var ownerList = await owner.GetAsync($"/api/runs/{runId}/approvals");
+        Assert.Equal(HttpStatusCode.OK, ownerList.StatusCode);
+        var items = (await ownerList.ReadJsonAsync()).AsArray();
+        var item = Assert.Single(items)!.AsObject();
+        Assert.Equal(approvalId, item["id"]!.GetValue<string>());
+        Assert.Equal(
+            new[]
+            {
+                "decided_at", "decision", "expires_at", "id",
+                "required_role", "run_id", "self_approval_forbidden", "status",
+            },
+            item.Select(pair => pair.Key).Order(StringComparer.Ordinal));
+
+        // 合格 approver(角色相符、非發起人)看得到;角色不符者看到空清單而非別人的待辦。
+        using var approver = Client("demo-a", "user-b", "USER");
+        Assert.Equal(
+            approvalId,
+            Assert.Single((await (await approver.GetAsync($"/api/runs/{runId}/approvals")).ReadJsonAsync()).AsArray())!
+                ["id"]!.GetValue<string>());
+        using var unrelated = Client("demo-a", "user-c", "ADMIN");
+        Assert.Empty((await (await unrelated.GetAsync($"/api/runs/{runId}/approvals")).ReadJsonAsync()).AsArray());
+
+        using var crossTenant = Client("demo-b", "user-b", "USER");
+        Assert.Equal(
+            HttpStatusCode.NotFound,
+            (await crossTenant.GetAsync($"/api/runs/{runId}/approvals")).StatusCode);
+    }
+
     private HttpClient Client(string tenant, string user, string role)
         => _factory.CreateInternalClient().WithTenant(tenant).WithUser(user).WithRole(role);
 

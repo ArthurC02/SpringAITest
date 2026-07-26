@@ -264,15 +264,19 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Start_EmptyRevisionGrants_FailClosed()
     {
-        var client = Admin();
         var agentId = await PublishedAgentAsync(
-            client,
+            Admin(),
             "empty-grants",
             body =>
             {
                 body["allowed_tools"] = new JsonArray();
                 body["knowledge_sources"] = new JsonArray();
             });
+        // 呼叫端**帶著**兩個合法 claim:這樣「交集為空」的唯一成因就是 revision 側是空的,
+        // 否則(用不帶 capability 的 client)這條測試會因為 caller 側為空而假綠。
+        var client = AdminWithCapabilities(
+            "tool.use:local.calculator",
+            $"knowledge.read:{SourceId}");
 
         var started = await client.SendAsync(Start(agentId, "empty-grants-start"));
         var run = await started.ReadJsonAsync();
@@ -402,6 +406,9 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
             });
         Assert.Equal(HttpStatusCode.OK, running.StatusCode);
 
+        // 非法 waiting transition 的完整矩陣(缺 checkpoint_ref / 版本未前進 / pending_input 過大 /
+        // result 過大)由 InMemoryAgentRunRecoveryTests.WaitingInput_RequiresCheckpointIdentityAndStrictVersionAdvance
+        // 直接打同一份生產碼驗證;這裡只留一個代表案,證明 InvalidState 在 HTTP 層映射成 409。
         var missingCheckpointRef = await client.PostAsJsonAsync(
             $"/api/agent-runs/{runId}/transitions",
             new
@@ -414,35 +421,6 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
                 checkpoint_version = 1,
             });
         Assert.Equal(HttpStatusCode.Conflict, missingCheckpointRef.StatusCode);
-
-        var nonAdvancedCheckpoint = await client.PostAsJsonAsync(
-            $"/api/agent-runs/{runId}/transitions",
-            new
-            {
-                expected_version = 3,
-                to_status = "waiting_input",
-                lease_token = leaseToken,
-                lease_generation = leaseGeneration,
-                expected_event_ack_cursor = eventAckCursor,
-                checkpoint_ref = V2CheckpointRef(leaseGeneration),
-                checkpoint_version = 0,
-            });
-        Assert.Equal(HttpStatusCode.Conflict, nonAdvancedCheckpoint.StatusCode);
-
-        var oversizedPendingInput = await client.PostAsJsonAsync(
-            $"/api/agent-runs/{runId}/transitions",
-            new
-            {
-                expected_version = 3,
-                to_status = "waiting_input",
-                lease_token = leaseToken,
-                lease_generation = leaseGeneration,
-                expected_event_ack_cursor = eventAckCursor,
-                checkpoint_ref = V2CheckpointRef(leaseGeneration),
-                checkpoint_version = 1,
-                pending_input = new { value = new string('p', 64 * 1024) },
-            });
-        Assert.Equal(HttpStatusCode.Conflict, oversizedPendingInput.StatusCode);
 
         var pending = JsonDocument.Parse("""{"question":"需要哪個期間？"}""").RootElement.Clone();
         var waiting = await client.PostAsJsonAsync(
@@ -616,26 +594,109 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Single(events["events"]!.AsArray());
         Assert.Equal(2, events["next_sequence"]!.GetValue<long>());
 
-        var rejected = await client.PostAsJsonAsync(
-            $"/api/agent-runs/{runId}/events",
-            new
+        // 敏感 payload 規則:除了 payload 之外一切合法(已知 event_type、有 node_id、cursor 連續),
+        // 唯一拒因就是 payload 帶 prompt。訊息也一併比對,避免將來被別的規則「順便」擋掉而假綠。
+        object SensitiveBatch(object payload) => new
+        {
+            expected_version = 2,
+            lease_token = leaseToken,
+            lease_generation = leaseGeneration,
+            event_cursor_start = 1,
+            events = new[]
             {
-                expected_version = 2,
-                lease_token = leaseToken,
-                lease_generation = leaseGeneration,
-                event_cursor_start = 1,
-                events = new[]
+                new
                 {
-                    new
-                    {
-                        event_id = Guid.NewGuid(),
-                        event_type = "bad",
-                        snapshot_hash = snapshotHash,
-                        payload = new { prompt = "secret" },
-                    },
+                    event_id = Guid.NewGuid(),
+                    event_type = "model_step",
+                    node_id = "model",
+                    snapshot_hash = snapshotHash,
+                    payload,
                 },
-            });
+            },
+        };
+        var rejected = await client.PostAsJsonAsync(
+            $"/api/agent-runs/{runId}/events", SensitiveBatch(new { prompt = "secret" }));
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
+        Assert.Equal(
+            "event payload 含敏感欄位或超過上限",
+            (await rejected.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // 對照組:同一批次換成不含敏感欄位的 payload 就會被接受 —— 證明拒因確實是 payload。
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await client.PostAsJsonAsync(
+                $"/api/agent-runs/{runId}/events", SensitiveBatch(new { status = "ok" }))).StatusCode);
+    }
+
+    // GET /api/runs/{id}/events 的游標守門(AgentRunController:50-55)。off-point 進 400,
+    // on-point(limit=200)必須放行 —— 用 "abc" 等安全內部值測不出把 200 寫成 100 這種錯。
+    [Theory]
+    [InlineData("after_sequence=-1&limit=10", HttpStatusCode.BadRequest)]
+    [InlineData("after_sequence=0&limit=0", HttpStatusCode.BadRequest)]
+    [InlineData("after_sequence=0&limit=201", HttpStatusCode.BadRequest)]
+    [InlineData("after_sequence=0&limit=1", HttpStatusCode.OK)]
+    [InlineData("after_sequence=0&limit=200", HttpStatusCode.OK)]
+    public async Task Events_CursorQueryBoundaries(string query, HttpStatusCode expected)
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "events-range");
+        var run = await (await client.SendAsync(Start(agentId, $"events-range-{Guid.NewGuid():N}")))
+            .ReadJsonAsync();
+        var runId = run["id"]!.GetValue<string>();
+
+        var response = await client.GetAsync($"/api/runs/{runId}/events?{query}");
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Events_AfterSequenceBeyondTail_ReturnsEmptyWithoutRewindingCursor()
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "events-tail");
+        var run = await (await client.SendAsync(Start(agentId, "events-tail-start"))).ReadJsonAsync();
+        var runId = run["id"]!.GetValue<string>();
+
+        var head = await (await client.GetAsync(
+            $"/api/runs/{runId}/events?after_sequence=0&limit=100")).ReadJsonAsync();
+        var tail = head["next_sequence"]!.GetValue<long>();
+
+        var beyond = await (await client.GetAsync(
+            $"/api/runs/{runId}/events?after_sequence={tail + 1_000}&limit=100")).ReadJsonAsync();
+
+        Assert.Empty(beyond["events"]!.AsArray());
+        // 空頁不得把游標倒退回去,否則輪詢的客戶端會無限重讀舊事件。
+        Assert.True(beyond["next_sequence"]!.GetValue<long>() >= tail);
+    }
+
+    // /api/agent-runs/recovery/claim 的輸入守門(AgentRunRecoveryController:25-27)。
+    // 這支路由不帶呼叫者身分,參數就是唯一的濫用面 —— limit=1000 會一次抽乾整個佇列。
+    [Theory]
+    [InlineData(0, 30, "worker")]
+    [InlineData(101, 30, "worker")]
+    [InlineData(20, 4, "worker")]
+    [InlineData(20, 301, "worker")]
+    [InlineData(20, 30, "")]
+    public async Task RecoveryClaim_RejectsOutOfRangeLimitLeaseOrWorker(
+        int limit, int leaseSeconds, string workerId)
+    {
+        var response = await _factory.CreateInternalClient().PostAsJsonAsync(
+            "/api/agent-runs/recovery/claim",
+            new { worker_id = workerId, limit, lease_seconds = leaseSeconds });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(1, 5)]
+    [InlineData(100, 300)]
+    public async Task RecoveryClaim_AcceptsInclusiveBoundaries(int limit, int leaseSeconds)
+    {
+        var response = await _factory.CreateInternalClient().PostAsJsonAsync(
+            "/api/agent-runs/recovery/claim",
+            new { worker_id = new string('w', 200), limit, lease_seconds = leaseSeconds });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     [Fact]

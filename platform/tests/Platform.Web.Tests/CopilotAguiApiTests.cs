@@ -1,8 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Platform.Web.Tests;
 
@@ -166,6 +168,26 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("伺服器發生錯誤，請稍後再試", body["message"]!.GetValue<string>());
     }
 
+    // 同一道 fail-closed 的另一格:claims 齊全但身分本身含隔離鍵分隔字元 ':' —— tenant "demo" + user "a:b"
+    // 與 tenant "demo:a" + user "b" 會共用同一把 isolation key。AG-UI 走 UserContext.IsolationKey,
+    // 必須在建立 session 前拒絕,不得讓兩個不同使用者共用同一個短期記憶命名空間。
+    [Theory]
+    [InlineData("a:b", "demo")]
+    [InlineData("b", "demo:a")]
+    public async Task Agui_IdentityContainingIsolationSeparator_Returns500BeforeAgentOrSession(
+        string username, string tenantCode)
+    {
+        var client = _factory.CreateClient()
+            .WithToken(_factory.IssueToken(username, "USER", tenantCode));
+        var runsBefore = ChatClient.Runs.Count;
+
+        var resp = await SendAguiAsync(client, RunInputFor("colon-identity", "不應進入 agent"));
+
+        Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
+        Assert.Equal(runsBefore, ChatClient.Runs.Count);
+        Assert.Equal(500, (await resp.ReadJsonAsync())["status"]!.GetValue<int>());
+    }
+
     // B-P1-03(承接現行 A-23,帶 JWT):有效 JWT → 200 + text/event-stream + 協定標準 "data: "(有空格)
     // + 既有事件序列。這是相對匿名姿態唯一改變的前置條件,事件序列本身不變。
     [Fact]
@@ -257,51 +279,10 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     }
 
     // ---- B-P2-01/04:P2 記憶收斂 —— 同一 threadId 連續多輪,第二輪(以後)記得先前輪次,且訊息不重複累加 ----
+    // 「第二輪記得第一輪」與「單訊息 client 三輪各出現一次」都是下面 full-array 版本的必要推論
+    // (三輪後每則 user 恰出現一次且總數恰為 5),且那版才是真實 @ag-ui/client 的形狀,故只保留它。
 
-    // B-P2-01:第二輪記得第一輪(現行 production 此項為 False,P2 之前 AG-UI 未掛 ChatHistoryProvider
-    // 的 explicit compaction 設定;這是 P2 新引入的行為,不是回歸)。
-    [Fact]
-    public async Task Agui_SameThreadId_SecondRound_RemembersFirstRound()
-    {
-        const string threadId = "b-p2-01";
-        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
-
-        var resp1 = await SendAguiAsync(client, RunInputFor(threadId, "我叫小明"));
-        Assert.Equal(HttpStatusCode.OK, resp1.StatusCode);
-        await resp1.Content.ReadAsStringAsync();
-
-        var resp2 = await SendAguiAsync(client, RunInputFor(threadId, "我叫什麼"));
-        Assert.Equal(HttpStatusCode.OK, resp2.StatusCode);
-        await resp2.Content.ReadAsStringAsync();
-
-        var lastRunTexts = ChatClient.Runs[^1].Select(m => m.Text ?? string.Empty).ToList();
-        Assert.Contains(lastRunTexts, t => t.Contains("我叫小明", StringComparison.Ordinal));
-        Assert.Contains(lastRunTexts, t => t.Contains("我叫什麼", StringComparison.Ordinal));
-    }
-
-    // B-P2-04:同一 threadId 連發三輪,每則 user 訊息在送進模型的 messages 中恰出現一次
-    // ——前端 CopilotKit 重送完整訊息陣列 + 伺服器端 session 已有同一批訊息,兩者不得重複累加。
-    [Fact]
-    public async Task Agui_SameThreadId_ThreeRounds_UserMessagesAppearExactlyOnce_NotDuplicated()
-    {
-        const string threadId = "b-p2-04";
-        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
-
-        foreach (var msg in new[] { "第一輪", "第二輪", "第三輪" })
-        {
-            var resp = await SendAguiAsync(client, RunInputFor(threadId, msg));
-            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-            await resp.Content.ReadAsStringAsync();
-        }
-
-        var lastRunTexts = ChatClient.Runs[^1].Select(m => m.Text ?? string.Empty).ToList();
-        foreach (var msg in new[] { "第一輪", "第二輪", "第三輪" })
-        {
-            Assert.Single(lastRunTexts, t => t == msg);
-        }
-    }
-
-    // B-P2-04 強化版(補上面測試的盲區):真實 @ag-ui/client 每輪重送「完整」訊息陣列(client 端維護的
+    // B-P2-04(full-array):真實 @ag-ui/client 每輪重送「完整」訊息陣列(client 端維護的
     // 全歷史),assistant 訊息回填伺服器上一輪實際回傳的 messageId(id 對得齊)。三輪下來,FakeChatClient
     // 收到的最後一輪 messages 中每則 user 訊息仍恰出現一次,且總數只隨輪次線性成長(1→3→5),不因
     // wire 重送 + session 疊加而複合暴增(修復前反編譯/Langfuse trace 證實會長到 1→5→11)。
@@ -488,14 +469,19 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         await resp.Content.ReadAsStringAsync();
 
-        Assert.Contains(FakeConversationStore.Saved, s => s.TenantCode == "demo-a" && s.UserId == "b-p3-07-user");
+        // b-p3-07-user 是本案專屬身分 → 這一輪「恰好」留下一筆,不是「有包含」(共用靜態清單不重置,
+        // 模糊比對會被其他測試的殘留餵成假綠)。
+        var saved = Assert.Single(
+            FakeConversationStore.Saved, s => s.TenantCode == "demo-a" && s.UserId == "b-p3-07-user");
+        Assert.Equal("你好世界", saved.Response.Reply);
 
         var historyResp = await client.GetAsync("/api/chat/history");
         Assert.Equal(HttpStatusCode.OK, historyResp.StatusCode);
         var replies = (await historyResp.ReadJsonAsync()).AsArray()
             .Select(n => n!["reply"]!.GetValue<string>())
             .ToList();
-        Assert.Contains(replies, r => r == "你好世界");
+        // 同一身分的歷史恰等於那一輪(副駕與 ChatView 共用同一份歷史)。
+        Assert.Equal(new[] { "你好世界" }, replies);
     }
 
     // B-P3-01:副駕側 mem0 recall 在模型呼叫前、remember 在完整回覆後(含順序斷言)。用專屬的 recording
@@ -558,12 +544,9 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var raw = await resp.Content.ReadAsStringAsync();
-        var frames = ExtractFrames(raw);
 
-        var types = frames.Select(f => f.GetProperty("type").GetString()).ToList();
-        Assert.Contains("TEXT_MESSAGE_CONTENT", types);
-        Assert.Contains("RUN_FINISHED", types);
-        Assert.DoesNotContain("RUN_ERROR", types);
+        // 專屬 factory + 專屬 threadId → 事件序列是確定的:精確比對整串,才抓得到「多冒出一個事件」的迴歸。
+        Assert.Equal(NormalReplyEvents, EventTypes(raw));
     }
 
     // RememberAsync 在完整回覆後執行；失敗只能記 warning，不能將已完成的 turn 轉成 RUN_ERROR。
@@ -577,16 +560,22 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         var resp = await SendAguiAsync(client, RunInputFor("b-p3-mem0-remember-throws", "你好"));
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var raw = await resp.Content.ReadAsStringAsync();
-        var frames = ExtractFrames(raw);
-        var types = frames.Select(f => f.GetProperty("type").GetString()).ToList();
-
-        Assert.Contains("TEXT_MESSAGE_START", types);
-        Assert.Contains("TEXT_MESSAGE_CONTENT", types);
-        Assert.Contains("TEXT_MESSAGE_END", types);
-        Assert.Contains("RUN_FINISHED", types);
-        Assert.DoesNotContain("RUN_ERROR", types);
+        Assert.Equal(NormalReplyEvents, EventTypes(await resp.Content.ReadAsStringAsync()));
     }
+
+    /// <summary>一輪正常(兩塊串流)回覆的完整 AG-UI 事件序列。</summary>
+    private static readonly string[] NormalReplyEvents =
+    {
+        "RUN_STARTED",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
+        "RUN_FINISHED",
+    };
+
+    private static List<string?> EventTypes(string rawSse) =>
+        ExtractFrames(rawSse).Select(f => f.GetProperty("type").GetString()).ToList();
 
     // ---- P4(copilot-shared-core §11 步驟 14):路由共用 —— 副駕取得同批 skill 能力 ----
 
@@ -686,36 +675,9 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     private Platform.Service.Abstractions.ILlmAgent RoutingAgent
         => _factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
 
-    // T-P4-2:路由命中(HIT)→ 事件流中不得出現任何 skill 名的 TOOL_CALL_*(短路,skill 從未註冊成 AITool,
-    // 結構上不可能洩漏成 tool-call 事件,見 SkillRoutingAgent 類別 XML doc 的安全保證)。
-    [Fact]
-    public async Task Agui_RoutingHit_NoToolCallEvents_UserStillGetsAnswer()
-    {
-        FakeWorkflowService.CatalogOverride = Cat(SingleSkillCatalog);
-        var routingAgent = (FakeLlmAgent)RoutingAgent;
-        var originalResponse = routingAgent.Response;
-        routingAgent.Response = "kb-query";
-        try
-        {
-            var client = _factory.CreateClient().WithToken(_factory.IssueToken());
-
-            var resp = await SendAguiAsync(client, RunInputFor("t-p4-2", "這季毛利率多少?"));
-
-            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-            var raw = await resp.Content.ReadAsStringAsync();
-            var frames = ExtractFrames(raw);
-            var types = frames.Select(f => f.GetProperty("type").GetString()).ToList();
-
-            Assert.DoesNotContain(types, t => t == "TOOL_CALL_START" || t == "TOOL_CALL_ARGS" || t == "TOOL_CALL_END");
-            // 使用者仍拿到回覆(摘要文字),不是空話。
-            Assert.Contains("TEXT_MESSAGE_CONTENT", types);
-        }
-        finally
-        {
-            routingAgent.Response = originalResponse;
-            FakeWorkflowService.CatalogOverride = null;
-        }
-    }
+    // T-P4-2(路由命中 → 無任何 skill 名的 TOOL_CALL_* 事件、使用者仍拿到答案)是
+    // Agui_AgenticSkillRouted_NoToolCallEvents_FinalContentFromAnswerKey(同斷言 + invoke 輸入 + answer 鍵萃取)
+    // 與 Agui_RoutingHitWithClientToolsPresent_*(同斷言 + client tools 維度)的共同子集,不另留一份。
 
     // T-P4-3/B-P4-13(已知限制的驗收,非 bug):路由命中 + 前端同時提供非空 client tools → 該輪 client tool
     // 不被呼叫(短路天花板,01-plan §5.2/02-spec §5.2),使用者仍拿到 skill 的答案。即使這次的觸發訊息與
@@ -925,6 +887,65 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         Assert.DoesNotContain("RUN_FINISHED", types);
         Assert.Equal(savedBefore, FakeConversationStore.Saved.Count);
         Assert.Equal(rememberedBefore, FakeMem0Client.Remembered.Count);
+    }
+
+    // ---- D6:canary 打開時,副駕這條鏈路同樣由 Root Orchestrator 作答(先前 Web 層整層空白) ----
+
+    /// <summary>只回固定答案的 IAgentChatRuntime;真實實作的選擇閘另在 AgentChatRuntimeTests 驗。</summary>
+    private sealed class StubAgentChatRuntime : Platform.Service.Abstractions.IAgentChatRuntime
+    {
+        public string? Reply { get; init; }
+
+        public List<string> ConversationIds { get; } = new();
+
+        public Task<Microsoft.Agents.AI.AgentResponse?> RunAsync(
+            string message, string conversationId, Guid? requestedOrchestratorId,
+            Platform.Service.Abstractions.IChatIdentityAccessor identity,
+            string? logicalAttemptId = null, CancellationToken ct = default)
+        {
+            ConversationIds.Add(conversationId);
+            return Task.FromResult<Microsoft.Agents.AI.AgentResponse?>(Reply is null
+                ? null
+                : new Microsoft.Agents.AI.AgentResponse(
+                    new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, Reply)));
+        }
+    }
+
+    [Fact]
+    public async Task Agui_AgentChatEnabled_EmitsOrchestratorAnswer_AndPersistsTurn()
+    {
+        const string answer = "Root Orchestrator 的副駕答案";
+        var runtime = new StubAgentChatRuntime { Reply = answer };
+        await using var factory = new TestWebAppFactory(
+            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        var client = factory
+            .WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<Platform.Service.Abstractions.IAgentChatRuntime>();
+                services.AddSingleton<Platform.Service.Abstractions.IAgentChatRuntime>(runtime);
+            }))
+            .CreateClient()
+            .WithToken(factory.IssueToken(username: "d6-agui-user", role: "USER", tenantCode: "demo-a"));
+
+        var resp = await SendAguiAsync(client, RunInputFor("d6-agui", "這季毛利率多少?"));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var raw = await resp.Content.ReadAsStringAsync();
+        var types = EventTypes(raw);
+
+        // 短路答案照 AG-UI 事件格式送出(單一 CONTENT frame),沒有任何 TOOL_CALL_* 洩漏,也沒有 RUN_ERROR。
+        Assert.Equal(
+            new[] { "RUN_STARTED", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED" },
+            types);
+        Assert.Equal(answer, ExtractAssistantMessage(raw).Text);
+
+        // AG-UI 的 session/D6 conversationId 只能來自 JWT 身分,不是 wire 的 threadId。
+        Assert.Equal("demo-a:d6-agui-user", Assert.Single(runtime.ConversationIds));
+
+        // 短路輪照樣進共用歷史(與 /api/chat* 同一份)。
+        var saved = Assert.Single(
+            FakeConversationStore.Saved, s => s.UserId == "d6-agui-user");
+        Assert.Equal(answer, saved.Response.Reply);
     }
 
     /// <summary>可注入 recall/remember 例外的 IMem0Client fake，驗證 pipeline 邊界仍會降級。</summary>

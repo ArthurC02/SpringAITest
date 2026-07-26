@@ -23,7 +23,11 @@ from app.runtime.checkpoints import (
 from app.runtime.facts import (
     ProposedAction,
     RuntimeFactEnvelope,
+    action_envelopes,
+    caller_envelopes,
     materialize_trusted_facts,
+    system_fact,
+    verified_tool_fact,
 )
 from app.runtime.graph import build_context, compile_runtime_graph, initial_state
 from app.runtime.model import (
@@ -42,7 +46,7 @@ from app.runtime.models import (
     canonical_json_sha256,
     parse_json_preserving_numbers,
 )
-from app.runtime.policy import PreActionPolicy
+from app.runtime.policy import PolicyError, PreActionPolicy
 from app.runtime.tool_boundary import (
     DirectToolDenied,
     effective_specs,
@@ -56,19 +60,13 @@ from app.llm import get_direct_agent_runtime_llm
 from app.workflow_contracts import GRAPH_IR_COMPILER_CONTRACT_VERSION
 
 
-def _legacy_python_canonical_writer_vector() -> None:
-    raw = (
-        '{"nested":{"\\uf900":1.230,"\\ud800\\udc00":0.00000100},'
-        '"negative":-0,"exp":1e+3,'
-        '"large":123456789012345678901234567890,'
-        '"bool":true,"null":null,'
-        '"strings":"line\\n\\u2028\\u2029\\ud800\\udc00\\u6f22"}'
-    )
-
-
 def test_direct_agent_provider_disables_hidden_retries() -> None:
     get_direct_agent_runtime_llm.cache_clear()
     assert get_direct_agent_runtime_llm().max_retries == 0
+
+
+def test_python_canonical_writer_matches_golden_vector() -> None:
+    """Python writer 的黃金向量；與 .NET 權威 bytes 的測試互為兩側,不可合併。"""
     raw = (
         '{"nested":{"\\uf900":1.230,"\\ud800\\udc00":0.00000100},'
         '"negative":-0,"exp":1e+3,'
@@ -113,11 +111,51 @@ def test_v2_checkpoint_ref_round_trips_generation_namespace() -> None:
         "v2:01:" + "a" * 64 + ":018f6f21-6c42-7abc-8def-0123456789ab",
         "v2:1:" + "A" * 64 + ":018f6f21-6c42-7abc-8def-0123456789ab",
         "v2:1:" + "a" * 64 + ":NOT-A-UUID",
+        # 舊的 v1 三段格式（thread:checkpoint）必須被拒,不能被當成 v2 解析。
+        "a" * 64 + ":018f6f21-6c42-7abc-8def-0123456789ab",
+        "v2:1:" + "a" * 64,
+        "v3:1:" + "a" * 64 + ":018f6f21-6c42-7abc-8def-0123456789ab",
     ],
 )
 def test_v2_checkpoint_ref_rejects_noncanonical_identity(value: str) -> None:
     with pytest.raises(ValueError):
         config_from_checkpoint_ref(value)
+
+
+def test_thread_identity_differs_per_lease_generation() -> None:
+    """generation fencing 的前提：每一代都有專屬 thread id,且 0/負數不可構成。"""
+    identity = {
+        "tenant_id": "tenant-a",
+        "user_id": "user-a",
+        "run_id": "271c9de5-d772-48d7-8236-b6a46f4588f5",
+        "snapshot_hash": "a" * 64,
+    }
+    threads = [
+        checkpoint_config(**identity, lease_generation=generation)["configurable"][
+            "thread_id"
+        ]
+        for generation in (None, 1, 2)
+    ]
+
+    assert len(set(threads)) == 3
+    assert checkpoint_config(**identity)["configurable"].get("lease_generation") is None
+    for invalid in (0, -1):
+        with pytest.raises(ValueError, match="lease generation must be positive"):
+            checkpoint_config(**identity, lease_generation=invalid)
+
+
+def test_checkpoint_ref_rejects_mismatched_thread_or_generation() -> None:
+    """`manager._authoritative_ref_config` 的實際 fencing 執行點。"""
+    thread_id = "a" * 64
+    ref = f"v2:2:{thread_id}:018f6f21-6c42-7abc-8def-0123456789ab"
+
+    assert config_from_checkpoint_ref(
+        ref, expected_thread_id=thread_id, expected_generation=2
+    )["configurable"]["lease_generation"] == 2
+    with pytest.raises(ValueError, match="thread identity"):
+        config_from_checkpoint_ref(ref, expected_thread_id="b" * 64)
+    with pytest.raises(ValueError, match="generation does not match"):
+        config_from_checkpoint_ref(ref, expected_generation=3)
 
 
 def test_authoritative_dotnet_canonical_bytes_preserve_numeric_lexemes() -> None:
@@ -1251,5 +1289,490 @@ async def test_waiting_input_resumes_after_graph_recreation_with_same_scope() ->
     assert resumed["final_output"] == "Final answer: FY2025"
     assert second_model.seen[0]["active_skill_name"] == "research-skill"
     assert second_model.seen[1]["active_skill_name"] == ""
-    assert second_model.seen[0]["active_skill_name"] == "research-skill"
     assert resumed["active_skill_scope"] is None
+
+
+def runtime_harness(
+    run_snapshot: DirectAgentExecutionSnapshot,
+    model: Any,
+    *,
+    deps: Any = None,
+    artifact_reader: Any = None,
+) -> tuple[Any, dict[str, Any], Any]:
+    """(graph, config, context)：同一個 saver 才能在同一測試內 interrupt→resume。"""
+    graph = compile_runtime_graph(InMemorySaver(serde=strict_serializer()))
+    context = build_context(
+        snapshot=run_snapshot,
+        request_context=request_context(),
+        model=model,
+        artifact_reader=artifact_reader or FakeArtifactReader(),
+        deps=deps,
+    )
+    config = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+    )
+    return graph, config, context
+
+
+async def run_runtime(
+    run_snapshot: DirectAgentExecutionSnapshot,
+    model: Any,
+    *,
+    deps: Any = None,
+    artifact_reader: Any = None,
+    state: dict[str, Any] | None = None,
+    message: str = "start",
+) -> dict[str, Any]:
+    graph, config, context = runtime_harness(
+        run_snapshot, model, deps=deps, artifact_reader=artifact_reader
+    )
+    seeded = initial_state(run_snapshot, message)
+    seeded.update(state or {})
+    return await graph.ainvoke(seeded, config, context=context)
+
+
+def enable_write_tools(
+    monkeypatch: pytest.MonkeyPatch, run_snapshot: DirectAgentExecutionSnapshot
+) -> None:
+    monkeypatch.setattr("app.runtime.graph.settings.agent_write_tools_enabled", True)
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_enabled", True
+    )
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_allowlist",
+        "runtime.write_evidence",
+    )
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_tenant_allowlist",
+        run_snapshot.caller.tenant_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_generic_resume_cannot_resolve_waiting_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D7 契約：waiting_approval 只能由 Backend 核准路徑解除,一般 resume 值必須失敗。"""
+    run_snapshot = snapshot(tools=["runtime.write_evidence"])
+    enable_write_tools(monkeypatch, run_snapshot)
+
+    class MustNotWrite:
+        calls = 0
+
+        async def write(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("generic resume must never reach the write tool")
+
+    sink = MustNotWrite()
+    graph, config, context = runtime_harness(
+        run_snapshot,
+        FakeModel(
+            [
+                RuntimeCommand(
+                    kind="tool_call",
+                    name="runtime.write_evidence",
+                    arguments={"record_id": "refund-1", "value": "approved"},
+                )
+            ]
+        ),
+        deps=SimpleNamespace(write_evidence_sink=sink),
+    )
+    interrupted = await graph.ainvoke(
+        initial_state(run_snapshot, "write"), config, context=context
+    )
+    assert interrupted["__interrupt__"]
+
+    resumed = await graph.ainvoke(Command(resume="approved"), config, context=context)
+
+    assert resumed["status"] == "failed"
+    assert resumed["error_code"] == "approval_resume_denied"
+    assert sink.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "error_code"),
+    [
+        ("", "invalid_resume_input"),
+        ("   ", "invalid_resume_input"),
+        (123, "invalid_resume_input"),
+        ("x" * settings.runtime_max_message_chars, None),
+        ("x" * (settings.runtime_max_message_chars + 1), "resume_input_too_large"),
+    ],
+    ids=["empty", "blank", "not-a-string", "exact-limit", "limit-plus-one"],
+)
+async def test_resume_input_boundaries(value: Any, error_code: str | None) -> None:
+    run_snapshot = snapshot()
+    graph, config, context = runtime_harness(
+        run_snapshot,
+        FakeModel(
+            [
+                RuntimeCommand(kind="request_input", content="Which period?"),
+                RuntimeCommand(kind="final", content="done"),
+            ]
+        ),
+    )
+    interrupted = await graph.ainvoke(
+        initial_state(run_snapshot, "start"), config, context=context
+    )
+    assert interrupted["__interrupt__"]
+
+    resumed = await graph.ainvoke(Command(resume=value), config, context=context)
+
+    if error_code is None:
+        assert resumed["status"] == "completed"
+        assert resumed["final_output"] == "done"
+    else:
+        assert resumed["status"] == "failed"
+        assert resumed["error_code"] == error_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "error_code"),
+    [
+        ({"step_count": 15}, "step_budget_exceeded"),
+        ({"context_rounds": 5}, "context_budget_exceeded"),
+        ({"estimated_tokens": 4_003}, "token_budget_exceeded"),
+    ],
+    ids=["step", "context", "token"],
+)
+async def test_run_budgets_fail_closed_before_the_model_runs(
+    state: dict[str, Any], error_code: str
+) -> None:
+    """三個預算錯誤碼過去零覆蓋。刻意用「遠超上限」的值,不把 `>=`/`>` 差一固化成契約。"""
+    run_snapshot = snapshot()
+    model = FakeModel([RuntimeCommand(kind="final", content="must not run")])
+
+    result = await run_runtime(run_snapshot, model, state=state)
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == error_code
+    assert model.seen == []
+
+
+@pytest.mark.asyncio
+async def test_run_below_every_budget_completes() -> None:
+    run_snapshot = snapshot()
+    model = FakeModel([RuntimeCommand(kind="final", content="done")])
+
+    result = await run_runtime(
+        run_snapshot,
+        model,
+        state={"step_count": 10, "context_rounds": 1, "estimated_tokens": 100},
+    )
+
+    assert result["status"] == "completed"
+    assert result["error_code"] is None
+    assert len(model.seen) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_rounds", "expected_status"),
+    [(3, "completed"), (4, "failed")],
+    ids=["at-limit-minus-one", "at-limit"],
+)
+async def test_tool_round_budget_boundary(
+    tool_rounds: int, expected_status: str
+) -> None:
+    """max_tool_rounds=4：已用 3 輪還能再呼叫一次,已用 4 輪必須擋下。"""
+    run_snapshot = snapshot(tools=["local.calculator"])
+    model = FakeModel(
+        [
+            RuntimeCommand(
+                kind="tool_call",
+                name="local.calculator",
+                arguments={"expression": "1+1"},
+            ),
+            RuntimeCommand(kind="final", content="2"),
+        ]
+    )
+
+    result = await run_runtime(
+        run_snapshot, model, state={"tool_rounds": tool_rounds}
+    )
+
+    assert result["status"] == expected_status
+    if expected_status == "failed":
+        assert result["error_code"] == "tool_budget_exceeded"
+    else:
+        assert result["tool_rounds"] == tool_rounds + 1
+        assert any(
+            event["event_type"] == "tool_completed" for event in result["events"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_model_usage_equal_to_remaining_budget_is_accepted() -> None:
+    """`raw_usage > remaining` 的剛好一側：用滿預算不算違規。"""
+    run_snapshot = snapshot()
+    model = UsageModel(4_000)
+
+    result = await run_runtime(run_snapshot, model)
+
+    assert result["status"] == "completed"
+    assert result["estimated_tokens"] == 4_000
+
+
+def test_workflow_governance_caps_agent_limits() -> None:
+    """不可變 workflow revision 封住 Agent 上限：兩邊取小。"""
+    raw = snapshot().model_dump(mode="json", exclude={"snapshot_hash"})
+    definition = raw["workflow"]["definition"]
+    definition["governance"]["maxSteps"] = 5
+    loop = next(
+        node for node in definition["nodes"] if node["type"] == "bounded_agent_loop"
+    )
+    loop["config"]["maxIterations"] = 2
+    raw["workflow"]["definition_sha256"] = canonical_json_sha256(definition)
+    raw["snapshot_hash"] = canonical_json_sha256(raw)
+    capped = DirectAgentExecutionSnapshot.model_validate(raw)
+
+    governed = build_context(
+        snapshot=capped,
+        request_context=request_context(),
+        model=FakeModel([]),
+        artifact_reader=FakeArtifactReader(),
+    ).limits
+    agent_governed = build_context(
+        snapshot=snapshot(),
+        request_context=request_context(),
+        model=FakeModel([]),
+        artifact_reader=FakeArtifactReader(),
+    ).limits
+
+    assert (governed.step_budget, governed.max_tool_rounds) == (5, 2)
+    # 反向：Agent 自身較嚴時（step 12 < governance 20、tool 4 < loop 8）以 Agent 為準。
+    assert (agent_governed.step_budget, agent_governed.max_tool_rounds) == (12, 4)
+
+
+@pytest.mark.parametrize(
+    ("producer", "value", "accepted"),
+    [
+        ("model", "10.00", False),
+        ("tool", "10.00", False),
+        ("", "10.00", False),
+        ("adapter", "10.00", False),
+        ("adapter:refund", 10.0, False),
+        ("adapter:refund", "10.00", True),
+    ],
+)
+def test_action_amount_requires_adapter_producer(
+    producer: str, value: Any, accepted: bool
+) -> None:
+    """model 參數永遠不能變成 action.amount：只有 `adapter:` 前綴的 envelope 進得去。"""
+    action = ProposedAction(
+        action_type="tool_call",
+        verified_amount=RuntimeFactEnvelope(
+            name="action.amount",
+            value=value,
+            producer=producer,
+            provenance="system",
+            trust_tier="trusted",
+        ),
+    )
+
+    names = {envelope.name for envelope in action_envelopes(action)}
+
+    assert ("action.amount" in names) is accepted
+
+
+def test_conflicting_fact_envelopes_are_both_dropped() -> None:
+    same = [
+        system_fact("action.tool_name", "local.calculator", producer="router"),
+        system_fact("action.tool_name", "local.calculator", producer="snapshot"),
+    ]
+    conflicting = [
+        system_fact("action.tool_name", "local.calculator", producer="router"),
+        system_fact("action.tool_name", "runtime.write_evidence", producer="spoof"),
+    ]
+
+    assert materialize_trusted_facts("pre-action", same) == {
+        "action.tool_name": "local.calculator"
+    }
+    assert materialize_trusted_facts("pre-action", conflicting) == {}
+
+
+def test_uncataloged_or_gate_unavailable_facts_are_dropped() -> None:
+    envelopes = [
+        RuntimeFactEnvelope(
+            name="not.in.catalog",
+            value="x",
+            producer="router",
+            provenance="system",
+            trust_tier="trusted",
+        ),
+        system_fact("action.amount", "10.00", producer="adapter:refund"),
+    ]
+
+    # action.amount 在 preflight gate 不存在 ⇒ 連同未知 fact 一起被丟棄。
+    assert materialize_trusted_facts("preflight", envelopes) == {}
+    assert materialize_trusted_facts("pre-action", envelopes) == {
+        "action.amount": "10.00"
+    }
+
+
+def test_fact_constructors_reject_wrong_catalog_class() -> None:
+    assert system_fact("action.type", "response", producer="router").provenance == (
+        "system"
+    )
+    assert verified_tool_fact(
+        "context.source_count", 1, producer="backend_retrieval", source_ref="ref"
+    ).trust_tier == "verified"
+    with pytest.raises(ValueError, match="trusted system fact"):
+        system_fact("context.source_count", 1, producer="router")
+    with pytest.raises(ValueError, match="verified tool fact"):
+        verified_tool_fact("action.type", "response", producer="x", source_ref="")
+
+
+def policy_rule(rule_id: str, then: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "id": rule_id,
+        "name": rule_id,
+        "enabled": True,
+        "priority": 10,
+        "when": {"fact": "caller.role", "op": "eq", "value": "ADMIN"},
+        "then": then,
+        "onUnknown": [{"action": "deny", "reason": "unknown"}],
+    }
+
+
+def decide(
+    then: list[dict[str, Any]],
+    *,
+    extra: list[dict[str, Any]] | None = None,
+    pinned_skills: list[str] | None = None,
+    tools: list[str] | None = None,
+):
+    policy = PreActionPolicy(
+        {"version": 1, "rules": [policy_rule("primary", then), *(extra or [])]},
+        pinned_skills=pinned_skills or [],
+        registered_tools=tools or [],
+        roles=["ADMIN"],
+    )
+    return policy.decide(
+        ProposedAction(action_type="response"),
+        caller_envelopes(tenant_id="tenant-甲", role="ADMIN", groups=[]),
+    )
+
+
+def test_policy_rejects_rules_routing_to_an_unpinned_skill() -> None:
+    """route_to_skill 的 pin 檢查在建構期就 fail closed（decide 之前）。"""
+    with pytest.raises(PolicyError, match="business rules"):
+        decide(
+            [{"action": "route_to_skill", "skill": "ghost-skill"}],
+            pinned_skills=["research-skill"],
+        )
+
+    routed = decide(
+        [{"action": "route_to_skill", "skill": "research-skill"}],
+        pinned_skills=["research-skill"],
+    )
+
+    assert (routed.outcome, routed.code) == ("continue", "route_to_skill")
+    assert routed.routed_skill == "research-skill"
+
+
+def test_policy_intersects_multiple_allow_read_tool_actions() -> None:
+    """兩條規則各給一組讀取工具時取交集（最窄者勝）,不是聯集。"""
+    decision = decide(
+        [{"action": "allow_read_tool", "tools": ["local.calculator", "local.glossary"]}],
+        extra=[
+            policy_rule(
+                "second",
+                [{"action": "allow_read_tool", "tools": ["local.glossary", "local.rerank"]}],
+            )
+        ],
+        tools=["local.calculator", "local.glossary", "local.rerank"],
+    )
+
+    assert decision.outcome == "continue"
+    assert decision.allowed_read_tools == frozenset({"local.glossary"})
+
+
+@pytest.mark.parametrize(
+    ("then", "write_flag", "expected"),
+    [
+        ([{"action": "escalate", "role": "ADMIN"}], False, ("blocked", "rule_escalate")),
+        (
+            [{"action": "ask_user", "question": "需要哪一年的資料？"}],
+            False,
+            ("waiting_input", "ask_user"),
+        ),
+        (
+            [{"action": "require_approval", "role": "ADMIN"}],
+            False,
+            ("blocked", "approval_not_enabled"),
+        ),
+        (
+            [{"action": "require_approval", "role": "ADMIN"}],
+            True,
+            ("waiting_approval", "require_approval"),
+        ),
+    ],
+    ids=["escalate", "ask_user", "approval-flag-off", "approval-flag-on"],
+)
+def test_policy_decision_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    then: list[dict[str, Any]],
+    write_flag: bool,
+    expected: tuple[str, str],
+) -> None:
+    monkeypatch.setattr(
+        "app.runtime.policy.settings.agent_write_tools_enabled", write_flag
+    )
+
+    decision = decide(then)
+
+    assert (decision.outcome, decision.code) == expected
+    if decision.code == "ask_user":
+        assert decision.question == "需要哪一年的資料？"
+    if decision.outcome == "waiting_approval":
+        assert decision.required_role == "ADMIN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "error_code"),
+    [
+        ({"step_count": 11}, None),
+        ({"step_count": 12}, "step_budget_exceeded"),
+        ({"context_rounds": 1}, None),
+        ({"context_rounds": 2}, "context_budget_exceeded"),
+        ({"estimated_tokens": 3_999}, None),
+        ({"estimated_tokens": 4_000}, "token_budget_exceeded"),
+    ],
+    ids=[
+        "step-limit-minus-one",
+        "step-at-limit",
+        "context-limit-minus-one",
+        "context-at-limit",
+        "token-limit-minus-one",
+        "token-at-limit",
+    ],
+)
+async def test_run_budget_boundaries_are_inclusive_upper_bounds(
+    state: dict[str, Any], error_code: str | None
+) -> None:
+    """三個預算的比較子一致：`max_*` 就是上限本身,用滿即擋（snapshot 的 12/2/4000）。
+
+    context_rounds 過去用 `>` 而 step/token 用 `>=`,所以 max_context_rounds=2 實際
+    允許 3 輪追問。這裡逐個釘住 on-point（剛好等於上限 → 擋）與 off-point（上限減一
+    → 放行）。
+    """
+    run_snapshot = snapshot()
+    model = UsageModel(0)
+
+    result = await run_runtime(run_snapshot, model, state=state)
+
+    if error_code is None:
+        assert result["status"] == "completed"
+        assert result["error_code"] is None
+        assert model.calls == 1
+    else:
+        assert result["status"] == "failed"
+        assert result["error_code"] == error_code
+        assert model.calls == 0

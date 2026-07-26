@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -124,8 +125,9 @@ async def test_resume_rejects_tampered_or_foreign_checkpoint_before_dispatch(
     assert backend.cancelled == [("run", "Invalid Root resume checkpoint")]
 
 
-@pytest.mark.asyncio
-async def test_root_checkpoint_validates_hmac_and_jsonb_canonical_round_trip():
+def _fake_checkpoint_store():
+    """A PostgreSQL-shaped store whose single row stays inspectable/tamperable."""
+
     class Cursor:
         async def fetchone(self):
             return connection.row
@@ -157,6 +159,12 @@ async def test_root_checkpoint_validates_hmac_and_jsonb_canonical_round_trip():
     connection = Connection()
     store = PostgresCheckpointStore("postgresql://test")
     store._pool = Pool()
+    return store, connection
+
+
+@pytest.mark.asyncio
+async def test_root_checkpoint_validates_hmac_and_jsonb_canonical_round_trip():
+    store, connection = _fake_checkpoint_store()
     payload = {"root_run_id": "run", "snapshot_hash": "b" * 64, "tenant_id": "tenant", "user_id": "user", "stage": "context", "audit": []}
 
     reference, version = await store.put_root_context_checkpoint(payload)
@@ -167,6 +175,75 @@ async def test_root_checkpoint_validates_hmac_and_jsonb_canonical_round_trip():
         await store.get_root_context_checkpoint(
             reference[:-1] + ("0" if reference[-1] != "0" else "1")
         )
+    ident, digest, mac = reference.split(":")[1:]
+    for malformed in (
+        f"rctx0:{ident}:{digest}:{mac}",
+        f"{ident}:{digest}:{mac}",
+        f"rctx1:{ident}:{digest}:{mac}:extra",
+    ):
+        with pytest.raises(ValueError, match="invalid Root context checkpoint reference"):
+            await store.get_root_context_checkpoint(malformed)
+
+    connection.row = None
+    with pytest.raises(ValueError, match="missing or corrupt"):
+        await store.get_root_context_checkpoint(reference)
+
+
+@pytest.mark.asyncio
+async def test_stored_root_checkpoint_payload_tamper_is_rejected():
+    """A signed reference is not enough: the stored bytes are rehashed on read."""
+    store, connection = _fake_checkpoint_store()
+    payload = {"root_run_id": "run", "snapshot_hash": "b" * 64, "tenant_id": "tenant", "user_id": "user", "stage": "context", "audit": []}
+
+    reference, _ = await store.put_root_context_checkpoint(payload)
+    tampered = json.loads(connection.row["payload"])
+    tampered["tenant_id"] = "other-tenant"
+    # The digest column keeps its original value, as a database-level rewrite would.
+    connection.row["payload"] = json.dumps(tampered)
+
+    with pytest.raises(ValueError, match="missing or corrupt"):
+        await store.get_root_context_checkpoint(reference)
+
+
+@pytest.mark.asyncio
+async def test_recover_once_reclaims_inflight_commands_and_skips_active_keys():
+    executed = []
+
+    class RecoveryBackend(Backend):
+        def __init__(self, items):
+            super().__init__()
+            self.items = items
+
+        async def claim_recovery(self):
+            return SimpleNamespace(items=self.items, has_more=False)
+
+    item = SimpleNamespace(
+        tenant_id="tenant-b",
+        user_id="user-b",
+        role="ADMIN",
+        claim=SimpleNamespace(run_id="run-1", command_id="command-1"),
+    )
+    supervisor = RootRuntimeSupervisor(RecoveryBackend([item]), object())
+
+    async def record(claim, ctx):
+        executed.append((claim.run_id, ctx))
+
+    supervisor._run_claim = record
+
+    await supervisor.recover_once()
+    await asyncio.gather(*list(supervisor._tasks.values()), return_exceptions=True)
+
+    assert [run_id for run_id, _ in executed] == ["run-1"]
+    ctx = executed[0][1]
+    assert (ctx.tenant_id, ctx.user_id, ctx.role) == ("tenant-b", "user-b", "ADMIN")
+
+    # A command already owned by this process must not be claimed twice.
+    running = asyncio.create_task(asyncio.sleep(5))
+    supervisor._tasks["run-1:command-1"] = running
+    await supervisor.recover_once()
+    assert len(executed) == 1
+    running.cancel()
+    await supervisor.close()
 
 
 @pytest.mark.asyncio

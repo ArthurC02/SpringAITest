@@ -6,6 +6,7 @@ from langchain_core.runnables import RunnableLambda
 
 from app.runtime.models import canonical_json_sha256
 from app.runtime.orchestrator import (
+    MAX_CHILD_OUTPUT_BYTES,
     RootExecutionSnapshot,
     RootInput,
     TaskAssignment,
@@ -190,30 +191,73 @@ async def test_verified_resume_input_is_consumed_and_satisfies_context_gate(monk
     ) == canonical_json_sha256("Region: Taiwan")
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "user_input",
-    ["Taiwan region", "I do not know", "Region:"],
-)
-async def test_unstructured_or_incomplete_resume_stays_fail_closed(monkeypatch, user_input):
-    snapshot = _snapshot_with_input()
-    raw = snapshot.model_dump(mode="python")
+def _install_structured_model(monkeypatch, payload: dict) -> list:
+    """Replace only the provider; the grounding checks stay real."""
+    calls: list = []
+
+    class Model:
+        def bind(self, **_kwargs):
+            return self
+
+        def with_structured_output(self, _schema):
+            def respond(value):
+                calls.append(value)
+                return payload
+
+            return RunnableLambda(respond)
+
+    monkeypatch.setattr(
+        "app.runtime.orchestrator_production.get_direct_agent_runtime_llm",
+        lambda: Model(),
+    )
+    return calls
+
+
+def _snapshot_without_retrieval() -> RootExecutionSnapshot:
+    raw = _snapshot_with_input().model_dump(mode="python")
     raw["authority"]["context_tools"] = []
     raw.pop("snapshot_hash")
+    return RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_input, payload",
+    [
+        # Unstructured input: the model invents a structured quote absent from it.
+        (
+            "Taiwan region",
+            {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key": "region", "quote": "Region: Taiwan", "input_index": 0}], "missing": []},
+        ),
+        # Quoted verbatim, but the quote does not contain the claimed value.
+        (
+            "I do not know",
+            {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key": "region", "quote": "I do not know", "input_index": 0}], "missing": []},
+        ),
+        # Incomplete input: ready together with a still-missing field is contradictory.
+        (
+            "Region:",
+            {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key": "region", "quote": "Region:", "input_index": 0}], "missing": ["region"]},
+        ),
+    ],
+)
+async def test_unstructured_or_incomplete_resume_stays_fail_closed(
+    monkeypatch, user_input, payload
+):
+    calls = _install_structured_model(monkeypatch, payload)
     planner = ProductionRootPlanner(
         FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
     )
-    from app.runtime.orchestrator_production import _ContextSufficiency
-    async def insufficient(_snapshot, _inputs):
-        return _ContextSufficiency(ready=False, missing=["region is required"])
-    monkeypatch.setattr(planner, "_assess_context", insufficient)
+
     acquired = await planner.acquire(
-        RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw),
-        {"user_input": user_input},
-        1,
+        _snapshot_without_retrieval(), {"user_input": user_input}, 1
     )
+
+    assert calls, "the real grounding path must run against the model output"
     assert not acquired.ready
-    assert acquired.missing == ["region is required"]
+    assert acquired.missing == ["context sufficiency assessment unavailable"]
+    assert acquired.context == {"goal": "Find the contract evidence"}
+    assert [item.context_key for item in acquired.provenance] == ["goal"]
 
 
 @pytest.mark.asyncio
@@ -236,98 +280,86 @@ async def test_context_acquisition_rejects_unknown_tool_without_calling_network(
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "payload, message",
     [
-        {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"region","quote":"Region: Taiwan","input_index":0}], "missing": ["country"]},
-        {"ready": True, "facts": {}, "evidence": [{"fact_key":"region","quote":"Taiwan","input_index":0}], "missing": []},
-        {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [], "missing": []},
-        {"ready": False, "facts": {"region": "Taiwan"}, "evidence": [], "missing": ["country"]},
-        {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"region","quote":"Taiwan","input_index":0}, {"fact_key":"region","quote":"Taiwan","input_index":0}], "missing": []},
+        ({"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"region","quote":"Region: Taiwan","input_index":0}], "missing": ["country"]}, "ready context requires facts, evidence, and no missing fields"),
+        ({"ready": True, "facts": {}, "evidence": [{"fact_key":"region","quote":"Taiwan","input_index":0}], "missing": []}, "ready context requires facts, evidence, and no missing fields"),
+        ({"ready": True, "facts": {"region": "Taiwan"}, "evidence": [], "missing": []}, "ready context requires facts, evidence, and no missing fields"),
+        ({"ready": False, "facts": {"region": "Taiwan"}, "evidence": [], "missing": ["country"]}, "insufficient context must expose only missing fields"),
+        ({"ready": False, "facts": {}, "evidence": [], "missing": []}, "insufficient context must expose only missing fields"),
+        ({"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"region","quote":"Taiwan","input_index":0}, {"fact_key":"region","quote":"Taiwan","input_index":0}], "missing": []}, "exactly one grounded evidence item per fact"),
+        ({"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"country","quote":"Taiwan","input_index":0}], "missing": []}, "exactly one grounded evidence item per fact"),
+        ({"ready": False, "missing": [f"field-{index}" for index in range(21)]}, "at most 20 items"),
+        ({"ready": True, "facts": {f"f{index}": "v" for index in range(33)}, "evidence": [{"fact_key": f"f{index}", "quote": "v", "input_index": 0} for index in range(33)], "missing": []}, "at most 32 items"),
+        ({"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key":"region","quote":"Taiwan","input_index":20}], "missing": []}, "less than or equal to 19"),
     ],
 )
-def test_context_sufficiency_rejects_contradictory_authority(payload):
-    with pytest.raises(ValueError):
+def test_context_sufficiency_rejects_contradictory_authority(payload, message):
+    with pytest.raises(ValueError, match=message):
         _ContextSufficiency(**payload)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ready": False, "missing": [f"field-{index}" for index in range(20)]},
+        {
+            "ready": True,
+            "facts": {f"f{index}": "v" for index in range(32)},
+            "evidence": [{"fact_key": f"f{index}", "quote": "v", "input_index": 0} for index in range(32)],
+            "missing": [],
+        },
+        {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key": "region", "quote": "Taiwan", "input_index": 19}], "missing": []},
+    ],
+)
+def test_context_sufficiency_accepts_its_declared_bounds(payload):
+    assert _ContextSufficiency(**payload).ready == payload["ready"]
+
+
 @pytest.mark.asyncio
-async def test_context_sufficiency_rejects_forged_evidence(monkeypatch):
-    snapshot = _snapshot_with_input()
+@pytest.mark.parametrize(
+    "inputs, payload, expected_facts",
+    [
+        # Forged evidence: the quote appears nowhere in the trusted input.
+        (
+            ["I am in Taiwan"],
+            {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key": "region", "quote": "invented authority", "input_index": 0}], "missing": []},
+            None,
+        ),
+        # Real quote, unrelated privilege claim: the value is not inside the quote.
+        (
+            ["Region: Taiwan"],
+            {"ready": True, "facts": {"is_admin": "true"}, "evidence": [{"fact_key": "is_admin", "quote": "Region: Taiwan", "input_index": 0}], "missing": []},
+            None,
+        ),
+        # Evidence index outside the trusted inputs cannot be grounded.
+        (
+            ["Region: Taiwan"],
+            {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key": "region", "quote": "Region: Taiwan", "input_index": 1}], "missing": []},
+            None,
+        ),
+        # Naturally phrased but genuinely grounded: the gate must not over-reject.
+        (
+            ["I am in Taiwan"],
+            {"ready": True, "facts": {"region": "Taiwan"}, "evidence": [{"fact_key": "region", "quote": "I am in Taiwan", "input_index": 0}], "missing": []},
+            {"region": "Taiwan"},
+        ),
+    ],
+)
+async def test_context_sufficiency_grounds_every_fact_in_its_trusted_quote(
+    monkeypatch, inputs, payload, expected_facts
+):
+    _install_structured_model(monkeypatch, payload)
     planner = ProductionRootPlanner(
         FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
     )
 
-    class Model:
-        def bind(self, **_kwargs):
-            return self
-        def with_structured_output(self, _schema):
-            return RunnableLambda(
-                lambda _value: {
-                    "ready": True,
-                    "facts": {"region": "Taiwan"},
-                    "evidence": [{"fact_key": "region", "quote": "invented authority", "input_index": 0}],
-                    "missing": [],
-                }
-            )
+    assessed = await planner._assess_context(_snapshot_with_input(), inputs)
 
-    monkeypatch.setattr("app.runtime.orchestrator_production.get_direct_agent_runtime_llm", lambda: Model())
-    assert await planner._assess_context(snapshot, ["I am in Taiwan"]) is None
-
-
-@pytest.mark.asyncio
-async def test_context_sufficiency_rejects_unrelated_privilege_claim(monkeypatch):
-    snapshot = _snapshot_with_input()
-    planner = ProductionRootPlanner(
-        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
-    )
-
-    class Model:
-        def bind(self, **_kwargs):
-            return self
-
-        def with_structured_output(self, _schema):
-            return RunnableLambda(
-                lambda _value: {
-                    "ready": True,
-                    "facts": {"is_admin": "true"},
-                    "evidence": [
-                        {"fact_key": "is_admin", "quote": "Region: Taiwan", "input_index": 0}
-                    ],
-                    "missing": [],
-                }
-            )
-
-    monkeypatch.setattr("app.runtime.orchestrator_production.get_direct_agent_runtime_llm", lambda: Model())
-    assert await planner._assess_context(snapshot, ["Region: Taiwan"]) is None
-
-
-@pytest.mark.asyncio
-async def test_context_sufficiency_accepts_natural_grounded_fact(monkeypatch):
-    snapshot = _snapshot_with_input()
-    planner = ProductionRootPlanner(
-        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
-    )
-
-    class Model:
-        def bind(self, **_kwargs):
-            return self
-
-        def with_structured_output(self, _schema):
-            return RunnableLambda(
-                lambda _value: {
-                    "ready": True,
-                    "facts": {"region": "Taiwan"},
-                    "evidence": [
-                        {"fact_key": "region", "quote": "I am in Taiwan", "input_index": 0}
-                    ],
-                    "missing": [],
-                }
-            )
-
-    monkeypatch.setattr("app.runtime.orchestrator_production.get_direct_agent_runtime_llm", lambda: Model())
-    assessed = await planner._assess_context(snapshot, ["I am in Taiwan"])
-    assert assessed is not None
-    assert assessed.facts == {"region": "Taiwan"}
+    if expected_facts is None:
+        assert assessed is None
+    else:
+        assert assessed is not None and assessed.facts == expected_facts
 
 
 @pytest.mark.asyncio
@@ -363,19 +395,50 @@ async def test_verifier_parses_bounded_json_string_before_strict_validation():
     snapshot = _snapshot()
     from app.runtime.orchestrator import ChildResult
 
-    report = await runtime.run_verifier(
-        snapshot,
-        [
-            ChildResult(
-                task_id="worker-task",
-                attempt=1,
-                child_run_id="child",
-                worker_snapshot_hash=snapshot.workers[0].snapshot_hash,
-                worker_agent_id=snapshot.workers[0].agent_id,
-                worker_agent_revision=snapshot.workers[0].agent_revision,
-                worker_workflow_revision=snapshot.workers[0].workflow_revision,
-                status="completed",
-            )
-        ],
-    )
+    report = await runtime.run_verifier(snapshot, [_worker_result(snapshot)])
     assert report.items[0].verdict == "PASS"
+
+
+def _worker_result(snapshot):
+    from app.runtime.orchestrator import ChildResult
+
+    return ChildResult(
+        task_id="worker-task",
+        attempt=1,
+        child_run_id="child",
+        worker_snapshot_hash=snapshot.workers[0].snapshot_hash,
+        worker_agent_id=snapshot.workers[0].agent_id,
+        worker_agent_revision=snapshot.workers[0].agent_revision,
+        worker_workflow_revision=snapshot.workers[0].workflow_revision,
+        status="completed",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verifier_output, message",
+    [
+        ({"output": "not json at all"}, "Verifier output is not strict JSON"),
+        ({"output": {"items": "not a list"}}, "validation error"),
+        # A verifier payload past the child wire bound never reaches the parser.
+        ({"output": "x" * (MAX_CHILD_OUTPUT_BYTES + 1)}, "Verifier child did not complete"),
+    ],
+)
+async def test_verifier_output_that_is_not_a_bounded_report_fails_closed(
+    verifier_output, message
+):
+    class VerifierBackend(FakeBackend):
+        async def get_child(self, root_run_id, child_id, ctx):
+            status = await super().get_child(root_run_id, child_id, ctx)
+            status.output = verifier_output
+            return status
+
+    runtime = ProductionChildRuntime(
+        VerifierBackend(),
+        FakeManager(),
+        RequestContext(tenant_id="tenant", user_id="user", role="USER"),
+    )
+    snapshot = _snapshot()
+
+    with pytest.raises(Exception, match=message):
+        await runtime.run_verifier(snapshot, [_worker_result(snapshot)])

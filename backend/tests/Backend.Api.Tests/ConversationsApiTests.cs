@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using Backend.Api.Common;
+using Microsoft.AspNetCore.Http;
 
 namespace Backend.Api.Tests;
 
@@ -70,6 +72,38 @@ public sealed class ConversationsApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         Assert.Equal("缺少租戶識別標頭：X-Tenant-Id", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // 「只有空白的 X-Tenant-Id」與「完全缺 header」是同一等價類 —— IdentityHeaders.Value() 把空白
+    // 正規化成 null。這一格直接打 RequireTenant(不經傳輸層,避免 header 是否被中介層 trim 掉的干擾),
+    // Documents/Conversations/ConfigurationSet 共用同一段程式碼,驗一次即證成整條路徑。
+    [Fact]
+    public void RequireTenant_BlankHeader_IsTreatedAsMissing()
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Headers[IdentityHeaders.TenantHeader] = "   ";
+
+        var error = Assert.Throws<ApiException>(() => context.Request.RequireTenant());
+
+        Assert.Equal(StatusCodes.Status400BadRequest, error.Status);
+        Assert.Equal("缺少租戶識別標頭：X-Tenant-Id", error.Message);
+    }
+
+    // X-User-Id 是刻意可選的:缺 header → UserIdOrEmpty() 回落空字串寫入,不是 400。
+    // 同一個空使用者才讀得回自己的紀錄(不會外洩給具名使用者)。
+    [Fact]
+    public async Task Create_MissingUserHeader_FallsBackToEmptyUser()
+    {
+        var anonymous = _factory.CreateInternalClient().WithTenant("demo-a");
+
+        var created = await anonymous.PostAsJsonAsync(
+            "/api/conversations", new { prompt = "無使用者問句", reply = "無使用者專屬回覆" });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+
+        var mine = (await (await anonymous.GetAsync("/api/conversations")).ReadJsonAsync()).AsArray();
+        Assert.Contains(mine, n => n!["reply"]!.GetValue<string>() == "無使用者專屬回覆");
+        var named = (await (await Client("demo-a", "named-user").GetAsync("/api/conversations")).ReadJsonAsync()).AsArray();
+        Assert.DoesNotContain(named, n => n!["reply"]!.GetValue<string>() == "無使用者專屬回覆");
     }
 
     [Fact]

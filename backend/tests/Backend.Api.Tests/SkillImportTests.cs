@@ -5,6 +5,10 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json.Nodes;
 using Backend.Api.Skills;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Backend.Api.Tests;
 
@@ -120,11 +124,11 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
             .GetAsync("demo-a", name, default));
     }
 
-    [Theory]
-    [InlineData("catalog")]
-    [InlineData("kb-query")]
-    public async Task ImportDerived_ReservedOrBuiltinName_Returns409(string name)
+    // 保留字/內建名走同一個 ReservedNames.Contains(硬寫清單)→ 一個代表值即可。
+    [Fact]
+    public async Task ImportDerived_ReservedOrBuiltinName_Returns409()
     {
+        const string name = "kb-query";
         Pkg.SetupDerived(_ => new SkillPackageValidationResult(
             true, Array.Empty<SkillValidationError>(),
             new SkillMetadata(name, "reserved", "USER", "flow"), Yaml(name)));
@@ -172,6 +176,91 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
         Assert.Contains("違反契約",
             (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // SkillNameRules 的長度與 dash 邊界(只有 server-derived import 會套用它)。
+    // 64 = on-point(放行,真的建得起來);65 / 尾隨 `-` / 連續 `--` = off-point → 502,
+    // 因為那是「引擎回報的名字不可信」,不是使用者的 package 有問題。
+    [Theory]
+    [InlineData("a", 64, HttpStatusCode.OK)]              // on-point:剛好 64 字
+    [InlineData("a", 65, HttpStatusCode.BadGateway)]      // off-point:65 字
+    [InlineData("trailing-", 1, HttpStatusCode.BadGateway)]
+    [InlineData("a--b", 1, HttpStatusCode.BadGateway)]
+    public async Task ImportDerived_NameLengthAndDashBoundaries_Returns502(
+        string unit, int repeat, HttpStatusCode expected)
+    {
+        var name = string.Concat(Enumerable.Repeat(unit, repeat));
+        Pkg.SetupDerived(_ => new SkillPackageValidationResult(
+            true, Array.Empty<SkillValidationError>(),
+            new SkillMetadata(name, "d", "USER", "flow"),
+            $"name: {name}\ndescription: d\nflow: []\n"));
+
+        var response = await ImportDerivedAsync(
+            Admin(), Zip(("SKILL.md", Encoding.UTF8.GetBytes("boundary"))));
+
+        Assert.Equal(expected, response.StatusCode);
+        var repo = (FakeSkillRepository)_factory.Fake<ISkillRepository>();
+        if (expected == HttpStatusCode.OK)
+        {
+            Assert.NotNull(await repo.GetAsync("demo-a", name, default));
+            return;
+        }
+
+        Assert.Contains("違反契約", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+        Assert.Null(await repo.GetAsync("demo-a", name, default));
+    }
+
+    // 25 MiB 傳輸上限(SkillController.MaxImportUploadBytes)的 on-point / off-point。
+    // 上限守的是整個 request body 而非檔案大小 → 必須扣掉 multipart 固定開銷才打得到 on-point。
+    // 這是 DoS 前置守門,而且整個 backend 測試專案原本沒有任何 413 斷言:把 25 改成 2500 也不會有人紅。
+    [Theory]
+    [InlineData(0, HttpStatusCode.UnprocessableEntity, 1)] // 剛好等於上限 → 放行,走到 validator
+    [InlineData(1, HttpStatusCode.RequestEntityTooLarge, 0)] // 上限 +1 → 413,validator 完全沒被呼叫
+    public async Task Import_AdminOversizePackage_Returns413_BeforeValidator(
+        long delta, HttpStatusCode expected, int expectedValidatorCalls)
+    {
+        const string name = "imp-upload-limit";
+        const long maxImportUploadBytes = 25L * 1024 * 1024;
+        // on-point 用 invalid 回應:證明「沒被 413 擋掉、確實走到 validator」,又不必把 25 MiB 存進 repo。
+        Pkg.Setup(name, _ => new SkillPackageValidationResult(
+            false, new[] { new SkillValidationError("too_big_but_allowed", "走到引擎了", null) }, null, null));
+        var overhead = Multipart(Array.Empty<byte>()).Headers.ContentLength!.Value;
+        var content = Multipart(new byte[maxImportUploadBytes + delta - overhead]);
+        Assert.Equal(maxImportUploadBytes + delta, content.Headers.ContentLength!.Value);
+        var callsBefore = Pkg.Calls.Count;
+
+        var response = await Admin().PostAsync($"/api/skills/{name}/import", content);
+
+        Assert.Equal(expected, response.StatusCode);
+        Assert.Equal(expectedValidatorCalls, Pkg.Calls.Count - callsBefore);
+        if (expected == HttpStatusCode.RequestEntityTooLarge)
+        {
+            Assert.Equal("上傳的 package 過大,超過傳輸上限",
+                (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+        }
+    }
+
+    // multipart 前置守門的兩個 400:根本不是 multipart、以及 multipart 但沒有可用檔案(缺 part / 空檔)。
+    // 兩者都必須早於 validator。
+    [Theory]
+    [InlineData("not-multipart", "匯入需以 multipart/form-data 上傳 package zip")]
+    [InlineData("no-file-part", "缺少上傳的 package 檔案")]
+    [InlineData("empty-file", "缺少上傳的 package 檔案")]
+    public async Task Import_NonMultipartOrEmptyFile_Returns400(string mode, string message)
+    {
+        var callsBefore = Pkg.Calls.Count;
+        HttpContent content = mode switch
+        {
+            "not-multipart" => new StringContent("garbage", Encoding.UTF8, "text/plain"),
+            "no-file-part" => new MultipartFormDataContent { { new StringContent("x"), "expected_name" } },
+            _ => Multipart(Array.Empty<byte>()),
+        };
+
+        var response = await Admin().PostAsync("/api/skills/imp-bad-body/import", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(message, (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+        Assert.Equal(callsBefore, Pkg.Calls.Count);
     }
 
     [Fact]
@@ -406,25 +495,72 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         Assert.Single(revisions);
     }
 
-    [Fact] // definition-only create 宣告 kind: agentic → 引擎 validate 判 invalid → 422,零寫入(AST-P0-013)。
+    // definition-only create:**引擎回報 kind=agentic** 時 backend 必須自己擋下來 → 502,零寫入。
+    // 「kind: agentic 的 YAML 語法不合法」的權威在 workflow(workflow/app/engine/skill.py 已有測試),
+    // 拿 FakeSkillValidator 鏡射出來的 agentic_requires_import 去斷言等於在測 fake 自己編的錯誤碼;
+    // backend 這側真正該守的是「引擎(或替代實作)回報 valid=true + kind=agentic」那格 ——
+    // 放行會造出 kind=agentic 但 package=null 的壞資料列(之後 /package 404、export 會用 flow 打包器、
+    // restore 直接撞 409)。所以這裡把真的 WorkflowSkillValidator 接一個會這樣回答的引擎 stub。
+    // 決策表收尾:單元側(SkillValidatorTests)驗「引擎違約 → 例外」,這裡驗「例外 → 對外狀態碼 + ApiError 形狀」。
+    [Fact]
     public async Task DefinitionOnlyCreate_AgenticKind_Rejected()
     {
         const string name = "imp_agentic_create";
-        // 真 workflow 對 `kind: agentic` 的 definition-only 提交回 valid:false / agentic_requires_import;
-        // backend 走既有 invalid→422 對映(不是 controller 的 kind 猜測)。
-        var yaml = $"name: {name}\ndescription: x\nkind: agentic\nflow:\n  - node: query_intake\n";
+        using var factory = new AgenticEngineFactory(name);
+        var admin = factory.CreateInternalClient().WithRole("ADMIN").WithTenant("demo-a").WithUser("admin-a");
 
-        var resp = await Admin().PostAsJsonAsync("/api/skills", Body(yaml));
+        var resp = await admin.PostAsJsonAsync("/api/skills", Body(Yaml(name)));
 
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal("Skill 定義驗證失敗", body["message"]!.GetValue<string>());
-        Assert.NotNull(body["fieldErrors"]!["agentic_requires_import"]);
+        Assert.Equal(502, body["status"]!.GetValue<int>());
+        Assert.Equal(
+            "Skill 驗證服務呼叫失敗：引擎回應違反契約（skill.kind 必須是 flow（agentic 僅能經 import 建立））",
+            body["message"]!.GetValue<string>());
+        Assert.NotNull(body["timestamp"]);
+        Assert.Empty(body["fieldErrors"]!.AsObject());
 
-        // 零副作用:definition / metadata / package / revision / 兩個 hash 皆未變(此名從未存在)。
-        Assert.Equal(HttpStatusCode.NotFound, (await Admin().GetAsync($"/api/skills/{name}")).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await Admin().GetAsync($"/api/skills/{name}/revisions")).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await Admin().GetAsync($"/api/skills/{name}/package")).StatusCode);
+        // 零副作用:definition / metadata / package / revision 皆未產生。
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.GetAsync($"/api/skills/{name}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.GetAsync($"/api/skills/{name}/revisions")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.GetAsync($"/api/skills/{name}/package")).StatusCode);
+    }
+
+    /// <summary>把 ISkillValidator 換回**真的** WorkflowSkillValidator,下游接一個固定回報
+    /// 「valid=true 且 kind=agentic」的引擎 stub — 測試因此走到 backend 自己的契約守門。</summary>
+    private sealed class AgenticEngineFactory : TestWebAppFactory
+    {
+        private readonly string _skillName;
+
+        public AgenticEngineFactory(string skillName) => _skillName = skillName;
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<ISkillValidator>();
+                services.AddSingleton<ISkillValidator>(new WorkflowSkillValidator(
+                    new HttpClient(new AgenticEngineHandler(_skillName)), "http://workflow:8001", "tok"));
+            });
+        }
+    }
+
+    private sealed class AgenticEngineHandler : HttpMessageHandler
+    {
+        private readonly string _skillName;
+
+        public AgenticEngineHandler(string skillName) => _skillName = skillName;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"valid\":true,\"errors\":[],\"skill\":{\"name\":\"" + _skillName
+                    + "\",\"description\":\"季報問答\",\"required_role\":\"USER\",\"kind\":\"agentic\"}}",
+                    Encoding.UTF8, "application/json"),
+            });
     }
 
     // ==================================================================
@@ -524,12 +660,11 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(SkillHash.Sha256(zip), revision["package_sha256"]!.GetValue<string>());
     }
 
-    [Theory]
-    [InlineData("catalog")]
-    [InlineData("summarize")]
-    [InlineData("template-compare")]
-    public async Task Import_ReservedName_Returns409_AndWritesNothing(string name)
+    // 同上:具名 import 的保留字檢查與 derived 共用同一個 ReservedNames.Contains → 一個代表值。
+    [Fact]
+    public async Task Import_ReservedName_Returns409_AndWritesNothing()
     {
+        const string name = "template-compare";
         Pkg.Setup(name, _ => new SkillPackageValidationResult(
             true, Array.Empty<SkillValidationError>(),
             new SkillMetadata(name, "reserved", "USER", "flow"), Yaml(name)));
@@ -608,5 +743,137 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(new[] { 3, 2, 1 }, revisions.Select(r => r!["revision"]!.GetValue<int>()));
         Assert.All(revisions, r => Assert.Equal("agentic", r!["kind"]!.GetValue<string>()));
         Assert.All(revisions, r => Assert.True(r!["has_package"]!.GetValue<bool>()));
+    }
+
+    // ---- restore 的其餘決策表格(原本 2 條測試對約 10 個分支)----
+
+    private FakeSkillRepository Repo => (FakeSkillRepository)_factory.Fake<ISkillRepository>();
+
+    private static Skill FlowSkill(string name, string definition)
+        => new(name, "舊版", definition, "USER", true, 0, default, default);
+
+    [Fact] // 授權(403)/ 跨租戶、不存在、revision 不存在、軟刪後(全 404)—— restore 的四種「進不去」。
+    public async Task Restore_UnknownRevisionOrSkill_Returns404_AndUserIsForbidden()
+    {
+        const string name = "restore-404";
+        var admin = Admin();
+        Assert.Equal(HttpStatusCode.Created,
+            (await admin.PostAsJsonAsync("/api/skills", Body(Yaml(name)))).StatusCode);
+
+        // (a) USER → 403(授權 filter 早於一切)。
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await User().PostAsync($"/api/skills/{name}/revisions/1/restore", content: null)).StatusCode);
+
+        // (b) 跨租戶 → 404(不洩漏存在性,不是 403)。
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await Admin("demo-b").PostAsync($"/api/skills/{name}/revisions/1/restore", content: null)).StatusCode);
+
+        // (c) skill 不存在 → 404。
+        var ghost = await admin.PostAsync("/api/skills/restore-ghost/revisions/1/restore", content: null);
+        Assert.Equal(HttpStatusCode.NotFound, ghost.StatusCode);
+        Assert.Equal("找不到 Skill：restore-ghost", (await ghost.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // (d) revision 0 / 負數 / current+1 → 404,訊息指名 name#revision。
+        foreach (var revision in new[] { 0, -1, 2 })
+        {
+            var resp = await admin.PostAsync($"/api/skills/{name}/revisions/{revision}/restore", content: null);
+            Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+            Assert.Equal($"找不到 Skill revision：{name}#{revision}",
+                (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+        }
+
+        // (e) 軟刪後不得靠 restore 復活(復活只有 POST /api/skills 那條路)。
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync($"/api/skills/{name}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await admin.PostAsync($"/api/skills/{name}/revisions/1/restore", content: null)).StatusCode);
+    }
+
+    [Fact] // 舊 agentic revision(建立於 package snapshot 之前)無法安全重建作者 package → fail-closed 409。
+    public async Task Restore_LegacyAgenticRevisionWithoutPackage_Returns409()
+    {
+        const string name = "restore-legacy-agentic";
+        // 現行 API 造不出「kind=agentic 且 package=null」,直接種入 legacy 資料形狀。
+        await Repo.ImportAsync(
+            "demo-a",
+            new Skill(name, "legacy", $"name: {name}\nkind: agentic\n", "USER", true, 0, default, default, "agentic"),
+            package: null, packageSha256: null, "admin-a", default);
+        var callsBefore = Pkg.Calls.Count;
+
+        var resp = await Admin().PostAsync($"/api/skills/{name}/revisions/1/restore", content: null);
+
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+        Assert.Equal(
+            $"Skill revision {name}#1 建立於 package 快照功能之前，無法安全回復",
+            (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // 零副作用:沒有打 package validator,也沒有新增 revision。
+        Assert.Equal(callsBefore, Pkg.Calls.Count);
+        Assert.Single((await (await Admin().GetAsync($"/api/skills/{name}/revisions")).ReadJsonAsync()).AsArray());
+    }
+
+    /// <summary>種入「r1 = 舊定義(可含 fake 驗證器 marker)、r2 = 現行合法版本」,回傳現行 definition。</summary>
+    private async Task<string> SeedStaleRevisionAsync(string name, string staleDefinition)
+    {
+        await Repo.ImportAsync(
+            "demo-a", FlowSkill(name, staleDefinition), null, null, "admin-a", default);
+        var current = Yaml(name, "現行版");
+        Assert.Equal(HttpStatusCode.OK,
+            (await Admin().PutAsJsonAsync($"/api/skills/{name}", Body(current))).StatusCode);
+        return current;
+    }
+
+    private async Task AssertCurrentUnchangedAsync(string name, string current)
+    {
+        var single = await (await Admin().GetAsync($"/api/skills/{name}")).ReadJsonAsync();
+        Assert.Equal(current, single["definition"]!.GetValue<string>());
+        Assert.Equal(2, single["current_revision"]!.GetValue<int>());
+        Assert.Equal(2, (await (await Admin().GetAsync($"/api/skills/{name}/revisions")).ReadJsonAsync()).AsArray().Count);
+    }
+
+    [Fact] // restore 會**重新**驗證:引擎規則變嚴之後,舊 revision 不得靜默復活。
+    public async Task Restore_FlowRevisionRejectedByEngine_Returns422_AndKeepsCurrent()
+    {
+        const string name = "restore-stale";
+        var current = await SeedStaleRevisionAsync(
+            name, $"name: {name}\ndescription: 舊版\nflow:\n  - loop: [{FakeSkillValidator.InvalidMarker}]\n");
+
+        var resp = await Admin().PostAsync($"/api/skills/{name}/revisions/1/restore", content: null);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("Skill 定義驗證失敗", body["message"]!.GetValue<string>());
+        Assert.NotNull(body["fieldErrors"]!["unbounded_loop"]);
+        await AssertCurrentUnchangedAsync(name, current);
+    }
+
+    [Fact] // restore × 引擎不可達 → 502(不是 422、不是「就用舊 snapshot 吧」),零寫入。
+    public async Task Restore_EngineUnreachable_Returns502_AndWritesNothing()
+    {
+        const string name = "restore-engine-down";
+        var current = await SeedStaleRevisionAsync(
+            name, $"name: {name}\ndescription: 舊版\n{FakeSkillValidator.EngineDownMarker}\n");
+
+        var resp = await Admin().PostAsync($"/api/skills/{name}/revisions/1/restore", content: null);
+
+        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        Assert.Contains("Skill 驗證服務呼叫失敗",
+            (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+        await AssertCurrentUnchangedAsync(name, current);
+    }
+
+    [Fact] // revision 的 definition name 與路由不符 → 422(否則會「回復 A 卻蓋到 B」)。
+    public async Task Restore_RevisionNameMismatch_Returns422()
+    {
+        const string name = "restore-name-mismatch";
+        var current = await SeedStaleRevisionAsync(
+            name, "name: someone-else\ndescription: 舊版\nflow:\n  - node: query_intake\n");
+
+        var resp = await Admin().PostAsync($"/api/skills/{name}/revisions/1/restore", content: null);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        Assert.Equal(
+            $"Skill revision 的 name 與路由不符：定義為 someone-else，路由為 {name}",
+            (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+        await AssertCurrentUnchangedAsync(name, current);
     }
 }

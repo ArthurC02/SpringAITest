@@ -127,7 +127,12 @@ def _scan(steps: Iterable[Any], out: _Scan) -> None:
 def _require_expression(body: Any, field: str) -> None:
     if not isinstance(body, dict) or not isinstance(body.get(field), str):
         raise SkillCompileError(f"{field} 必須是條件式字串")
-    expressions.validate(body[field])  # 白名單外語法 → ExpressionError
+    try:
+        expressions.validate(body[field])
+    except expressions.ExpressionError as e:
+        # 同 _script_contract：引擎層的例外一律收斂成 SkillCompileError，
+        # compile() 的呼叫端（custom.load / invoke）只準備接這一種型別。
+        raise SkillCompileError(f"invalid_expression: {field} {body[field]!r}: {e}")
 
 
 def _script_contract(source: Any) -> script_runner.ScriptContract:

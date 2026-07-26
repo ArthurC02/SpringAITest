@@ -87,18 +87,34 @@ public sealed class SkillValidatorTests
         Assert.Contains("缺少 skill 中繼資料", ex.Message);
     }
 
-    // 驗證服務故障的三個等價類:HTTP 錯誤碼、無法解析的 body、完全沒有回應(傳輸例外)。
-    // 全部 → 502(不是 422):不得把引擎不可達誤判成使用者的定義有問題。
+    // valid=true 的成功路徑同樣要守契約(比照姊妹類 WorkflowSkillPackageValidator.ValidateSuccessContract)。
+    // 這三格原本 fail-open:空白 name 會寫入無名 skill;kind=agentic 會造出「agentic 但 package=null」
+    // 的壞資料狀態(之後 /package 404、export 用 flow exporter 打包、restore 撞 409);
+    // 非法 required_role 直接落地成無人認得的授權值。逐格斷言 detail,避免檢查被短路後仍然綠。
     [Theory]
-    [InlineData(404)]
-    [InlineData(500)]
-    [InlineData(503)]
-    public async Task DownstreamHttpError_Throws502(int status)
+    [InlineData("""{"valid":true,"errors":[],"skill":{"name":"   ","description":"季報問答"}}""", "skill.name")]
+    [InlineData("""{"valid":true,"errors":[],"skill":{"name":"quarterly_qa","kind":"agentic"}}""", "skill.kind")]
+    [InlineData("""{"valid":true,"errors":[],"skill":{"name":"quarterly_qa","required_role":"SUPERADMIN"}}""", "skill.required_role")]
+    public async Task ValidWithContractViolation_Throws502(string body, string field)
     {
-        var ex = await Assert.ThrowsAsync<ApiException>(() => Validate(Json((HttpStatusCode)status, "{}")));
+        var ex = await Assert.ThrowsAsync<ApiException>(() => Validate(Json(HttpStatusCode.OK, body)));
 
         Assert.Equal(502, ex.Status);
-        Assert.Contains("HTTP " + status, ex.Message);
+        Assert.Contains("引擎回應違反契約", ex.Message);
+        Assert.Contains(field, ex.Message);
+    }
+
+    // 驗證服務故障的三個等價類:HTTP 錯誤碼、無法解析的 body、完全沒有回應(傳輸例外)。
+    // 全部 → 502(不是 422):不得把引擎不可達誤判成使用者的定義有問題。
+    // 所有非 2xx 走同一行 `!resp.IsSuccessStatusCode`(無 4xx/5xx 分流)→ 一個代表值即可。
+    [Fact]
+    public async Task DownstreamHttpError_Throws502()
+    {
+        var ex = await Assert.ThrowsAsync<ApiException>(
+            () => Validate(Json(HttpStatusCode.ServiceUnavailable, "{}")));
+
+        Assert.Equal(502, ex.Status);
+        Assert.Contains("HTTP 503", ex.Message);
     }
 
     [Fact]

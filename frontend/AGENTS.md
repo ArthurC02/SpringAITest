@@ -17,7 +17,9 @@ npm install
 npm run dev     # Vite on :5173, proxies /api → :8080
 npm run build   # tsc type-check + vite bundle
 npm run lint    # oxlint
-npm run test:unit # Agent Builder model/API + mocked-browser regression tests
+npm run test:unit # Vitest pure logic + Playwright mocked-browser regression tests
+npm run test:unit:logic # Vitest only (fast, no browser/server)
+npm run test:unit:ui # Playwright mocked-browser tests only
 npm run test:evidence:install # install Chromium for release-evidence browser gates
 npm run test:evidence         # full-compose Playwright gates (PW_BASE_URL defaults to :5173)
 ```
@@ -26,7 +28,10 @@ The normal frontend gate remains lint + build. `test:evidence` is a release gate
 expects an externally started full compose stack and never mocks AG-UI. Set `EVIDENCE_DIR`
 to the ignored root artifact directory (for example `../artifacts/copilot-shared-core/<run-id>`
 when running from `frontend/`). If Chromium or the evidence stream endpoint is absent, the
-outer evidence harness must report `BLOCKED`; a Playwright skip is never release PASS.
+outer evidence harness must report `BLOCKED`; a Playwright skip is never release PASS —
+`playwright.config.ts` registers `evidenceSkipGuardReporter.ts`, which fails the run itself
+(non-zero exit) whenever any evidence test is skipped, so running `npm run test:evidence`
+directly without the harness cannot report a false PASS either.
 
 ## Conventions & Gotchas
 

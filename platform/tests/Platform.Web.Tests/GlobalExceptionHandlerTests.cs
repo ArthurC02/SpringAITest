@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Logging.Abstractions;
 using Platform.Service.Exceptions;
 using Platform.Web.Errors;
@@ -59,5 +60,55 @@ public sealed class GlobalExceptionHandlerTests
 
         Assert.Equal(404, status);
         Assert.Equal("找不到文件：d1", body["message"]!.GetValue<string>());
+    }
+
+    // 決策表同一列:下游 payload 過大 → 413,訊息同屬 4xx 可控範圍不被通用化。
+    [Fact]
+    public async Task PayloadTooLarge_413_PreservesControlledMessage()
+    {
+        var (status, body) = await Handle(
+            new WorkflowPayloadTooLargeException("Business Rule request is too large"));
+
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, status);
+        Assert.Equal("Business Rule request is too large", body["message"]!.GetValue<string>());
+    }
+
+    // 防禦分支:回應已開始寫出(串流途中)時不得再改寫 body —— 回 false 交還給呼叫端,
+    // 已送出的位元組原封不動(改寫會產生「半段 SSE + 一段 JSON」的畸形回應)。
+    [Fact]
+    public async Task ResponseAlreadyStarted_ReturnsFalse_AndDoesNotRewriteBody()
+    {
+        var body = new MemoryStream();
+        var ctx = new DefaultHttpContext();
+        ctx.Features.Set<IHttpResponseFeature>(new StartedResponseFeature { Body = body, StatusCode = 200 });
+        ctx.Response.Body = body;
+        await body.WriteAsync("data:已送出的 token\n\n"u8.ToArray());
+        var sentBytes = body.Length;
+        var handler = new GlobalExceptionHandler(NullLogger<GlobalExceptionHandler>.Instance);
+
+        var handled = await handler.TryHandleAsync(
+            ctx, new InvalidOperationException("串流中途失敗"), CancellationToken.None);
+
+        Assert.False(handled);
+        Assert.Equal(200, ctx.Response.StatusCode);
+        Assert.Equal(sentBytes, body.Length);
+    }
+
+    /// <summary>HasStarted=true 的回應功能(DefaultHttpContext 內建的實作永遠回 false,無法觸發早退分支)。</summary>
+    private sealed class StartedResponseFeature : IHttpResponseFeature
+    {
+        public int StatusCode { get; set; } = 200;
+        public string? ReasonPhrase { get; set; }
+        public IHeaderDictionary Headers { get; set; } = new HeaderDictionary();
+        public Stream Body { get; set; } = Stream.Null;
+        public bool HasStarted => true;
+
+        public void OnStarting(Func<object, Task> callback, object state)
+        {
+        }
+
+        public void OnCompleted(Func<object, Task> callback, object state)
+        {
+        }
     }
 }

@@ -270,6 +270,54 @@ public sealed class ChatSessionWindowTests
         Assert.Contains(stored, m => m.Text == "reply");
     }
 
+    // ---- HIT 路徑也必須整 turn 原子裁切:tool-call/result 配對不得被手動 append 的裁切拆散 ----
+    // (Window_ToolCallAndResult_NotSplitByCompaction 只證明了 ChatClientAgent 那條路徑;HIT 輪走的是
+    //  SkillRoutingAgent.AppendExchangeToSessionAsync 自己呼叫 ChatReducer 的另一段程式碼,先前只用純文字測過。)
+    [Fact]
+    public async Task ConsecutiveHits_ToolCallAndResult_NotSplitByManualCompaction()
+    {
+        var agent = new FakeLlmAgent();
+        var wf = new FakeWorkflowService
+        {
+            Catalog = Cat(SingleSkillCatalog),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
+        };
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, historyProvider, _) = TestChatAgent.Build(identity: identity, llmAgent: agent, workflows: wf);
+        identity.SetRequestKeys("u1", "c-hit-tool", UserA);
+
+        var session = await hostAgent.GetOrCreateSessionAsync("c-hit-tool");
+        var seeded = new List<ChatMessage>
+        {
+            new(ChatRole.User, "toolQ"),
+            new(ChatRole.Assistant, new List<AIContent> { new FunctionCallContent("call1", "doThing", new Dictionary<string, object?>()) }),
+            new(ChatRole.Tool, new List<AIContent> { new FunctionResultContent("call1", "result1") }),
+            new(ChatRole.Assistant, "final answer using tool"),
+        };
+        for (var i = 0; i < 18; i++)
+        {
+            seeded.Add(new ChatMessage(i % 2 == 0 ? ChatRole.User : ChatRole.Assistant, $"m{i}"));
+        }
+        historyProvider.SetMessages(session, seeded); // 22 則(4 則一組的 tool turn + 18 則一般訊息)
+        await hostAgent.SaveSessionAsync("c-hit-tool", session);
+
+        // 一輪 HIT 手動 append 2 則 → 24 則,觸發裁切;最舊的整個 turn 是那 4 則一組的 tool-call turn。
+        EnqueueHit(agent, "reply");
+        var round = await hostAgent.GetOrCreateSessionAsync("c-hit-tool");
+        await hostAgent.RunAsync("Q", round);
+        await hostAgent.SaveSessionAsync("c-hit-tool", round);
+
+        var finalSession = await hostAgent.GetOrCreateSessionAsync("c-hit-tool");
+        var stored = historyProvider.GetMessages(finalSession);
+
+        Assert.DoesNotContain(stored, m => m.Contents.Any(c => c is FunctionCallContent));
+        Assert.DoesNotContain(stored, m => m.Contents.Any(c => c is FunctionResultContent));
+        Assert.DoesNotContain(stored, m => m.Text == "toolQ");
+        Assert.DoesNotContain(stored, m => m.Text == "final answer using tool");
+        Assert.Contains(stored, m => m.Text == "Q");
+        Assert.Contains(stored, m => m.Text == "reply");
+    }
+
     // ---- 連續多輪 HIT(本產品主流情境):視窗全程被裁到 ≤20,不會無界成長 ----
     [Fact]
     public async Task ManyConsecutiveHits_WindowStaysBounded_NeverGrowsUnbounded()

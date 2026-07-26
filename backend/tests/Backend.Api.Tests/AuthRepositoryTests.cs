@@ -8,10 +8,14 @@ namespace Backend.Api.Tests;
 /// <summary>
 /// AuthRepository 的**真 PostgreSQL**驗收:AddUserAsync 的 TOCTOU 兜底(unique violation → 409)。
 /// 手寫 fake(FakeAuthRepository,行程記憶體 Dictionary)無法產生真的 PostgresException,
-/// 只有真 DB 唯一約束能背書這條 catch 分支 —— 比照 ConfigurationSetRepositoryTests 共用同一個
-/// PostgresFixture(appdb 不可達則 SkipIfUnavailable 略過,不假綠)。
+/// 只有真 DB 唯一約束能背書這條 catch 分支 —— 比照 ConfigurationSetRepositoryTests 加入
+/// "Postgres" collection 共用同一個 PostgresFixture 並序列化執行(appdb 不可達則
+/// SkipIfUnavailable 略過,不假綠)。用 IClassFixture 自建一份 fixture 會讓本類與 collection
+/// 內的其他 DB 測試類**平行**跑 DbBootstrap 的 DDL,實測會打壞
+/// ConfigurationSetRepositoryTests.ConcurrentActivate_*(PostgresCollection.cs 註解描述的失效模式)。
 /// </summary>
-public sealed class AuthRepositoryTests : IClassFixture<PostgresFixture>
+[Collection("Postgres")]
+public sealed class AuthRepositoryTests
 {
     private readonly PostgresFixture _fx;
 

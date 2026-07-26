@@ -88,6 +88,11 @@ public sealed class WorkflowSkillValidator : ISkillValidator
                     StatusCodes.Status502BadGateway, "Skill 驗證服務呼叫失敗：回應缺少 skill 中繼資料");
             }
 
+            if (body.Valid)
+            {
+                ValidateSuccessContract(body.Skill!);
+            }
+
             return new SkillValidationResult(
                 body.Valid,
                 body.Errors?.Select(e => new SkillValidationError(e.Code, e.Message, e.Line)).ToList()
@@ -101,6 +106,39 @@ public sealed class WorkflowSkillValidator : ISkillValidator
                         string.IsNullOrWhiteSpace(body.Skill.RequiredRole) ? "USER" : body.Skill.RequiredRole,
                         // kind 為 additive(R4):舊引擎不帶 → 預設 flow。
                         string.IsNullOrWhiteSpace(body.Skill.Kind) ? "flow" : body.Skill.Kind));
+        }
+    }
+
+    /// <summary>
+    /// valid=true 的成功路徑契約檢查(比照姊妹類 WorkflowSkillPackageValidator.ValidateSuccessContract)。
+    /// 語法/編譯規則的權威仍在引擎;這裡守的是 backend 自己的資料完整性 —— 引擎回報的 metadata
+    /// 一旦違約就會直接落地成壞資料,而 backend 沒有第二次機會發現。
+    /// 「欄位缺席」與「欄位非法」不同類:缺 required_role/kind 仍走既有預設(USER / flow),
+    /// 只有**明確給了非法值**才算違約。
+    /// </summary>
+    private static void ValidateSuccessContract(ValidateSkill skill)
+    {
+        static ApiException Violation(string detail) => new(
+            StatusCodes.Status502BadGateway,
+            "Skill 驗證服務呼叫失敗：引擎回應違反契約（" + detail + "）");
+
+        if (string.IsNullOrWhiteSpace(skill.Name))
+        {
+            throw Violation("skill.name 必須是非空字串");
+        }
+
+        // definition-only 寫入不含 package,agentic 一律走 import(AGENTS.md)。此端點回報 agentic
+        // 即為違約:放行會造出 kind=agentic 但 package=null 的列,之後 /package 404、
+        // export 會用 flow 的打包器產出格式錯誤的 zip、restore 直接撞 409。
+        if (!string.IsNullOrWhiteSpace(skill.Kind) && !string.Equals(skill.Kind, "flow", StringComparison.Ordinal))
+        {
+            throw Violation("skill.kind 必須是 flow（agentic 僅能經 import 建立）");
+        }
+
+        if (!string.IsNullOrWhiteSpace(skill.RequiredRole)
+            && skill.RequiredRole is not ("USER" or "ADMIN"))
+        {
+            throw Violation("skill.required_role 必須是 USER 或 ADMIN");
         }
     }
 
