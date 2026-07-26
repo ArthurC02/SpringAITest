@@ -367,9 +367,6 @@ export type RuleFactType =
   | 'collection'
   | string
 
-/** Exact base-10 decimal transported as a JSON string; never parse with Number. */
-export type RuleDecimalString = string
-
 export type RuleGate =
   | 'preflight'
   | 'post-context'

@@ -1,3 +1,5 @@
+import { clearByPrefix } from './storageKeys'
+
 interface StoredAttempt {
   version: 1
   fingerprint: string
@@ -37,17 +39,7 @@ export function getSessionStorage(): Storage | undefined {
 }
 
 export function clearLogicalAttemptStorage(storage = getSessionStorage()): void {
-  if (!storage) return
-  try {
-    const keys: string[] = []
-    for (let index = 0; index < storage.length; index += 1) {
-      const key = storage.key(index)
-      if (key?.startsWith(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:`)) keys.push(key)
-    }
-    for (const key of keys) storage.removeItem(key)
-  } catch {
-    // Storage may be unavailable; logout must continue.
-  }
+  clearByPrefix(storage, `${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:`)
 }
 
 export function pendingCancelStorageKey(agentId: string): string {

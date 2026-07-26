@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using Platform.Service.Dtos;
+using Platform.Service.Exceptions;
 using Platform.Service.Options;
 
 namespace Platform.Service;
@@ -85,6 +86,36 @@ public sealed class BackendClient
         catch (JsonException ex)
         {
             throw wrap(ex);
+        }
+    }
+
+    /// <summary>
+    /// 透明代理送出:傳輸失敗與 backend 5xx 收斂成 <see cref="WorkflowInvocationException"/>(對外 502,
+    /// 不外洩 backend 的內部錯誤 body);2xx 與 4xx 一律原樣回傳 status/body/ETag 供 controller 寫回。
+    /// 請求 header 的決策(If-Match / Idempotency-Key)仍留在各服務。req 由本方法負責釋放。
+    /// </summary>
+    /// <param name="inspectResponse">
+    /// 需要讀取 backend 額外 response header 的呼叫端(D3 的 dispatch metadata)在 response 釋放前取值;
+    /// 純代理端點不需要。
+    /// </param>
+    public async Task<(int Status, string Body, string? ETag)> SendForProxyAsync(
+        HttpRequestMessage req,
+        string failurePrefix,
+        CancellationToken ct,
+        Action<HttpResponseMessage>? inspectResponse = null)
+    {
+        using (req)
+        using (var resp = await SendAsync(
+                   req, ex => new WorkflowInvocationException(failurePrefix + ex.Message, ex), ct))
+        {
+            var status = (int)resp.StatusCode;
+            if (status >= 500)
+            {
+                throw new WorkflowInvocationException(failurePrefix + "HTTP " + status);
+            }
+
+            inspectResponse?.Invoke(resp);
+            return (status, await resp.Content.ReadAsStringAsync(ct), resp.Headers.ETag?.ToString());
         }
     }
 

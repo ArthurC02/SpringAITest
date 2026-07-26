@@ -270,10 +270,7 @@ public interface IOrchestratorRunRepository
     Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenantId, string userId, Guid rootRunId, Guid childId, CancellationToken ct);
     Task<OrchestratorRunWriteResult> TransitionAsync(string tenantId, string userId, Guid rootRunId, OrchestratorRootTransitionRequest request, CancellationToken ct);
     Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenantId, string userId, Guid rootRunId, OrchestratorContextAcquireRequest request, CancellationToken ct);
-    Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenantId, string userId, Guid rootRunId, Guid childId, CancellationToken ct)
-        => Task.FromResult<OrchestratorContextRequestResponse?>(null);
-    Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenantId, string userId, Guid rootRunId, Guid childId, Guid requestId, CancellationToken ct)
-        => Task.FromResult<OrchestratorContextRequestResponse?>(null);
-    Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenantId, string userId, Guid rootRunId, Guid childId, Guid requestId, long expectedVersion, OrchestratorContextDeltaRequest request, CancellationToken ct)
-        => Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.NotFound));
+    Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenantId, string userId, Guid rootRunId, Guid childId, CancellationToken ct);
+    Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenantId, string userId, Guid rootRunId, Guid childId, Guid requestId, CancellationToken ct);
+    Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenantId, string userId, Guid rootRunId, Guid childId, Guid requestId, long expectedVersion, OrchestratorContextDeltaRequest request, CancellationToken ct);
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from decimal import Decimal
 
@@ -19,6 +20,29 @@ class DecimalWireError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def is_number(value: object) -> bool:
+    """A finite JSON number. `bool` is an `int` subclass and is never a number here."""
+    return (
+        isinstance(value, (int, float, Decimal))
+        and not isinstance(value, bool)
+        and not (
+            isinstance(value, float)
+            and not math.isfinite(value)
+            or isinstance(value, Decimal)
+            and not value.is_finite()
+        )
+    )
+
+
+def is_decimal_wire(value: object) -> bool:
+    """`parse_decimal_wire` as a predicate (validator and evaluator both need it)."""
+    try:
+        parse_decimal_wire(value)
+    except DecimalWireError:
+        return False
+    return True
 
 
 def parse_decimal_wire(value: object) -> tuple[str, Decimal]:

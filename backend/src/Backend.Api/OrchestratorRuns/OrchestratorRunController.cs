@@ -10,7 +10,7 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
     [HttpPost("admin/orchestrators/{orchestratorId:guid}/runs")]
     public async Task<IActionResult> Start(Guid orchestratorId, OrchestratorRunStartRequest request, CancellationToken ct)
     {
-        RequireSystemAdmin();
+        Request.RequireCapability("workflow.manage");
         var result = await runs.CreateAsync(Request.RequireTenant(), Request.RequireUserId(), Request.UserRole()!, Request.UserGroups(), Request.UserCapabilities(), orchestratorId, Conversation(request.ConversationId), Message(request.Message), Key(), ct);
         return Accepted(result);
     }
@@ -27,7 +27,6 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
     [HttpPost("orchestrator-runs/{runId:guid}/commands/{commandId:guid}/claim")]
     public async Task<IActionResult> Claim(Guid runId, Guid commandId, OrchestratorRunCommandClaimRequest request, CancellationToken ct)
     { var claim = await runs.ClaimCommandAsync(Request.RequireTenant(), Request.RequireUserId(), runId, commandId, request.WorkerId?.Trim() ?? "", request.LeaseSeconds, ct); return claim is null ? NoContent() : Ok(claim); }
-    [HttpPost("orchestrator-runs/{runId:guid}/commands/{commandId:guid}/renew")]
     [HttpPost("orchestrator-runs/{runId:guid}/commands/{commandId:guid}/lease/renew")]
     public async Task<IActionResult> Renew(Guid runId, Guid commandId, OrchestratorRunCommandRenewRequest request, CancellationToken ct)
     { var claim = await runs.RenewCommandAsync(Request.RequireTenant(), Request.RequireUserId(), runId, commandId, request.ClaimToken ?? "", request.LeaseGeneration, request.LeaseSeconds, ct); return claim is null ? NoContent() : Ok(claim); }
@@ -88,7 +87,6 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
         catch (ArgumentException e) { throw new ApiException(400, e.Message); }
     }
     private IActionResult Accepted(OrchestratorRunWriteResult r) { if (r.Status == OrchestratorRunWriteStatus.NotFound) throw Missing(); if (r.Status is OrchestratorRunWriteStatus.Conflict or OrchestratorRunWriteStatus.InvalidState) throw new ApiException(409, r.Message ?? "Orchestrator run state conflict"); Response.Headers["X-Orchestrator-Run-Replayed"] = r.Replayed ? "true" : "false"; if (r.Dispatch is not null) Response.Headers["X-Orchestrator-Run-Command-Id"] = r.Dispatch.CommandId.ToString("D"); return StatusCode(202, r.Run! with { CommandId = r.Dispatch?.CommandId }); }
-    private void RequireSystemAdmin() { if (!Request.HasCapability("workflow.manage")) throw new ApiException(403, "workflow.manage capability is required"); }
     // The recovery repositories throw on these bounds; validate them here so an invalid
     // Workflow scanner request is a 400 ApiError instead of a 500.
     private static string Worker(string? workerId, int limit, int leaseSeconds)

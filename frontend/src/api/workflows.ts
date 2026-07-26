@@ -1,4 +1,5 @@
 import { apiFetch, apiFetchWithEtag } from './http'
+import { object } from '../wire'
 import type {
   Workflow, WorkflowDefinition, WorkflowDraft, WorkflowKind, WorkflowNodeType,
   WorkflowRevision, WorkflowSimulation, WorkflowSummary, WorkflowUiMetadata, WorkflowValidation,
@@ -12,7 +13,6 @@ type WireWorkflow = RawObject & { id: string; name: string; kind: WorkflowKind; 
 type WireValidation = { valid: boolean; definition?: WorkflowDefinition; ui_metadata?: WorkflowUiMetadata; errors?: Array<{ field?: string; message: string; node_id?: string; edge_id?: string }> }
 type WireCatalog = { nodes?: WorkflowNodeType[] }
 
-function object(value: unknown): RawObject { return value && typeof value === 'object' ? value as RawObject : {} }
 function graph(value: unknown, kind: WorkflowKind): WorkflowDefinition {
   const raw = object(value)
   const runtimeVariant = raw.runtimeVariant === 'worker' || raw.runtimeVariant === 'verifier'

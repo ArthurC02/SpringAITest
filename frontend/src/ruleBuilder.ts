@@ -55,19 +55,6 @@ export function actionCatalogItems(
   return response?.actions ?? response?.items ?? []
 }
 
-export function catalogGates(
-  response:
-    | RuleFactCatalogEntry[]
-    | RuleCatalogEnvelope<RuleFactCatalogEntry>
-    | null
-    | undefined,
-): RuleGate[] {
-  if (!response || Array.isArray(response)) {
-    return [...new Set((response ?? []).flatMap((fact) => fact.gates ?? []))]
-  }
-  return response.gates ?? [...new Set(factCatalogItems(response).flatMap((fact) => fact.gates ?? []))]
-}
-
 export function factsForGate(facts: RuleFactCatalogEntry[], gate: RuleGate): RuleFactCatalogEntry[] {
   return facts.filter((fact) => !fact.gates?.length || fact.gates.includes(gate))
 }

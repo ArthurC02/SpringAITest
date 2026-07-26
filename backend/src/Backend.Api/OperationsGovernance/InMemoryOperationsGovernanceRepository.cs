@@ -82,28 +82,21 @@ public sealed class InMemoryOperationsGovernanceRepository(
         }
     }
 
+    // Lite 模式沒有 per-revision 的 run 指標來源:revisions 恆為空,因此 selected/previous/delta 也恆為 null。
     public Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, CancellationToken ct)
     {
         lock (_gate)
-        {
-            var revisions = Array.Empty<RevisionMetric>();
-            var selected = selectedRevision is int id ? revisions.SingleOrDefault(x => x.Revision == id) : null;
-            var previous = selected is null ? null : revisions.Where(x => x.Revision < selected.Revision).OrderByDescending(x => x.Revision).FirstOrDefault();
-            var delta = selected is not null && previous is not null ? new RevisionDelta(previous.Revision, selected.Revision, selected.Runs - previous.Runs, 0, selected.AverageLatencyMs - previous.AverageLatencyMs, 0) : null;
-            return Task.FromResult(new OperationsVersionComparison(selectedRevision, State(tenantId).Audit.Count(x => x is "rollout" or "rollback"), selectedRevision is not null, true, revisions, delta));
-        }
+            return Task.FromResult(new OperationsVersionComparison(
+                selectedRevision, State(tenantId).Audit.Count(x => x is "rollout" or "rollback"),
+                selectedRevision is not null, true, Array.Empty<RevisionMetric>(), null));
     }
 
-    public Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct) => Task.FromResult(LegacyInventory());
+    public Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct)
+        => Task.FromResult(LegacyInventory.Items);
 
     private TenantState State(string tenantId) => _states.TryGetValue(tenantId, out var state) ? state : _states[tenantId] = new TenantState();
     private static RegressionGate? Gate(TenantState state, Guid? id) => state.Gate is { } gate && gate.Id == id
         ? gate with { OverrideActive = state.Overrides.Values.Any(x => x.RegressionId == gate.Id), AuditEntries = state.Audit.Count } : null;
-    private static IReadOnlyList<LegacyInventoryItem> LegacyInventory() => [
-        new("flow-yaml-authors", "read_only_pending_r6", "legacy fallback below threshold"),
-        new("agent-skill-runner", "explicit_legacy_executor", "r6 review"),
-        new("current-skill-package", "retain_until_revision_artifact", "r6"),
-    ];
     private static long Average(IEnumerable<long?> values) { var items = values.Where(x => x is not null).Select(x => x!.Value).ToArray(); return items.Length == 0 ? 0 : (long)items.Average(); }
     private static long Max(IEnumerable<long?> values) { var items = values.Where(x => x is not null).Select(x => x!.Value).ToArray(); return items.Length == 0 ? 0 : items.Max(); }
     private static long? AverageNullable(IEnumerable<long?> values) { var items = values.Where(x => x is not null).Select(x => x!.Value).ToArray(); return items.Length == 0 ? null : (long)items.Average(); }

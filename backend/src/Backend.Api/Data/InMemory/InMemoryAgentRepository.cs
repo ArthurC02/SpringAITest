@@ -38,14 +38,6 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         }
     }
 
-    internal string? GetActivePublishedDefinitionUnsafe(string tenantId, Guid id, int revision)
-    {
-        lock (_gate)
-        {
-            var entry = Find(tenantId, id); if (entry is null || !entry.Enabled || entry.PublishedRevision != revision) return null;
-            return entry.Revisions.FirstOrDefault(r => r.Revision == revision && r.Status == "published")?.DefinitionSnapshot;
-        }
-    }
     internal (string Definition, Guid? WorkflowId, int? WorkflowRevision)? GetActivePublishedOrchestratorReferenceWithoutLock(string tenantId, Guid id, int revision)
     { var entry = Find(tenantId, id); if (entry is null || !entry.Enabled || entry.PublishedRevision != revision) return null; var row = entry.Revisions.FirstOrDefault(r => r.Revision == revision && r.Status == "published"); return row is null ? null : (row.DefinitionSnapshot, row.RuntimeWorkflowId, row.RuntimeWorkflowRevision); }
 

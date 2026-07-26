@@ -1,3 +1,4 @@
+import { object } from './wire'
 import type {
   AgentBusinessRules,
   AgentDraft,
@@ -69,12 +70,6 @@ function strings(value: unknown, fallback: string[] = []): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
     : [...fallback]
-}
-
-function object(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {}
 }
 
 function finiteNumber(value: unknown): number {

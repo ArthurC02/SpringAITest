@@ -1,3 +1,5 @@
+import { clearByPrefix } from './storageKeys'
+
 /** Durable, user-scoped state for an active root orchestrator run.  The input itself
  * is deliberately not stored: a non-cryptographic fingerprint is only used to decide
  * whether a retry is the same logical request. */
@@ -87,15 +89,5 @@ export function clearOrchestratorRunState(
 }
 
 export function clearOrchestratorRunStorage(storage: Storage | undefined = globalThis.localStorage): void {
-  if (!storage) return
-  try {
-    const keys: string[] = []
-    for (let index = 0; index < storage.length; index += 1) {
-      const key = storage.key(index)
-      if (key?.startsWith(`${ORCHESTRATOR_RUN_STORAGE_PREFIX}:`)) keys.push(key)
-    }
-    keys.forEach((key) => storage.removeItem(key))
-  } catch {
-    // Logout must continue even when localStorage is disabled.
-  }
+  clearByPrefix(storage, `${ORCHESTRATOR_RUN_STORAGE_PREFIX}:`)
 }

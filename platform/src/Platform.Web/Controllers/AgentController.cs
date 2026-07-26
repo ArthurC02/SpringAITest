@@ -22,31 +22,11 @@ namespace Platform.Web.Controllers;
 [Route("api/agents")]
 [Authorize]
 [AdminOnly("權限不足，無法存取 Agent")]
-public sealed class AgentController : ControllerBase
+public sealed class AgentController : ProxyControllerBase
 {
     private readonly IAgentService _agents;
 
     public AgentController(IAgentService agents) => _agents = agents;
-
-    /// <summary>本次請求的 If-Match(樂觀鎖前置條件);缺則 null。原樣轉發給 backend。</summary>
-    private string? IfMatch =>
-        Request.Headers.IfMatch.Count > 0 ? Request.Headers.IfMatch.ToString() : null;
-
-    /// <summary>把 backend 的透明代理回應原樣寫回:狀態碼、JSON body 與 ETag response header(若有)。</summary>
-    private IActionResult Write(AgentProxyResponse r)
-    {
-        if (r.ETag is not null)
-        {
-            Response.Headers.ETag = r.ETag;
-        }
-
-        return new ContentResult
-        {
-            StatusCode = r.Status,
-            Content = r.Body,
-            ContentType = "application/json; charset=utf-8",
-        };
-    }
 
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)

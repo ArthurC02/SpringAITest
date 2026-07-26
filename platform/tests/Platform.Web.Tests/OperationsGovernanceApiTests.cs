@@ -63,7 +63,7 @@ public sealed class OperationsGovernanceApiTests
         int downstream, int expected, string? expectedMessage)
     {
         using var factory = new Factory();
-        factory.Handler.Respond(
+        factory.Handler.Reset(
             (HttpStatusCode)downstream,
             "{\"status\":" + downstream + ",\"message\":\"regression gate blocked\",\"detail\":\"internal-secret\"}");
         using var client = factory.CreateClient().WithToken(
@@ -109,7 +109,7 @@ public sealed class OperationsGovernanceApiTests
 
     private sealed class Factory : TestWebAppFactory
     {
-        public Handler Handler { get; } = new();
+        public CapturingBackendHandler Handler { get; } = new();
         public Factory() : base(agentWriteToolsEnabled: true) { }
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -119,22 +119,6 @@ public sealed class OperationsGovernanceApiTests
                 services.RemoveAll<BackendClient>();
                 services.AddHttpClient<BackendClient>().ConfigurePrimaryHttpMessageHandler(() => Handler);
             });
-        }
-    }
-
-    private sealed class Handler : HttpMessageHandler
-    {
-        private HttpRequestMessage? _request;
-        private HttpStatusCode _status = HttpStatusCode.OK;
-        private string _body = "{}";
-        public string? Path { get; private set; }
-        public string? Method { get; private set; }
-        public void Respond(HttpStatusCode status, string body) { _status = status; _body = body; }
-        public string? Header(string name) => _request is not null && _request.Headers.TryGetValues(name, out var values) ? string.Join(",", values) : null;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            _request = request; Path = request.RequestUri?.AbsolutePath; Method = request.Method.Method;
-            return Task.FromResult(new HttpResponseMessage(_status) { Content = new StringContent(_body, Encoding.UTF8, "application/json") });
         }
     }
 }

@@ -1,7 +1,7 @@
 using System.Net;
-using System.Text;
 using Backend.Api.Common;
 using Backend.Api.Skills;
+using static Backend.Api.Tests.StubHandler; // 共用的 Json(status, body) 回應工廠(Fakes.cs)
 
 namespace Backend.Api.Tests;
 
@@ -18,12 +18,6 @@ public sealed class SkillValidatorTests
 
     private static Task<SkillValidationResult> Validate(StubHandler stub)
         => Build(stub).ValidateAsync(Yaml, "demo-a", "admin-a", "ADMIN", CancellationToken.None);
-
-    private static StubHandler Json(HttpStatusCode status, string body)
-        => new(_ => new HttpResponseMessage(status)
-        {
-            Content = new StringContent(body, Encoding.UTF8, "application/json"),
-        });
 
     [Fact]
     public async Task Valid_ReturnsMetadata_AndSendsDefinitionWithIdentityHeaders()
@@ -135,31 +129,5 @@ public sealed class SkillValidatorTests
 
         Assert.Equal(502, ex.Status);
         Assert.Contains("連線被拒", ex.Message);
-    }
-
-    /// <summary>可控回應、可捕捉最後一次請求(含 body)的 HttpMessageHandler。</summary>
-    private sealed class StubHandler : HttpMessageHandler
-    {
-        private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
-
-        public StubHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) => _responder = responder;
-
-        public HttpRequestMessage? LastRequest { get; private set; }
-
-        public string LastBody { get; private set; } = string.Empty;
-
-        protected override async Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            LastRequest = request;
-            if (request.Content is not null)
-            {
-                LastBody = await request.Content.ReadAsStringAsync(cancellationToken);
-            }
-
-            return _responder(request);
-        }
-
-        public string Header(string name) => LastRequest!.Headers.GetValues(name).Single();
     }
 }

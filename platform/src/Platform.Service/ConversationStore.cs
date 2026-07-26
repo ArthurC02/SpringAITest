@@ -18,11 +18,8 @@ public sealed class ConversationStore : IConversationStore
 
     private Exception WrapTransport(Exception ex) => new BackendCallException(FailurePrefix + ex.Message, ex);
 
-    public async Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
-        => await AddAsync(prompt, reply, ctx, null, ct);
-
     public async Task<ChatResponse> AddAsync(
-        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata,
+        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata = null,
         CancellationToken ct = default)
     {
         var created = await _backend.SendForJsonAsync<ConversationCreated>(

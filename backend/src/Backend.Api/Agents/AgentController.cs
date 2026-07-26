@@ -74,7 +74,7 @@ public sealed class AgentController : ControllerBase
     {
         var tenantId = Request.RequireTenant();
         var name = Require(request.Name, "name");
-        var expectedVersion = ExpectedVersionFromIfMatch();
+        var expectedVersion = Request.RequireIfMatchVersion();
 
         var canonical = AgentCanonicalizer.Canonicalize(request);
         var result = await _repo.UpdateDraftAsync(
@@ -97,7 +97,7 @@ public sealed class AgentController : ControllerBase
     public async Task<ActionResult<AgentValidationResponse>> Validate(Guid id, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
-        var expectedVersion = ExpectedVersionFromIfMatch();
+        var expectedVersion = Request.RequireIfMatchVersion();
         var agent = await _repo.GetAsync(tenantId, id, ct) ?? throw NotFound(id);
         if (agent.DraftVersion != expectedVersion)
         {
@@ -138,7 +138,7 @@ public sealed class AgentController : ControllerBase
         Guid id, [FromBody] AgentPublishRequest request, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
-        var ifMatchVersion = ExpectedVersionFromIfMatch();
+        var ifMatchVersion = Request.RequireIfMatchVersion();
         if (request.ExpectedDraftVersion is not long expectedVersion)
         {
             throw new ApiException(StatusCodes.Status400BadRequest, "publish 必須帶 expected_draft_version");
@@ -279,31 +279,13 @@ public sealed class AgentController : ControllerBase
 
     private const string Message = "權限不足，無法存取 Agent";
 
-    private long ExpectedVersionFromIfMatch()
-    {
-        var raw = Request.Headers.IfMatch.ToString();
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            throw new ApiException(
-                StatusCodes.Status428PreconditionRequired, "缺少 If-Match 標頭:draft 寫入必須帶當前 ETag");
-        }
-
-        if (!long.TryParse(raw.Trim().Trim('"'), out var version))
-        {
-            throw new ApiException(StatusCodes.Status400BadRequest, "If-Match 標頭格式不正確");
-        }
-
-        return version;
-    }
-
     private ActionResult<AgentResponse> WithETag(Agent agent)
     {
         SetETag(agent.DraftVersion);
         return Ok(AgentResponse.From(agent));
     }
 
-    private void SetETag(long draftVersion)
-        => Response.Headers.ETag = $"\"{draftVersion}\"";
+    private void SetETag(long draftVersion) => Response.SetVersionETag(draftVersion);
 
     private static string Require(string? value, string field)
         => string.IsNullOrWhiteSpace(value)

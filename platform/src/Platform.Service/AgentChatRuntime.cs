@@ -53,7 +53,6 @@ public sealed class AgentChatRuntime(
         var chatKey = NewIdempotencyKey("chat", user, conversationId, attempt);
         var resumeKey = NewIdempotencyKey("resume", user, conversationId, attempt);
         var switchKey = NewIdempotencyKey("switch", user, conversationId, attempt);
-        (string Mode, Guid? OrchestratorId)? resolved = null;
         if (!string.IsNullOrWhiteSpace(logicalAttemptId))
         {
             var replay = await TryGetAttemptReplayAsync(resumeKey, conversationId, requestedOrchestratorId, message, user, ct)
@@ -95,14 +94,14 @@ public sealed class AgentChatRuntime(
             await CancelAsync(RequiredGuid(activeRun, "id"), user, switchKey, ct);
         }
 
-        resolved ??= await ResolveAsync(requestedOrchestratorId, user, ct);
-        if (resolved.Value.Mode == "legacy")
+        var resolved = await ResolveAsync(requestedOrchestratorId, user, ct);
+        if (resolved.Mode == "legacy")
         {
             if (requestedOrchestratorId is not null)
                 throw new DownstreamConflictException("Explicit Orchestrator cannot resolve to legacy mode");
             return null;
         }
-        if (resolved.Value.OrchestratorId is null)
+        if (resolved.OrchestratorId is null)
             throw new WorkflowInvocationException("Runtime resolver returned an invalid Orchestrator");
         var accepted = await PostJsonAsync(
             "/api/chat-runs",
@@ -110,7 +109,7 @@ public sealed class AgentChatRuntime(
             {
                 message,
                 conversation_id = conversationId,
-                orchestrator_id = resolved.Value.OrchestratorId,
+                orchestrator_id = resolved.OrchestratorId,
             },
             user,
             chatKey,
@@ -275,20 +274,9 @@ public sealed class AgentChatRuntime(
         }
     }
 
-    private async Task<Exception> MapBackendErrorAsync(
+    private Task<Exception> MapBackendErrorAsync(
         HttpResponseMessage response, CancellationToken ct)
-    {
-        var message = await backend.ReadErrorMessageAsync(response, ct);
-        return (int)response.StatusCode switch
-        {
-            400 => new WorkflowBadInputException(message),
-            403 => new WorkflowForbiddenException(message),
-            404 => new WorkflowNotFoundException(message),
-            409 => new DownstreamConflictException(message),
-            _ => new WorkflowInvocationException(
-                $"Agent chat Backend HTTP {(int)response.StatusCode}"),
-        };
-    }
+        => BackendErrorMapper.MapErrorAsync(response, backend, "Agent chat Backend ", ct);
 
     private static (Guid RunId, Guid CommandId, ChatTurnMetadata Metadata) ParseAccepted(JsonElement root)
     {
@@ -305,33 +293,18 @@ public sealed class AgentChatRuntime(
                 runId));
     }
 
-    private async Task DispatchBestEffortAsync(
+    private Task DispatchBestEffortAsync(
         Guid runId, Guid commandId, UserContext user, CancellationToken ct)
-    {
-        try
-        {
-            using var request = InternalRequest.Build(
-                HttpMethod.Post,
-                workflowOptions.BaseUrl.TrimEnd('/') + $"/orchestrator-runs/{runId:D}/dispatch",
-                workflowOptions.InternalToken,
-                user,
-                new { command_id = commandId.ToString("D"), context = new { } },
-                Json);
-            using var response = await InternalRequest.SendAsync(
-                workflow,
-                request,
-                ex => new WorkflowInvocationException("Root Workflow dispatch unavailable", ex),
-                ct);
-            if (!response.IsSuccessStatusCode)
-                logger.LogWarning("D6 Root dispatch deferred for {RunId}: HTTP {Status}", runId, (int)response.StatusCode);
-        }
-        catch (Exception ex) when (
-            ex is HttpRequestException or JsonException or FormatException
-                or WorkflowInvocationException or TaskCanceledException)
-        {
-            logger.LogWarning(ex, "D6 Root dispatch deferred for {RunId}", runId);
-        }
-    }
+        => InternalRequest.KickBestEffortAsync(
+            workflow,
+            workflowOptions.BaseUrl.TrimEnd('/') + $"/orchestrator-runs/{runId:D}/dispatch",
+            workflowOptions.InternalToken,
+            user,
+            new { command_id = commandId.ToString("D"), context = new { } },
+            Json,
+            logger,
+            $"D6 Root Workflow dispatch for run {runId:D}",
+            ct);
 
     private static string RenderResult(JsonElement run)
     {

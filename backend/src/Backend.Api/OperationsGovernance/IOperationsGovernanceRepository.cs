@@ -47,3 +47,17 @@ public sealed record LegacyInventoryItem(
     [property: JsonPropertyName("id")] string Id,
     [property: JsonPropertyName("disposition")] string Disposition,
     [property: JsonPropertyName("trigger")] string Trigger);
+
+/// <summary>
+/// R5 收尾盤點:哪些 legacy 執行路徑仍在線、為何保留、何時複審。內容是編譯期常數(不是租戶資料),
+/// Dapper 與 in-memory 兩個 repository 回同一份 —— 兩邊各抄一次就會悄悄漂移。
+/// </summary>
+public static class LegacyInventory
+{
+    public static readonly IReadOnlyList<LegacyInventoryItem> Items =
+    [
+        new("flow-yaml-authors", "read_only_pending_r6", "legacy fallback below threshold"),
+        new("agent-skill-runner", "explicit_legacy_executor", "r6 review"),
+        new("current-skill-package", "retain_until_revision_artifact", "r6"),
+    ];
+}

@@ -1,6 +1,6 @@
 using System.Globalization;
+using System.Net.Http.Headers;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
@@ -16,6 +16,7 @@ namespace Platform.Service;
 public sealed class AgentRunService : IAgentRunService
 {
     private const string FailurePrefix = "Agent 執行服務失敗：";
+    private const string BackendFailurePrefix = FailurePrefix + "Backend ";
     private static readonly JsonSerializerOptions JsonOpts =
         new(JsonSerializerDefaults.Web);
 
@@ -185,23 +186,9 @@ public sealed class AgentRunService : IAgentRunService
         string? idempotencyKey,
         CancellationToken ct)
     {
-        using var request = _backend.BuildRequest(method, path, ctx, body);
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-        {
-            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
-        }
-
-        using var response = await _backend.SendAsync(request, WrapTransport, ct);
-        var status = (int)response.StatusCode;
-        if (status >= 500)
-        {
-            throw new WorkflowInvocationException(FailurePrefix + "Backend HTTP " + status);
-        }
-
-        return new AgentProxyResponse(
-            status,
-            await response.Content.ReadAsStringAsync(ct),
-            response.Headers.ETag?.ToString());
+        var (status, responseBody, etag) = await _backend.SendForProxyAsync(
+            BuildRequest(method, path, ctx, body, idempotencyKey), BackendFailurePrefix, ct);
+        return new AgentProxyResponse(status, responseBody, etag);
     }
 
     private async Task<BackendCommandResult> BackendCommandAsync(
@@ -212,40 +199,34 @@ public sealed class AgentRunService : IAgentRunService
         string? idempotencyKey,
         CancellationToken ct)
     {
-        using var request = _backend.BuildRequest(method, path, ctx, body);
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-        {
-            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
-        }
+        // dispatch metadata 在 response header 上,必須在 response 釋放前取下。
+        HttpResponseHeaders? headers = null;
+        var (status, backendBody, etag) = await _backend.SendForProxyAsync(
+            BuildRequest(method, path, ctx, body, idempotencyKey),
+            BackendFailurePrefix,
+            ct,
+            response => headers = response.Headers);
 
-        using var response = await _backend.SendAsync(request, WrapTransport, ct);
-        var status = (int)response.StatusCode;
-        if (status >= 500)
-        {
-            throw new WorkflowInvocationException(FailurePrefix + "Backend HTTP " + status);
-        }
-
-        var backendBody = await response.Content.ReadAsStringAsync(ct);
         var proxy = new AgentProxyResponse(
             status,
             IsSuccess(status)
-                ? StripInternalCommandMetadata(backendBody)
+                ? RunCommandRedaction.StripCommandId(backendBody, FailurePrefix)
                 : backendBody,
-            response.Headers.ETag?.ToString());
+            etag);
         if (!IsSuccess(status))
         {
             return new BackendCommandResult(proxy, false, null);
         }
 
         var dispatchRequired = RequiredBooleanHeader(
-            response,
+            headers!,
             "X-Agent-Run-Dispatch-Required");
         if (!dispatchRequired)
         {
             return new BackendCommandResult(proxy, false, null);
         }
 
-        var commandIdText = RequiredHeader(response, "X-Agent-Run-Command-Id");
+        var commandIdText = RequiredHeader(headers!, "X-Agent-Run-Command-Id");
         if (!Guid.TryParse(commandIdText, out var commandId))
         {
             throw new WorkflowInvocationException(
@@ -255,67 +236,56 @@ public sealed class AgentRunService : IAgentRunService
         return new BackendCommandResult(proxy, true, commandId);
     }
 
-    private async Task KickWorkflowAsync(
+    private HttpRequestMessage BuildRequest(
+        HttpMethod method, string path, UserContext ctx, object? body, string? idempotencyKey)
+    {
+        var request = _backend.BuildRequest(method, path, ctx, body);
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+        }
+
+        return request;
+    }
+
+    private Task KickWorkflowAsync(
         string path,
         UserContext ctx,
         Guid commandId,
         CancellationToken ct)
-    {
-        try
-        {
-            using var request = InternalRequest.Build(
-                HttpMethod.Post,
-                _workflowOptions.BaseUrl.TrimEnd('/') + path,
-                _workflowOptions.InternalToken,
-                ctx,
-                new { command_id = commandId },
-                JsonOpts);
-            using var response = await InternalRequest.SendAsync(
-                _workflow,
-                request,
-                WrapTransport,
-                ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning(
-                    "Agent run Workflow kick failed for command {CommandId}: HTTP {StatusCode}",
-                    commandId,
-                    (int)response.StatusCode);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                ex,
-                "Agent run Workflow kick failed for command {CommandId}; durable command remains recoverable",
-                commandId);
-        }
-    }
+        => InternalRequest.KickBestEffortAsync(
+            _workflow,
+            _workflowOptions.BaseUrl.TrimEnd('/') + path,
+            _workflowOptions.InternalToken,
+            ctx,
+            new { command_id = commandId },
+            JsonOpts,
+            _logger,
+            $"Agent run Workflow kick for command {commandId:D}",
+            ct);
 
-    private async Task KickApprovedWriteAsync(Guid runId, Guid approvalId, UserContext ctx, CancellationToken ct)
-    {
-        try
-        {
-            using var request = InternalRequest.Build(HttpMethod.Post, _workflowOptions.BaseUrl.TrimEnd('/') + $"/agent-runs/{runId:D}/approvals/{approvalId:D}/execute", _workflowOptions.InternalToken, ctx, new { }, JsonOpts);
-            using var response = await InternalRequest.SendAsync(_workflow, request, WrapTransport, ct);
-            if (!response.IsSuccessStatusCode) _logger.LogWarning("Approved write Workflow kick failed for approval {ApprovalId}: HTTP {StatusCode}", approvalId, (int)response.StatusCode);
-        }
-        catch (Exception ex) { _logger.LogWarning(ex, "Approved write Workflow kick failed for approval {ApprovalId}; durable effect remains recoverable", approvalId); }
-    }
-
-    private Exception WrapTransport(Exception ex)
-        => new WorkflowInvocationException(FailurePrefix + ex.Message, ex);
+    private Task KickApprovedWriteAsync(Guid runId, Guid approvalId, UserContext ctx, CancellationToken ct)
+        => InternalRequest.KickBestEffortAsync(
+            _workflow,
+            _workflowOptions.BaseUrl.TrimEnd('/') + $"/agent-runs/{runId:D}/approvals/{approvalId:D}/execute",
+            _workflowOptions.InternalToken,
+            ctx,
+            new { },
+            JsonOpts,
+            _logger,
+            $"Approved write Workflow kick for approval {approvalId:D}",
+            ct);
 
     private static bool IsSuccess(int status) => status is >= 200 and < 300;
 
-    private static string RequiredHeader(HttpResponseMessage response, string name)
-        => response.Headers.TryGetValues(name, out var values)
+    private static string RequiredHeader(HttpResponseHeaders headers, string name)
+        => headers.TryGetValues(name, out var values)
             ? values.Single()
             : throw new WorkflowInvocationException(
                 FailurePrefix + $"Backend 缺少必要 header：{name}");
 
-    private static bool RequiredBooleanHeader(HttpResponseMessage response, string name)
-        => bool.TryParse(RequiredHeader(response, name), out var value)
+    private static bool RequiredBooleanHeader(HttpResponseHeaders headers, string name)
+        => bool.TryParse(RequiredHeader(headers, name), out var value)
             ? value
             : throw new WorkflowInvocationException(
                 FailurePrefix + $"Backend header {name} 無效");
@@ -339,26 +309,6 @@ public sealed class AgentRunService : IAgentRunService
 
         throw new WorkflowInvocationException(
             FailurePrefix + $"Backend 缺少必要欄位：{propertyName}");
-    }
-
-    private static string StripInternalCommandMetadata(string json)
-    {
-        try
-        {
-            if (JsonNode.Parse(json) is not JsonObject run)
-            {
-                throw new JsonException("Backend run response is not an object");
-            }
-
-            run.Remove("command_id");
-            return run.ToJsonString(JsonOpts);
-        }
-        catch (JsonException ex)
-        {
-            throw new WorkflowInvocationException(
-                FailurePrefix + "Backend run response is invalid",
-                ex);
-        }
     }
 
     private sealed record BackendCommandResult(

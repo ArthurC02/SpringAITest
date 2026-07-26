@@ -131,11 +131,8 @@ public sealed class OperationsGovernanceRepository(NpgsqlDataSource dataSource) 
         return new(selectedRevision, events, selectedRevision is not null, snapshotsIntact, revisions, delta);
     }
 
-    public Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct) => Task.FromResult<IReadOnlyList<LegacyInventoryItem>>([
-        new("flow-yaml-authors", "read_only_pending_r6", "legacy fallback below threshold"),
-        new("agent-skill-runner", "explicit_legacy_executor", "r6 review"),
-        new("current-skill-package", "retain_until_revision_artifact", "r6"),
-    ]);
+    public Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct)
+        => Task.FromResult(LegacyInventory.Items);
 
     private static async Task<RegressionGate?> GateAsync(NpgsqlConnection conn, string tenantId, CancellationToken ct)
     {

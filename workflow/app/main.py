@@ -56,15 +56,9 @@ from app.schemas import (
     ToolInfo,
     ValidatePackageResult,
 )
-from app.security import RequestContext, get_context
-from app.runtime.api import (
-    AgentRuntimeFeatureGateMiddleware,
-    router as agent_runtime_router,
-)
-from app.runtime.orchestrator_api import (
-    MultiAgentDispatchFeatureGateMiddleware,
-    router as orchestrator_runtime_router,
-)
+from app.security import FeatureGateMiddleware, RequestContext, get_context
+from app.runtime.api import router as agent_runtime_router
+from app.runtime.orchestrator_api import router as orchestrator_runtime_router
 from app.runtime.orchestrator_backend import OrchestratorBackendClient
 from app.runtime.orchestrator_supervisor import RootRuntimeSupervisor
 from app.orchestration.api import router as workflow_designer_router
@@ -218,8 +212,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
 app.add_middleware(BusinessRuleRequestLimitMiddleware)
-app.add_middleware(AgentRuntimeFeatureGateMiddleware)
-app.add_middleware(MultiAgentDispatchFeatureGateMiddleware)
+app.add_middleware(
+    FeatureGateMiddleware,
+    prefix="/agent-runs/",
+    flag_name="agent_test_run_enabled",
+)
+app.add_middleware(
+    FeatureGateMiddleware,
+    prefix="/orchestrator-runs",
+    flag_name="multi_agent_dispatch_enabled",
+)
 app.include_router(agent_runtime_router)
 app.include_router(orchestrator_runtime_router)
 app.include_router(workflow_designer_router)

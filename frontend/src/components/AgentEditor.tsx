@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError } from '../api/http'
+import { ApiError, isConflict } from '../api/http'
 import {
   createAgent,
   getAgent,
@@ -54,11 +54,6 @@ const ROLES: { id: AgentExecutionRole; label: string }[] = [
   { id: 'worker', label: 'Worker' },
   { id: 'verifier', label: 'Verifier' },
 ]
-
-/** 409/412 都是樂觀併發衝突:草稿已被他人更新或發布內容與已驗證版本不符,需重新載入。 */
-function isConflict(e: unknown): boolean {
-  return e instanceof ApiError && (e.status === 409 || e.status === 412)
-}
 
 /** 建立時 slug 撞名 → 409。其餘沿用後端 message。 */
 function createErrorMessage(e: unknown): string {

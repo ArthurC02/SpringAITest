@@ -49,7 +49,11 @@ from app.runtime.tool_boundary import (
 )
 from app.security import RequestContext
 from app.settings import settings
-from app.workflow_contracts import GRAPH_IR_COMPILER_CONTRACT_VERSION
+from app.workflow_contracts import (
+    AGENT_LOOP_REQUIRED_STAGES,
+    AGENT_REQUIRED_STAGES,
+    GRAPH_IR_COMPILER_CONTRACT_VERSION,
+)
 
 
 class RuntimePreflightError(RuntimeError):
@@ -1286,17 +1290,7 @@ def _validate_preflight_snapshot(
     if not isinstance(nodes, list):
         raise RuntimePreflightError("runtime workflow has no node catalog")
     node_types = {node.get("type") for node in nodes if isinstance(node, dict)}
-    required = {
-        "start",
-        "dependency_and_capability_preflight",
-        "inject_authorized_context",
-        "checkpoint",
-        "bounded_agent_loop",
-        "validate_structured_output",
-        "bounded_repair_or_controlled_failure",
-        "end",
-    }
-    if not required <= node_types:
+    if not AGENT_REQUIRED_STAGES <= node_types:
         raise RuntimePreflightError("runtime workflow is missing a required stage")
     loop = next(
         (
@@ -1315,10 +1309,5 @@ def _validate_preflight_snapshot(
         for child in loop.get("children") or []
         if isinstance(child, dict)
     }
-    if not {
-        "model_step",
-        "tool_policy_and_approval_gate",
-        "tool_call_and_observation",
-        "checkpoint_and_budget_gate",
-    } <= child_types:
+    if not AGENT_LOOP_REQUIRED_STAGES <= child_types:
         raise RuntimePreflightError("runtime workflow loop is missing governance stages")

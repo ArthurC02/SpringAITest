@@ -1,19 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError } from '../api/http'
+import { isConflict } from '../api/http'
 import {
   createOrchestrator, getOrchestrator, listOrchestratorRevisions, listOrchestrators,
   publishOrchestrator, putOrchestratorDraft, restoreOrchestratorRevision, validateOrchestrator,
 } from '../api/orchestrators'
-import type { Orchestrator, OrchestratorDraft } from '../types'
+import type {
+  AgentRun, AgentRunEvent, Orchestrator, OrchestratorDraft, WorkflowDefinition, WorkflowNodeType,
+  WorkflowRevision, WorkflowTraceEntry, WorkflowUiMetadata,
+} from '../types'
 import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { runWithToast, useToast } from './Toast'
 import { cancelOrchestratorRun, getOrchestratorRun, getOrchestratorRunEvents, newIdempotencyKey, startOrchestratorRun } from '../api/orchestratorRuns'
-import type { AgentRun, AgentRunEvent } from '../types'
 import { getSession } from '../api/auth'
-import { ApiError as HttpApiError } from '../api/http'
-import { mergeRunEvents } from '../agentRunDisplay'
+import {
+  ACTIVE_RUN_STATUSES, isAmbiguousFailure, mergeRunEvents, POLL_MS, TERMINAL_RUN_STATUSES,
+  withAcceptedCancelStatus,
+} from '../agentRunDisplay'
 import {
   clearOrchestratorRunState,
   messageFingerprint,
@@ -24,7 +28,6 @@ import {
 import { safeOrchestratorBudget, toOrchestratorTraceEvent } from '../orchestratorTrace'
 import { listWorkflowNodeCatalog, listWorkflowRevisions } from '../api/workflows'
 import WorkflowDesigner from '../workflowDesigner/WorkflowDesigner'
-import type { WorkflowDefinition, WorkflowNodeType, WorkflowRevision, WorkflowTraceEntry, WorkflowUiMetadata } from '../types'
 
 const emptyDraft = (): OrchestratorDraft => ({
   name: '', description: '', instructions: '', policy: { dispatchMode: 'bounded-parallel', joinPolicy: 'fail-fast', repairPolicy: 'fail', aggregationPolicy: 'verified-only', denialPolicy: 'fail-closed' }, workflow: { id: '', revision: 0 },
@@ -33,16 +36,6 @@ const emptyDraft = (): OrchestratorDraft => ({
   verifier: { agentId: '', revision: 0, variant: 'read-only', outputContract: { type: 'verification-report' }, independent: true },
   budgets: { maxContextRounds: 2, maxTasks: 8, maxChildRuns: 9, maxConcurrency: 4, maxRepairRounds: 1, tokenBudget: 10000, timeoutSeconds: 300 },
 })
-const isConflict = (e: unknown) => e instanceof ApiError && (e.status === 409 || e.status === 412)
-
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'pending', 'starting', 'running', 'resuming', 'cancelling'])
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out'])
-const POLL_MS = 1500
-
-function isAmbiguousFailure(error: unknown): boolean {
-  return !(error instanceof HttpApiError) || error.status >= 500
-}
-
 function storageScope(): string {
   const session = getSession()
   return session ? `${session.tenantCode}:${session.username}` : 'anonymous'
@@ -75,7 +68,7 @@ function TraceOverlay({ run, events, definition, metadata, catalog }: { run: Age
   </details>
 }
 
-export function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator }) {
+function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator }) {
   const [message, setMessage] = useState('')
   const [run, setRun] = useState<AgentRun | null>(null)
   const [events, setEvents] = useState<AgentRunEvent[]>([])
@@ -180,7 +173,7 @@ export function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator })
     try {
       const cancelled = await cancelOrchestratorRun(run.runId, cancelKey)
       const accepted = { ...recordRef.current!, cancelKey, cancelAccepted: true }
-      persist(accepted); setRun(TERMINAL_RUN_STATUSES.has(cancelled.status) ? cancelled : { ...cancelled, status: 'cancelling' })
+      persist(accepted); setRun(withAcceptedCancelStatus(cancelled, true))
       if (TERMINAL_RUN_STATUSES.has(cancelled.status)) persist(null)
     } catch (reason) {
       if (!isAmbiguousFailure(reason)) persist({ ...recordRef.current!, cancelKey: null, cancelAccepted: false })

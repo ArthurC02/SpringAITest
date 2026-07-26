@@ -83,7 +83,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
         return StatusCode(202, new ChatRunResponse("orchestrator", run with { CommandId = result.Dispatch?.CommandId ?? run.CommandId }, result.Dispatch?.CommandId ?? run.CommandId, result.Replayed));
     }
 
-    private void RequireManage() { if (!Request.HasCapability("workflow.manage")) throw new ApiException(403, "workflow.manage capability is required"); }
+    private void RequireManage() => Request.RequireCapability("workflow.manage");
     private string Role() => Request.UserRole() ?? throw new ApiException(400, "X-User-Role is required");
     private string Key()
     {

@@ -1,4 +1,3 @@
-using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -52,85 +51,43 @@ public sealed class WorkflowSkillPackageValidator : ISkillPackageValidator
 
         using var req = new HttpRequestMessage(HttpMethod.Post, _baseUrl + "/skills/validate-package")
         {
-            // 強制 HTTP/1.1(與 flow validate 一致,避免下游 uvicorn h2c 升級掉 body)。
-            Version = HttpVersion.Version11,
-            VersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
             Content = form,
         };
+        req.UseInternalIdentity(_internalToken, tenantId, userId, role);
 
-        req.Headers.TryAddWithoutValidation("X-Internal-Token", _internalToken);
-        req.Headers.TryAddWithoutValidation(IdentityHeaders.TenantHeader, tenantId);
-        req.Headers.TryAddWithoutValidation(IdentityHeaders.UserHeader, userId ?? string.Empty);
-        req.Headers.TryAddWithoutValidation(IdentityHeaders.RoleHeader, role ?? string.Empty);
+        var body = await _http.SendJsonAsync<ValidatePackageBody>(req, Failure, JsonOpts, ct);
 
-        HttpResponseMessage resp;
-        try
+        if (!body.Valid)
         {
-            resp = await _http.SendAsync(req, ct);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new ApiException(StatusCodes.Status502BadGateway, "Skill 套件驗證服務呼叫失敗：" + ex.Message);
-        }
-
-        using (resp)
-        {
-            if (!resp.IsSuccessStatusCode)
-            {
-                throw new ApiException(
-                    StatusCodes.Status502BadGateway, "Skill 套件驗證服務呼叫失敗：HTTP " + (int)resp.StatusCode);
-            }
-
-            ValidatePackageBody? body;
-            try
-            {
-                body = await resp.Content.ReadFromJsonAsync<ValidatePackageBody>(JsonOpts, ct);
-            }
-            catch (Exception ex)
-            {
-                throw new ApiException(StatusCodes.Status502BadGateway, "Skill 套件驗證服務呼叫失敗：" + ex.Message);
-            }
-
-            if (body is null)
-            {
-                throw new ApiException(StatusCodes.Status502BadGateway, "Skill 套件驗證服務呼叫失敗：回應內容為空");
-            }
-
-            if (!body.Valid)
-            {
-                return new SkillPackageValidationResult(
-                    false,
-                    body.Errors?.Select(e => new SkillValidationError(e.Code, e.Message, e.Line)).ToList()
-                        ?? new List<SkillValidationError>(),
-                    Skill: null,
-                    CanonicalDefinition: null);
-            }
-
-            ValidateSuccessContract(body, expectedName);
-            var validatedSkill = body.Skill!;
-
-            var meta = new SkillMetadata(
-                validatedSkill.Name,
-                // 與 definition-only 寫入同一個預設:缺席/空 → string.Empty(見 ValidateSuccessContract)。
-                validatedSkill.Description ?? string.Empty,
-                validatedSkill.RequiredRole!,
-                validatedSkill.Kind!);
-
             return new SkillPackageValidationResult(
-                true, Array.Empty<SkillValidationError>(), meta, body.CanonicalDefinition);
+                false,
+                body.Errors?.Select(e => new SkillValidationError(e.Code, e.Message, e.Line)).ToList()
+                    ?? new List<SkillValidationError>(),
+                Skill: null,
+                CanonicalDefinition: null);
         }
+
+        ValidateSuccessContract(body, expectedName);
+        var validatedSkill = body.Skill!;
+
+        var meta = new SkillMetadata(
+            validatedSkill.Name,
+            // 與 definition-only 寫入同一個預設:缺席/空 → string.Empty(見 ValidateSuccessContract)。
+            validatedSkill.Description ?? string.Empty,
+            validatedSkill.RequiredRole!,
+            validatedSkill.Kind!);
+
+        return new SkillPackageValidationResult(
+            true, Array.Empty<SkillValidationError>(), meta, body.CanonicalDefinition);
     }
+
+    private static ApiException Failure(string detail)
+        => new(StatusCodes.Status502BadGateway, "Skill 套件驗證服務呼叫失敗：" + detail);
 
     private static void ValidateSuccessContract(
         ValidatePackageBody body, string? expectedName)
     {
-        static ApiException Violation(string detail) => new(
-            StatusCodes.Status502BadGateway,
-            "Skill 套件驗證服務呼叫失敗：引擎回應違反契約（" + detail + "）");
+        static ApiException Violation(string detail) => Failure("引擎回應違反契約（" + detail + "）");
 
         if (body.Skill is null || string.IsNullOrWhiteSpace(body.CanonicalDefinition))
         {
@@ -217,15 +174,4 @@ public sealed class WorkflowSkillPackageValidator : ISkillPackageValidator
         [property: JsonPropertyName("errors")] List<ValidateError>? Errors,
         [property: JsonPropertyName("skill")] ValidateSkill? Skill,
         [property: JsonPropertyName("canonical_definition")] string? CanonicalDefinition);
-
-    private sealed record ValidateError(
-        [property: JsonPropertyName("code")] string Code,
-        [property: JsonPropertyName("message")] string? Message,
-        [property: JsonPropertyName("line")] int? Line);
-
-    private sealed record ValidateSkill(
-        [property: JsonPropertyName("name")] string Name,
-        [property: JsonPropertyName("description")] string? Description,
-        [property: JsonPropertyName("required_role")] string? RequiredRole,
-        [property: JsonPropertyName("kind")] string? Kind);
 }

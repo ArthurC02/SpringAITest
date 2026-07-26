@@ -3,6 +3,7 @@ import time
 from app.engine.node_registry import node
 from app.nodes.context_enrichment.models import ContextReference
 from app.nodes.context_enrichment.ports import ContextStorePort
+from app.security import RequestContext
 
 
 @node(
@@ -44,8 +45,11 @@ def make_submit_revision_node(context_store: ContextStorePort):
             },
         }
         result = await context_store.submit_revision(
-            context_id=state["validated_job"]["context_id"], tenant_id=state["tenant_id"],
-            user_id=state["user_id"], role=state["role"], candidate=candidate,
+            context_id=state["validated_job"]["context_id"],
+            ctx=RequestContext(
+                tenant_id=state["tenant_id"], user_id=state["user_id"], role=state["role"]
+            ),
+            candidate=candidate,
         )
         status, unmet, ref = result.get("status"), result.get("unmet_requirements", []), result.get("context_ref")
         if not isinstance(status, str) or not isinstance(unmet, list):

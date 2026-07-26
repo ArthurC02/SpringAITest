@@ -69,7 +69,7 @@ public sealed class OperationsGovernanceController(
     public async Task<IActionResult> LegacyInventory(CancellationToken ct)
     { RequireManage(); return Ok(await governance.GetLegacyInventoryAsync(Request.RequireTenant(), ct)); }
 
-    private void RequireManage() { if (!Request.HasCapability("workflow.manage")) throw new ApiException(403, "workflow.manage capability is required"); }
+    private void RequireManage() => Request.RequireCapability("workflow.manage");
     private string Key()
     {
         var values = Request.Headers["Idempotency-Key"]; var key = values.Count == 1 ? values[0]?.Trim() : null;

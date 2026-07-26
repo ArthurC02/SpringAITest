@@ -7,7 +7,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from app.backend_http import get_client
+from app.backend_http import get_client, internal_headers
 from app.runtime.events import RuntimeEvent
 from app.runtime.models import (
     DirectAgentExecutionSnapshot,
@@ -126,15 +126,6 @@ class BackendRunClient:
     def __init__(self, owner: str | None = None):
         self.owner = owner or f"workflow:{socket.gethostname()}:{uuid.uuid4().hex}"
 
-    @staticmethod
-    def _headers(ctx: RequestContext) -> dict[str, str]:
-        return {
-            "X-Internal-Token": settings.internal_api_token,
-            "X-Tenant-Id": ctx.tenant_id,
-            "X-User-Id": ctx.user_id,
-            "X-User-Role": ctx.role,
-        }
-
     async def execution_snapshot(
         self, run_id: str, ctx: RequestContext
     ) -> DirectAgentExecutionSnapshot:
@@ -246,7 +237,7 @@ class BackendRunClient:
                     f"/api/agent-runs/{_guid(run_id)}/commands/"
                     f"{quote_path(command_id)}/claim"
                 ),
-                headers=self._headers(ctx),
+                headers=internal_headers(ctx),
                 json={
                     "worker_id": self.owner,
                     "lease_seconds": settings.runtime_lease_seconds,
@@ -400,7 +391,7 @@ class BackendRunClient:
             response = await get_client().request(
                 method,
                 path,
-                headers=self._headers(ctx),
+                headers=internal_headers(ctx),
                 json=json,
                 timeout=httpx.Timeout(10.0),
             )
@@ -431,7 +422,7 @@ class BackendRunClient:
             response = await get_client().request(
                 method,
                 path,
-                headers=self._headers(ctx),
+                headers=internal_headers(ctx),
                 json=json,
                 timeout=httpx.Timeout(10.0),
             )

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import math
 from decimal import Decimal
 from typing import Any
 
 from app.business_rules.catalog import ACTION_BY_NAME, FACT_BY_NAME, GATES, LIMITS
-from app.business_rules.decimal_value import DecimalWireError, parse_decimal_wire
+from app.business_rules.decimal_value import (
+    is_decimal_wire,
+    is_number,
+    parse_decimal_wire,
+)
 from app.business_rules.models import (
     CanonicalRuleSet,
     Condition,
@@ -32,22 +35,9 @@ def _fact_value_is_valid(
             and (not enum_values or value in enum_values)
         )
     if fact_type == "number":
-        return (
-            isinstance(value, (int, float, Decimal))
-            and not isinstance(value, bool)
-            and not (
-                isinstance(value, float)
-                and not math.isfinite(value)
-                or isinstance(value, Decimal)
-                and not value.is_finite()
-            )
-        )
+        return is_number(value)
     if fact_type == "decimal":
-        try:
-            parse_decimal_wire(value)
-        except DecimalWireError:
-            return False
-        return True
+        return is_decimal_wire(value)
     if fact_type == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     if fact_type == "boolean":

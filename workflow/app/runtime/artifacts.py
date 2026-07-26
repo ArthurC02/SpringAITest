@@ -10,7 +10,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import ConfigDict, BaseModel, Field
 
-from app.backend_http import get_client
+from app.backend_http import get_client, internal_headers
 from app.engine import package
 from app.engine.package import (
     MAX_PACKAGE_BASE64_CHARS,
@@ -20,7 +20,6 @@ from app.engine.package import (
 from app.engine.skill import Skill, parse_source
 from app.runtime.models import PinnedSkillSummary
 from app.security import RequestContext
-from app.settings import settings
 
 MAX_RESOURCE_BYTES = 16_384
 
@@ -216,17 +215,11 @@ class RevisionArtifactReader:
     async def read(
         self, pin: PinnedSkillSummary, ctx: RequestContext
     ) -> LoadedSkillArtifact:
-        headers = {
-            "X-Internal-Token": settings.internal_api_token,
-            "X-Tenant-Id": ctx.tenant_id,
-            "X-User-Id": ctx.user_id,
-            "X-User-Role": ctx.role,
-        }
         name = quote(pin.name, safe="")
         try:
             response = await get_client().get(
                 f"/api/skills/{name}/revisions/{pin.revision}/execution-artifact",
-                headers=headers,
+                headers=internal_headers(ctx),
                 timeout=httpx.Timeout(10.0),
             )
             if response.status_code == 404:

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Platform.Service.Dtos;
 
 namespace Platform.Service;
@@ -86,6 +87,42 @@ public static class InternalRequest
         catch (Exception ex)
         {
             throw wrap(ex);
+        }
+    }
+
+    /// <summary>
+    /// 「已受理的耐久命令 → best-effort 通知下游」共用樣板(D3 start/resume/cancel、D3 approved write、
+    /// D5/D6 root dispatch)。契約是「Backend 已耐久受理的命令,絕不因下游通知失敗回捲成 5xx」——
+    /// 故 catch 範圍刻意是寬的 <see cref="Exception"/>(含取消與任何未預期型別),只記 warning;
+    /// 未送達的命令留給下游自行回收(reclaim)。
+    /// </summary>
+    /// <param name="label">log 前綴,由呼叫端帶入可辨識的命令/執行身分。</param>
+    public static async Task KickBestEffortAsync(
+        HttpClient client,
+        string url,
+        string internalToken,
+        UserContext ctx,
+        object body,
+        JsonSerializerOptions json,
+        ILogger logger,
+        string label,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var request = Build(HttpMethod.Post, url, internalToken, ctx, body, json);
+            using var response = await client.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning(
+                    "{Kick} failed: HTTP {Status}; durable command remains recoverable",
+                    label,
+                    (int)response.StatusCode);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "{Kick} failed; durable command remains recoverable", label);
         }
     }
 }

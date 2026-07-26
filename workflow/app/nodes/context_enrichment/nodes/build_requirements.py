@@ -1,5 +1,6 @@
 from app.engine.node_registry import node
 from app.nodes.context_enrichment.ports import ContextPolicyPort
+from app.security import RequestContext
 
 
 @node(
@@ -9,7 +10,7 @@ from app.nodes.context_enrichment.ports import ContextPolicyPort
 )
 def make_build_requirements_node(context_policy: ContextPolicyPort):
     async def build_requirements(state: dict) -> dict:
-        policy = await context_policy.get_active(tenant_id=state["tenant_id"], user_id=state["user_id"], role=state["role"])
+        policy = await context_policy.get_active(ctx=RequestContext(tenant_id=state["tenant_id"], user_id=state["user_id"], role=state["role"]))
         values = policy.get("values") if isinstance(policy, dict) else None
         if not isinstance(values, dict):
             raise ValueError("context policy values are unavailable")

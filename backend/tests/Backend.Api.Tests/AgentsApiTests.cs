@@ -1241,12 +1241,16 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
             e => e!["field"]!.GetValue<string>() == "audience");
     }
 
-    // ---- If-Match 語法:非數字 / weak ETag / 萬用字元一律 400(不是 428/409/500)----
+    // ---- If-Match 語法:非數字 / weak ETag / 萬用字元 / 低於下界一律 400(不是 428/409/500)----
+    // 訊息改為 Common/VersionEtags.RequireIfMatchVersion 的共用字串:四個 controller 的 If-Match
+    // 解析已統一到同一個 helper(原本 Agent 專屬的中文訊息與另外三份逐字重複的實作一併移除)。
+    // "0" 是 draft_version 下界(第一版就是 1)的 off-point:共用 helper 一律拒絕 version < 1。
 
     [Theory]
     [InlineData("abc")]
     [InlineData("W/\"1\"")]
     [InlineData("*")] // HTTP 語意上代表「任何現存資源」;此處刻意不支援
+    [InlineData("\"0\"")]
     public async Task IfMatch_MalformedOrWildcard_Returns400(string ifMatch)
     {
         var client = Admin();
@@ -1256,7 +1260,7 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         Assert.Equal(
-            "If-Match 標頭格式不正確",
+            "If-Match header is invalid",
             (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
     }
 

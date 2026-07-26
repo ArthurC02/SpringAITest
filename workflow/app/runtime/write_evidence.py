@@ -11,8 +11,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from app.backend_http import get_client
-from app.settings import settings
+from app.backend_http import get_client, internal_headers
 
 if TYPE_CHECKING:
     from app.engine.tool_registry import ToolContext
@@ -33,16 +32,10 @@ class BackendWriteEvidenceSink:
     ) -> int:
         if not effect_id or not ctx.run_id:
             raise WriteEvidenceError("durable run and effect identities are required")
-        headers = {
-            "X-Internal-Token": settings.internal_api_token,
-            "X-Tenant-Id": ctx.tenant_id,
-            "X-User-Id": ctx.user_id,
-            "X-User-Role": ctx.role,
-        }
         try:
             response = await get_client().post(
                 f"/api/agent-runs/{ctx.run_id}/write-effects/{effect_id}/evidence",
-                headers=headers,
+                headers=internal_headers(ctx),
                 json={"record_id": record_id, "value": value},
                 timeout=httpx.Timeout(10.0),
             )

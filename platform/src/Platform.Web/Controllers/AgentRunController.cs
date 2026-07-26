@@ -15,24 +15,11 @@ namespace Platform.Web.Controllers;
 [Route("api")]
 [Authorize]
 [AdminOnly("權限不足，無法執行 Agent")]
-public sealed class AgentRunController : ControllerBase
+public sealed class AgentRunController : ProxyControllerBase
 {
     private readonly IAgentRunService _runs;
 
     public AgentRunController(IAgentRunService runs) => _runs = runs;
-
-    private string? IdempotencyKey =>
-        Request.Headers.TryGetValue("Idempotency-Key", out var value)
-            ? value.ToString()
-            : null;
-
-    private IActionResult Write(AgentProxyResponse response)
-        => new ContentResult
-        {
-            StatusCode = response.Status,
-            Content = response.Body,
-            ContentType = "application/json; charset=utf-8",
-        };
 
     [HttpPost("agents/{agentId:guid}/runs")]
     public async Task<IActionResult> Start(

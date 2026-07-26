@@ -9,11 +9,10 @@ Harness 的 fatal 路徑（稽核仍落地），而不是把整個服務炸掉�
 
 import httpx
 
-from app.backend_http import get_client
+from app.backend_http import get_client, internal_headers
 from app.engine import package
 from app.engine.package import AgentSkillPackage
 from app.engine.tool_registry import ToolContext
-from app.settings import settings
 
 
 class PackageUnavailable(RuntimeError):
@@ -24,16 +23,10 @@ class BackendPackageReader:
     """production adapter：tenant-scoped internal Backend package endpoint → AgentSkillPackage。"""
 
     async def read(self, name: str, ctx: ToolContext) -> AgentSkillPackage:
-        headers = {
-            "X-Internal-Token": settings.internal_api_token,
-            "X-Tenant-Id": ctx.tenant_id,
-            "X-User-Id": ctx.user_id,
-            "X-User-Role": ctx.role,
-        }
         try:
             resp = await get_client().get(
                 f"/api/skills/{name}/package",
-                headers=headers,
+                headers=internal_headers(ctx),
                 timeout=httpx.Timeout(10.0),
             )
             if resp.status_code == 404:

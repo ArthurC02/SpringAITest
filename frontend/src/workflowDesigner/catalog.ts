@@ -13,10 +13,6 @@ export function catalogForKind(
   })
 }
 
-export function isRequiredStage(catalog: WorkflowNodeType[], type: string, kind: WorkflowKind): boolean {
-  return catalogForKind(catalog, kind).some((node) => node.type === type && node.requiredStage === true)
-}
-
 /** Deletion is an explicit allow: stale/missing catalog metadata and unknown versions stay locked. */
 export function canDeleteNode(
   catalog: WorkflowNodeType[],

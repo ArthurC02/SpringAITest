@@ -9,7 +9,8 @@ namespace Platform.Service.Abstractions;
 /// </summary>
 public interface IWorkflowAdminService
 {
-    Task<AdminProxyResponse> SendAsync(
+    /// <summary>回傳與 Agent Registry 代理同一形狀的 <see cref="AgentProxyResponse"/>(status + 原始 body + ETag)。</summary>
+    Task<AgentProxyResponse> SendAsync(
         HttpMethod method,
         string resource,
         Guid? id,
@@ -19,5 +20,3 @@ public interface IWorkflowAdminService
         JsonElement? body = null,
         CancellationToken cancellationToken = default);
 }
-
-public sealed record AdminProxyResponse(int Status, string Body, string? ETag);

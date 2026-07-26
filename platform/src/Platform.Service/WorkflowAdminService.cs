@@ -1,17 +1,18 @@
 using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
-using Platform.Service.Exceptions;
 
 namespace Platform.Service;
 
 public sealed class WorkflowAdminService : IWorkflowAdminService
 {
+    private const string FailurePrefix = "Workflow Designer backend 呼叫失敗：";
+
     private readonly BackendClient _backend;
 
     public WorkflowAdminService(BackendClient backend) => _backend = backend;
 
-    public async Task<AdminProxyResponse> SendAsync(
+    public async Task<AgentProxyResponse> SendAsync(
         HttpMethod method,
         string resource,
         Guid? id,
@@ -37,7 +38,7 @@ public sealed class WorkflowAdminService : IWorkflowAdminService
             path += "/" + suffix;
         }
 
-        using var request = _backend.BuildRequest(
+        var request = _backend.BuildRequest(
             method,
             path,
             context,
@@ -47,19 +48,8 @@ public sealed class WorkflowAdminService : IWorkflowAdminService
             request.Headers.TryAddWithoutValidation("If-Match", ifMatch);
         }
 
-        using var response = await _backend.SendAsync(
-            request,
-            ex => new WorkflowInvocationException("Workflow Designer backend 無法連線：" + ex.Message, ex),
-            cancellationToken);
-        var status = (int)response.StatusCode;
-        if (status >= 500)
-        {
-            throw new WorkflowInvocationException($"Workflow Designer backend 回應 HTTP {status}");
-        }
-
-        return new AdminProxyResponse(
-            status,
-            await response.Content.ReadAsStringAsync(cancellationToken),
-            response.Headers.ETag?.ToString());
+        var (status, responseBody, etag) = await _backend.SendForProxyAsync(
+            request, FailurePrefix, cancellationToken);
+        return new AgentProxyResponse(status, responseBody, etag);
     }
 }

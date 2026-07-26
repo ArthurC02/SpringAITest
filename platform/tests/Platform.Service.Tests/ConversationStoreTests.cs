@@ -81,15 +81,14 @@ public sealed class ConversationStoreTests
     }
 
     // 沒有 D6 lineage 的一般聊天輪:五個 lineage 欄位一律以 null 送出(不得省略、更不得殘留上一輪的值)。
-    // IConversationStore 的 5 參多載是「預設介面方法」,會靜默把 metadata 丟掉;ConversationStore 必須是
-    // 覆寫它的那一個實作,兩個多載才會走同一段 body 組裝——本案與 Add_WithRootMetadata_* 成對釘住這件事。
+    // 與 Add_WithRootMetadata_* 成對:同一段 body 組裝在帶/不帶 metadata 兩種輸入下都要正確。
     [Fact]
     public async Task Add_WithoutMetadata_SendsNullLineageFields()
     {
         var stub = new StubHttpMessageHandler(_ =>
             TestHttp.Json(HttpStatusCode.Created, "{\"id\":5,\"createdAt\":\"2026-07-12T10:00:00Z\"}"));
 
-        // 刻意經介面呼叫 4 參多載(聊天走的就是這條:D6 未命中時 TurnMetadata 為 null)。
+        // 刻意經介面省略 metadata 呼叫(聊天走的就是這條:D6 未命中時 TurnMetadata 為 null)。
         IConversationStore store = Build(stub);
         await store.AddAsync("prompt", "reply", Ctx);
 

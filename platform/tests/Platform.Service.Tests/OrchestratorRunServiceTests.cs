@@ -10,7 +10,7 @@ namespace Platform.Service.Tests;
 /// <summary>
 /// D5 root dispatch 的 service 層。Backend 先落地、Platform 只 best-effort 送 {command_id, context:{}}
 /// 給 Workflow;耐久命令身分是內部執行憑據,絕不進公開回應(root AGENTS.md D5:「Internal execution
-/// claims and recovery are never public APIs」),對齊 D3 的 AgentRunService.StripInternalCommandMetadata。
+/// claims and recovery are never public APIs」),與 D3 共用 RunCommandRedaction.StripCommandId。
 /// </summary>
 public sealed class OrchestratorRunServiceTests
 {
@@ -62,7 +62,7 @@ public sealed class OrchestratorRunServiceTests
         });
 
         var result = await Build(backend, workflow).StartAsync(
-            OrchestratorId, "hello", "conversation-1", null, "root-key", Owner);
+            OrchestratorId, "hello", "conversation-1", "root-key", Owner);
 
         Assert.Equal(202, result.Status);
         var allocation = Assert.Single(backendCalls);
@@ -91,35 +91,9 @@ public sealed class OrchestratorRunServiceTests
     }
 
     /// <summary>
-    /// 公開 body 的 Context 是刻意被忽略的(OrchestratorRunService 的 `_ = initialContext`):
-    /// caller 提供的 context 不是可回收的授權,Backend 只 hash 伺服器自有的 root_input。
-    /// </summary>
-    [Fact]
-    public async Task Start_IgnoresCallerSuppliedContext()
-    {
-        string? backendBody = null;
-        var backend = new StubHttpMessageHandler(request =>
-        {
-            backendBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
-            return Run(HttpStatusCode.Accepted);
-        });
-        var workflow = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Accepted, "{}"));
-        var callerContext = JsonDocument
-            .Parse("""{"granted_tools":["runtime.write_evidence"],"tenant":"other-tenant"}""")
-            .RootElement.Clone();
-
-        await Build(backend, workflow).StartAsync(
-            OrchestratorId, "hello", "conversation-1", callerContext, "root-key", Owner);
-
-        Assert.DoesNotContain("granted_tools", backendBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("other-tenant", backendBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("granted_tools", workflow.LastBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("other-tenant", workflow.LastBody, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// dispatch 是 best-effort:Workflow 回錯誤碼或整個沒有回應,都不得回滾已受理的 root run
-    /// (耐久命令留著讓 Workflow 之後回收)。這條同時守住 catch 的例外白名單 —— 少一個型別就會炸給呼叫端。
+    /// (耐久命令留著讓 Workflow 之後回收)。共用的 InternalRequest.KickBestEffortAsync 刻意寬 catch,
+    /// 任何下游失敗型別都不得逃逸給呼叫端。
     /// </summary>
     [Theory]
     [InlineData("http-503")]
@@ -136,7 +110,7 @@ public sealed class OrchestratorRunServiceTests
         });
 
         var result = await Build(backend, workflow).StartAsync(
-            OrchestratorId, "hello", "conversation-1", null, "root-key", Owner);
+            OrchestratorId, "hello", "conversation-1", "root-key", Owner);
 
         Assert.Equal(202, result.Status);
         using var body = JsonDocument.Parse(result.Body);
@@ -158,7 +132,7 @@ public sealed class OrchestratorRunServiceTests
             HttpStatusCode.Conflict,
             """{"status":409,"message":"Orchestrator 未發布"}"""));
         var rejected = await Build(conflict, workflow).StartAsync(
-            OrchestratorId, "hello", "conversation-1", null, "root-key", Owner);
+            OrchestratorId, "hello", "conversation-1", "root-key", Owner);
         Assert.Equal(409, rejected.Status);
         Assert.Contains("Orchestrator 未發布", rejected.Body, StringComparison.Ordinal);
 
@@ -166,7 +140,7 @@ public sealed class OrchestratorRunServiceTests
             HttpStatusCode.InternalServerError, """{"detail":"secret"}"""));
         var error = await Assert.ThrowsAsync<WorkflowInvocationException>(
             () => Build(broken, workflow).StartAsync(
-                OrchestratorId, "hello", "conversation-1", null, "root-key", Owner));
+                OrchestratorId, "hello", "conversation-1", "root-key", Owner));
         Assert.DoesNotContain("secret", error.Message, StringComparison.Ordinal);
 
         Assert.Equal(0, workflowCalls);
@@ -204,7 +178,7 @@ public sealed class OrchestratorRunServiceTests
         var service = Build(backend, workflow);
 
         var started = await service.StartAsync(
-            OrchestratorId, "hello", "conversation-1", null, "root-key", Owner);
+            OrchestratorId, "hello", "conversation-1", "root-key", Owner);
         var dispatched = workflow.LastBody!;
         var cancelled = await service.CancelAsync(RunId, "stop", "cancel-key", Owner);
         var read = await service.GetAsync(RunId, Owner);

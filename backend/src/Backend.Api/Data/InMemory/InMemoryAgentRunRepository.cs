@@ -1521,27 +1521,6 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             new AgentRunCommandDispatch(command.Id, token, expiresAt, command.DispatchAttempts));
     }
 
-    private CommandEntry NewCompletedCommand(
-        Guid runId,
-        string type,
-        string requestHash,
-        JsonElement input)
-    {
-        var now = UtcNow();
-        return new CommandEntry
-        {
-            Id = Guid.NewGuid(),
-            Sequence = ++_latestCommandSequence,
-            RunId = runId,
-            Type = type,
-            RequestHash = requestHash,
-            Input = input.Clone(),
-            InputHash = AgentRunCommandInput.CanonicalSha256(input, type),
-            DispatchCompletedAt = now,
-            CreatedAt = now,
-        };
-    }
-
     private DateTime UtcNow() => _timeProvider.GetUtcNow().UtcDateTime;
 
     private static string NewToken()

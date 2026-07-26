@@ -1,7 +1,6 @@
 using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
-using Platform.Service.Exceptions;
 
 namespace Platform.Service;
 
@@ -67,31 +66,21 @@ public sealed class AgentService : IAgentService
             ? $"/api/agents/{id:D}"
             : $"/api/agents/{id:D}/{suffix}";
 
+    /// <summary>
+    /// 2xx 與 4xx(含 draft concurrency 的 409/428)一律原樣穿透:body 直接是 backend 的 JSON
+    /// (domain snake_case 或 ApiError)，ETag 若有則帶回;5xx 與傳輸失敗由
+    /// <see cref="BackendClient.SendForProxyAsync"/> 收斂成對外 502。
+    /// </summary>
     private async Task<AgentProxyResponse> ProxyAsync(
         HttpMethod method, string path, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct)
     {
-        using var req = _backend.BuildRequest(method, path, ctx, body.HasValue ? (object)body.Value : null);
+        var req = _backend.BuildRequest(method, path, ctx, body.HasValue ? (object)body.Value : null);
         if (!string.IsNullOrEmpty(ifMatch))
         {
             req.Headers.TryAddWithoutValidation("If-Match", ifMatch);
         }
 
-        using var resp = await _backend.SendAsync(req, WrapTransport, ct);
-        var status = (int)resp.StatusCode;
-
-        // 5xx:不把 backend 的內部錯誤 body 洩漏給客戶端 —— 收斂成對外 502(固定 message 由全域處理輸出)。
-        if (status >= 500)
-        {
-            throw new WorkflowInvocationException(FailurePrefix + "HTTP " + status);
-        }
-
-        // 2xx 與 4xx(含 draft concurrency 的 409/428)一律原樣穿透:
-        // body 直接是 backend 的 JSON(domain snake_case 或 ApiError)，ETag 若有則帶回。
-        var content = await resp.Content.ReadAsStringAsync(ct);
-        var etag = resp.Headers.ETag?.ToString();
+        var (status, content, etag) = await _backend.SendForProxyAsync(req, FailurePrefix, ct);
         return new AgentProxyResponse(status, content, etag);
     }
-
-    private Exception WrapTransport(Exception ex)
-        => new WorkflowInvocationException(FailurePrefix + ex.Message, ex);
 }

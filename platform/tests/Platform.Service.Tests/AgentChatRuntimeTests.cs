@@ -1,5 +1,4 @@
 using System.Net;
-using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Platform.Service;
 using Platform.Service.Dtos;
@@ -94,8 +93,8 @@ public sealed class AgentChatRuntimeTests
     public async Task ResolverLegacy_UsesLegacyAndDoesNotAllocate()
     {
         var handler = new QueueHandler(
-            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-            Json(HttpStatusCode.OK, """{"mode":"legacy"}"""));
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.OK, """{"mode":"legacy"}"""));
         var result = await Build(handler, Enabled()).RunAsync("hello", "c1", null, Identity());
         Assert.Null(result);
         Assert.Equal(2, handler.Requests.Count);
@@ -106,12 +105,12 @@ public sealed class AgentChatRuntimeTests
     public async Task CanaryDefault_AllocatesKicksPollsAndRendersAggregateAnswer()
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
-            Json(HttpStatusCode.Accepted, Accepted()),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"run\":{{\"id\":\"{Run}\",\"status\":\"running\"}}}}"),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"run\":{{\"id\":\"{Run}\",\"status\":\"completed\",\"result\":{{\"aggregate\":{{\"answer\":\"done\"}}}}}}}}"));
-        var workflow = new QueueHandler(Json(HttpStatusCode.Accepted, "{}"));
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"run\":{{\"id\":\"{Run}\",\"status\":\"running\"}}}}"),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"run\":{{\"id\":\"{Run}\",\"status\":\"completed\",\"result\":{{\"aggregate\":{{\"answer\":\"done\"}}}}}}}}"));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}"));
         var identity = Identity();
 
         var result = await Build(backend, Enabled(), workflow)
@@ -135,8 +134,8 @@ public sealed class AgentChatRuntimeTests
     public async Task ExplicitOrchestrator_ResolverReturnsLegacy_Conflicts_WithoutAllocating()
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-            Json(HttpStatusCode.OK, """{"mode":"legacy"}"""));
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.OK, """{"mode":"legacy"}"""));
 
         await Assert.ThrowsAsync<DownstreamConflictException>(
             () => Build(backend, Enabled()).RunAsync("hello", "c1", Orchestrator, Identity()));
@@ -151,8 +150,8 @@ public sealed class AgentChatRuntimeTests
     public async Task ActiveRunningRoot_PollsExistingRun_WithoutResumeOrAllocate()
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, Active(Orchestrator, "running", "{}")),
-            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", """{"aggregate":{"answer":"done"}}""")));
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "running", "{}")),
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "completed", """{"aggregate":{"answer":"done"}}""")));
 
         var result = await Build(backend, Enabled()).RunAsync("next turn", "c1", null, Identity());
 
@@ -166,8 +165,8 @@ public sealed class AgentChatRuntimeTests
     public async Task ExplicitResolver404_DoesNotFallbackOrAllocate()
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-            Json(HttpStatusCode.NotFound, """{"message":"not found"}"""));
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"not found"}"""));
         await Assert.ThrowsAsync<WorkflowNotFoundException>(
             () => Build(backend, Enabled()).RunAsync("hello", "c1", Orchestrator, Identity()));
         Assert.Equal(2, backend.Requests.Count);
@@ -177,7 +176,7 @@ public sealed class AgentChatRuntimeTests
     public async Task AmbiguousActiveRoot_ConflictsAndNeverAllocatesAnotherRun()
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.Conflict, """{"message":"Multiple active chat root runs require operator intervention"}"""));
+            TestHttp.Json(HttpStatusCode.Conflict, """{"message":"Multiple active chat root runs require operator intervention"}"""));
 
         await Assert.ThrowsAsync<DownstreamConflictException>(
             () => Build(backend, Enabled()).RunAsync("hello", "c1", null, Identity()));
@@ -190,11 +189,11 @@ public sealed class AgentChatRuntimeTests
     public async Task WorkflowKickFailure_IsRecoverable()
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
-            Json(HttpStatusCode.Accepted, Accepted()),
-            Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"recovered"}}}}"""));
-        var workflow = new QueueHandler(Json(HttpStatusCode.ServiceUnavailable, "{}"));
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+            TestHttp.Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"recovered"}}}}"""));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.ServiceUnavailable, "{}"));
         var result = await Build(backend, Enabled(), workflow)
             .RunAsync("hello", "c1", null, Identity());
         Assert.Equal("recovered", result!.Text);
@@ -208,15 +207,15 @@ public sealed class AgentChatRuntimeTests
             "waiting_input",
             """{"clarification":["Which region?"]}""");
         var backend = new QueueHandler(
-            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
-            Json(HttpStatusCode.Accepted, Accepted()),
-            Json(HttpStatusCode.OK, waiting),
-            Json(HttpStatusCode.OK, waiting),
-            Json(HttpStatusCode.Accepted, Accepted()),
-            Json(HttpStatusCode.OK,
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+            TestHttp.Json(HttpStatusCode.OK, waiting),
+            TestHttp.Json(HttpStatusCode.OK, waiting),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+            TestHttp.Json(HttpStatusCode.OK,
                 $"{{\"run\":{{\"status\":\"completed\",\"result\":{{\"aggregate\":{{\"answer\":\"resumed\"}}}}}}}}"));
-        var workflow = new QueueHandler(Json(HttpStatusCode.Accepted, "{}"));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}"));
         var runtime = Build(backend, Enabled(), workflow);
 
         var question = await runtime.RunAsync("initial", "c1", null, Identity());
@@ -234,13 +233,13 @@ public sealed class AgentChatRuntimeTests
     {
         var other = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, Active(Orchestrator, "waiting_input", """{"clarification":["q"]}""")),
-            Json(HttpStatusCode.Accepted, "{}"),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{other}\"}}}}"),
-            Json(HttpStatusCode.Accepted, Accepted(other)),
-            Json(HttpStatusCode.OK,
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "waiting_input", """{"clarification":["q"]}""")),
+            TestHttp.Json(HttpStatusCode.Accepted, "{}"),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{other}\"}}}}"),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted(other)),
+            TestHttp.Json(HttpStatusCode.OK,
                 """{"run":{"status":"completed","result":{"aggregate":{"answer":"switched"}}}}"""));
-        var workflow = new QueueHandler(Json(HttpStatusCode.Accepted, "{}"));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}"));
 
         var answer = await Build(backend, Enabled(), workflow)
             .RunAsync("new task", "c1", other, Identity());
@@ -259,14 +258,14 @@ public sealed class AgentChatRuntimeTests
         var conversation = new string('c', 1_024);
         var waiting = Active(Orchestrator, "waiting_input", """{"clarification":["Which region?"]}""");
         var backend = new QueueHandler(
-            Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
-            Json(HttpStatusCode.Accepted, Accepted()),
-            Json(HttpStatusCode.OK, waiting),
-            Json(HttpStatusCode.OK, waiting),
-            Json(HttpStatusCode.Accepted, Accepted()),
-            Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"resumed"}}}}"""));
-        var workflow = new QueueHandler(Json(HttpStatusCode.Accepted, "{}"));
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+            TestHttp.Json(HttpStatusCode.OK, waiting),
+            TestHttp.Json(HttpStatusCode.OK, waiting),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+            TestHttp.Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"resumed"}}}}"""));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}"));
         var runtime = Build(backend, EnabledFor(tenant), workflow);
 
         await runtime.RunAsync("initial", conversation, null, Identity(user, conversation));
@@ -284,12 +283,12 @@ public sealed class AgentChatRuntimeTests
         var conversation = new string('c', 1_024);
         var other = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, Active(Orchestrator, "waiting_input", """{"clarification":["q"]}""")),
-            Json(HttpStatusCode.Accepted, "{}"),
-            Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{other}\"}}}}"),
-            Json(HttpStatusCode.Accepted, Accepted(other)),
-            Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"switched"}}}}"""));
-        var workflow = new QueueHandler(Json(HttpStatusCode.Accepted, "{}"));
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "waiting_input", """{"clarification":["q"]}""")),
+            TestHttp.Json(HttpStatusCode.Accepted, "{}"),
+            TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{other}\"}}}}"),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted(other)),
+            TestHttp.Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"switched"}}}}"""));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}"));
 
         await Build(backend, EnabledFor(tenant), workflow)
             .RunAsync("new task", conversation, other, Identity(user, conversation));
@@ -315,13 +314,13 @@ public sealed class AgentChatRuntimeTests
         async Task<string> AllocateKeyAsync(string attempt)
         {
             var backend = new QueueHandler(
-                Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-                Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-                Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
-                Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
-                Json(HttpStatusCode.Accepted, Accepted()),
-                Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"done"}}}}"""));
-            await Build(backend, EnabledFor(tenant), new QueueHandler(Json(HttpStatusCode.Accepted, "{}")))
+                TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+                TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+                TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+                TestHttp.Json(HttpStatusCode.OK, $"{{\"mode\":\"orchestrator\",\"orchestrator\":{{\"id\":\"{Orchestrator}\"}}}}"),
+                TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+                TestHttp.Json(HttpStatusCode.OK, """{"run":{"status":"completed","result":{"aggregate":{"answer":"done"}}}}"""));
+            await Build(backend, EnabledFor(tenant), new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}")))
                 .RunAsync("same user-visible message", conversation, null,
                     Identity(user, conversation), attempt);
             return backend.Requests[4].IdempotencyKey!;
@@ -333,8 +332,8 @@ public sealed class AgentChatRuntimeTests
     {
         var completed = Active(Orchestrator, "completed", """{"aggregate":{"answer":"replayed"}}""");
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, completed),
-            Json(HttpStatusCode.OK, completed));
+            TestHttp.Json(HttpStatusCode.OK, completed),
+            TestHttp.Json(HttpStatusCode.OK, completed));
         var workflow = new QueueHandler();
 
         var result = await Build(backend, Enabled(), workflow).RunAsync(
@@ -350,8 +349,8 @@ public sealed class AgentChatRuntimeTests
     {
         var waiting = Active(Orchestrator, "waiting_input", """{"clarification":["Which region?"]}""");
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, waiting),
-            Json(HttpStatusCode.OK, waiting));
+            TestHttp.Json(HttpStatusCode.OK, waiting),
+            TestHttp.Json(HttpStatusCode.OK, waiting));
 
         var result = await Build(backend, Enabled()).RunAsync(
             "same turn", "c1", null, Identity(), "retry-token");
@@ -367,9 +366,9 @@ public sealed class AgentChatRuntimeTests
         var queued = Active(Orchestrator, "queued", "{}")
             .Replace(Command.ToString(), replayCommand.ToString(), StringComparison.OrdinalIgnoreCase);
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, queued),
-            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", """{"aggregate":{"answer":"done"}}""")));
-        var workflow = new QueueHandler(Json(HttpStatusCode.Accepted, "{}"));
+            TestHttp.Json(HttpStatusCode.OK, queued),
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "completed", """{"aggregate":{"answer":"done"}}""")));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}"));
 
         var result = await Build(backend, Enabled(), workflow).RunAsync(
             "same turn", "c1", null, Identity(), "retry-token");
@@ -382,7 +381,7 @@ public sealed class AgentChatRuntimeTests
     [Fact]
     public async Task LogicalAttemptMismatch_ConflictsWithoutActiveLookupOrAllocation()
     {
-        var backend = new QueueHandler(Json(HttpStatusCode.Conflict,
+        var backend = new QueueHandler(TestHttp.Json(HttpStatusCode.Conflict,
             """{"message":"Chat logical attempt does not match this request"}"""));
 
         await Assert.ThrowsAsync<DownstreamConflictException>(() => Build(backend, Enabled()).RunAsync(
@@ -397,7 +396,7 @@ public sealed class AgentChatRuntimeTests
     public async Task LogicalAttemptReplay_CanonicalizesSurroundingWhitespaceBeforeFingerprinting()
     {
         var completed = Active(Orchestrator, "completed", """{"aggregate":{"answer":"replayed"}}""");
-        var backend = new QueueHandler(Json(HttpStatusCode.OK, completed), Json(HttpStatusCode.OK, completed));
+        var backend = new QueueHandler(TestHttp.Json(HttpStatusCode.OK, completed), TestHttp.Json(HttpStatusCode.OK, completed));
 
         var result = await Build(backend, Enabled()).RunAsync(
             "  details  ", "  c1  ", null, Identity(), "retry-token");
@@ -419,8 +418,8 @@ public sealed class AgentChatRuntimeTests
     public async Task Poll_NonSuccessTerminalStatus_Throws(string status)
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, Active(Orchestrator, status, "{}")),
-            Json(HttpStatusCode.OK, Active(Orchestrator, status, "{}")));
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, status, "{}")),
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, status, "{}")));
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(
             () => Build(backend, Enabled()).RunAsync("hello", "c1", null, Identity()));
@@ -433,8 +432,8 @@ public sealed class AgentChatRuntimeTests
     public async Task Poll_CompletedWithoutAggregateAnswer_RendersRawResult(string result, string expected)
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", result)),
-            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", result)));
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "completed", result)),
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "completed", result)));
 
         var response = await Build(backend, Enabled()).RunAsync("hello", "c1", null, Identity());
 
@@ -445,8 +444,8 @@ public sealed class AgentChatRuntimeTests
     public async Task Poll_CompletedWithoutResult_Throws()
     {
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", "null")),
-            Json(HttpStatusCode.OK, Active(Orchestrator, "completed", "null")));
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "completed", "null")),
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "completed", "null")));
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(
             () => Build(backend, Enabled()).RunAsync("hello", "c1", null, Identity()));
@@ -461,8 +460,8 @@ public sealed class AgentChatRuntimeTests
     {
         var waiting = Active(Orchestrator, "waiting_input", result);
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, waiting),
-            Json(HttpStatusCode.OK, waiting));
+            TestHttp.Json(HttpStatusCode.OK, waiting),
+            TestHttp.Json(HttpStatusCode.OK, waiting));
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(
             () => Build(backend, Enabled()).RunAsync("same turn", "c1", null, Identity(), "retry-token"));
@@ -476,9 +475,9 @@ public sealed class AgentChatRuntimeTests
         using var cancellation = new CancellationTokenSource();
         var running = Active(Orchestrator, "running", "{}");
         var backend = new QueueHandler(
-            Json(HttpStatusCode.OK, running),   // active 查詢
-            Json(HttpStatusCode.OK, running),   // 第一次輪詢 → 呼叫端此時斷線
-            Json(HttpStatusCode.OK, running))   // 若還繼續輪詢才會用到(不該用到)
+            TestHttp.Json(HttpStatusCode.OK, running),   // active 查詢
+            TestHttp.Json(HttpStatusCode.OK, running),   // 第一次輪詢 → 呼叫端此時斷線
+            TestHttp.Json(HttpStatusCode.OK, running))   // 若還繼續輪詢才會用到(不該用到)
         {
             OnRequest = request =>
             {
@@ -560,11 +559,6 @@ public sealed class AgentChatRuntimeTests
 
     private static string Active(Guid orchestrator, string status, string result) =>
         $"{{\"mode\":\"orchestrator\",\"run\":{{\"id\":\"{Run}\",\"orchestrator_id\":\"{orchestrator}\",\"orchestrator_revision\":2,\"workflow_id\":\"44444444-4444-4444-4444-444444444444\",\"workflow_revision\":3,\"status\":\"{status}\",\"result\":{result}}},\"command_id\":\"{Command}\"}}";
-
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) => new(status)
-    {
-        Content = new StringContent(body, Encoding.UTF8, "application/json"),
-    };
 
     private sealed class QueueHandler(params HttpResponseMessage[] responses) : HttpMessageHandler
     {

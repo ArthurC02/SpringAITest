@@ -234,11 +234,6 @@ class RuntimeRunManager:
                     message="Execution preflight was rejected.",
                 )
 
-    async def start_command(
-        self, run_id: str, command_id: str, ctx: RequestContext
-    ) -> RuntimeRunResult:
-        return await self.dispatch_command(run_id, command_id, ctx)
-
     async def _fail_owned_preflight(
         self,
         command: RecoveryCommand,

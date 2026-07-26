@@ -1,30 +1,10 @@
 using System.Net;
-using System.Net.Http.Json;
+using static Platform.Web.Tests.ApiTestHelpers;
 
 namespace Platform.Web.Tests;
 
 public sealed class WorkflowAdminApiTests
 {
-    private static HttpRequestMessage Request(
-        HttpMethod method,
-        string path,
-        string? ifMatch = null,
-        object? body = null)
-    {
-        var request = new HttpRequestMessage(method, path);
-        if (ifMatch is not null)
-        {
-            request.Headers.TryAddWithoutValidation("If-Match", ifMatch);
-        }
-
-        if (body is not null)
-        {
-            request.Content = JsonContent.Create(body);
-        }
-
-        return request;
-    }
-
     [Theory]
     [InlineData("/api/admin/workflows")]
     [InlineData("/api/admin/workflows/catalog/nodes")]
@@ -88,7 +68,7 @@ public sealed class WorkflowAdminApiTests
         var id = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
         var response = await client.SendAsync(Request(
-            HttpMethod.Put,
+            "PUT",
             $"/api/admin/workflows/{id:D}/draft",
             "\"6\"",
             new { definition = new { schemaVersion = 1 } }));
@@ -111,7 +91,7 @@ public sealed class WorkflowAdminApiTests
         var id = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
         var response = await client.SendAsync(Request(
-            HttpMethod.Put,
+            "PUT",
             $"/api/admin/orchestrators/{id:D}/draft",
             "\"6\"",
             new { definition = new { schemaVersion = 1 } }));
@@ -126,6 +106,35 @@ public sealed class WorkflowAdminApiTests
         Assert.Equal("\"6\"", body["if_match"]!.GetValue<string>());
     }
 
+    // 兩個 resource 共用的動作宣告(含 [HttpXxx])住在 WorkflowAdminControllerBase,OrchestratorAdminController
+    // 自己一個 action 都沒有 —— 這幾條路由若沒被繼承下來會變 404。其餘 5 種形狀(List/draft/revisions/
+    // enable/delete)已由本檔其他案例走過,兩者合起來即 10 條共用路由的完整面。
+    [Theory]
+    [InlineData("POST", "", "")]
+    [InlineData("GET", "/11111111-1111-1111-1111-111111111111", "")]
+    [InlineData("POST", "/11111111-1111-1111-1111-111111111111/validate", "validate")]
+    [InlineData("POST", "/11111111-1111-1111-1111-111111111111/publish", "publish")]
+    [InlineData("POST", "/11111111-1111-1111-1111-111111111111/revisions/2/restore", "revisions/2/restore")]
+    public async Task SharedActions_AreInheritedByBothResources(
+        string method, string relativePath, string expectedSuffix)
+    {
+        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
+        var client = ManagerClient(factory);
+
+        foreach (var resource in new[] { "workflows", "orchestrators" })
+        {
+            var response = await client.SendAsync(Request(
+                method, $"/api/admin/{resource}{relativePath}", body: new { definition = new { } }));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var body = await response.ReadJsonAsync();
+            Assert.Equal(resource, body["resource"]!.GetValue<string>());
+            Assert.Equal(
+                expectedSuffix.Length == 0 ? null : expectedSuffix,
+                body["suffix"]?.GetValue<string>());
+        }
+    }
+
     // forwardIfMatch:false 的路由(List/Get/revisions/restore/enable/disable)即使 client 帶 If-Match
     // 也不得往下轉發 —— 否則 backend 會對一個非變更請求做前置條件檢查。
     [Theory]
@@ -138,7 +147,7 @@ public sealed class WorkflowAdminApiTests
         using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
         var client = ManagerClient(factory);
 
-        var response = await client.SendAsync(Request(new HttpMethod(method), path, "\"6\""));
+        var response = await client.SendAsync(Request(method, path, "\"6\""));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Null((await response.ReadJsonAsync())["if_match"]);

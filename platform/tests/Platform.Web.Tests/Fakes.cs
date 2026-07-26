@@ -133,8 +133,8 @@ public sealed class FakeMem0Client : IMem0Client
 
 /// <summary>
 /// 聊天歷史 store fake(代表 backend /api/conversations,以 (tenant_id, user_id) 隔離)。
-/// AddAsync 回遞增 id 並依 ctx 的租戶/使用者記進 Saved;ListDescAsync 依 ctx 過濾只回同租戶同使用者的紀錄
-/// (鏡射真正 ConversationStore 的隔離語意,供 A-21 的租戶隔離斷言使用)。
+/// AddAsync 回遞增 id 並依 ctx 的租戶/使用者(連同 D6 lineage metadata)記進 Saved;ListDescAsync 依 ctx
+/// 過濾只回同租戶同使用者的紀錄(鏡射真正 ConversationStore 的隔離語意,供 A-21 的租戶隔離斷言使用)。
 /// ThrowOnAdd 讓 A-15/A-16 腳本化持久化失敗(阻塞 500 vs 串流 best-effort 的決策表兩半)。
 /// 靜態:controller 端以 AddScoped 註冊,每次請求都是新實例,狀態要跨請求可見必須是靜態。
 /// </summary>
@@ -145,9 +145,11 @@ public sealed class FakeConversationStore : IConversationStore
     /// <summary>測試腳本開關:true 時 AddAsync 擲例外,模擬持久化層失敗。用畢務必在 finally 還原為 false。</summary>
     public static bool ThrowOnAdd { get; set; }
 
-    public static readonly List<(string TenantCode, string UserId, ChatResponse Response)> Saved = new();
+    public static readonly List<(string TenantCode, string UserId, ChatResponse Response, ChatTurnMetadata? Metadata)> Saved = new();
 
-    public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
+    public Task<ChatResponse> AddAsync(
+        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata = null,
+        CancellationToken ct = default)
     {
         if (ThrowOnAdd)
         {
@@ -155,7 +157,7 @@ public sealed class FakeConversationStore : IConversationStore
         }
 
         var response = new ChatResponse(_nextId++, reply, DateTime.UtcNow);
-        Saved.Add((ctx.TenantCode, ctx.UserId, response));
+        Saved.Add((ctx.TenantCode, ctx.UserId, response, metadata));
         return Task.FromResult(response);
     }
 
@@ -717,7 +719,7 @@ public sealed class FakeOrchestratorRunService : IOrchestratorRunService
     public const string RunIdText = "55555555-5555-5555-5555-555555555555";
     private const string Body = """{"id":"55555555-5555-5555-5555-555555555555","status":"queued","state_version":1}""";
     public FakeOrchestratorRunService(FakeCallScope scope) => scope.Own(Calls);
-    public Task<AgentProxyResponse> StartAsync(Guid id,string? message,string? conversation,System.Text.Json.JsonElement? context,string? key,UserContext user,CancellationToken ct=default)
+    public Task<AgentProxyResponse> StartAsync(Guid id,string? message,string? conversation,string? key,UserContext user,CancellationToken ct=default)
     { Calls.Add($"start:{id:D}:{message}:{conversation}:{key}:{user.UserId}"); return Task.FromResult(new AgentProxyResponse(202,Body,null)); }
     public Task<AgentProxyResponse> GetAsync(Guid id,UserContext user,CancellationToken ct=default)
     { Calls.Add($"get:{id:D}:{user.UserId}"); return Task.FromResult(new AgentProxyResponse(200,Body,null)); }
@@ -728,14 +730,12 @@ public sealed class FakeOrchestratorRunService : IOrchestratorRunService
 }
 
 /// <summary>
-/// Agent Registry 服務 fake(代表 backend :8002 的 /api/agents 透明代理)。重現 D1 需驗的 backend 行為:
-/// 所有 Builder 端點非 ADMIN → 403、GET 帶 ETag、If-Match 版本不符 → 409、
-/// 未知 id → 404。回傳 <see cref="AgentProxyResponse"/>(status + 原始 JSON body + ETag),由 controller 原樣寫回。
-/// Calls 是靜態的,讓「flag off 時請求不得抵達代理」可被斷言。
+/// D4 管理代理 fake:把收到的 resource/id/suffix/method/身分/If-Match 原樣回成 JSON body,
+/// 讓 Web 層可斷言「兩個 controller 各自送出正確的 resource 與 If-Match 轉發決策」。
 /// </summary>
 public sealed class FakeWorkflowAdminService : IWorkflowAdminService
 {
-    public Task<AdminProxyResponse> SendAsync(
+    public Task<AgentProxyResponse> SendAsync(
         HttpMethod method,
         string resource,
         Guid? id,
@@ -755,10 +755,16 @@ public sealed class FakeWorkflowAdminService : IWorkflowAdminService
             tenant = context.TenantCode,
             if_match = ifMatch,
         });
-        return Task.FromResult(new AdminProxyResponse(200, payload, "\"7\""));
+        return Task.FromResult(new AgentProxyResponse(200, payload, "\"7\""));
     }
 }
 
+/// <summary>
+/// Agent Registry 服務 fake(代表 backend :8002 的 /api/agents 透明代理)。重現 D1 需驗的 backend 行為:
+/// 所有 Builder 端點非 ADMIN → 403、GET 帶 ETag、If-Match 版本不符 → 409、
+/// 未知 id → 404。回傳 <see cref="AgentProxyResponse"/>(status + 原始 JSON body + ETag),由 controller 原樣寫回。
+/// Calls 是靜態的,讓「flag off 時請求不得抵達代理」可被斷言。
+/// </summary>
 public sealed class FakeAgentService : IAgentService
 {
     public static readonly List<string> Calls = new();

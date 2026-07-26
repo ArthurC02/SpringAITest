@@ -12,6 +12,7 @@ TestClient 不進 context manager）則靠 get_client() 延遲建立，行為與
 """
 
 import asyncio
+from typing import Protocol
 
 import httpx
 
@@ -56,6 +57,24 @@ async def aclose_client() -> None:
         await _client.aclose()
         _client = None
         _client_loop = None
+
+
+class Identity(Protocol):
+    """帶租戶身分的 context（RequestContext 與 ToolContext 都符合這個形狀）。"""
+
+    tenant_id: str
+    user_id: str
+    role: str
+
+
+def internal_headers(ctx: Identity) -> dict[str, str]:
+    """服務間標頭：內部密鑰 + 身分（租戶邊界由 backend 依 X-Tenant-Id 過濾）。"""
+    return {
+        "X-Internal-Token": settings.internal_api_token,
+        "X-Tenant-Id": ctx.tenant_id,
+        "X-User-Id": ctx.user_id,
+        "X-User-Role": ctx.role,
+    }
 
 
 async def search_chunks(query: str, top_k: int, tenant_id: str) -> list[dict]:

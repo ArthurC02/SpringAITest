@@ -1,5 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Platform.Service;
+using Platform.Service.Abstractions;
 
 namespace Platform.Web.Tests;
 
@@ -91,7 +98,68 @@ public sealed class OrchestratorRunApiTests
         Assert.Contains(FakeOrchestratorRunService.Calls,x=>x.Contains(":root-key:owner",StringComparison.Ordinal));
     }
 
+    // 公開 start body 沒有 context 欄位:呼叫端硬塞的 context 是不可回收的授權,必須在 Web 邊界就被丟掉,
+    // 既不得進 Backend 的 root_input,也不得混進 Workflow 的 dispatch body(那裡只送 command_id + 空 context)。
+    // 走真 OrchestratorRunService(其餘測試用 fake),兩個下游各自攔截後逐字檢查。
+    [Fact]
+    public async Task Start_CallerSuppliedContextNeverReachesBackendOrWorkflow()
+    {
+        using var factory=new RealServiceFactory();
+        factory.Backend.Reset(HttpStatusCode.Accepted,
+            $$"""{"id":"{{RunId}}","status":"queued","state_version":1,"command_id":"77777777-7777-7777-7777-777777777777"}""");
+        factory.Workflow.Reset(HttpStatusCode.Accepted,"{}");
+        var admin=factory.CreateClient().WithToken(
+            factory.IssueToken("owner","ADMIN","tenant-x",new[]{"workflow.manage"}));
+        using var start=new HttpRequestMessage(HttpMethod.Post,"/api/admin/orchestrators/"+OrchestratorId+"/runs")
+        {
+            Content=JsonContent.Create(new
+            {
+                message="m",
+                conversationId="c",
+                context=new { granted_tools=new[]{"runtime.write_evidence"},tenant="other-tenant" },
+            }),
+        };
+
+        var response=await admin.SendAsync(start);
+
+        Assert.Equal(HttpStatusCode.Accepted,response.StatusCode);
+        foreach(var forwarded in new[]
+        {
+            Encoding.UTF8.GetString(factory.Backend.Body!),
+            Encoding.UTF8.GetString(factory.Workflow.Body!),
+        })
+        {
+            Assert.DoesNotContain("granted_tools",forwarded,StringComparison.Ordinal);
+            Assert.DoesNotContain("other-tenant",forwarded,StringComparison.Ordinal);
+        }
+    }
+
     private static TestWebAppFactory EnabledFactory()=>new(workflowDesignerEnabled:true,multiAgentDispatchEnabled:true);
     private static HttpRequestMessage Request(string method,string path)=>new(new HttpMethod(method),path)
     { Content=method=="POST"?JsonContent.Create(new { reason="stop" }):null };
+
+    /// <summary>保留真 OrchestratorRunService,只把它的兩個下游(backend、workflow)換成攔截 handler。</summary>
+    private sealed class RealServiceFactory : TestWebAppFactory
+    {
+        public CapturingBackendHandler Backend { get; }=new();
+        public CapturingBackendHandler Workflow { get; }=new();
+
+        public RealServiceFactory()
+            : base(workflowDesignerEnabled:true,multiAgentDispatchEnabled:true)
+        {
+        }
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<BackendClient>();
+                services.AddHttpClient<BackendClient>().ConfigurePrimaryHttpMessageHandler(()=>Backend);
+                services.RemoveAll<IOrchestratorRunService>();
+                services.AddHttpClient<IOrchestratorRunService,OrchestratorRunService>()
+                    .ConfigurePrimaryHttpMessageHandler(()=>Workflow);
+            });
+        }
+    }
 }

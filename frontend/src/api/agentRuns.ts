@@ -1,33 +1,12 @@
 import { apiFetch } from './http'
+import { TERMINAL_RUN_STATUSES } from '../agentRunDisplay'
+import { integer as finiteInteger, object, pick, text } from '../wire'
 import type {
   AgentRun,
   AgentRunEvent,
   AgentRunEventPage,
   AgentRunPinnedSkill,
 } from '../types'
-
-type JsonObject = Record<string, unknown>
-
-function object(value: unknown): JsonObject {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as JsonObject)
-    : {}
-}
-
-function pick(source: JsonObject, ...keys: string[]): unknown {
-  for (const key of keys) {
-    if (Object.hasOwn(source, key)) return source[key]
-  }
-  return undefined
-}
-
-function text(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null
-}
-
-function finiteInteger(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) ? value : null
-}
 
 function pinnedSkills(value: unknown): AgentRunPinnedSkill[] {
   if (Array.isArray(value)) {
@@ -70,10 +49,7 @@ export function normalizeAgentRun(value: unknown): AgentRun {
   const rawStatus = text(pick(source, 'status')) ?? 'unknown'
   const cancelRequestedAt = text(pick(source, 'cancelRequestedAt', 'cancel_requested_at'))
   const status =
-    cancelRequestedAt &&
-    !['completed', 'failed', 'cancelled', 'timed_out'].includes(rawStatus)
-      ? 'cancelling'
-      : rawStatus
+    cancelRequestedAt && !TERMINAL_RUN_STATUSES.has(rawStatus) ? 'cancelling' : rawStatus
 
   return {
     runId,

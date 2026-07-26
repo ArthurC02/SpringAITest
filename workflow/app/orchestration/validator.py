@@ -8,8 +8,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.orchestration.canonical import canonical_definition, canonical_json, sha256
-from app.orchestration.catalog import COMPILER_CONTRACT_VERSION, get
+from app.orchestration.catalog import get
 from app.orchestration.models import GraphDiagnostic
+from app.workflow_contracts import (
+    AGENT_LOOP_REQUIRED_STAGES,
+    AGENT_REQUIRED_STAGES,
+    AGENT_STAGE_ORDER,
+)
 
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 _FORBIDDEN_KEYS = frozenset(
@@ -28,26 +33,6 @@ _FORBIDDEN_KEYS = frozenset(
         "agent_revision",
     }
 )
-_AGENT_REQUIRED = frozenset(
-    {
-        "start",
-        "end",
-        "dependency_and_capability_preflight",
-        "inject_authorized_context",
-        "checkpoint",
-        "bounded_agent_loop",
-        "validate_structured_output",
-        "bounded_repair_or_controlled_failure",
-    }
-)
-_AGENT_LOOP_REQUIRED = frozenset(
-    {
-        "model_step",
-        "tool_policy_and_approval_gate",
-        "tool_call_and_observation",
-        "checkpoint_and_budget_gate",
-    }
-)
 _VERIFIER_LOOP_REQUIRED = frozenset(
     {
         "model_step",
@@ -61,23 +46,6 @@ _WORKER_ONLY_TYPES = frozenset(
         "tool_call_and_observation",
     }
 )
-_ORCHESTRATOR_REQUIRED = frozenset(
-    {
-        "start",
-        "end",
-        "acquire_context_and_analyze_problem",
-        "sufficiency_gate",
-        "decompose_work",
-        "dispatch_agents",
-        "join_worker_results",
-        "invoke_verifier",
-        "bounded_repair",
-        "aggregate_results",
-        "respond",
-        "audit",
-    }
-)
-
 _ORCHESTRATOR_STAGE_ORDER = (
     "start",
     "acquire_context_and_analyze_problem",
@@ -92,16 +60,7 @@ _ORCHESTRATOR_STAGE_ORDER = (
     "audit",
     "end",
 )
-_AGENT_STAGE_ORDER = (
-    "start",
-    "dependency_and_capability_preflight",
-    "inject_authorized_context",
-    "checkpoint",
-    "bounded_agent_loop",
-    "validate_structured_output",
-    "bounded_repair_or_controlled_failure",
-    "end",
-)
+_ORCHESTRATOR_REQUIRED = frozenset(_ORCHESTRATOR_STAGE_ORDER)
 _EXPLICIT_LOOP_TYPES = frozenset({"bounded_agent_loop", "bounded_repair"})
 
 
@@ -362,7 +321,7 @@ def _validate_stage_order(
     forward: dict[str, list[str]],
     state: _State,
 ) -> None:
-    order = _ORCHESTRATOR_STAGE_ORDER if kind == "orchestrator" else _AGENT_STAGE_ORDER if kind == "agent-runtime" else ()
+    order = _ORCHESTRATOR_STAGE_ORDER if kind == "orchestrator" else AGENT_STAGE_ORDER if kind == "agent-runtime" else ()
     if not order:
         return
     ids_by_type: dict[str, list[str]] = defaultdict(list)
@@ -559,7 +518,7 @@ def validate(definition: Any, ui_metadata: Any = None) -> ValidationResult:
                     node_id=node_id,
                 )
     types = {str(node.get("type")) for node in nodes}
-    required = _AGENT_REQUIRED if kind == "agent-runtime" else _ORCHESTRATOR_REQUIRED if kind == "orchestrator" else frozenset()
+    required = AGENT_REQUIRED_STAGES if kind == "agent-runtime" else _ORCHESTRATOR_REQUIRED if kind == "orchestrator" else frozenset()
     for missing in sorted(required - types):
         state.error("$.definition.nodes", "missing_required_stage", f"Graph kind '{kind}' requires '{missing}'.")
     if kind == "agent-runtime":
@@ -569,7 +528,7 @@ def validate(definition: Any, ui_metadata: Any = None) -> ValidationResult:
             loop_required = (
                 _VERIFIER_LOOP_REQUIRED
                 if runtime_variant == "verifier"
-                else _AGENT_LOOP_REQUIRED
+                else AGENT_LOOP_REQUIRED_STAGES
             )
             for missing in sorted(loop_required - child_types):
                 state.error("$.definition.nodes", "missing_required_loop_stage", f"bounded_agent_loop requires '{missing}'.", node_id=str(loops[0].get("id")))
@@ -603,6 +562,3 @@ def validate(definition: Any, ui_metadata: Any = None) -> ValidationResult:
             errors=[GraphDiagnostic(path="$.definition", code="invalid_json_value", message="Definition and UI metadata must contain finite JSON values.")],
         )
 
-
-def contract_version() -> str:
-    return COMPILER_CONTRACT_VERSION

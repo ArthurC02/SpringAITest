@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -17,7 +16,12 @@ from app.business_rules.catalog import (
     ROLE_VALUES,
     RULE_SET_VERSION,
 )
-from app.business_rules.decimal_value import DecimalWireError, parse_decimal_wire
+from app.business_rules.decimal_value import (
+    DecimalWireError,
+    is_decimal_wire,
+    is_number,
+    parse_decimal_wire,
+)
 from app.business_rules.models import (
     CanonicalRule,
     CanonicalRuleSet,
@@ -71,30 +75,13 @@ class _State:
         return True
 
 
-def _is_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float, Decimal))
-        and not isinstance(value, bool)
-        and not (
-            isinstance(value, float)
-            and not math.isfinite(value)
-            or isinstance(value, Decimal)
-            and not value.is_finite()
-        )
-    )
-
-
 def _valid_scalar_for_fact(value: Any, fact_type: str) -> bool:
     if fact_type in ("string", "enum"):
         return isinstance(value, str)
     if fact_type == "number":
-        return _is_number(value)
+        return is_number(value)
     if fact_type == "decimal":
-        try:
-            parse_decimal_wire(value)
-        except DecimalWireError:
-            return False
-        return True
+        return is_decimal_wire(value)
     if fact_type == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     return False

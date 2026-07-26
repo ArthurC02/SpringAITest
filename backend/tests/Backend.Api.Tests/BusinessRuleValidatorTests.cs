@@ -1,8 +1,8 @@
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using Backend.Api.Agents;
 using Backend.Api.Common;
+using static Backend.Api.Tests.StubHandler; // 共用的 Json(status, body) 回應工廠(Fakes.cs)
 
 namespace Backend.Api.Tests;
 
@@ -136,31 +136,4 @@ public sealed class BusinessRuleValidatorTests
         Assert.Contains("回應內容為空", empty.Message);
     }
 
-    private static StubHandler Json(HttpStatusCode status, string body)
-        => new(_ => new HttpResponseMessage(status)
-        {
-            Content = new StringContent(body, Encoding.UTF8, "application/json"),
-        });
-
-    private sealed class StubHandler : HttpMessageHandler
-    {
-        private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
-
-        public StubHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) => _responder = responder;
-
-        public HttpRequestMessage? LastRequest { get; private set; }
-        public string LastBody { get; private set; } = string.Empty;
-
-        protected override async Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            LastRequest = request;
-            LastBody = request.Content is null
-                ? string.Empty
-                : await request.Content.ReadAsStringAsync(cancellationToken);
-            return _responder(request);
-        }
-
-        public string Header(string name) => LastRequest!.Headers.GetValues(name).Single();
-    }
 }

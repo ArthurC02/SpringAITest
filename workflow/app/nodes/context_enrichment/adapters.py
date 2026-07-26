@@ -5,20 +5,15 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from app.backend_http import get_client, search_chunks_scoped
-from app.settings import settings
+from app.backend_http import get_client, internal_headers, search_chunks_scoped
+from app.security import RequestContext
 
 
 class BackendContextPolicy:
-    async def get_active(self, *, tenant_id: str, user_id: str, role: str) -> dict[str, Any]:
+    async def get_active(self, *, ctx: RequestContext) -> dict[str, Any]:
         response = await get_client().get(
             "/api/context-policies",
-            headers={
-                "X-Internal-Token": settings.internal_api_token,
-                "X-Tenant-Id": tenant_id,
-                "X-User-Id": user_id,
-                "X-User-Role": role,
-            },
+            headers=internal_headers(ctx),
         )
         response.raise_for_status()
         payload = response.json()
@@ -32,20 +27,13 @@ class BackendContextStore:
         self,
         *,
         context_id: str,
-        tenant_id: str,
-        user_id: str,
-        role: str,
+        ctx: RequestContext,
         candidate: dict[str, Any],
     ) -> dict[str, Any]:
         response = await get_client().post(
             f"/api/contexts/{context_id}/revisions",
             json=candidate,
-            headers={
-                "X-Internal-Token": settings.internal_api_token,
-                "X-Tenant-Id": tenant_id,
-                "X-User-Id": user_id,
-                "X-User-Role": role,
-            },
+            headers=internal_headers(ctx),
         )
         response.raise_for_status()
         payload = response.json()

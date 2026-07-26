@@ -434,11 +434,6 @@ class ProductionChildRuntime:
                 snapshot.root_run_id, child.id, self.ctx
             )
             if status.status in {"completed", "failed", "cancelled"}:
-                mapped = (
-                    status.status
-                    if status.status in {"completed", "failed", "cancelled"}
-                    else "failed"
-                )
                 output_size = len(
                     json.dumps(
                         status.output,
@@ -467,7 +462,7 @@ class ProductionChildRuntime:
                     worker_agent_id=status.agent_id,
                     worker_agent_revision=status.agent_revision,
                     worker_workflow_revision=status.workflow_revision,
-                    status="failed" if oversized else mapped,
+                    status="failed" if oversized else status.status,
                     output={} if oversized else status.output,
                     citations=[] if oversized else status.citations,
                     error_code=(

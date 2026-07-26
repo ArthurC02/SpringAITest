@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.Agents;
@@ -5,6 +7,38 @@ using Backend.Api.Common;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Tests;
+
+/// <summary>
+/// 可控回應、可捕捉最後一次請求(含 body)的 HttpMessageHandler。三個對 workflow(:8001)出站的
+/// client 測試(skill validate / skill validate-package / business-rules validate)共用同一份。
+/// </summary>
+public sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
+{
+    /// <summary>最常見的腳本:固定狀態碼 + JSON body。</summary>
+    public static StubHandler Json(HttpStatusCode status, string body)
+        => new(_ => new HttpResponseMessage(status)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        });
+
+    public HttpRequestMessage? LastRequest { get; private set; }
+
+    public string LastBody { get; private set; } = string.Empty;
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        LastRequest = request;
+        if (request.Content is not null)
+        {
+            LastBody = await request.Content.ReadAsStringAsync(cancellationToken);
+        }
+
+        return responder(request);
+    }
+
+    public string Header(string name) => LastRequest!.Headers.GetValues(name).Single();
+}
 
 // 六個儲存庫 fake 已升格為 Backend.Api.Data.InMemory.InMemory*Repository(見 FakeRepositoryAliases.cs 的 re-export)。
 // 本檔僅保留 Skill 驗證器 fake — 它取代的是對 workflow(:8001)的 HTTP 呼叫,不是資料層,故不升格。

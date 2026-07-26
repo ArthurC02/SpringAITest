@@ -30,7 +30,7 @@ from app.runtime.orchestrator import (
     _json_size,
 )
 from app.orchestration.validator import validate
-from tests.test_orchestration_graph_ir import agent_runtime_graph
+from tests.test_orchestration_graph_ir import agent_runtime_graph, orchestrator_graph
 from app.runtime.models import canonical_json_bytes, canonical_json_sha256, parse_json_preserving_numbers
 from app.workflow_contracts import GRAPH_IR_COMPILER_CONTRACT_VERSION
 
@@ -40,7 +40,7 @@ def _hash(value: str) -> str:
 
 
 def _snapshot(**limits: Any) -> RootExecutionSnapshot:
-    graph = _orchestrator_graph()
+    graph = orchestrator_graph()
     graph_result = validate(graph)
     rules: dict[str, Any] = {"version": 1, "rules": []}
     policies = {"dispatchMode": "bounded-parallel"}
@@ -107,39 +107,6 @@ def _snapshot(**limits: Any) -> RootExecutionSnapshot:
     return RootExecutionSnapshot(
         snapshot_hash=canonical_json_sha256(canonical_payload), **payload
     )
-
-
-def _orchestrator_graph() -> dict[str, Any]:
-    stages = [
-        ("start", "start", {}),
-        ("context", "acquire_context_and_analyze_problem", {}),
-        ("sufficiency", "sufficiency_gate", {}),
-        ("decompose", "decompose_work", {}),
-        ("dispatch", "dispatch_agents", {}),
-        ("join", "join_worker_results", {}),
-        ("verify", "invoke_verifier", {}),
-        ("repair", "bounded_repair", {"maxIterations": 2}),
-        ("aggregate", "aggregate_results", {}),
-        ("respond", "respond", {}),
-        ("audit", "audit", {}),
-        ("end", "end", {}),
-    ]
-    return {
-        "schemaVersion": 1,
-        "kind": "orchestrator",
-        "nodes": [
-            {"id": node_id, "type": node_type, "typeVersion": "1.0", "config": config}
-            for node_id, node_type, config in stages
-        ],
-        "edges": [
-            {"id": f"e{i}", "source": {"nodeId": stages[i][0], "port": "out"}, "target": {"nodeId": stages[i + 1][0], "port": "in"}}
-            for i in range(len(stages) - 1)
-        ] + [
-            {"id": "tasks", "source": {"nodeId": "decompose", "port": "tasks"}, "target": {"nodeId": "dispatch", "port": "tasks"}},
-            {"id": "results", "source": {"nodeId": "dispatch", "port": "results"}, "target": {"nodeId": "join", "port": "results"}},
-        ],
-        "governance": {"maxSteps": 40, "maxConcurrency": 4},
-    }
 
 
 class FakeRuntime:

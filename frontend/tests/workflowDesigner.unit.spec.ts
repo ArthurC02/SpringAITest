@@ -2,7 +2,7 @@ import { expect, test } from 'vitest'
 import { canConnect } from '../src/workflowDesigner/connection'
 import { patchPositions, semanticFingerprint } from '../src/workflowDesigner/graphAdapter'
 import { semanticDiff } from '../src/workflowDesigner/diff'
-import { canDeleteNode, catalogForKind, isRequiredStage } from '../src/workflowDesigner/catalog'
+import { canDeleteNode, catalogForKind } from '../src/workflowDesigner/catalog'
 import { reconnectSemanticEdge, removeSemanticEdges, removeSemanticNodes } from '../src/workflowDesigner/editing'
 import { createBlankDraft } from '../src/workflowDesigner/draft'
 import type { WorkflowDefinition, WorkflowNodeType, WorkflowUiMetadata } from '../src/types'
@@ -44,8 +44,10 @@ test.describe('Workflow Designer graph boundary', () => {
   test('palette is kind-scoped and required-stage metadata remains locked', () => {
     expect(catalogForKind(catalog, 'orchestrator').map((node) => node.type)).toEqual(['start', 'join', 'optional'])
     expect(catalogForKind(catalog, 'agent-runtime').map((node) => node.type)).toEqual(['start'])
-    expect(isRequiredStage(catalog, 'join', 'orchestrator')).toBe(true)
-    expect(isRequiredStage(catalog, 'join', 'agent-runtime')).toBe(false)
+    // The gatekeeper is canDeleteNode: a required stage stays locked, and a node absent
+    // from the kind's catalog fails closed rather than becoming deletable.
+    expect(canDeleteNode(catalog, 'orchestrator', 'join', '1.0')).toBe(false)
+    expect(canDeleteNode(catalog, 'agent-runtime', 'join', '1.0')).toBe(false)
   })
 
   test('agent-runtime palette filters worker-only stages from verifier variants', () => {

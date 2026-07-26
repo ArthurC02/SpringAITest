@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class ContextPolicyPort(Protocol):
-    async def get_active(self, *, tenant_id: str, user_id: str, role: str) -> dict[str, Any]: ...
+    async def get_active(self, *, ctx: "RequestContext") -> dict[str, Any]: ...
 
 
 class ContextStorePort(Protocol):
@@ -20,9 +20,7 @@ class ContextStorePort(Protocol):
         self,
         *,
         context_id: str,
-        tenant_id: str,
-        user_id: str,
-        role: str,
+        ctx: "RequestContext",
         candidate: dict[str, Any],
     ) -> dict[str, Any]: ...
 

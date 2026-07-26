@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using Backend.Api.Common;
 using Backend.Api.Skills;
+using static Backend.Api.Tests.StubHandler; // 共用的 Json(status, body) 回應工廠(Fakes.cs)
 
 namespace Backend.Api.Tests;
 
@@ -27,12 +28,6 @@ public sealed class SkillPackageValidatorTests
         => Build(stub).ValidatePackageAsync(
             PackageBytes, "sales-helper.zip", expectedName: null,
             "demo-a", "admin-a", "ADMIN", CancellationToken.None);
-
-    private static StubHandler Json(HttpStatusCode status, string body)
-        => new(_ => new HttpResponseMessage(status)
-        {
-            Content = new StringContent(body, Encoding.UTF8, "application/json"),
-        });
 
     private const string ValidBody =
         """
@@ -278,31 +273,5 @@ public sealed class SkillPackageValidatorTests
 
         Assert.Equal(502, error.Status);
         Assert.Equal("Skill 套件驗證服務呼叫失敗：引擎回應違反契約（" + detail + "）", error.Message);
-    }
-
-    /// <summary>可控回應、可捕捉最後一次請求(含 multipart body 字串)的 HttpMessageHandler。</summary>
-    private sealed class StubHandler : HttpMessageHandler
-    {
-        private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
-
-        public StubHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) => _responder = responder;
-
-        public HttpRequestMessage? LastRequest { get; private set; }
-
-        public string LastBody { get; private set; } = string.Empty;
-
-        protected override async Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            LastRequest = request;
-            if (request.Content is not null)
-            {
-                LastBody = await request.Content.ReadAsStringAsync(cancellationToken);
-            }
-
-            return _responder(request);
-        }
-
-        public string Header(string name) => LastRequest!.Headers.GetValues(name).Single();
     }
 }

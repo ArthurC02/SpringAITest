@@ -320,8 +320,10 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             },
         };
     });
-// workflow.manage capability policy(D1):識別 JWT 的 capabilities claim(見 ClaimsPrincipalExtensions)。
-// 本期無端點消費此 policy —— 只落地 policy + 測試,SYSTEM_ADMIN UI 之後才接。fail-closed:缺 claim 即拒絕,
+// workflow.manage capability policy(D1 落地):識別 JWT 的 capabilities claim(見 ClaimsPrincipalExtensions)。
+// 目前的消費點有三:D4 的 WorkflowAdminControllerBase(/api/admin/workflows*、/api/admin/orchestrators*)、
+// D5 的 OrchestratorRunController.Start(/api/admin/orchestrators/{id}/runs)、
+// D7 的 OperationsGovernanceController(/api/admin/operations/*)。fail-closed:缺 claim 即拒絕,
 // 單純 tenant ADMIN 不自動取得(不新增可繞過 tenant/policy 的隱含超級角色,02-spec §9)。
 builder.Services.AddAuthorization(options =>
 {

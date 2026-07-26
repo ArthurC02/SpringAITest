@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import partial
+
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.runtime.backend import BackendRunConflict, BackendRunError
@@ -14,33 +16,10 @@ from app.runtime.models import (
     RuntimeRunResult,
     StartRunRequest,
 )
-from app.security import RequestContext, require_internal
+from app.security import require_runtime_context
 from app.settings import settings
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runtime"])
-
-
-class AgentRuntimeFeatureGateMiddleware:
-    """Return 404 before routing/body parsing when the D3 flag is disabled."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if (
-            scope.get("type") == "http"
-            and str(scope.get("path") or "").startswith("/agent-runs/")
-            and not settings.agent_test_run_enabled
-        ):
-            response = HTTPException(status_code=404, detail="Not Found")
-            from starlette.responses import JSONResponse
-
-            await JSONResponse(
-                status_code=response.status_code,
-                content={"detail": response.detail},
-            )(scope, receive, send)
-            return
-        await self.app(scope, receive, send)
 
 
 def _manager(request: Request) -> RuntimeRunManager:
@@ -56,24 +35,11 @@ def _manager(request: Request) -> RuntimeRunManager:
     return value
 
 
-async def _context(request: Request) -> RequestContext:
-    # Feature-off is deliberately resolved before authentication: the route
-    # remains indistinguishable from an uninstalled capability.
-    if not settings.agent_test_run_enabled:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    await require_internal(request.headers.get("X-Internal-Token"))
-    tenant = (request.headers.get("X-Tenant-Id") or "").strip()
-    user = (request.headers.get("X-User-Id") or "").strip()
-    role = (request.headers.get("X-User-Role") or "").strip()
-    if not tenant or not user or not role:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": "missing_context",
-                "message": "Agent runtime requires tenant, user, and role identity.",
-            },
-        )
-    return RequestContext(tenant_id=tenant, user_id=user, role=role)
+_context = partial(
+    require_runtime_context,
+    flag_name="agent_test_run_enabled",
+    message="Agent runtime requires tenant, user, and role identity.",
+)
 
 
 @router.post(

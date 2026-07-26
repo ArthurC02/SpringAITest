@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using static Platform.Web.Tests.ApiTestHelpers;
 
 namespace Platform.Web.Tests;
 
@@ -19,22 +20,6 @@ public sealed class AgentApiTests : IDisposable
     private readonly TestWebAppFactory _factory = new(agentBuilderEnabled: true);
 
     public void Dispose() => _factory.Dispose();
-
-    private static HttpRequestMessage Req(string method, string path, string? ifMatch = null, object? body = null)
-    {
-        var req = new HttpRequestMessage(new HttpMethod(method), path);
-        if (ifMatch is not null)
-        {
-            req.Headers.TryAddWithoutValidation("If-Match", ifMatch);
-        }
-
-        if (body is not null)
-        {
-            req.Content = JsonContent.Create(body);
-        }
-
-        return req;
-    }
 
     // ---- (a) flag off:所有 /api/agents* → 404,且請求不得抵達代理 ----
 
@@ -56,7 +41,7 @@ public sealed class AgentApiTests : IDisposable
         // 帶有效 ADMIN token 仍應 404(flag 關閉在認證之前 fail-closed,不洩漏端點存在)。
         var client = flagOff.CreateClient().WithToken(flagOff.IssueToken("admin-a", "ADMIN", "demo-a"));
 
-        var resp = await client.SendAsync(Req(method, path, body: method is "POST" or "PUT" ? new { slug = "x" } : null));
+        var resp = await client.SendAsync(Request(method, path, body: method is "POST" or "PUT" ? new { slug = "x" } : null));
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
@@ -83,7 +68,7 @@ public sealed class AgentApiTests : IDisposable
     public async Task Endpoints_FlagOn_Return401_WithoutToken(string method, string path)
     {
         var resp = await _factory.CreateClient().SendAsync(
-            Req(method, path, body: method is "POST" or "PUT" ? new { slug = "x" } : null));
+            Request(method, path, body: method is "POST" or "PUT" ? new { slug = "x" } : null));
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         Assert.Equal(401, (await resp.ReadJsonAsync())["status"]!.GetValue<int>());
@@ -107,7 +92,7 @@ public sealed class AgentApiTests : IDisposable
         var user = _factory.CreateClient().WithToken(_factory.IssueToken("user-a", "USER", "demo-a"));
         var before = FakeAgentService.Calls.Count;
 
-        var resp = await user.SendAsync(Req(
+        var resp = await user.SendAsync(Request(
             method, path,
             ifMatch: method is "PUT" or "POST" ? FakeAgentService.CurrentETag : null,
             body: method is "POST" or "PUT" ? new { slug = "x" } : null));
@@ -164,7 +149,7 @@ public sealed class AgentApiTests : IDisposable
     [Fact]
     public async Task UpdateDraft_MatchingIfMatch_Returns200_WithNewEtag()
     {
-        var resp = await _factory.AdminClient().SendAsync(Req(
+        var resp = await _factory.AdminClient().SendAsync(Request(
             "PUT", ExistingPath + "/draft", ifMatch: FakeAgentService.CurrentETag, body: new { name = "改名" }));
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -175,7 +160,7 @@ public sealed class AgentApiTests : IDisposable
     [Fact]
     public async Task UpdateDraft_StaleIfMatch_Returns409_Passthrough()
     {
-        var resp = await _factory.AdminClient().SendAsync(Req(
+        var resp = await _factory.AdminClient().SendAsync(Request(
             "PUT", ExistingPath + "/draft", ifMatch: "\"999\"", body: new { name = "改名" }));
 
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
@@ -187,7 +172,7 @@ public sealed class AgentApiTests : IDisposable
     [Fact]
     public async Task UpdateDraft_MissingIfMatch_Returns428_Passthrough()
     {
-        var resp = await _factory.AdminClient().SendAsync(Req(
+        var resp = await _factory.AdminClient().SendAsync(Request(
             "PUT", ExistingPath + "/draft", body: new { name = "改名" }));
 
         Assert.Equal(HttpStatusCode.PreconditionRequired, resp.StatusCode);
@@ -197,7 +182,7 @@ public sealed class AgentApiTests : IDisposable
     [Fact]
     public async Task Validate_MatchingIfMatch_Returns200()
     {
-        var resp = await _factory.AdminClient().SendAsync(Req(
+        var resp = await _factory.AdminClient().SendAsync(Request(
             "POST", ExistingPath + "/validate", ifMatch: FakeAgentService.CurrentETag));
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -257,7 +242,7 @@ public sealed class AgentApiTests : IDisposable
     [Fact]
     public async Task Publish_Admin_ForwardsExpectedDraftVersion_AndReturnsAgentSnapshot()
     {
-        var resp = await _factory.AdminClient().SendAsync(Req(
+        var resp = await _factory.AdminClient().SendAsync(Request(
             "POST",
             ExistingPath + "/publish",
             ifMatch: FakeAgentService.CurrentETag,
@@ -271,7 +256,7 @@ public sealed class AgentApiTests : IDisposable
     [Fact]
     public async Task Publish_MissingExpectedDraftVersion_Returns400_Passthrough()
     {
-        var resp = await _factory.AdminClient().SendAsync(Req(
+        var resp = await _factory.AdminClient().SendAsync(Request(
             "POST",
             ExistingPath + "/publish",
             ifMatch: FakeAgentService.CurrentETag,
@@ -327,7 +312,7 @@ public sealed class AgentApiTests : IDisposable
         using var flagOff = new TestWebAppFactory(agentBuilderEnabled: false);
         var calls = FakeWorkflowService.EngineCalls.Count;
 
-        var response = await flagOff.CreateClient().SendAsync(Req(
+        var response = await flagOff.CreateClient().SendAsync(Request(
             method,
             path,
             body: method == "POST"
@@ -343,7 +328,7 @@ public sealed class AgentApiTests : IDisposable
     [InlineData("POST", "/api/agents/rules/validate")]
     public async Task RuleEndpoints_RequireAuthenticationAndAdmin(string method, string path)
     {
-        var anonymous = await _factory.CreateClient().SendAsync(Req(
+        var anonymous = await _factory.CreateClient().SendAsync(Request(
             method,
             path,
             body: method == "POST"
@@ -353,7 +338,7 @@ public sealed class AgentApiTests : IDisposable
 
         var calls = FakeWorkflowService.EngineCalls.Count;
         var user = _factory.CreateClient().WithToken(_factory.IssueToken("user-a", "USER", "demo-a"));
-        var forbidden = await user.SendAsync(Req(
+        var forbidden = await user.SendAsync(Request(
             method,
             path,
             body: method == "POST"

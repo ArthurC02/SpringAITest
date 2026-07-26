@@ -233,7 +233,9 @@ public sealed class ChatServiceTests
         public List<UserContext> ListCalls { get; } = new();
         public List<ChatResponse> Items { get; } = new();
 
-        public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
+        public Task<ChatResponse> AddAsync(
+            string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata = null,
+            CancellationToken ct = default)
             => throw new NotSupportedException("本 fake 只服務歷史查詢");
 
         public Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)

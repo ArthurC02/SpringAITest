@@ -36,6 +36,14 @@ from tests.test_root_orchestrator_production import _snapshot_with_input
 client = TestClient(app)
 
 
+def _guid_snapshot() -> RootExecutionSnapshot:
+    """Backend 的 GUID 契約：把測試 fixture 的 root_run_id 換成合法 GUID 後重算雜湊。"""
+    raw = _snapshot_with_input().model_dump(mode="python")
+    raw["root_run_id"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    raw.pop("snapshot_hash")
+    return RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw)
+
+
 class _Policy:
     async def get_active(self, **_kwargs):
         return {
@@ -795,10 +803,7 @@ async def test_either_gate_off_falls_back_to_the_pre_e1_acquirer(
 
 @pytest.mark.asyncio
 async def test_child_wire_carries_typed_expected_context_ref(monkeypatch):
-    raw = _snapshot_with_input().model_dump(mode="python")
-    raw["root_run_id"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    raw.pop("snapshot_hash")
-    snapshot = RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw)
+    snapshot = _guid_snapshot()
     backend = OrchestratorBackendClient()
     captured = {}
 
@@ -852,10 +857,7 @@ async def test_child_wire_carries_typed_expected_context_ref(monkeypatch):
 async def test_backend_acquire_rejects_provenance_beyond_snapshot_authority(
     monkeypatch, source_type, source_id
 ):
-    raw = _snapshot_with_input().model_dump(mode="python")
-    raw["root_run_id"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    raw.pop("snapshot_hash")
-    snapshot = RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw)
+    snapshot = _guid_snapshot()
     backend = OrchestratorBackendClient()
 
     async def response(*_args, **_kwargs):
@@ -913,10 +915,7 @@ async def test_engine_only_state_keys_never_reach_the_backend_acquire_call(monke
 
 @pytest.mark.asyncio
 async def test_backend_acquire_rejects_context_without_exact_unique_provenance(monkeypatch):
-    raw = _snapshot_with_input().model_dump(mode="python")
-    raw["root_run_id"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    raw.pop("snapshot_hash")
-    snapshot = RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw)
+    snapshot = _guid_snapshot()
     backend = OrchestratorBackendClient()
 
     async def response(*_args, **_kwargs):

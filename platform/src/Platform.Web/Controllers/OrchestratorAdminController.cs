@@ -1,65 +1,14 @@
-using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Platform.Service.Abstractions;
 
 namespace Platform.Web.Controllers;
 
+/// <summary>Orchestrator 管理端點與 workflows 的動作集逐字相同,全部繼承自
+/// <see cref="WorkflowAdminControllerBase"/>;此處只綁路由與 backend resource 名稱。</summary>
 [Route("api/admin/orchestrators")]
 public sealed class OrchestratorAdminController : WorkflowAdminControllerBase
 {
     public OrchestratorAdminController(IWorkflowAdminService service) : base(service, "orchestrators")
     {
     }
-
-    [HttpGet]
-    public async Task<IActionResult> List(CancellationToken ct) =>
-        Write(await Send(HttpMethod.Get, null, null, null, false, ct));
-
-    [HttpPost]
-    public async Task<IActionResult> Create(
-        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body,
-        CancellationToken ct) =>
-        Write(await Send(HttpMethod.Post, null, null, body, false, ct));
-
-    [HttpGet("{id:guid}")]
-    public async Task<IActionResult> Get(Guid id, CancellationToken ct) =>
-        Write(await Send(HttpMethod.Get, id, null, null, false, ct));
-
-    [HttpPut("{id:guid}/draft")]
-    public async Task<IActionResult> Update(
-        Guid id,
-        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body,
-        CancellationToken ct) =>
-        Write(await Send(HttpMethod.Put, id, "draft", body, true, ct));
-
-    [HttpPost("{id:guid}/validate")]
-    public async Task<IActionResult> Validate(
-        Guid id,
-        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body,
-        CancellationToken ct) =>
-        Write(await Send(HttpMethod.Post, id, "validate", body, true, ct));
-
-    [HttpPost("{id:guid}/publish")]
-    public async Task<IActionResult> Publish(
-        Guid id,
-        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body,
-        CancellationToken ct) =>
-        Write(await Send(HttpMethod.Post, id, "publish", body, true, ct));
-
-    [HttpGet("{id:guid}/revisions")]
-    public async Task<IActionResult> Revisions(Guid id, CancellationToken ct) =>
-        Write(await Send(HttpMethod.Get, id, "revisions", null, false, ct));
-
-    [HttpPost("{id:guid}/revisions/{revision:int}/restore")]
-    public async Task<IActionResult> Restore(Guid id, int revision, CancellationToken ct) =>
-        Write(await Send(HttpMethod.Post, id, $"revisions/{revision}/restore", null, false, ct));
-
-    [HttpPost("{id:guid}/enable")]
-    public async Task<IActionResult> Enable(Guid id, CancellationToken ct) =>
-        Write(await Send(HttpMethod.Post, id, "enable", null, false, ct));
-
-    [HttpDelete("{id:guid}")]
-    public async Task<IActionResult> Disable(Guid id, CancellationToken ct) =>
-        Write(await Send(HttpMethod.Delete, id, null, null, false, ct));
 }

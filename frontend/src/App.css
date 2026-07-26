@@ -1,57 +1,3 @@
-.app {
-  width: min(820px, 100%);
-  height: 100svh;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  border-inline: 1px solid var(--border);
-  box-sizing: border-box;
-}
-
-.app__header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border);
-}
-
-.app__header h1 {
-  font-size: 20px;
-  margin: 0;
-}
-
-.app__badge {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text);
-  background: var(--code-bg);
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.app__clear {
-  margin-left: auto;
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.app__clear:hover:not(:disabled) {
-  background: var(--code-bg);
-}
-
-.app__clear:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
 .chat {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -658,45 +604,7 @@ details > summary {
   border-bottom: 1px solid var(--border);
 }
 
-/* 工作流:左清單 + 右執行面板 */
-.wf {
-  display: flex;
-  gap: 20px;
-  align-items: flex-start;
-}
-.wf__list {
-  flex: 0 0 260px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.wf__item {
-  text-align: left;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px;
-  background: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-.wf__item:hover {
-  background: var(--code-bg);
-}
-.wf__item--active {
-  border-color: var(--accent);
-}
-.wf__item-name {
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.wf__item-desc {
-  font-size: 12px;
-  color: var(--text);
-  margin-top: 4px;
-}
+/* Skill 執行面板 */
 .wf__panel {
   flex: 1 1 auto;
   min-width: 0;
@@ -951,10 +859,6 @@ details > summary {
   margin: 0;
   word-break: break-all;
 }
-.nodes-tab .nodecat {
-  max-height: none;
-}
-
 /* YAML 編輯器：透明 textarea 疊在 highlight.js 上色層之上。
    兩層的字體度量與內距必須完全一致，否則游標會跟文字錯位。 */
 .yaml {
@@ -1020,11 +924,7 @@ details > summary {
   color: var(--text-h);
 }
 
-/* 執行清單的來源徽章（code / 內建 / 自訂） */
-.badge--src-code {
-  background: var(--code-bg);
-  color: var(--text);
-}
+/* 執行清單的來源徽章（內建 / 自訂） */
 .badge--src-builtin {
   background: var(--success-bg);
   color: var(--success);

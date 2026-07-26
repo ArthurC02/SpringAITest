@@ -19,12 +19,11 @@ from typing import Any
 import httpx
 import yaml
 
-from app.backend_http import get_client
+from app.backend_http import get_client, internal_headers
 from app.engine import compiler, package
 from app.engine import skill as skill_mod
 from app.engine.skill import InputField
 from app.security import RequestContext
-from app.settings import settings
 from app.skills import LoadedSkill
 
 # 自訂 skill 沒有專屬的依賴組裝：沿用 kb_query 那組正式依賴（節點需要 llm/檢索/稽核時取得到）
@@ -71,16 +70,6 @@ def _is_agentic(definition: str) -> bool:
     return isinstance(metadata, dict) and metadata.get("kind") == "agentic"
 
 
-def _headers(ctx: RequestContext) -> dict[str, str]:
-    """服務間標頭：內部密鑰 + 身分（租戶邊界由 backend 依 X-Tenant-Id 過濾）。"""
-    return {
-        "X-Internal-Token": settings.internal_api_token,
-        "X-Tenant-Id": ctx.tenant_id,
-        "X-User-Id": ctx.user_id,
-        "X-User-Role": ctx.role,
-    }
-
-
 async def _fetch(path: str, ctx: RequestContext) -> Any | None:
     """GET backend；404 → None（含跨租戶不可見），其餘失敗 → BackendUnavailable。
 
@@ -89,7 +78,7 @@ async def _fetch(path: str, ctx: RequestContext) -> Any | None:
     """
     try:
         resp = await get_client().get(
-            path, headers=_headers(ctx), timeout=httpx.Timeout(10.0)
+            path, headers=internal_headers(ctx), timeout=httpx.Timeout(10.0)
         )
         if resp.status_code == 404:
             return None

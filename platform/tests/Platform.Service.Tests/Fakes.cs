@@ -62,23 +62,15 @@ public sealed class FakeConversationStore : IConversationStore
     public List<(string Prompt, string Reply)> Saved { get; } = new();
     public List<UserContext> AddCalledWith { get; } = new();
 
-    /// <summary>與 <see cref="Saved"/> 同索引的 D6 lineage metadata(未帶時為 null)。必須覆寫 5 參多載才
-    /// 收得到:<see cref="IConversationStore"/> 的預設介面方法會把 metadata 丟掉。</summary>
+    /// <summary>與 <see cref="Saved"/> 同索引的 D6 lineage metadata(未帶時為 null)。</summary>
     public List<ChatTurnMetadata?> SavedMetadata { get; } = new();
     public List<ChatResponse> Items { get; } = new();
     public bool ThrowOnAdd { get; set; }
     private long _nextId = 1;
 
-    public async Task<ChatResponse> AddAsync(
-        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata,
+    public Task<ChatResponse> AddAsync(
+        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata = null,
         CancellationToken ct = default)
-    {
-        var response = await AddAsync(prompt, reply, ctx, ct);
-        SavedMetadata.Add(metadata);
-        return response;
-    }
-
-    public Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default)
     {
         if (ThrowOnAdd)
         {
@@ -87,6 +79,7 @@ public sealed class FakeConversationStore : IConversationStore
 
         Saved.Add((prompt, reply));
         AddCalledWith.Add(ctx);
+        SavedMetadata.Add(metadata);
         return Task.FromResult(new ChatResponse(_nextId++, reply, DateTime.UtcNow));
     }
 

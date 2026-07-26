@@ -142,5 +142,8 @@ public sealed class RuntimeDiscoveryReplayRouteTests : IClassFixture<RuntimeDisc
         public Task<OrchestratorChildStatusResponse?> GetChildAsync(string a,string b,Guid c,Guid d,CancellationToken e)=>throw new NotSupportedException();
         public Task<OrchestratorRunWriteResult> TransitionAsync(string a,string b,Guid c,OrchestratorRootTransitionRequest d,CancellationToken e)=>throw new NotSupportedException();
         public Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string a,string b,Guid c,OrchestratorContextAcquireRequest d,CancellationToken e)=>throw new NotSupportedException();
+        public Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string a,string b,Guid c,Guid d,CancellationToken e)=>throw new NotSupportedException();
+        public Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string a,string b,Guid c,Guid d,Guid e,CancellationToken f)=>throw new NotSupportedException();
+        public Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string a,string b,Guid c,Guid d,Guid e,long f,OrchestratorContextDeltaRequest g,CancellationToken h)=>throw new NotSupportedException();
     }
 }

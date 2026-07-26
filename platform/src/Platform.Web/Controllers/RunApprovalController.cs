@@ -14,44 +14,29 @@ namespace Platform.Web.Controllers;
 [ApiController]
 [Route("api/runs/{runId:guid}/approvals")]
 [Authorize]
-public sealed class RunApprovalController(IAgentRunService runs) : ControllerBase
+public sealed class RunApprovalController(IAgentRunService runs) : ProxyControllerBase
 {
-    private string? IdempotencyKey => Request.Headers.TryGetValue("Idempotency-Key", out var value)
-        ? value.ToString()
-        : null;
-
     [HttpGet]
-    public Task<IActionResult> List(Guid runId, CancellationToken ct)
-        => Write(runs.ApprovalsAsync(runId, User.ToUserContext(), ct));
+    public async Task<IActionResult> List(Guid runId, CancellationToken ct)
+        => Write(await runs.ApprovalsAsync(runId, User.ToUserContext(), ct));
 
     [HttpPost("{approvalId:guid}/approve")]
-    public Task<IActionResult> Approve(
+    public async Task<IActionResult> Approve(
         Guid runId,
         Guid approvalId,
         [FromBody] ApprovalDecisionRequest? request,
         CancellationToken ct)
-        => Write(runs.DecideApprovalAsync(
+        => Write(await runs.DecideApprovalAsync(
             runId, approvalId, true, request?.Reason, IdempotencyKey, User.ToUserContext(), ct));
 
     [HttpPost("{approvalId:guid}/reject")]
-    public Task<IActionResult> Reject(
+    public async Task<IActionResult> Reject(
         Guid runId,
         Guid approvalId,
         [FromBody] ApprovalDecisionRequest? request,
         CancellationToken ct)
-        => Write(runs.DecideApprovalAsync(
+        => Write(await runs.DecideApprovalAsync(
             runId, approvalId, false, request?.Reason, IdempotencyKey, User.ToUserContext(), ct));
-
-    private static async Task<IActionResult> Write(Task<AgentProxyResponse> responseTask)
-    {
-        var response = await responseTask;
-        return new ContentResult
-        {
-            StatusCode = response.Status,
-            Content = response.Body,
-            ContentType = "application/json; charset=utf-8",
-        };
-    }
 }
 
 public sealed record ApprovalDecisionRequest(

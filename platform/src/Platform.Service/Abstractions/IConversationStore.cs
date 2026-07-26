@@ -8,12 +8,13 @@ namespace Platform.Service.Abstractions;
 /// </summary>
 public interface IConversationStore
 {
-    /// <summary>新增一輪對話,回 backend 產生的 id 與 createdAt(reply 原樣帶回)。</summary>
-    Task<ChatResponse> AddAsync(string prompt, string reply, UserContext ctx, CancellationToken ct = default);
-
+    /// <summary>
+    /// 新增一輪對話,回 backend 產生的 id 與 createdAt(reply 原樣帶回)。
+    /// <paramref name="metadata"/> 是 D6 的 Root Orchestrator lineage,一般聊天輪為 null。
+    /// </summary>
     Task<ChatResponse> AddAsync(
-        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata,
-        CancellationToken ct = default) => AddAsync(prompt, reply, ctx, ct);
+        string prompt, string reply, UserContext ctx, ChatTurnMetadata? metadata = null,
+        CancellationToken ct = default);
 
     /// <summary>歷史清單,created_at DESC,只回 ctx 所屬租戶+使用者的紀錄。</summary>
     Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default);

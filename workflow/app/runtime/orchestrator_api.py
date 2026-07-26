@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.responses import JSONResponse
 
 from app.runtime.orchestrator_supervisor import RootRuntimeSupervisor
-from app.security import RequestContext, require_internal
-from app.settings import settings
+from app.security import require_runtime_context
 
 router = APIRouter(prefix="/orchestrator-runs", tags=["root-orchestrator-runtime"])
 
@@ -30,41 +29,11 @@ class RootDispatchAccepted(BaseModel):
     scheduled: bool
 
 
-class MultiAgentDispatchFeatureGateMiddleware:
-    """Hide the entire D5 surface before auth and request-body parsing."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if (
-            scope.get("type") == "http"
-            and str(scope.get("path") or "").startswith("/orchestrator-runs")
-            and not settings.multi_agent_dispatch_enabled
-        ):
-            await JSONResponse(status_code=404, content={"detail": "Not Found"})(
-                scope, receive, send
-            )
-            return
-        await self.app(scope, receive, send)
-
-
-async def _context(request: Request) -> RequestContext:
-    if not settings.multi_agent_dispatch_enabled:
-        raise HTTPException(status_code=404, detail="Not Found")
-    await require_internal(request.headers.get("X-Internal-Token"))
-    tenant = (request.headers.get("X-Tenant-Id") or "").strip()
-    user = (request.headers.get("X-User-Id") or "").strip()
-    role = (request.headers.get("X-User-Role") or "").strip()
-    if not tenant or not user or not role:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "missing_context",
-                "message": "Root runtime requires tenant, user, and role identity.",
-            },
-        )
-    return RequestContext(tenant_id=tenant, user_id=user, role=role)
+_context = partial(
+    require_runtime_context,
+    flag_name="multi_agent_dispatch_enabled",
+    message="Root runtime requires tenant, user, and role identity.",
+)
 
 
 @router.post(

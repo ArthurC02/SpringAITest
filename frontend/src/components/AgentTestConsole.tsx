@@ -9,8 +9,15 @@ import {
 } from '../api/agentRuns'
 import type { AgentRun, AgentRunEvent } from '../types'
 import { fmtDate } from '../format'
-import { mergeRunEvents, sanitizeRunDisplay } from '../agentRunDisplay'
-import { ApiError } from '../api/http'
+import {
+  ACTIVE_RUN_STATUSES,
+  isAmbiguousFailure,
+  mergeRunEvents,
+  POLL_MS,
+  sanitizeRunDisplay,
+  TERMINAL_RUN_STATUSES,
+  withAcceptedCancelStatus,
+} from '../agentRunDisplay'
 import {
   AGENT_RUN_ATTEMPT_STORAGE_PREFIX,
   clearPendingCancelRun,
@@ -23,20 +30,8 @@ import ErrorText from './ErrorText'
 import { useConfirm } from './ConfirmDialog'
 import { useToast } from './Toast'
 
-const POLL_MS = 1500
-const ACTIVE_STATUSES = new Set(['queued', 'pending', 'starting', 'running', 'resuming', 'cancelling'])
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out'])
-
 type Operation = 'starting' | 'resuming' | 'cancelling' | null
 type AttemptSlot = { namespace: string; attempt: LogicalAttemptKey }
-
-function isAmbiguousFailure(error: unknown): boolean {
-  return !(error instanceof ApiError) || error.status >= 500
-}
-
-function withAcceptedCancelStatus(run: AgentRun, accepted: boolean): AgentRun {
-  return accepted && !TERMINAL_STATUSES.has(run.status) ? { ...run, status: 'cancelling' } : run
-}
 
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
@@ -170,7 +165,7 @@ export default function AgentTestConsole({ agentId, publishedRevision, enabled }
   }, [agentId, settleCancelledRun])
 
   useEffect(() => {
-    if (!run?.runId || !ACTIVE_STATUSES.has(run.status)) return
+    if (!run?.runId || !ACTIVE_RUN_STATUSES.has(run.status)) return
     const runId = run.runId
     const generation = generationRef.current
     let cancelled = false
@@ -192,7 +187,7 @@ export default function AgentTestConsole({ agentId, publishedRevision, enabled }
         setRun(displayedRun)
         applyEventPage(page, generation, runId)
         setRequestError(null)
-        if (ACTIVE_STATUSES.has(displayedRun.status)) {
+        if (ACTIVE_RUN_STATUSES.has(displayedRun.status)) {
           timer = setTimeout(() => void poll(), POLL_MS)
         }
       } catch (error) {
@@ -393,7 +388,7 @@ export default function AgentTestConsole({ agentId, publishedRevision, enabled }
 
   const canCancel =
     !!run &&
-    !TERMINAL_STATUSES.has(run.status) &&
+    !TERMINAL_RUN_STATUSES.has(run.status) &&
     run.status !== 'cancelling' &&
     operation === null
   const cancellationPending = run?.status === 'cancelling'

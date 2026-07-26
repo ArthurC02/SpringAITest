@@ -1,4 +1,25 @@
-import type { AgentRunEvent } from './types'
+import { ApiError } from './api/http'
+import type { AgentRun, AgentRunEvent } from './types'
+
+/** Run 只輪詢、不串流（D3/D5 契約），兩個主控台共用同一節奏。 */
+export const POLL_MS = 1500
+export const ACTIVE_RUN_STATUSES = new Set([
+  'queued', 'pending', 'starting', 'running', 'resuming', 'cancelling',
+])
+export const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out'])
+
+/**
+ * 非 ApiError（網路中斷）或 5xx 時，指令是否已被伺服器接受並不確定，
+ * 必須沿用同一把 idempotency key 重試，不能換新 key。
+ */
+export function isAmbiguousFailure(error: unknown): boolean {
+  return !(error instanceof ApiError) || error.status >= 500
+}
+
+/** 取消已被接受但伺服器尚未進終態時，顯示樂觀的 cancelling。 */
+export function withAcceptedCancelStatus(run: AgentRun, accepted: boolean): AgentRun {
+  return accepted && !TERMINAL_RUN_STATUSES.has(run.status) ? { ...run, status: 'cancelling' } : run
+}
 
 const SENSITIVE_KEY =
   /authorization|cookie|credential|password|secret|token|api[_-]?key|connection[_-]?string/i

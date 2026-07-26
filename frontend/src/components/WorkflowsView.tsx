@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ApiError } from '../api/http'
+import { isConflict } from '../api/http'
 import {
   createWorkflow, getWorkflow, listWorkflowNodeCatalog, listWorkflowRevisions, listWorkflows,
   publishWorkflow, restoreWorkflowRevision, simulateWorkflow, putWorkflowDraft, validateWorkflow,
@@ -13,8 +13,6 @@ import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useResource } from '../hooks/useResource'
 import { runWithToast, useToast } from './Toast'
-
-const conflict = (error: unknown) => error instanceof ApiError && (error.status === 409 || error.status === 412)
 
 function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   const toast = useToast()
@@ -44,7 +42,7 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
     const currentDraft = draft; const currentWorkflow = workflow
     if (!currentDraft || !etag || !currentWorkflow) return
     try { await putWorkflowDraft(id, currentWorkflow, currentDraft, etag); await load(); toast('草稿已儲存', 'success') }
-    catch (e) { if (conflict(e)) setBlocked(true); else throw e }
+    catch (e) { if (isConflict(e)) setBlocked(true); else throw e }
   }
   async function validate() { if (etag) setValidation(await validateWorkflow(id, etag)) }
   async function simulate() { if (etag) setSimulation(await simulateWorkflow(id, etag)) }

@@ -10,7 +10,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.backend_http import get_client
+from app.backend_http import get_client, internal_headers
 from app.runtime.orchestrator import (
     ContextAcquisition,
     RootExecutionSnapshot,
@@ -213,15 +213,6 @@ class AppliedContextDelta(BaseModel):
 class OrchestratorBackendClient:
     def __init__(self, owner: str | None = None):
         self.owner = owner or f"workflow-root:{socket.gethostname()}:{uuid.uuid4().hex}"
-
-    @staticmethod
-    def _headers(ctx: RequestContext) -> dict[str, str]:
-        return {
-            "X-Internal-Token": settings.internal_api_token,
-            "X-Tenant-Id": ctx.tenant_id,
-            "X-User-Id": ctx.user_id,
-            "X-User-Role": ctx.role,
-        }
 
     async def claim(
         self, run_id: str, command_id: str, ctx: RequestContext
@@ -591,7 +582,7 @@ class OrchestratorBackendClient:
             response = await get_client().request(
                 method,
                 path,
-                headers=self._headers(ctx) | (headers or {}),
+                headers=internal_headers(ctx) | (headers or {}),
                 json=json,
                 timeout=httpx.Timeout(10.0),
             )
