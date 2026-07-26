@@ -14,6 +14,7 @@ using Backend.Api.Orchestrators;
 using Backend.Api.RuntimeDiscovery;
 using Backend.Api.OperationsGovernance;
 using Backend.Api.Data.InMemory;
+using Backend.Api.Contexts;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -36,6 +37,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", "true");
         builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", "true");
         builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", "true");
+        builder.UseSetting("CONTEXT_ENRICHMENT_ENABLED", "true");
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<IAuthRepository>();
@@ -74,6 +76,9 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
             services.AddSingleton<IOperationsGovernanceRepository, InMemoryOperationsGovernanceRepository>();
             services.RemoveAll<IWorkflowCompiler>();
             services.AddSingleton<IWorkflowCompiler, FakeWorkflowCompiler>();
+
+            services.RemoveAll<IContextRepository>();
+            services.AddSingleton<IContextRepository, InMemoryContextRepository>();
 
             // Skill 驗證不打真的 workflow(:8001)。
             services.RemoveAll<ISkillValidator>();

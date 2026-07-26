@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
@@ -191,6 +192,7 @@ class TaskAssignment(_StrictModel):
     objective: str = Field(min_length=1, max_length=20_000)
     required_capabilities: list[str] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
+    context_ref: "TaskContextRef | None" = None
     context_provenance: list["ContextProvenance"] = Field(default_factory=list)
     write_intent: bool = False
     delegation_depth: Literal[0] = 0
@@ -218,6 +220,12 @@ class TaskAssignment(_StrictModel):
         if len(provenance_keys) != len(self.context_provenance):
             raise ValueError("task context provenance keys must be unique")
         return self
+
+
+class TaskContextRef(_StrictModel):
+    context_id: str = Field(min_length=1)
+    revision: int = Field(ge=1)
+    view_id: str = Field(min_length=1)
 
 
 class ContextProvenance(_StrictModel):
@@ -359,6 +367,10 @@ class ContextAcquisition(_StrictModel):
     context: dict[str, Any] = Field(default_factory=dict)
     provenance: list[ContextProvenance] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
+    # A not-ready acquisition normally parks the run for clarification.  An
+    # acquirer sets this when its authority declared the insufficiency final,
+    # so the run terminates instead of asking for input it can never use.
+    terminal: bool = False
 
 
 class ChildRuntime(Protocol):
@@ -433,6 +445,7 @@ class RootOrchestrator:
                     ledger,
                     cancel_on_task_cancel=cancel_on_task_cancel,
                     context_round=context_round,
+                    runtime_deadline_monotonic=time.monotonic() + max(0, timeout_seconds),
                 )
         except RootBudgetExceeded as exc:
             return self._failed(
@@ -462,6 +475,7 @@ class RootOrchestrator:
         *,
         cancel_on_task_cancel: bool,
         context_round: int,
+        runtime_deadline_monotonic: float,
     ) -> RootRunResult:
         # An insufficient assessment is an explicit interruption boundary.  Do
         # not burn multiple context rounds against identical input in a single
@@ -469,9 +483,9 @@ class RootOrchestrator:
         # supplies the next trusted caller clarification.  That makes the
         # max-context budget restart-safe and prevents an initial chat turn
         # from terminally failing before the user can answer a question.
-        acquisition = await self._acquire_context(
-            snapshot, context, context_round
-        )
+        acquisition_context = dict(context)
+        acquisition_context["__runtime_deadline_monotonic"] = runtime_deadline_monotonic
+        acquisition = await self._acquire_context(snapshot, acquisition_context, context_round)
         audit.append(
             self._event(
                 snapshot,
@@ -481,7 +495,10 @@ class RootOrchestrator:
                 missing_count=len(acquisition.missing),
             )
         )
-        acquired = acquisition.context
+        acquired = dict(acquisition.context)
+        acquired.pop("__runtime_deadline_monotonic", None)
+        if acquired != acquisition.context:
+            acquisition = acquisition.model_copy(update={"context": acquired})
         ledger.charge(snapshot, "context", acquisition.model_dump(mode="json"))
         acquired_size = len(
             json.dumps(acquired, ensure_ascii=False, separators=(",", ":"))
@@ -490,6 +507,12 @@ class RootOrchestrator:
         if acquired_size > snapshot.context_byte_budget:
             return self._failed(audit, [], None, "context byte budget exhausted")
         if not acquisition.ready:
+            if acquisition.terminal:
+                return self._failed(
+                    audit, [], None,
+                    "context is terminally insufficient: "
+                    + ", ".join(acquisition.missing),
+                )
             return RootRunResult(
                 status="waiting_input",
                 accepted_results=[],

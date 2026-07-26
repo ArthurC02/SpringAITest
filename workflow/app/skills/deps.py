@@ -30,6 +30,17 @@ from app.nodes.kbquery.ports import (
     SearchPort,
     StructuredLLMPort,
 )
+from app.nodes.context_enrichment.adapters import (
+    BackendContextPolicy,
+    BackendContextRetrieval,
+    BackendContextStore,
+)
+from app.nodes.context_enrichment.ports import (
+    ContextPolicyPort,
+    ContextRetrievalPort,
+    ContextStorePort,
+    TaskContextPort,
+)
 from app.settings import settings
 
 
@@ -52,12 +63,20 @@ class KbQueryDeps:
     agent_package_reader: AgentSkillPackageReader | None = None
     agent_chat_model: Callable[[], Any] | None = None
     write_evidence_sink: Any | None = None
+    # Context Enrichment reuses this service-level assembly point rather than
+    # introducing a second container.  These ports are only consumed by the
+    # server-owned context-enrichment skill.
+    context_policy: ContextPolicyPort | None = None
+    context_store: ContextStorePort | None = None
+    context_retrieval: ContextRetrievalPort | None = None
+    context_task_backend: TaskContextPort | None = None
 
 
 def _default_deps() -> KbQueryDeps:
     """組出正式環境的依賴組合。"""
     from app.skills.package_reader import BackendPackageReader
     from app.runtime.write_evidence import BackendWriteEvidenceSink
+    from app.runtime.orchestrator_backend import OrchestratorBackendClient
 
     return KbQueryDeps(
         llm=LangChainStructuredLLM(),
@@ -77,4 +96,8 @@ def _default_deps() -> KbQueryDeps:
         agent_package_reader=BackendPackageReader(),
         agent_chat_model=get_llm,
         write_evidence_sink=BackendWriteEvidenceSink(),
+        context_policy=BackendContextPolicy(),
+        context_store=BackendContextStore(),
+        context_retrieval=BackendContextRetrieval(settings.multi_agent_context_top_k),
+        context_task_backend=OrchestratorBackendClient(),
     )

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Backend.Api.Contexts;
 
 namespace Backend.Api.OrchestratorRuns;
 
@@ -162,6 +163,34 @@ public sealed record OrchestratorContextAcquireResponse(
     [property: JsonPropertyName("provenance")] IReadOnlyList<JsonElement> Provenance,
     [property: JsonPropertyName("missing")] IReadOnlyList<string> Missing);
 
+public sealed record OrchestratorContextRequestResponse(
+    [property: JsonPropertyName("id")] Guid Id,
+    [property: JsonPropertyName("root_run_id")] Guid RootRunId,
+    [property: JsonPropertyName("child_id")] Guid ChildId,
+    [property: JsonPropertyName("task_id")] string TaskId,
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("context_id")] Guid ContextId,
+    [property: JsonPropertyName("base_context_ref")] ContextRef? BaseContextRef,
+    [property: JsonPropertyName("current_context_ref")] ContextRef? CurrentContextRef,
+    [property: JsonPropertyName("version")] long Version,
+    [property: JsonPropertyName("created_at")] DateTime CreatedAt,
+    [property: JsonPropertyName("updated_at")] DateTime UpdatedAt);
+
+/// <summary>Workflow can submit content, but never ownership, task lineage, or view role.</summary>
+public sealed record OrchestratorContextDeltaRequest(
+    [property: JsonPropertyName("definition")] JsonElement? Definition,
+    [property: JsonPropertyName("evidence")] IReadOnlyList<ContextEvidenceInput>? Evidence = null,
+    [property: JsonPropertyName("views")] IReadOnlyList<ContextViewInput>? Views = null,
+    [property: JsonPropertyName("measurements")] ContextObjectiveMeasurements? Measurements = null,
+    [property: JsonPropertyName("as_of")] DateTime? AsOf = null,
+    [property: JsonPropertyName("expires_at")] DateTime? ExpiresAt = null);
+
+public enum OrchestratorContextDeltaStatus { Success, NotFound, Conflict }
+public sealed record OrchestratorContextDeltaResult(
+    OrchestratorContextDeltaStatus Status,
+    ContextRevisionResponse? Revision = null,
+    long Version = 0);
+
 /// <summary>
 /// Public root-event payloads, shared by both repositories so the two authorities cannot
 /// drift.  Redaction happens at the producer: the durable command identity is an internal
@@ -241,4 +270,10 @@ public interface IOrchestratorRunRepository
     Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenantId, string userId, Guid rootRunId, Guid childId, CancellationToken ct);
     Task<OrchestratorRunWriteResult> TransitionAsync(string tenantId, string userId, Guid rootRunId, OrchestratorRootTransitionRequest request, CancellationToken ct);
     Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenantId, string userId, Guid rootRunId, OrchestratorContextAcquireRequest request, CancellationToken ct);
+    Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenantId, string userId, Guid rootRunId, Guid childId, CancellationToken ct)
+        => Task.FromResult<OrchestratorContextRequestResponse?>(null);
+    Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenantId, string userId, Guid rootRunId, Guid childId, Guid requestId, CancellationToken ct)
+        => Task.FromResult<OrchestratorContextRequestResponse?>(null);
+    Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenantId, string userId, Guid rootRunId, Guid childId, Guid requestId, long expectedVersion, OrchestratorContextDeltaRequest request, CancellationToken ct)
+        => Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.NotFound));
 }

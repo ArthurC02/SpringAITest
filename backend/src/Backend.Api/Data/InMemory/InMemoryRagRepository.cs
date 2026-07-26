@@ -21,7 +21,7 @@ public sealed class InMemoryRagRepository : IRagRepository
         public required DateTime CreatedAt { get; init; }
         public int ChunkCount { get; set; }
         public string Status { get; set; } = "processing";
-        public List<(string Content, float[] Embedding)> Chunks { get; set; } = new();
+        public List<(string Id, string Content, float[] Embedding)> Chunks { get; set; } = new();
     }
 
     private readonly ConcurrentDictionary<string, Doc> _docs = new();
@@ -52,7 +52,7 @@ public sealed class InMemoryRagRepository : IRagRepository
         {
             if (_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId)
             {
-                d.Chunks = chunks.Zip(embeddings, (c, e) => (c, e)).ToList();
+                d.Chunks = chunks.Zip(embeddings, (c, e) => (Guid.NewGuid().ToString("D"), c, e)).ToList();
                 d.ChunkCount = chunks.Count;
                 d.Status = "ready";
             }
@@ -84,12 +84,12 @@ public sealed class InMemoryRagRepository : IRagRepository
         lock (_lockObj)
         {
             var hits = _docs.Values.Where(d => d.TenantId == tenantId)
-                .SelectMany(d => d.Chunks.Select(c => (d.Id, d.Title, c.Content, c.Embedding)))
-                .Select(x => (x.Id, x.Title, x.Content, Score: Cosine(queryEmbedding, x.Embedding)))
+                .SelectMany(d => d.Chunks.Select(c => (DocumentId: d.Id, ChunkId: c.Id, d.Title, c.Content, c.Embedding)))
+                .Select(x => (x.DocumentId, x.ChunkId, x.Title, x.Content, Score: Cosine(queryEmbedding, x.Embedding)))
                 .Where(x => x.Score is not null)
                 .OrderByDescending(x => x.Score!.Value)
                 .Take(topK)
-                .Select(x => new RetrievedChunk(x.Id, x.Title, x.Content, x.Score!.Value))
+                .Select(x => new RetrievedChunk(x.DocumentId, x.ChunkId, x.Title, x.Content, x.Score!.Value))
                 .ToList();
             return Task.FromResult<IReadOnlyList<RetrievedChunk>>(hits);
         }
@@ -115,12 +115,12 @@ public sealed class InMemoryRagRepository : IRagRepository
         {
             var hits = _docs.Values
                 .Where(d => d.TenantId == tenantId && allowed.Contains(d.Id))
-                .SelectMany(d => d.Chunks.Select(c => (d.Id, d.Title, c.Content, c.Embedding)))
-                .Select(x => (x.Id, x.Title, x.Content, Score: Cosine(queryEmbedding, x.Embedding)))
+                .SelectMany(d => d.Chunks.Select(c => (DocumentId: d.Id, ChunkId: c.Id, d.Title, c.Content, c.Embedding)))
+                .Select(x => (x.DocumentId, x.ChunkId, x.Title, x.Content, Score: Cosine(queryEmbedding, x.Embedding)))
                 .Where(x => x.Score is not null)
                 .OrderByDescending(x => x.Score!.Value)
                 .Take(topK)
-                .Select(x => new RetrievedChunk(x.Id, x.Title, x.Content, x.Score!.Value))
+                .Select(x => new RetrievedChunk(x.DocumentId, x.ChunkId, x.Title, x.Content, x.Score!.Value))
                 .ToList();
             return Task.FromResult<IReadOnlyList<RetrievedChunk>>(hits);
         }
@@ -131,6 +131,18 @@ public sealed class InMemoryRagRepository : IRagRepository
         var mine = _docs.Values.Where(d => d.TenantId == tenantId).ToList();
         var titles = mine.OrderByDescending(d => d.CreatedAt).Take(5).Select(d => d.Title).ToList();
         return Task.FromResult(new AnalysisSummary(mine.Count, mine.Sum(d => d.ChunkCount), titles));
+    }
+
+    /// <summary>Lite-only chunk authority check for <see cref="InMemoryContextRepository"/>; the Dapper
+    /// path resolves the chunk inside the revision transaction instead, so this is not on IRagRepository.</summary>
+    public Task<bool> ContextEvidenceMatchesAsync(string tenantId, Guid documentId, Guid chunkId, string contentSha256, CancellationToken ct)
+    {
+        lock (_lockObj)
+        {
+            var document = _docs.GetValueOrDefault(documentId.ToString("D"));
+            var chunk = document?.TenantId == tenantId ? document.Chunks.FirstOrDefault(x => x.Id == chunkId.ToString("D")) : default;
+            return Task.FromResult(chunk.Content is not null && string.Equals(Skills.SkillHash.Sha256(chunk.Content), contentSha256, StringComparison.Ordinal));
+        }
     }
 
     /// <summary>cosine 相似度 = dot / (|a| * |b|);維度不匹配回 null(該 chunk 略過),退化(零向量)回 0。</summary>

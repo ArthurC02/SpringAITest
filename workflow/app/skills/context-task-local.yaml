@@ -1,0 +1,7 @@
+name: context-task-local
+description: Internal trusted Harness seam for task-local context requests and deltas
+required_role: ADMIN
+input_schema:
+  task_context_job: {type: dict, required: true}
+flow:
+  - node: context_task_local_update@1.0

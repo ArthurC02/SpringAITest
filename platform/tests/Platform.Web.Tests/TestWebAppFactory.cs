@@ -22,6 +22,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
     private readonly bool _agentTestRunEnabled;
     private readonly bool _workflowDesignerEnabled;
     private readonly bool _multiAgentDispatchEnabled;
+    private readonly bool _contextEnrichmentEnabled;
     private readonly bool _agentWriteToolsEnabled;
     private readonly bool _agentChatEnabled;
     private readonly string _agentChatTenantAllowlist = string.Empty;
@@ -35,7 +36,8 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         bool enableRateLimiting = false, bool removeSessionIsolationProvider = false,
         bool useDevelopmentEnvironment = false, bool agentBuilderEnabled = false,
         bool agentTestRunEnabled = false, bool workflowDesignerEnabled = false,
-        bool multiAgentDispatchEnabled = false, bool agentWriteToolsEnabled = false,
+        bool multiAgentDispatchEnabled = false, bool contextEnrichmentEnabled = false,
+        bool agentWriteToolsEnabled = false,
         bool agentChatEnabled = false, string agentChatTenantAllowlist = "",
         IMem0Client? mem0Override = null)
     {
@@ -46,6 +48,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         _agentTestRunEnabled = agentTestRunEnabled;
         _workflowDesignerEnabled = workflowDesignerEnabled;
         _multiAgentDispatchEnabled = multiAgentDispatchEnabled;
+        _contextEnrichmentEnabled = contextEnrichmentEnabled;
         _agentWriteToolsEnabled = agentWriteToolsEnabled;
         _agentChatEnabled = agentChatEnabled;
         _agentChatTenantAllowlist = agentChatTenantAllowlist;
@@ -65,6 +68,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("AGENT_TEST_RUN_ENABLED", _agentTestRunEnabled ? "true" : "false");
         builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", _workflowDesignerEnabled ? "true" : "false");
         builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", _multiAgentDispatchEnabled ? "true" : "false");
+        builder.UseSetting("CONTEXT_ENRICHMENT_ENABLED", _contextEnrichmentEnabled ? "true" : "false");
         builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", _agentWriteToolsEnabled ? "true" : "false");
         // D6 chat canary:旗標與逗號分隔的伺服器端租戶白名單是兩個獨立條件(兩者皆通過才進 canary),
         // 故兩個旋鈕分開,允許測「已啟用但租戶不在白名單」這一格。

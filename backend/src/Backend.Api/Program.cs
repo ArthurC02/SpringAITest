@@ -15,6 +15,7 @@ using Backend.Api.Orchestrators;
 using Backend.Api.OrchestratorRuns;
 using Backend.Api.RuntimeDiscovery;
 using Backend.Api.OperationsGovernance;
+using Backend.Api.Contexts;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -40,6 +41,9 @@ var multiAgentDispatchEnabled = workflowDesignerEnabled
 var agentChatEnabled = multiAgentDispatchEnabled
     && string.Equals(cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentWriteToolsEnabled = string.Equals(cfg["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var contextEnrichmentEnabled = multiAgentDispatchEnabled
+    && string.Equals(cfg["CONTEXT_ENRICHMENT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+builder.Services.AddSingleton(new ContextEnrichmentState(contextEnrichmentEnabled));
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -50,7 +54,8 @@ if (useInMemoryDb)
 {
     builder.Services.AddSingleton<IAuthRepository, InMemoryAuthRepository>();
     builder.Services.AddSingleton<IConversationRepository, InMemoryConversationRepository>();
-    builder.Services.AddSingleton<IRagRepository, InMemoryRagRepository>();
+    builder.Services.AddSingleton<InMemoryRagRepository>();
+    builder.Services.AddSingleton<IRagRepository>(sp => sp.GetRequiredService<InMemoryRagRepository>());
     builder.Services.AddSingleton<IConfigRepository, InMemoryConfigRepository>();
     builder.Services.AddSingleton<ISkillRepository, InMemorySkillRepository>();
     builder.Services.AddSingleton<IConfigurationSetRepository, InMemoryConfigurationSetRepository>();
@@ -62,6 +67,7 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IOrchestratorRunRepository, InMemoryOrchestratorRunRepository>();
     builder.Services.AddSingleton<IRuntimeBindingRepository, InMemoryRuntimeBindingRepository>();
     builder.Services.AddSingleton<IOperationsGovernanceRepository, InMemoryOperationsGovernanceRepository>();
+    builder.Services.AddSingleton<IContextRepository, InMemoryContextRepository>();
 }
 else
 {
@@ -80,6 +86,7 @@ else
     builder.Services.AddScoped<IOrchestratorRunRepository, OrchestratorRunRepository>();
     builder.Services.AddScoped<IRuntimeBindingRepository, RuntimeBindingRepository>();
     builder.Services.AddScoped<IOperationsGovernanceRepository, OperationsGovernanceRepository>();
+    builder.Services.AddScoped<IContextRepository, ContextRepository>();
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +219,25 @@ if (!multiAgentDispatchEnabled)
         if (context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
             || context.Request.Path.StartsWithSegments("/api/admin/orchestrators")
                && context.Request.Path.Value?.Contains("/runs", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
+            return;
+        }
+        await next();
+    });
+}
+
+// Context APIs are internal implementation details of D5/D6.  The acquire route remains
+// available under D5 so an off flag preserves its established fail-closed not-ready response.
+if (!contextEnrichmentEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/contexts")
+            || context.Request.Path.StartsWithSegments("/api/context-views")
+            || context.Request.Path.StartsWithSegments("/api/context-policies")
+            || context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
+               && context.Request.Path.Value?.Contains("/context-requests", StringComparison.OrdinalIgnoreCase) == true)
         {
             await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
             return;

@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     agent_write_tools_allowlist: str = ""
     agent_write_tools_tenant_allowlist: str = ""
     multi_agent_dispatch_enabled: bool = False
+    # E1 is independently fail-closed.  The Root composition also requires
+    # multi_agent_dispatch_enabled, so this flag can never activate a second
+    # runtime path on its own.
+    context_enrichment_enabled: bool = False
     multi_agent_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
     multi_agent_root_lease_seconds: int = Field(default=300, ge=30, le=300)
     multi_agent_heartbeat_seconds: float = Field(default=30, ge=5, le=120)

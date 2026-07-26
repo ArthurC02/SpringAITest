@@ -1,6 +1,6 @@
 # Context Enrichment — 計畫書
 
-> 狀態：規劃中，尚未實作。
+> 狀態：**E1 + E3 已交付**（含符合性審查與修復輪）；E2/E4 阻擋於 §11 Q1–Q3。
 >
 > 來源設計文件：`context-enrichment-agentic-platform-design.md` v1.0（下稱「設計稿」），一份以 `MAF → LangGraph → Backend APIs` 為前提的通用架構規格。本計畫是它對照本 repo 現況（D1–D7 已交付）之後的落地版本：**保留設計稿附錄 A 的十條架構規則，刪掉本 repo 已經有的重複建設，並明確標示尚無資料來源、因此本期不做的部分。**
 >
@@ -37,6 +37,8 @@ return new(false, EmptyObject(), Array.Empty<JsonElement>(), missing);
 | 澄清回流通道 | `backend/.../OrchestratorRunRepository.cs:308` | `current_context.user_input` 已可短路回 `ready:true` |
 
 **結論：Context Enrichment ＝ 補上那個 server-owned read-only adapter，並讓它產出的 context 成為可版本化、可稽核、可重播的 artifact。不是新建一個平行的 Agent 架構。**
+
+> **實作期修正（重要）**：本節「沒有任何來源會回 `ready:true`」的判定當初不完整——Workflow 的 `ProductionRootPlanner` 一直有一條**本地** acquirer（LLM 澄清評估 + scoped 檢索），能在 Workflow 內回 `ready:true`；Backend 端才是永遠 not-ready。E1 交付後的最終形狀：旗標開啟 → server-owned Context Store 路徑；旗標關閉 → 舊本地 acquirer 與 Backend `user_input` 短路**位元不變地保留**（configuration-only rollback 成立）。
 
 ### 1.3 阻擋性前提：本 repo 沒有 structured data plane
 
@@ -151,11 +153,11 @@ I2 是四條裡影響最大的。它把設計稿 §16「Context Quality Gate」�
 | C1 | **Enrichment 用既有 Skill 引擎實作，不自建 `StateGraph`**：節點放 `workflow/app/nodes/context_enrichment/`（仿 `nodes/kbquery/` 子套件結構），以一份系統自有的 `app/skills/context-enrichment.yaml` 串成 flow + `loop`，DI 擴充既有 `KbQueryDeps` | kb-query 節點族已是同構問題的生產驗證實作（見 §5）。走既有引擎可免費繼承 reads 過濾、fatal 短路、trace、writes 剝除、bounded loop、安全條件求值與強制稽核收尾。**曾考慮並否決**：(a) 自建 `app/context_enrichment/` StateGraph——會複製一份既有治理，且 enrichment 是同步一次性呼叫、不需要自己的 checkpointer（澄清暫停由 root 的 `waiting_input` 負責，見 C9）；(b) 走 D4 Graph IR——它明文禁止內嵌 prompt/adapter，且那是使用者可視編輯的契約 |
 | C1a | 該 skill 是**系統自有、非使用者資產**。經查證，三道防線**全部已經存在，本計畫零新增程式、零新增測試**：① `required_role: ADMIN`（既有頂層欄位，`app/skills/analyze-report.yaml:3` 已在用）；② builtin 的 `bindable` 恆為 false（`GET /skills` 既有 fail-closed 規則）；③ 同名覆寫不可能——invoke 先查 builtin，`skills.get(name)` 命中就不會呼叫 `custom.load`（`workflow/app/main.py:482-490`） | 採用 C1（走既有 Skill 引擎）原本的疑慮是「enrichment 可能被當成一般 skill 直接 invoke，繞過 Root 的授權與預算」。查證後這個疑慮不成立，C1 的代價實際為零。依 I4，既有機制不再補測試 |
 | C2 | Context Store 由 Backend 擁有（Dapper + in-memory 雙路徑），沿用 `agent_revision` 的 canonical bytes + SHA256 + 定時比對驗證 | Backend 是資料與權限的唯一權威。Workflow 目前只寫 checkpoint，維持這條界線 |
-| C3 | **3 張核心表 + 2 張 catalog 表**，不是設計稿 §15.2 的 25 張：`context_revision`、`context_evidence`、`context_view`、`source_catalog`、`metric_definition` | requirements / facts / gaps / conflicts / assumptions 全部內嵌 envelope canonical JSON——它們沒有獨立查詢需求，拆表是投機性正規化。lineage 是 evidence 的欄位不是表（整條鏈在寫入時已知） |
-| C4 | 不引入 Redis / MinIO。文件 evidence 存 `content_ref` 指向既有 `documents`/`rag_chunks` 主鍵；結構化 payload 內嵌 JSONB 並沿用 65 536 bytes 上限 | 既有 PostgreSQL 已同時是文件庫、向量庫與 revision 庫。E1 不做快取；若之後量測顯示需要，cache key 必須含 entitlement fingerprint（設計稿 §15.5） |
+| C3 | **3 張核心表 + 1 張政策表 + 2 張 catalog 表（共 6 張）**，不是設計稿 §15.2 的 25 張：`context_revision`、`context_evidence`、`context_view`、`context_policy`（C18）、`source_catalog`、`metric_definition` | requirements / facts / gaps / conflicts / assumptions 全部內嵌 envelope canonical JSON——它們沒有獨立查詢需求，拆表是投機性正規化。lineage 是 evidence 的欄位不是表（整條鏈在寫入時已知） |
+| C4 | 不引入 Redis / MinIO。文件 evidence 存 `content_ref` 指向既有 `documents`/`rag_chunks` 主鍵；**單筆 evidence** 的結構化 payload 內嵌 JSONB 並沿用 65 536 bytes 上限（整份 envelope 的 256 KB 上限另見 §10） | 既有 PostgreSQL 已同時是文件庫、向量庫與 revision 庫。E1 不做快取；若之後量測顯示需要，cache key 必須含 entitlement fingerprint（設計稿 §15.5） |
 | C4a | Evidence 只落地**客觀量測**（`observations`），不落地分數。`freshness_score` / `authority_score` / `consistency_score` 這類導出值由 Backend 依當時政策計算，不寫進 evidence 列 | I2：分數是政策的函數，政策會改版。把分數凍結在 evidence 上等於把業務規則複製到資料裡，之後改門檻就得回填歷史資料 |
 | C5 | 唯一進入點是 D5/D6 Root Orchestrator。Enrichment 掛在既有 `ContextAcquirer` seam（`orchestrator.py:381`） | 一個注入點、零拓樸改動、既有預算與授權自動生效。legacy chat 不受影響 |
-| C6 | 新旗標 `CONTEXT_ENRICHMENT_ENABLED`，Backend / Workflow / Platform 各自獨立 fail-closed，且依賴 `MULTI_AGENT_DISPATCH_ENABLED` | 沿用既有六旗標樣板。沒有 Root Orchestrator 就沒有 Enrichment 的消費者。**實作前先確認一件事**：`workflow/app/settings.py:41-54` 目前**沒有** `agent_chat_enabled` 欄位，D6 在 Workflow 端實際共用 `multi_agent_dispatch_enabled`；根 `AGENTS.md` 與 `workflow/AGENTS.md:80` 宣稱的「三服務各自獨立旗標」在 Workflow 端與程式碼有落差。新旗標要嘛真的在 `settings.py` 落地，要嘛比照現況並修正文件——不要再複製一個只存在於文件的旗標 |
+| C6 | 新旗標 `CONTEXT_ENRICHMENT_ENABLED`，Backend / Workflow / Platform 各自獨立 fail-closed，且依賴 `MULTI_AGENT_DISPATCH_ENABLED` | 沿用既有六旗標樣板。沒有 Root Orchestrator 就沒有 Enrichment 的消費者。**實作前先確認一件事**：`workflow/app/settings.py:41-54` 目前**沒有** `agent_chat_enabled` 欄位，D6 在 Workflow 端實際共用 `multi_agent_dispatch_enabled`；根 `AGENTS.md` 與 `workflow/AGENTS.md:81` 宣稱的「三服務各自獨立旗標」在 Workflow 端與程式碼有落差。新旗標要嘛真的在 `settings.py` 落地，要嘛比照現況並修正文件——不要再複製一個只存在於文件的旗標 |
 | C7 | **Source ID 命名必須與 Orchestrator snapshot 的 `authority.context_tools` / `knowledge_sources` 對齊** | 硬約束不是建議：`orchestrator_backend.py:291-301` 已經會拒絕越權 provenance。`source_catalog.source_id` 若與授權欄位對不上，整條鏈直接失敗 |
 | C8 | TaskEnvelope 擴充：`OrchestratorTaskEnvelope.cs:26` 的欄位白名單加入 `context_ref {context_id, revision, view_id}`；`context` 縮成 view 投影後的最小資料；`context_provenance` 由 Context Store 產生，不再由 caller 提供 | 避免 envelope 與 Context Store 兩份真相。View 是唯一投影來源 |
 | C9 | `NEEDS_CLARIFICATION` → root `waiting_input`，使用者回答經既有 `current_context.user_input` 回流 | 不新建 interrupt 機制；D6 已有「回傳第一個伺服器界定的澄清問題」的行為 |
@@ -166,7 +168,7 @@ I2 是四條裡影響最大的。它把設計稿 §16「Context Quality Gate」�
 | C12 | Entity / Industry / Peer resolution E1 **不做** | 設計稿 §10.4 自己禁止 LLM 創造 entity_id；repo 沒有 entity master，E1 做出來只會是無來源的猜測。E2 有種子資料才開 |
 | C13 | 數值型 Grounded Fact 一律由程式計算、且計算方是 Backend（C11b）；Workflow 的 LLM 只做候選重排與**已由 Backend 算好**的數值的敘述化。`workflow/app/nodes/kbquery/calculator.py` 的確定性風格仍是節點層的樣板，但不得在其中新增業務算式 | 設計稿 §6.2、§10.18 + I2 |
 | C14 | Prompt 分區塊渲染：`[SYSTEM_POLICY]` `[TASK]` `[DOMAIN_DEFINITIONS]` `[STRUCTURED_FACTS]` `[UNTRUSTED_EVIDENCE]` `[CONFLICTS_AND_GAPS]` `[OUTPUT_SCHEMA]`；文件內容永遠在 `UNTRUSTED_EVIDENCE`。token 上限以既有 `orchestrator_token_cap` 為準 | 設計稿 §17.4、§18.1。不新建第二套 token 預算 |
-| **C15** | **ETag / If-Match：抽共用**。既有三份（`AgentController.cs:282-306`、`WorkflowController.cs:37,39`、`OrchestratorController.cs:22-24`，其中 Orchestrator 還把同一行內聯重複三次）語意等價但寫法分歧、錯誤訊息中英夾雜。新增第 4 份前，在 `Common/` 抽兩個 extension method（`RequireIfMatchVersion()` / `SetVersionETag(long)`），**只給新 Context controller 用，不回頭改既有三份** | I3 的「適當」在此有明確界線：Rule of Three 已觸發，抽 10 行無分支邏輯成本極低；但既有測試可能斷言了確切錯誤字串，回頭統一是為了整潔而承擔契約破壞風險——不做 |
+| **C15** | **ETag / If-Match：抽共用**。既有三份（`AgentController.cs:282-306`、`WorkflowController.cs:37,39`、`OrchestratorController.cs:22-24`，其中 Orchestrator 還把同一判斷內聯在單行重複）語意等價但寫法分歧、錯誤訊息中英夾雜。新增第 4 份前，在 `Common/` 抽兩個 extension method（`RequireIfMatchVersion()` / `SetVersionETag(long)`），**只給新 Context controller 用，不回頭改既有三份** | I3 的「適當」在此有明確界線：Rule of Three 已觸發，抽 10 行無分支邏輯成本極低；但既有測試可能斷言了確切錯誤字串，回頭統一是為了整潔而承擔契約破壞風險——不做 |
 | **C16** | **Canonicalizer：複用不抽象**。key-sort 遞迴直接呼叫 `AgentCanonicalizer.CanonicalizeDefinition`（`Orchestrators/OrchestratorDtos.cs:28` 已經是這個做法，本 repo 自己建立的慣例）；Context 專屬的欄位驗證獨立寫在 `Contexts/ContextCanonicalizer.cs`。**不要發明 `ICanonicalizer` 或共用基底類別** | `AgentCanonicalizer` 587 行、`WorkflowCanonicalizer` 50 行，真正重複的只有約 12 行 key-sort，其餘 90% 是各 aggregate 的語意驗證。為 12 行發明介面是 I3 明文禁止的「為單一問題發明抽象」 |
 | **C16a** | **Python 端算 canonical hash 一律用 `workflow/app/canonical_json.py`（UTF-16 ordinal 排序，對齊 .NET `StringComparer.Ordinal`），不要自己寫 `json.dumps(sort_keys=True)`** | 稽核原本查出 repo 有**兩份排序語意不同**的跨服務 canonical JSON 實作，對非 BMP 字元 key 已實測分岔。**此問題已於本計畫開工前修掉**：兩份統一到新的共用模組 `app/canonical_json.py`，並留下 `workflow/tests/test_canonical_json.py` 的 parity 測試釘住。Context Store 的 canonical bytes 必須與 Backend 的 `AgentCanonicalizer` 位元一致，所以新程式一律走這個唯一事實來源。**注意**：.NET 端只排 object key、**保留 array 順序**（`AgentCanonicalizer.cs:552`），所以陣列的排序鍵只需在 Workflow 內部確定性，不需對齊 .NET |
 | **C17** | **Revision publish 交易：複製樣板，不抽跨 aggregate 框架**。複製「FOR UPDATE 鎖 → 驗版本 → reference lock（FOR SHARE）→ supersede → insert revision → 更新指標欄」六步驟；若 Context 也有 Publish/Restore 共同邏輯，比照 `OrchestratorRepository.WriteRevision` 在**同一檔案內**抽私有方法 | 三個既有 revision 表的欄位差異很大（skill binding / ui_metadata / verifier 參照），鎖定順序本身也是各自的業務規則。抽共用等於要把 INSERT 欄位清單參數化成 mini-ORM，成本遠大於維持三份百行內的原生 SQL |
@@ -184,7 +186,8 @@ I2 是四條裡影響最大的。它把設計稿 §16「Context Quality Gate」�
 -- 核心三表
 context_revision(
   context_id uuid, revision int, tenant_id text, root_run_id uuid null,
-  status text,                    -- RECEIVED..READY/NEEDS_CLARIFICATION/BLOCKED_BY_POLICY
+  status text,                    -- 完整狀態集見 §8：NEED_MORE_CONTEXT / NEEDS_CLARIFICATION /
+                                  -- BLOCKED_BY_POLICY / INSUFFICIENT_DATA / READY / READY_WITH_ASSUMPTIONS
   canonical bytea, sha256 text,   -- 權威 UTF-8 canonical bytes，與 agent_revision 同樣板
   definition jsonb,               -- 查詢投影用，非權威
   as_of timestamptz,
@@ -245,7 +248,8 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
               build_requirements     語意需求 → 資料需求；此節點禁止產生 SQL/URL/table name
               discover_sources       查 source_catalog ∩ snapshot.authority
               retrieve_documents     既有 /api/retrieval/search（scope_contract_version:1）
-              normalize + dedupe     canonical key 去重，保留原始值與正規化規則版本
+              normalize_evidence     正規化，保留原始值與正規化規則版本
+              deduplicate_evidence   canonical key 去重（是節點不是 reducer——見 §9 Workflow 工作項）
               detect_conflicts       不靜默覆蓋，衝突必須進 verifier view
               build_facts            數值由 Backend 算好後才敘述化（C11b）
               build_views            planner / worker / verifier 投影
@@ -253,8 +257,8 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
                                      ↑ 只送候選 envelope + 客觀量測值
                                      ↓ Backend 套政策後回傳權威 status（C10）
                  ├ NEED_MORE_CONTEXT 且 round 未用盡 → expand_requirements → 回 discover_sources
-                 ├ NEEDS_CLARIFICATION → 交還 root
-                 ├ BLOCKED_BY_POLICY / INSUFFICIENT_DATA → 交還 root
+                 ├ NEEDS_CLARIFICATION → 交還 root（waiting_input）
+                 ├ BLOCKED_BY_POLICY / INSUFFICIENT_DATA → root 終止（terminal，failed），不重試
                  └ READY / READY_WITH_ASSUMPTIONS → 回傳 context_ref
           → 回傳 {ready, context:{context_ref, view_id, ...}, provenance[], missing[]}
       → ready=false 且 round 用盡 → 既有 INSUFFICIENT_DATA 路徑
@@ -271,8 +275,8 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
 
 | 里程碑 | 完成後可用狀態 | 前提 | 驗收 | 規模 |
 | --- | --- | --- | --- | --- |
-| **E1 Context 骨架** | `context/acquire` 對文件來源回 `ready:true`；Context 版本化持久化；Backend 擁有 Readiness 判定；child 只拿 view | 無（今天就能做） | 18 項（見下表；初稿 21 項依 I4 刪 4 增 1） | XL |
-| **E2 語意解析與 Catalog** | Metric definition version pinning、Entity resolution（候選由 Backend 出）、fiscal calendar、多來源選擇、conflict detection | **需先回答 §11 Q1/Q2**：是否有結構化數據源與 entity 種子 | A-CTX-20..39 | XL |
+| **E1 Context 骨架** | `context/acquire` 對文件來源回 `ready:true`；Context 版本化持久化；Backend 擁有 Readiness 判定；child 只拿 view | 無（今天就能做） | 18 項（[04-acceptance-tests](04-acceptance-tests.md) §1；初稿 21 項依 I4 刪 4 增 1） | XL |
+| **E2 語意解析與 Catalog** | Metric definition version pinning、Entity resolution（候選由 Backend 出）、fiscal calendar、多來源選擇、conflict detection | **需先回答 §11 Q1/Q2**：是否有結構化數據源與 entity 種子 | A-CTX-23..39 | XL |
 | **E3 Task-local 擴充** | `ContextRequest` / `ContextDelta` / 新 revision + optimistic concurrency；per-task view；`context.*` SSE | E1 | A-CTX-40..59 | L |
 | **E4 品質與觀測** | Context Utilization、Need-More-Context After Dispatch Rate、golden case 套組、per-industry 門檻 | E2、E3 | A-CTX-60..79 | M |
 
@@ -282,7 +286,7 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
 
 **Backend**（`Contexts/` 新 feature folder）
 - 三表 + `context_policy` + 兩 catalog 表，加進 `DbBootstrap.Ddl` 冪等建表（additive-only，沿用既有慣例）。
-- Dapper 與 in-memory 雙實作（C19）：**本 repo 沒有共用契約測試，兩份是各寫各的**，這是實打實的隱藏成本，不要假設之後會有框架統一。
+- Dapper 與 in-memory 雙實作；測試依 C19 寫成一個吃 `IContextRepository` 的參數化 Theory 同時跑兩份實作——不各寫各的，也不擴張成全 repo 框架。
 - `Common/` 抽 ETag/If-Match 兩個 extension method 供新 controller 用（C15）；canonical key-sort 複用 `AgentCanonicalizer`（C16）；publish 交易複製六步驟樣板（C17）。
 - **Readiness 政策與判定**（I2 的核心工作，原本錯放在 Workflow）：Hard Gate 條件、權重、門檻、source precedence、requirement 樣板、時間解析政策，全部是 Backend 的資料 + 一支純函式判定器。
 - `POST /api/contexts/{id}/revisions`：套用政策 → 回傳權威 `status` / `readiness` / `unmet_requirements[]` → 同一交易內不可變寫入 + canonical SHA。
@@ -317,7 +321,7 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
 
 **節點族的測試形狀**：比照 kb-query 現況——`test_kbquery_nodes.py` 做節點單元（每支只打一個節點，依賴用 fake 隔離），`test_skill_kbquery_parity_e2e.py` 做整圖端到端。後者有一段值得抄的歷史：它原本對 7 個案例各做全欄位 golden trace 比對，任一個 state 鍵改名就要重產 7 份快照、失敗訊息只會是「兩個超長 dict 不相等」；已經收斂成 **1 個代表案例做 golden + 其餘改驗結構性觀測點**。Enrichment 的整圖測試直接採用收斂後的形狀，**不要重蹈 N 份 golden trace**。
 
-依此原則從初稿刪掉的案例，連同刪除理由記錄如下（每一條都已用既有測試位置確認過），避免日後被當成遺漏補回來：
+依此原則從初稿刪掉的案例，連同刪除理由記錄如下（每一條都已用既有測試位置確認過），避免日後被當成遺漏補回來。刪除留下的編號缺口（A-CTX-03 / 16 / 17 / 20）刻意不回填，讓「刪過什麼」在編號上留痕；E2 起的編號從 23 開始：
 
 | 原案例 | 刪除理由 |
 | --- | --- |
@@ -326,26 +330,7 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
 | `If-Match` 缺失 428 / 過期 409 | C15 抽出的 helper 只是搬移既有邏輯，行為不變；`AgentsApiTests.cs:232/212` 與 `WorkflowAdminApiTests.cs:21/24` 已在兩個 aggregate 上覆蓋 |
 | Enrichment skill 被直接 invoke | 三道防線都是既有機制且已查證生效（C1a） |
 
-| ID | 情境 | 驗收 |
-| --- | --- | --- |
-| A-CTX-01 | 旗標關閉 | 三服務各自 fail-closed；`context/acquire` 維持既有 not-ready 行為，不回退成「放行」 |
-| A-CTX-02 | 同一 context 連續兩次 enrichment | 產生 revision 1、2；revision 1 內容位元不變 |
-| **A-CTX-04** | Evidence 的 `source_id` 不在 snapshot authority 內 | Backend 拒絕持久化；Workflow 端既有檢查亦拒絕（雙重）。**這條同時補一個既有缺口**：`workflow/app/runtime/orchestrator_backend.py:291-301` 的 `"Root context provenance exceeds snapshot authority"` 分支目前**全 repo 沒有任何測試觸發過**。Context Enrichment 是第一個真的會送 provenance 的呼叫者，這條分支到現在都沒被走過 |
-| A-CTX-05 | **跨 tenant evidence 注入** | Hard fail + 安全告警，不得降級為 gap。必須用**另一租戶的真實 run/context**，不是不存在的 id——既有 `OrchestratorRunApiTests.cs:93` 測的是後者（owner-scope），嚴格跨租戶在 Orchestrator 這層其實還沒被證明過。斷言沿用共用 helper，不再複製第 7 份 `CrossTenant_*` 樣板 |
-| A-CTX-06 | **文件內含指令文字**（prompt injection） | 內容只出現在 `[UNTRUSTED_EVIDENCE]` 區塊，不影響 system instruction / tool allowlist |
-| A-CTX-07 | 呼叫者無 `knowledge.read:<docId>` | 檢索回空，投影前再檢一次仍為空；不得靠模型自律 |
-| A-CTX-08 | Mandatory requirement 未滿足 | 狀態不得為 `READY`；round 未用盡則 expand，用盡則 `INSUFFICIENT_DATA` |
-| A-CTX-09 | Readiness 落在 0.70–0.85 | `READY_WITH_ASSUMPTIONS`，且 assumptions 非空並出現在 planner view |
-| A-CTX-10 | 關鍵歧義 | root 進 `waiting_input`；使用者回答經 `current_context.user_input` 回流並產生新 revision |
-| A-CTX-11 | 重試造成重複檢索結果 | evidence reducer 依 canonical key 合併，筆數不重複；不同 snapshot 的同一資料保留兩筆並標記 |
-| A-CTX-12 | Required source timeout / Optional source 失敗 | 前者建立 gap 並影響 readiness；後者不阻斷流程，只降低 completeness |
-| A-CTX-13 | Envelope 超過大小上限 | 建立 gap 並降級投影，**不得靜默截斷** |
-| A-CTX-14 | Worker child 取得的 payload | 只含自己的 view；斷言 envelope 全量欄位不出現在 child snapshot |
-| A-CTX-15 | Deadline 逼近 | 停止 optional retrieval，保留 mandatory flow；既有 timeout 仍生效 |
-| A-CTX-18 | lite 模式（`DB_PROVIDER=inmemory`） | 一個吃 `IContextRepository` 的參數化 Theory 同時跑 Dapper 與 in-memory（C19），斷言 revision 不可變、tenant 隔離、唯一 active policy。**這條的存在理由是 ledger 已記錄過同型分歧**，不是為了覆蓋率 |
-| A-CTX-19 | Enrichment 產出的內容 | 不寫入 mem0；mem0 recall 內容不被當成 evidence |
-| **A-CTX-22** | **I2 守門測試**：同一組 evidence 與量測值，只改 `context_policy` 的門檻，重跑一次 | status 必須跟著改變。**這是四條不變量裡最容易被侵蝕的一條**——只要有人在 Workflow 補一個「暫時的」門檻常數，這個測試就會失敗。它同時證明判定確實來自 Backend |
-| A-CTX-21 | 同一 chunk 由兩次檢索取得 | 以 `document_id + chunk_id + content_hash` 為 canonical key 合併為一筆 evidence（依賴 `RetrievedChunk` 新增 chunk 識別欄位） |
+E1 驗收全表（A-CTX-01..22）移至 [04-acceptance-tests.md](04-acceptance-tests.md) §1，該檔是 A-CTX 編號與條目內容的唯一權威；本節只保留取捨原則、刪除紀錄與測試形狀指引作為歷史依據。
 
 ---
 
@@ -365,7 +350,7 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
 
 ---
 
-## 11. 待決策（需人回答，阻擋 E2）
+## 11. 待決策（需人回答）
 
 | # | 問題 | 影響 |
 | --- | --- | --- |
@@ -375,7 +360,7 @@ metric_definition(metric_id text, definition_version text, pack_id text, tenant_
 | Q4 | Context revision 的保留與 TTL 政策？設計稿 §26.2 建議 planner 24h / session decision 30d / revision 依稽核政策 | 決定 `expires_at` 與清理工作 |
 | Q5 | 確認「Enrichment 只掛 D5/D6 路徑、legacy chat 位元不變」是否符合預期？ | 若要覆蓋 legacy chat，範圍與風險大幅上升 |
 
-Q1–Q3 未回答之前，E1 與 E3 仍可獨立進行。
+Q1–Q3 阻擋 E2（E4 依賴 E2，連帶被擋）；未回答之前 E1 與 E3 仍可獨立進行。Q4 未定前，`expires_at` 先落地為 nullable、不排清理工作。Q5 是範圍確認：未獲相反指示前，預設維持「只掛 D5/D6、legacy chat 位元不變」。
 
 ---
 
@@ -390,4 +375,4 @@ E1 完成的定義是：在 `CONTEXT_ENRICHMENT_ENABLED=true` 且 canary 租戶�
 5. 全程可從 `orchestrator_run_event` 重建，
 6. 且旗標關閉後行為與今天位元相同。
 
-後續文件（核准後再寫，沿用既有編號慣例）：`02-spec.md`（契約與狀態機）、`03-design.md`（服務責任與 schema 細節）、`04-acceptance-tests.md`（A-CTX-## 全表）。**本計畫刻意不預先產出它們**——規格與驗收條件應該在 §11 的決策定案之後才寫，否則會寫出一份與資料現實脫節的規格。
+後續文件已撰寫：[02-spec.md](02-spec.md)（契約與狀態機，WHAT）、[03-design.md](03-design.md)（服務責任、schema 與節點契約，HOW）、[04-acceptance-tests.md](04-acceptance-tests.md)（A-CTX 全表的唯一權威）。與資料現實綁定的部分（E2 契約、E4 指標）在三份文件中都是**保留區段**，待 §11 Q1–Q3 定案後才補入——不預先發明沒有資料來源的規格。

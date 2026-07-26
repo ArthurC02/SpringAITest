@@ -2,6 +2,7 @@ using System.Text.Json;
 using Backend.Api.AgentRuns;
 using Backend.Api.Orchestrators;
 using Backend.Api.Workflows;
+using Backend.Api.Contexts;
 
 namespace Backend.Api.OrchestratorRuns;
 
@@ -9,7 +10,8 @@ namespace Backend.Api.OrchestratorRuns;
 public sealed class InMemoryOrchestratorRunRepository(
     IOrchestratorRepository orchestrators, IWorkflowRepository workflows,
     Backend.Api.Agents.IAgentRepository agents,
-    IAgentRunRepository? agentRuns = null) : IOrchestratorRunRepository
+    IAgentRunRepository? agentRuns = null, IContextRepository? contexts = null,
+    ContextEnrichmentState? contextState = null) : IOrchestratorRunRepository
 {
     private readonly object _gate = new();
     private readonly Dictionary<Guid, Entry> _runs = [];
@@ -73,6 +75,7 @@ public sealed class InMemoryOrchestratorRunRepository(
             var item = new Entry(id, Guid.NewGuid(), tenant, user, role, orchestratorId, revision, conversation, workflowId, workflowRevision, snapshot.StoredSnapshot, snapshot.SnapshotHash, now.AddSeconds(snapshot.EffectiveTimeoutSeconds), now);
             item.Events.Add(new(1, "run_created", snapshot.SnapshotHash, JsonDocument.Parse("{}").RootElement.Clone(), now));
             _runs.Add(id, item); _keys.Add((tenant, user, key), (hash, id));
+            if (contexts is IContextAuthorityRegistry registry) registry.RegisterRoot(tenant, user, id, snapshot.StoredSnapshot);
             return new(OrchestratorRunWriteStatus.Success, ToResponse(item), Dispatch: new(item.CommandId));
         }
     }
@@ -93,6 +96,11 @@ public sealed class InMemoryOrchestratorRunRepository(
     { lock (_gate) { if (string.IsNullOrWhiteSpace(workerId) || limit is < 1 or > 100 || leaseSeconds is < 1 or > 300) throw new ArgumentOutOfRangeException(nameof(workerId)); var candidates = _runs.Values.Where(x => !x.CommandCompleted && x.ClaimExpiresAt <= DateTime.UtcNow && (x.Status is "queued" or "running")).OrderBy(x => x.Created).Take(limit + 1).ToArray(); var items = new List<OrchestratorRunRecoveryItem>(); foreach (var x in candidates.Take(limit)) { var claim = ClaimCommandAsync(x.Tenant, x.User, x.Id, x.CommandId, workerId, leaseSeconds, ct).GetAwaiter().GetResult(); if (claim is not null) items.Add(new(x.Tenant, x.User, "ADMIN", claim)); } return Task.FromResult(new OrchestratorRunRecoveryResponse(items, candidates.Length > limit)); } }
     public async Task<OrchestratorChildResponse?> CreateChildAsync(string tenant, string user, Guid rootRunId, OrchestratorChildCreateRequest request, CancellationToken ct)
     {
+        if (contextState?.Enabled is true && contexts is not null)
+        {
+            var stored = await contexts.GetLatestReadyForRunAsync(tenant, user, rootRunId, ct);
+            request = request with { TaskEnvelope = ContextTaskEnvelopeProjection.ApplyIfAvailable(request.TaskEnvelope, stored, request.RunKind?.Trim() ?? "") };
+        }
         // Same fail-closed boundary as the PostgreSQL authority: a malformed child throws so the
         // controller can answer 400, instead of a null that becomes an eternally retryable 409.
         var (taskId, runKind, envelope) = OrchestratorTaskEnvelope.ValidateChild(request);
@@ -121,12 +129,78 @@ public sealed class InMemoryOrchestratorRunRepository(
             var child = new Child(Guid.NewGuid(), taskId, request.Attempt, runKind, request.AgentId, request.AgentRevision, pin.Value.Workflow, pin.Value.Revision, pin.Value.Hash, agentRunId, commandId, canonicalEnvelope, artifact); root.Children.Add(child); root.Events.Add(new(root.Events.Count + 1, "child_created", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildCreated(child.Id, agentRunId, child.Task, child.Attempt, child.Kind)).RootElement.Clone(), DateTime.UtcNow)); return new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.Status, child.AgentRunId, child.CommandId);
         }
     }
+    public Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult<OrchestratorContextRequestResponse?>(null);
+            var child = root.Children.SingleOrDefault(x => x.Id == childId);
+            if (child is null) return Task.FromResult<OrchestratorContextRequestResponse?>(null);
+            var created = child.ContextRequest is null;
+            child.ContextRequest ??= TaskContextRequest.Create(child);
+            var request = child.ContextRequest;
+            if (created && contexts is IContextTaskLocalRegistry taskContexts) taskContexts.RegisterTaskContext(tenant, rootRunId, request.ContextId);
+            if (created) root.Events.Add(new(root.Events.Count + 1, "context.requested", root.Hash, JsonSerializer.SerializeToElement(new { context_request_id = request.Id, child_id = child.Id, task_id = child.Task, role = request.Role }), DateTime.UtcNow));
+            return Task.FromResult<OrchestratorContextRequestResponse?>(request.ToResponse(rootRunId, child));
+        }
+    }
+    public Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult<OrchestratorContextRequestResponse?>(null);
+            var child = root.Children.SingleOrDefault(x => x.Id == childId);
+            return Task.FromResult(child?.ContextRequest is { } request && request.Id == requestId ? request.ToResponse(rootRunId, child) : null);
+        }
+    }
+    public Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, long expectedVersion, OrchestratorContextDeltaRequest delta, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || root.Children.SingleOrDefault(x => x.Id == childId) is not { } child || child.ContextRequest is not { } request || request.Id != requestId)
+                return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.NotFound));
+            if (request.Version != expectedVersion) return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Conflict));
+            var views = delta.Views ?? Array.Empty<ContextViewInput>();
+            if (views.Count != 1 || views[0].ViewType != request.Role) throw new ArgumentException("Context delta must contain exactly the task role view");
+            var stored = (contexts?.CreateRevisionAsync(tenant, user, request.ContextId,
+                new ContextRevisionSubmitRequest(rootRunId, delta.Definition, delta.Evidence, views, delta.Measurements, delta.AsOf, delta.ExpiresAt), ct)
+                ?? throw new ArgumentException("Context store is unavailable")).GetAwaiter().GetResult();
+            request.Current = stored.Revision.ContextRef;
+            request.Version++;
+            request.Updated = DateTime.UtcNow;
+            root.Events.Add(new(root.Events.Count + 1, "context.delta_applied", root.Hash, JsonSerializer.SerializeToElement(new { context_request_id = request.Id, child_id = child.Id, task_id = child.Task, revision = stored.Revision.Revision, status = stored.Revision.Status, readiness = stored.Revision.Readiness }), request.Updated));
+            return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Success, stored.Revision, request.Version));
+        }
+    }
     public Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
     { lock (_gate) { if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult<OrchestratorChildStatusResponse?>(null); var child = root.Children.SingleOrDefault(x => x.Id == childId); if (child is null) return Task.FromResult<OrchestratorChildStatusResponse?>(null); AgentRunResponse? run = agentRuns?.GetAsync(tenant, user, child.AgentRunId, ct).GetAwaiter().GetResult(); if (run is not null) { var prior = child.Status; child.Status = run.Status; if (prior != child.Status && child.Status is "completed" or "failed" or "cancelled") root.Events.Add(new(root.Events.Count + 1, "child_terminal", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildTerminal(child.Id, child.AgentRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.Hash, child.Status, run.Result, run.ErrorCode)).RootElement.Clone(), DateTime.UtcNow)); } var output = run?.Result ?? JsonDocument.Parse("{}").RootElement.Clone(); var citations = output.ValueKind == JsonValueKind.Object && output.TryGetProperty("citations", out var cits) && cits.ValueKind == JsonValueKind.Array ? cits.Clone() : JsonDocument.Parse("[]").RootElement.Clone(); return Task.FromResult<OrchestratorChildStatusResponse?>(new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.AgentRunId, child.Status, output, citations, run?.ErrorCode, run?.ErrorMessage)); } }
     public Task<OrchestratorRunWriteResult> TransitionAsync(string tenant, string user, Guid rootRunId, OrchestratorRootTransitionRequest request, CancellationToken ct)
     { lock (_gate) { if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound)); if (root.Status is "completed" or "failed" or "cancelled" || root.Version != request.ExpectedStateVersion || request.ToStatus is not ("waiting_input" or "completed" or "failed" or "cancelled") || (request.ToStatus == "waiting_input" && (string.IsNullOrWhiteSpace(request.CheckpointRef) || request.CheckpointVersion is null || request.CheckpointVersion < 1)) || root.LeaseGeneration != request.LeaseGeneration || !string.Equals(root.ClaimTokenHash, Skills.SkillHash.Sha256(request.ClaimToken ?? ""), StringComparison.Ordinal) || root.ClaimExpiresAt <= DateTime.UtcNow) return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Conflict, ToResponse(root), "Root command lease changed")); root.Status = request.ToStatus!; if (root.Status == "waiting_input") { root.CheckpointRef = request.CheckpointRef; root.CheckpointVersion = request.CheckpointVersion!.Value; } root.CommandCompleted = true; root.ClaimTokenHash = null; root.ClaimExpiresAt = DateTime.MinValue; root.Version++; root.Updated = DateTime.UtcNow; foreach (var e in request.Events ?? Array.Empty<OrchestratorRootEventAppend>()) root.Events.Add(new(root.Events.Count + 1, e.EventType ?? "root_event", root.Hash, e.Payload?.Clone() ?? JsonDocument.Parse("{}").RootElement.Clone(), root.Updated)); root.Events.Add(new(root.Events.Count + 1, root.Status == "waiting_input" ? "root_waiting_input" : "root_terminal", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.RootTerminal(root.Status)).RootElement.Clone(), root.Updated)); return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Success, ToResponse(root))); } }
     public Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenant, string user, Guid rootRunId, OrchestratorContextAcquireRequest request, CancellationToken ct)
-    { lock (_gate) { if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || request.ContextRound < 1 || request.CurrentContext is not { ValueKind: JsonValueKind.Object }) return Task.FromResult<OrchestratorContextAcquireResponse?>(null); using var snapshot = JsonDocument.Parse(root.Snapshot); var authority = snapshot.RootElement.GetProperty("authority"); var tools = authority.GetProperty("context_tools").EnumerateArray().Select(x => x.GetString()!).OrderBy(x => x, StringComparer.Ordinal); var knowledge = authority.GetProperty("knowledge_sources").EnumerateArray().Select(x => x.GetString()!).OrderBy(x => x, StringComparer.Ordinal); if (!tools.SequenceEqual((request.AllowedTools ?? []).OrderBy(x => x, StringComparer.Ordinal)) || !knowledge.SequenceEqual((request.AllowedKnowledgeSources ?? []).OrderBy(x => x, StringComparer.Ordinal))) return Task.FromResult<OrchestratorContextAcquireResponse?>(null); if (request.CurrentContext.Value.TryGetProperty("user_input", out var input) && input.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(input.GetString())) return Task.FromResult<OrchestratorContextAcquireResponse?>(new(true, request.CurrentContext.Value.Clone(), [], [])); var missing = tools.Select(x => "context-tool:" + x).Concat(knowledge.Select(x => "knowledge-source:" + x)).DefaultIfEmpty("context-adapter-unavailable").ToArray(); return Task.FromResult<OrchestratorContextAcquireResponse?>(new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], missing)); } }
+    {
+        lock (_gate)
+        {
+            if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || request.ContextRound < 1
+                || request.CurrentContext is not { ValueKind: JsonValueKind.Object } || request.CurrentContext.Value.GetRawText().Length > 65_536)
+                return Task.FromResult<OrchestratorContextAcquireResponse?>(null);
+            using var snapshot = JsonDocument.Parse(root.Snapshot); var authority = snapshot.RootElement.GetProperty("authority");
+            var tools = authority.GetProperty("context_tools").EnumerateArray().Select(x => x.GetString()!).OrderBy(x => x, StringComparer.Ordinal);
+            var knowledge = authority.GetProperty("knowledge_sources").EnumerateArray().Select(x => x.GetString()!).OrderBy(x => x, StringComparer.Ordinal);
+            if (!tools.SequenceEqual((request.AllowedTools ?? []).OrderBy(x => x, StringComparer.Ordinal)) || !knowledge.SequenceEqual((request.AllowedKnowledgeSources ?? []).OrderBy(x => x, StringComparer.Ordinal)))
+                return Task.FromResult<OrchestratorContextAcquireResponse?>(null);
+            var missing = tools.Select(x => "context-tool:" + x).Concat(knowledge.Select(x => "knowledge-source:" + x)).DefaultIfEmpty("context-adapter-unavailable").ToArray();
+            var clarified = request.CurrentContext.Value.TryGetProperty("user_input", out var input) && input.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(input.GetString());
+            // Flag off is the pre-E1 contract verbatim, clarification short circuit included.
+            if (contextState?.Enabled is not true)
+                return Task.FromResult<OrchestratorContextAcquireResponse?>(clarified
+                    ? new(true, request.CurrentContext.Value.Clone(), [], [])
+                    : new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], missing));
+            if (clarified) return Task.FromResult<OrchestratorContextAcquireResponse?>(new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], ["clarification-revision-required"]));
+            var stored = contexts?.GetLatestReadyForRunAsync(tenant, user, rootRunId, ct).GetAwaiter().GetResult();
+            if (stored is not null && ContextAcquireProjection.Build(stored) is { } projection) return Task.FromResult<OrchestratorContextAcquireResponse?>(projection);
+            return Task.FromResult<OrchestratorContextAcquireResponse?>(new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], missing));
+        }
+    }
     public Task<OrchestratorRunWriteResult> CancelAsync(string tenant, string user, Guid id, string? reason, string key, CancellationToken ct)
     {
         lock (_gate)
@@ -205,6 +279,25 @@ public sealed class InMemoryOrchestratorRunRepository(
     }
     private static void Expire(Entry run) { if (run.Status is "completed" or "failed" or "cancelled" or "timed_out") return; run.Status = "timed_out"; run.ErrorCode = "deadline_exceeded"; run.ErrorMessage = "Root run deadline expired"; run.CommandCompleted = true; run.ClaimTokenHash = null; run.ClaimExpiresAt = DateTime.MinValue; run.Version++; run.Updated = DateTime.UtcNow; foreach (var child in run.Children.Where(x => x.Status is "queued" or "running")) child.Status = "cancelled"; run.Events.Add(new(run.Events.Count + 1, "root_timed_out", run.Hash, JsonDocument.Parse("{}").RootElement.Clone(), run.Updated)); }
     private sealed class Entry(Guid id, Guid commandId, string tenant, string user, string role, Guid oid, int orev, string conversation, Guid wid, int wrev, string snapshot, string hash, DateTime deadline, DateTime now) { public Guid Id = id, CommandId = commandId; public string Tenant = tenant, User = user, Role = role, Conversation = conversation, Snapshot = snapshot, Hash = hash, Status = "queued"; public Guid OrchestratorId = oid, WorkflowId = wid; public int OrchestratorRevision = orev, WorkflowRevision = wrev; public long Version = 1, LeaseGeneration, CheckpointVersion; public bool CancelRequested, CommandCompleted, DispatchCompleted; public string? ClaimTokenHash, ResumeInput, CheckpointRef, ErrorCode, ErrorMessage; public DateTime ClaimExpiresAt = DateTime.MinValue; public DateTime Deadline = deadline, Created = now, Updated = now; public List<E> Events = []; public List<Child> Children = []; }
-    private sealed class Child(Guid id, string task, int attempt, string kind, Guid agentId, int agentRevision, Guid workflowId, int workflowRevision, string hash, Guid agentRunId, Guid commandId, JsonElement taskEnvelope, JsonElement dispatchArtifact) { public Guid Id = id, AgentId = agentId, WorkflowId = workflowId, AgentRunId = agentRunId, CommandId = commandId; public string Task = task, Kind = kind, Hash = hash, Status = "queued"; public int Attempt = attempt, AgentRevision = agentRevision, WorkflowRevision = workflowRevision; public JsonElement TaskEnvelope = taskEnvelope.Clone(), DispatchArtifact = dispatchArtifact.Clone(); }
+    private sealed class Child(Guid id, string task, int attempt, string kind, Guid agentId, int agentRevision, Guid workflowId, int workflowRevision, string hash, Guid agentRunId, Guid commandId, JsonElement taskEnvelope, JsonElement dispatchArtifact) { public Guid Id = id, AgentId = agentId, WorkflowId = workflowId, AgentRunId = agentRunId, CommandId = commandId; public string Task = task, Kind = kind, Hash = hash, Status = "queued"; public int Attempt = attempt, AgentRevision = agentRevision, WorkflowRevision = workflowRevision; public JsonElement TaskEnvelope = taskEnvelope.Clone(), DispatchArtifact = dispatchArtifact.Clone(); public TaskContextRequest? ContextRequest; }
+    private sealed class TaskContextRequest(Guid id, Guid contextId, string role, ContextRef? baseContext, DateTime now)
+    {
+        public Guid Id = id, ContextId = contextId;
+        public string Role = role;
+        public ContextRef? Base = baseContext, Current;
+        public long Version = 1;
+        public DateTime Created = now, Updated = now;
+        public static TaskContextRequest Create(Child child)
+        {
+            ContextRef? baseContext = null;
+            if (child.TaskEnvelope.TryGetProperty("context_ref", out var raw) && raw.ValueKind == JsonValueKind.Object
+                && raw.TryGetProperty("context_id", out var contextId) && Guid.TryParse(contextId.GetString(), out var id)
+                && raw.TryGetProperty("revision", out var revision) && revision.TryGetInt32(out var number)
+                && raw.TryGetProperty("view_id", out var viewId) && Guid.TryParse(viewId.GetString(), out var view)) baseContext = new(id, number, view);
+            return new(Guid.NewGuid(), Guid.NewGuid(), child.Kind == "verifier" ? "verifier" : "worker", baseContext, DateTime.UtcNow);
+        }
+        public OrchestratorContextRequestResponse ToResponse(Guid rootRunId, Child child)
+            => new(Id, rootRunId, child.Id, child.Task, Role, ContextId, Base, Current, Version, Created, Updated);
+    }
     private sealed record E(long Sequence, string Type, string Hash, JsonElement Payload, DateTime At);
 }

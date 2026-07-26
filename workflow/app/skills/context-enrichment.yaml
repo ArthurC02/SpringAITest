@@ -1,0 +1,27 @@
+name: context-enrichment
+description: Server-owned, policy-governed document context bootstrap for Root Orchestrator runs
+required_role: ADMIN
+input_schema:
+  job: {type: dict, required: true}
+flow:
+  - node: context_validate_job@1.0
+  - node: context_resolve_security_scope@1.0
+  - node: context_normalize_request@1.0
+  - node: context_resolve_time@1.0
+  - node: context_build_requirements@1.0
+  - loop:
+      # Engine safety bound mandated by E1. Root context_round and snapshot
+      # max_context_rounds remain the outer authoritative budget.
+      max_iterations: 3
+      until: "state.context_status != 'NEED_MORE_CONTEXT' or state.context_attempt >= state.remaining_context_rounds"
+      body:
+        - node: context_discover_sources@1.0
+        - node: context_retrieve_documents@1.0
+        - node: context_normalize_evidence@1.0
+        - node: context_deduplicate_evidence@1.0
+        - node: context_detect_conflicts@1.0
+        - node: context_build_facts@1.0
+        - node: context_assess_coverage@1.0
+        - node: context_build_views@1.0
+        - node: context_submit_revision@1.0
+        - node: context_expand_requirements@1.0

@@ -27,6 +27,7 @@ from app import tools as _tools  # noqa: F401
 # import 亦觸發 kb_query 十節點的 @node 註冊（build_input_model 之外，compile 需要它們）
 from app.skills.deps import _default_deps as _kb_query_deps
 from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
+from app.nodes.context_enrichment import nodes as _context_enrichment_nodes  # noqa: F401
 
 # 內建骨架 template_* 引用 nl_logic / retrieve 節點：_load_builtin 在本模組匯入時就會編譯
 # 這些骨架，因此節點的 @node 註冊必須先觸發。skills 匯入即自足（不倚賴呼叫端先匯入
@@ -65,10 +66,15 @@ _TEMPLATE_NAMES = (
 # 只用得到其中的 llm 埠，其餘（檢索/稽核各埠）用不到但無妨（同一支 KbQueryDeps
 # 也滿足編譯器強制附加的 audit_feedback 節點所需的 audit_repo）。
 _NODE_FIRST_MIGRATION_NAMES = ("rag-qa", "summarize", "triage", "analyze-report")
+# 內部 skill：Root runtime 自己用的組件，不是使用者資產。它們的 invoke 已在 main.py
+# 前置 404，這裡同步從 catalog 隱藏——否則任何登入者仍讀得到完整 YAML 定義。
+_INTERNAL_SKILL_NAMES = frozenset({"context-enrichment", "context-task-local"})
 
 # skill 名 → 依賴組裝函式。沒有對應項目的 skill 以 None 建圖（節點若需要依賴會在編譯期炸）。
 _DEPS_BUILDERS = {
     "kb-query": _kb_query_deps,
+    "context-enrichment": _kb_query_deps,
+    "context-task-local": _kb_query_deps,
     **{name: _kb_query_deps for name in _TEMPLATE_NAMES},
     **{name: _kb_query_deps for name in _NODE_FIRST_MIGRATION_NAMES},
 }
@@ -115,7 +121,10 @@ def get(name: str) -> LoadedSkill | None:
 
 def all_skills() -> list[LoadedSkill]:
     """所有已載入的 skill，依名稱排序以維持穩定輸出順序。"""
-    return sorted(_SKILLS.values(), key=lambda s: s.skill.name)
+    return sorted(
+        (skill for skill in _SKILLS.values() if skill.skill.name not in _INTERNAL_SKILL_NAMES),
+        key=lambda skill: skill.skill.name,
+    )
 
 
 _load_builtin()

@@ -5,6 +5,7 @@ using Backend.Api.AgentRuns;
 using Backend.Api.Orchestrators;
 using Backend.Api.Skills;
 using Backend.Api.Workflows;
+using Backend.Api.Contexts;
 using Dapper;
 using Npgsql;
 
@@ -12,7 +13,7 @@ namespace Backend.Api.OrchestratorRuns;
 
 /// <summary>PostgreSQL authority for D5 root aggregates.  It deliberately never writes D3
 /// <c>agent_run</c>; Workflow later creates child Agent runs with this root ID as provenance.</summary>
-public sealed class OrchestratorRunRepository(NpgsqlDataSource dataSource) : IOrchestratorRunRepository
+public sealed class OrchestratorRunRepository(NpgsqlDataSource dataSource, IContextRepository? contexts = null, ContextEnrichmentState? contextState = null) : IOrchestratorRunRepository
 {
     public async Task<OrchestratorRunWriteResult> CreateAsync(string tenant, string user, string role, IReadOnlyCollection<string> groups, IReadOnlyCollection<string> capabilities, Guid oid, string conversation, string message, string key, CancellationToken ct)
     {
@@ -240,6 +241,11 @@ public sealed class OrchestratorRunRepository(NpgsqlDataSource dataSource) : IOr
     }
     public async Task<OrchestratorChildResponse?> CreateChildAsync(string tenant, string user, Guid rootRunId, OrchestratorChildCreateRequest request, CancellationToken ct)
     {
+        if (contextState?.Enabled is true && contexts is not null)
+        {
+            var stored = await contexts.GetLatestReadyForRunAsync(tenant, user, rootRunId, ct);
+            request = request with { TaskEnvelope = ContextTaskEnvelopeProjection.ApplyIfAvailable(request.TaskEnvelope, stored, request.RunKind?.Trim() ?? "") };
+        }
         var (task, kind, envelope) = OrchestratorTaskEnvelope.ValidateChild(request);
         await using var c = await dataSource.OpenConnectionAsync(ct); await using var tx = await c.BeginTransactionAsync(ct);
         var root = await c.QuerySingleOrDefaultAsync<Row>(new CommandDefinition("SELECT " + Columns + " FROM orchestrator_run WHERE id=@rootRunId AND tenant_id=@tenant AND user_id=@user AND status IN ('queued','running') FOR UPDATE", new { rootRunId, tenant, user }, tx, cancellationToken: ct));
@@ -305,12 +311,87 @@ public sealed class OrchestratorRunRepository(NpgsqlDataSource dataSource) : IOr
         using var snapshot = JsonDocument.Parse(root.Snapshot); var authority = snapshot.RootElement.GetProperty("authority");
         var tools = Strings(authority.GetProperty("context_tools")).OrderBy(x => x, StringComparer.Ordinal).ToArray(); var knowledge = Strings(authority.GetProperty("knowledge_sources")).OrderBy(x => x, StringComparer.Ordinal).ToArray();
         if (!tools.SequenceEqual((request.AllowedTools ?? Array.Empty<string>()).OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal) || !knowledge.SequenceEqual((request.AllowedKnowledgeSources ?? Array.Empty<string>()).OrderBy(x => x, StringComparer.Ordinal), StringComparer.Ordinal)) return null;
-        if (request.CurrentContext.Value.TryGetProperty("user_input", out var clarification) && clarification.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(clarification.GetString())) return new(true, request.CurrentContext.Value.Clone(), Array.Empty<JsonElement>(), Array.Empty<string>());
         // No implicit connector exists in Backend.  Do not echo caller/model context or invent
         // provenance: an unavailable server-owned adapter is an explicit, safe insufficiency.
         var missing = tools.Select(x => "context-tool:" + x).Concat(knowledge.Select(x => "knowledge-source:" + x)).DefaultIfEmpty("context-adapter-unavailable").ToArray();
+        var clarified = request.CurrentContext.Value.TryGetProperty("user_input", out var clarification) && clarification.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(clarification.GetString());
+        // Flag off must stay bit-identical to the pre-E1 contract, including the clarification
+        // short circuit; only the enabled path routes clarification through a new revision.
+        if (contextState?.Enabled is not true)
+            return clarified
+                ? new(true, request.CurrentContext.Value.Clone(), Array.Empty<JsonElement>(), Array.Empty<string>())
+                : new(false, EmptyObject(), Array.Empty<JsonElement>(), missing);
+        if (clarified) return new(false, EmptyObject(), Array.Empty<JsonElement>(), new[] { "clarification-revision-required" });
+        var stored = contexts is null ? null : await contexts.GetLatestReadyForRunAsync(tenant, user, rootRunId, ct);
+        if (stored is not null && ContextAcquireProjection.Build(stored) is { } projection) return projection;
         return new(false, EmptyObject(), Array.Empty<JsonElement>(), missing);
     }
+    public async Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
+    {
+        if (contextState?.Enabled is not true) return null;
+        await using var c = await dataSource.OpenConnectionAsync(ct); await using var tx = await c.BeginTransactionAsync(ct);
+        var child = await LoadContextChildAsync(c, tx, tenant, user, rootRunId, childId, ct);
+        if (child is null) { await tx.RollbackAsync(ct); return null; }
+        var existing = await LoadContextRequestAsync(c, tx, rootRunId, childId, null, true, ct);
+        if (existing is not null) { await tx.CommitAsync(ct); return existing.ToResponse(); }
+        var role = child.RunKind == "verifier" ? "verifier" : "worker";
+        var baseRef = ContextRefFromEnvelope(child.TaskEnvelope);
+        var now = DateTime.UtcNow; var id = Guid.NewGuid(); var contextId = Guid.NewGuid();
+        try
+        {
+            await c.ExecuteAsync(new CommandDefinition("INSERT INTO context_request(id,orchestrator_root_run_id,orchestrator_child_id,context_id,task_id,role,base_context_ref,version,created_at,updated_at) VALUES(@id,@rootRunId,@childId,@contextId,@taskId,@role,@base::jsonb,1,@now,@now)", new { id, rootRunId, childId, contextId, taskId = child.TaskId, role, @base = JsonSerializer.Serialize(baseRef), now }, tx, cancellationToken: ct));
+            await AppendRootEventAsync(c, tx, rootRunId, child.RootSnapshotHash, "context.requested", JsonSerializer.Serialize(new { context_request_id = id, child_id = childId, task_id = child.TaskId, role }), ct);
+            await tx.CommitAsync(ct);
+            return new OrchestratorContextRequestResponse(id, rootRunId, childId, child.TaskId, role, contextId, baseRef, null, 1, now, now);
+        }
+        catch (PostgresException e) when (e.SqlState == "23505")
+        {
+            await tx.RollbackAsync(ct);
+            return await GetContextRequestAsync(tenant, user, rootRunId, childId,
+                await c.ExecuteScalarAsync<Guid>(new CommandDefinition("SELECT id FROM context_request WHERE orchestrator_root_run_id=@rootRunId AND orchestrator_child_id=@childId", new { rootRunId, childId }, cancellationToken: ct)), ct);
+        }
+    }
+    public async Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, CancellationToken ct)
+    {
+        if (contextState?.Enabled is not true) return null;
+        await using var c = await dataSource.OpenConnectionAsync(ct);
+        var owned = await c.ExecuteScalarAsync<bool>(new CommandDefinition("SELECT EXISTS(SELECT 1 FROM orchestrator_run_child ch JOIN orchestrator_run root ON root.id=ch.orchestrator_root_run_id WHERE ch.id=@childId AND ch.orchestrator_root_run_id=@rootRunId AND root.tenant_id=@tenant AND root.user_id=@user)", new { childId, rootRunId, tenant, user }, cancellationToken: ct));
+        return owned ? (await LoadContextRequestAsync(c, null, rootRunId, childId, requestId, false, ct))?.ToResponse() : null;
+    }
+    public async Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, long expectedVersion, OrchestratorContextDeltaRequest delta, CancellationToken ct)
+    {
+        if (contextState?.Enabled is not true || contexts is not ContextRepository contextRepository) return new(OrchestratorContextDeltaStatus.NotFound);
+        await using var c = await dataSource.OpenConnectionAsync(ct); await using var tx = await c.BeginTransactionAsync(ct);
+        var child = await LoadContextChildAsync(c, tx, tenant, user, rootRunId, childId, ct);
+        var stored = child is null ? null : await LoadContextRequestAsync(c, tx, rootRunId, childId, requestId, true, ct);
+        if (child is null || stored is null) { await tx.RollbackAsync(ct); return new(OrchestratorContextDeltaStatus.NotFound); }
+        if (stored.Version != expectedVersion) { await tx.RollbackAsync(ct); return new(OrchestratorContextDeltaStatus.Conflict); }
+        var views = delta.Views ?? Array.Empty<ContextViewInput>();
+        if (views.Count != 1 || !string.Equals(views[0].ViewType, stored.Role, StringComparison.Ordinal)) throw new ArgumentException("Context delta must contain exactly the task role view");
+        var revision = await contextRepository.CreateRevisionAsync(c, tx, tenant, user, stored.ContextId, new ContextRevisionSubmitRequest(rootRunId, delta.Definition, delta.Evidence, views, delta.Measurements, delta.AsOf, delta.ExpiresAt), ct);
+        var next = checked(stored.Version + 1);
+        var updated = await c.ExecuteAsync(new CommandDefinition("UPDATE context_request SET current_context_ref=@current::jsonb,version=@next,updated_at=clock_timestamp() WHERE id=@requestId AND version=@expected", new { requestId, current = JsonSerializer.Serialize(revision.Revision.ContextRef), next, expected = expectedVersion }, tx, cancellationToken: ct));
+        if (updated != 1) { await tx.RollbackAsync(ct); return new(OrchestratorContextDeltaStatus.Conflict); }
+        await c.ExecuteAsync(new CommandDefinition("INSERT INTO context_delta(id,context_request_id,version,context_id,revision) VALUES(@id,@requestId,@next,@contextId,@revision)", new { id = Guid.NewGuid(), requestId, next, contextId = stored.ContextId, revision = revision.Revision.Revision }, tx, cancellationToken: ct));
+        await AppendRootEventAsync(c, tx, rootRunId, child.RootSnapshotHash, "context.delta_applied", JsonSerializer.Serialize(new { context_request_id = requestId, child_id = childId, task_id = child.TaskId, revision = revision.Revision.Revision, status = revision.Revision.Status, readiness = revision.Revision.Readiness }), ct);
+        await tx.CommitAsync(ct);
+        return new(OrchestratorContextDeltaStatus.Success, revision.Revision, next);
+    }
+    private static async Task<ContextChildRow?> LoadContextChildAsync(NpgsqlConnection c, NpgsqlTransaction tx, string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
+        => await c.QuerySingleOrDefaultAsync<ContextChildRow>(new CommandDefinition("SELECT ch.task_id TaskId,ch.run_kind RunKind,ch.task_envelope::text TaskEnvelope,root.snapshot_sha256 RootSnapshotHash FROM orchestrator_run_child ch JOIN orchestrator_run root ON root.id=ch.orchestrator_root_run_id WHERE ch.id=@childId AND ch.orchestrator_root_run_id=@rootRunId AND root.tenant_id=@tenant AND root.user_id=@user FOR UPDATE OF ch,root", new { childId, rootRunId, tenant, user }, tx, cancellationToken: ct));
+    private static async Task<ContextRequestRow?> LoadContextRequestAsync(NpgsqlConnection c, NpgsqlTransaction? tx, Guid rootRunId, Guid childId, Guid? requestId, bool forUpdate, CancellationToken ct)
+        => await c.QuerySingleOrDefaultAsync<ContextRequestRow>(new CommandDefinition("SELECT id Id,orchestrator_root_run_id RootRunId,orchestrator_child_id ChildId,context_id ContextId,task_id TaskId,role Role,base_context_ref::text BaseContextRef,current_context_ref::text CurrentContextRef,version Version,created_at CreatedAt,updated_at UpdatedAt FROM context_request WHERE orchestrator_root_run_id=@rootRunId AND orchestrator_child_id=@childId AND (@requestId IS NULL OR id=@requestId)" + (forUpdate ? " FOR UPDATE" : ""), new { rootRunId, childId, requestId }, tx, cancellationToken: ct));
+    private static ContextRef? ContextRefFromEnvelope(string envelope)
+    {
+        using var document = JsonDocument.Parse(envelope);
+        if (!document.RootElement.TryGetProperty("context_ref", out var value) || value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("context_id", out var contextId) || !Guid.TryParse(contextId.GetString(), out var id)
+            || !value.TryGetProperty("revision", out var revision) || !revision.TryGetInt32(out var number) || number < 1
+            || !value.TryGetProperty("view_id", out var viewId) || !Guid.TryParse(viewId.GetString(), out var view)) return null;
+        return new ContextRef(id, number, view);
+    }
+    private static ContextRef? ContextRefFromJson(string? value)
+        => string.IsNullOrWhiteSpace(value) || value == "null" ? null : JsonSerializer.Deserialize<ContextRef>(value);
     private static async Task AppendRootEventAsync(NpgsqlConnection c, NpgsqlTransaction tx, Guid rootRunId, string snapshotHash, string type, string payload, CancellationToken ct)
         => await c.ExecuteAsync(new CommandDefinition("INSERT INTO orchestrator_run_event(run_id,sequence,event_type,snapshot_sha256,payload) VALUES(@rootRunId,(SELECT COALESCE(MAX(sequence),0)+1 FROM orchestrator_run_event WHERE run_id=@rootRunId),@type,@snapshotHash,@payload::jsonb)", new { rootRunId, type, snapshotHash, payload }, tx, cancellationToken: ct));
     private static async Task<ChildSource?> LoadChildSourceAsync(NpgsqlConnection c, NpgsqlTransaction tx, string tenant, Guid agentId, int revision, (Guid WorkflowId, int WorkflowRevision, string Hash, int TokenCap) pin, CancellationToken ct)
@@ -371,6 +452,9 @@ public sealed class OrchestratorRunRepository(NpgsqlDataSource dataSource) : IOr
     private static OrchestratorRunResponse? ToResponse(Row? x) { if (x is null) return null; using var doc = JsonDocument.Parse(x.Snapshot); return new(x.Id, x.OrchestratorId, x.OrchestratorRevision, x.Conversation, x.WorkflowId, x.WorkflowRevision, x.Hash, x.Status, x.CancelRequested, x.Version, x.Deadline, Budgets(doc.RootElement), x.Created, x.Updated, x.CommandId, x.Result is null ? null : JsonDocument.Parse(x.Result).RootElement.Clone(), x.ErrorCode, x.ErrorMessage); }
     private static JsonElement Budgets(JsonElement snapshot) { var limits = snapshot.GetProperty("limits"); var value = new System.Text.Json.Nodes.JsonObject { { "maxContextRounds", limits.GetProperty("max_context_rounds").GetInt32() }, { "maxTasks", limits.GetProperty("max_tasks").GetInt32() }, { "maxChildRuns", limits.GetProperty("max_child_runs").GetInt32() }, { "maxConcurrency", limits.GetProperty("max_concurrency").GetInt32() }, { "maxRepairRounds", limits.GetProperty("max_repair_rounds").GetInt32() }, { "timeoutSeconds", limits.GetProperty("timeout_seconds").GetDouble() }, { "tokenBudget", snapshot.GetProperty("token_budget").GetInt32() } }; return JsonDocument.Parse(value.ToJsonString()).RootElement.Clone(); }
     private sealed record Row(Guid Id, Guid OrchestratorId, int OrchestratorRevision, string Conversation, Guid WorkflowId, int WorkflowRevision, string Hash, string Status, bool CancelRequested, long Version, DateTime Deadline, string Snapshot, DateTime Created, DateTime Updated, string RequestHash, Guid? CommandId, string? Result, string? ErrorCode, string? ErrorMessage, string? CheckpointRef, long CheckpointVersion); private sealed record Event(long Sequence, string Type, string Hash, string Payload, DateTime At);
+    private sealed record ContextChildRow(string TaskId, string RunKind, string TaskEnvelope, string RootSnapshotHash);
+    private sealed record ContextRequestRow(Guid Id, Guid RootRunId, Guid ChildId, Guid ContextId, string TaskId, string Role, string? BaseContextRef, string? CurrentContextRef, long Version, DateTime CreatedAt, DateTime UpdatedAt)
+    { public OrchestratorContextRequestResponse ToResponse() => new(Id, RootRunId, ChildId, TaskId, Role, ContextId, ContextRefFromJson(BaseContextRef), ContextRefFromJson(CurrentContextRef), Version, CreatedAt, UpdatedAt); }
     private sealed class RootRow { public bool Enabled { get; init; } public int Revision { get; init; } public byte[]? Definition { get; init; } public string DefinitionSha256 { get; init; } = ""; public Guid WorkflowId { get; init; } public int WorkflowRevision { get; init; } public int SchemaVersion { get; init; } public byte[]? WorkflowDefinition { get; init; } public string WorkflowDefinitionSha256 { get; init; } = ""; public string CompilerContractVersion { get; init; } = ""; }
     private sealed class AgentRow { public string Name { get; init; } = ""; public byte[]? Definition { get; init; } public string DefinitionSha256 { get; init; } = ""; public Guid? WorkflowId { get; init; } public int? WorkflowRevision { get; init; } }
     private sealed record WorkflowSourceRow(int SchemaVersion, byte[]? Definition, string DefinitionSha256, string CompilerContractVersion);

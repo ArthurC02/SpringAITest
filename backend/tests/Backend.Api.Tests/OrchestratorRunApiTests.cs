@@ -3,7 +3,10 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Backend.Api.Common;
 using Backend.Api.OrchestratorRuns;
+using Backend.Api.Contexts;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -127,6 +130,117 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
         }
 
         Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(request)).StatusCode);
+    }
+
+    [Fact]
+    public async Task ContextRequests_AreOwnerScoped_AndDeltaRequiresIfMatch()
+    {
+        var client = Client(capability: null);
+        var child = Guid.NewGuid(); var requestId = Guid.NewGuid();
+
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync(
+            $"/api/orchestrator-runs/{UnknownRun:D}/children/{child:D}/context-requests", null)).StatusCode);
+
+        var path = $"/api/orchestrator-runs/{UnknownRun:D}/children/{child:D}/context-requests/{requestId:D}/deltas";
+        var missing = await client.PostAsJsonAsync(path, new { definition = new { }, views = new[] { new { view_type = "worker", definition = new { } } } });
+        Assert.Equal((HttpStatusCode)428, missing.StatusCode);
+
+        using var stale = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(new { definition = new { }, views = new[] { new { view_type = "worker", definition = new { } } } })
+        };
+        stale.Headers.TryAddWithoutValidation("If-Match", "\"1\"");
+        Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(stale)).StatusCode);
+    }
+
+    // If-Match 的三種等價類必須分流:缺 → 428(上面那格)、格式非法/低於下界 → 400、
+    // 合法但過期 → 409。"1" 是 on-point 合法值,"0" 是它的 off-point。
+    [Theory]
+    [InlineData("\"abc\"")]
+    [InlineData("\"0\"")]
+    [InlineData("abc")]
+    public async Task ContextDelta_InvalidIfMatch_IsBadRequest(string ifMatch)
+    {
+        var client = Client(capability: null);
+        var path = $"/api/orchestrator-runs/{UnknownRun:D}/children/{Guid.NewGuid():D}/context-requests/{Guid.NewGuid():D}/deltas";
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(new { definition = new { }, views = new[] { new { view_type = "worker", definition = new { } } } })
+        };
+        request.Headers.TryAddWithoutValidation("If-Match", ifMatch);
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.SendAsync(request)).StatusCode);
+    }
+
+    // 決策表的另一半:倉儲丟出的 Context 例外必須映到規格上的對外狀態碼,而不是 500。
+    // policy 不可用是暫時性的 503,policy 本身壞掉是 422,候選不合法是 400。
+    [Theory]
+    [InlineData("unavailable", 503)]
+    [InlineData("invalid", 422)]
+    [InlineData("argument", 400)]
+    public async Task ContextDelta_RepositoryFailures_MapToTheContractStatusCodes(string failure, int expected)
+    {
+        var controller = E3Controller(new E3OnlyRepository { Failure = failure }, out var http);
+        http.Request.Headers.IfMatch = "\"1\"";
+        var delta = new OrchestratorContextDeltaRequest(JsonSerializer.SerializeToElement(new { }), [], [new("worker", JsonSerializer.SerializeToElement(new { }))], new ContextObjectiveMeasurements(1, 1));
+
+        var thrown = await Assert.ThrowsAsync<ApiException>(
+            () => controller.AppendContextDelta(E3OnlyRepository.Root, E3OnlyRepository.Child, E3OnlyRepository.RequestId, delta, default));
+
+        Assert.Equal(expected, thrown.Status);
+    }
+
+    // M7:server-owned Context 投影是在倉儲裡跑的,它產出的 envelope 若超過白名單契約上限,
+    // 對外必須是永久的 400(與 controller 前置檢查同一語意),不是 Workflow 會重試的 500。
+    [Fact]
+    public async Task CreateChild_WhenServerProjectionRejectsTheEnvelope_IsBadRequest()
+    {
+        var controller = E3Controller(new E3OnlyRepository { Failure = "argument" }, out _);
+        var request = new OrchestratorChildCreateRequest("worker-task", 1, "worker", Guid.NewGuid(), 1,
+            TaskEnvelope: EnvelopeOfLength(null), TokenCap: 1000);
+
+        var thrown = await Assert.ThrowsAsync<ApiException>(() => controller.CreateChild(E3OnlyRepository.Root, request, default));
+
+        Assert.Equal(400, thrown.Status);
+    }
+
+    private static OrchestratorRunController E3Controller(E3OnlyRepository repository, out DefaultHttpContext http)
+    {
+        http = new DefaultHttpContext();
+        http.Request.Headers[IdentityHeaders.TenantHeader] = "d5-api";
+        http.Request.Headers[IdentityHeaders.UserHeader] = "root-operator";
+        return new OrchestratorRunController(repository) { ControllerContext = new() { HttpContext = http } };
+    }
+
+    [Fact]
+    public async Task ContextRequests_ApiSuccess_UsesRequestVersionEtag_AndMarksStaleIfMatch()
+    {
+        var controller = E3Controller(new E3OnlyRepository(), out var http);
+
+        var created = Assert.IsType<OkObjectResult>(await controller.CreateContextRequest(E3OnlyRepository.Root, E3OnlyRepository.Child, default));
+        var request = Assert.IsType<OrchestratorContextRequestResponse>(created.Value);
+        Assert.Equal("\"1\"", http.Response.Headers.ETag.ToString());
+        Assert.Equal("worker", request.Role);
+
+        http.Response.Headers.Clear(); http.Request.Headers.IfMatch = "\"1\"";
+        var delta = new OrchestratorContextDeltaRequest(JsonSerializer.SerializeToElement(new { }), [], [new("worker", JsonSerializer.SerializeToElement(new { }))], new ContextObjectiveMeasurements(1, 1));
+        var appended = Assert.IsType<OkObjectResult>(await controller.AppendContextDelta(E3OnlyRepository.Root, E3OnlyRepository.Child, request.Id, delta, default));
+        Assert.IsType<ContextRevisionResponse>(appended.Value);
+        Assert.Equal("\"2\"", http.Response.Headers.ETag.ToString());
+
+        var stale = await Assert.ThrowsAsync<ApiException>(() => controller.AppendContextDelta(E3OnlyRepository.Root, E3OnlyRepository.Child, request.Id, delta, default));
+        Assert.Equal(409, stale.Status);
+        Assert.Equal("Context request version is stale", stale.FieldErrors!["If-Match"]);
+    }
+
+    [Fact]
+    public async Task ContextRequests_FeatureOff_IsUndiscoverable()
+    {
+        using var factory = new ContextDisabledFactory();
+        var client = factory.CreateInternalClient().WithTenant("d5-api").WithUser("root-operator");
+        var response = await client.PostAsync($"/api/orchestrator-runs/{Guid.NewGuid():D}/children/{Guid.NewGuid():D}/context-requests", null);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -294,6 +408,51 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
                 services.RemoveAll<IOrchestratorRunRepository>();
                 services.AddSingleton<IOrchestratorRunRepository, InMemoryOrchestratorRunRepository>();
             });
+        }
+    }
+
+    private sealed class E3OnlyRepository : IOrchestratorRunRepository
+    {
+        public static readonly Guid Root = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        public static readonly Guid Child = Guid.Parse("22222222-2222-4222-8222-222222222222");
+        public static readonly Guid RequestId = Guid.Parse("33333333-3333-4333-8333-333333333333");
+        private readonly Guid _request = RequestId;
+        private long _version = 1;
+        private readonly Guid _context = Guid.Parse("44444444-4444-4444-8444-444444444444");
+        /// <summary>Which Context failure the repository raises, so the controller's exception → status
+        /// mapping is exercised instead of only its happy path.</summary>
+        public string? Failure { get; init; }
+        private void Fail() => throw (Exception?)(Failure switch
+        {
+            "unavailable" => new ContextPolicyUnavailableException(),
+            "invalid" => new ContextPolicyInvalidException("Active context policy is malformed"),
+            "argument" => new ArgumentException("task_envelope is required and too large"),
+            _ => null,
+        }) ?? new InvalidOperationException("no failure configured");
+        public Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenant, string user, Guid root, Guid child, CancellationToken ct)
+            => Task.FromResult(tenant == "d5-api" && user == "root-operator" && root == Root && child == Child ? Request() : null);
+        public Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenant, string user, Guid root, Guid child, Guid request, CancellationToken ct)
+            => Task.FromResult(tenant == "d5-api" && user == "root-operator" && root == Root && child == Child && request == _request ? Request() : null);
+        public Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenant, string user, Guid root, Guid child, Guid request, long expected, OrchestratorContextDeltaRequest delta, CancellationToken ct)
+        {
+            if (Failure is not null) Fail();
+            if (tenant != "d5-api" || user != "root-operator" || root != Root || child != Child || request != _request) return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.NotFound));
+            if (expected != _version) return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Conflict));
+            _version++;
+            var response = new ContextRevisionResponse(_context, 1, Root, ContextStatuses.Ready, 1m, [], Guid.NewGuid(), JsonSerializer.SerializeToElement(new { }), DateTime.UtcNow, DateTime.UtcNow, null, new ContextRef(_context, 1, Guid.NewGuid()));
+            return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Success, response, _version));
+        }
+        private OrchestratorContextRequestResponse Request() => new(_request, Root, Child, "task", "worker", _context, null, null, _version, DateTime.UtcNow, DateTime.UtcNow);
+        public Task<OrchestratorRunWriteResult> CreateAsync(string a,string b,string c,IReadOnlyCollection<string>d,IReadOnlyCollection<string>e,Guid f,string g,string h,string i,CancellationToken j)=>throw new NotSupportedException();
+        public Task<OrchestratorRunResponse?> GetAsync(string a,string b,Guid c,CancellationToken d)=>throw new NotSupportedException(); public Task<OrchestratorRunActiveLookup> FindActiveAsync(string a,string b,string c,CancellationToken d)=>throw new NotSupportedException(); public Task<OrchestratorRunActiveLookup> FindByIdempotencyKeyAsync(string a,string b,string c,OrchestratorRunReplayRequest d,CancellationToken e)=>throw new NotSupportedException(); public Task<OrchestratorRunEventsResponse?> EventsAsync(string a,string b,Guid c,long d,int e,CancellationToken f)=>throw new NotSupportedException(); public Task<OrchestratorRunWriteResult> CancelAsync(string a,string b,Guid c,string? d,string e,CancellationToken f)=>throw new NotSupportedException(); public Task<OrchestratorRunWriteResult> ResumeAsync(string a,string b,Guid c,string d,string e,CancellationToken f)=>throw new NotSupportedException(); public Task<string?> ExecutionArtifactAsync(string a,string b,Guid c,CancellationToken d)=>throw new NotSupportedException(); public Task<OrchestratorRunCommandClaim?> ClaimCommandAsync(string a,string b,Guid c,Guid d,string e,int f,CancellationToken g)=>throw new NotSupportedException(); public Task<OrchestratorRunCommandClaim?> RenewCommandAsync(string a,string b,Guid c,Guid d,string e,long f,int g,CancellationToken h)=>throw new NotSupportedException(); public Task<OrchestratorRunDispatchCompleteStatus> CompleteDispatchAsync(string a,string b,Guid c,Guid d,string e,CancellationToken f)=>throw new NotSupportedException(); public Task<OrchestratorRunRecoveryResponse> ClaimRecoveryAsync(string a,int b,int c,CancellationToken d)=>throw new NotSupportedException(); public Task<OrchestratorChildResponse?> CreateChildAsync(string a,string b,Guid c,OrchestratorChildCreateRequest d,CancellationToken e){Fail();throw new NotSupportedException();} public Task<OrchestratorChildStatusResponse?> GetChildAsync(string a,string b,Guid c,Guid d,CancellationToken e)=>throw new NotSupportedException(); public Task<OrchestratorRunWriteResult> TransitionAsync(string a,string b,Guid c,OrchestratorRootTransitionRequest d,CancellationToken e)=>throw new NotSupportedException(); public Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string a,string b,Guid c,OrchestratorContextAcquireRequest d,CancellationToken e)=>throw new NotSupportedException();
+    }
+
+    private sealed class ContextDisabledFactory : TestWebAppFactory
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.UseSetting("CONTEXT_ENRICHMENT_ENABLED", "false");
         }
     }
 }

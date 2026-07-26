@@ -20,9 +20,10 @@ public sealed class FeaturesApiTests
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
         Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
         Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.False(body["contextEnrichmentEnabled"]!.GetValue<bool>());
         Assert.False(body["agentChatEnabled"]!.GetValue<bool>());
         Assert.False(body["agentWriteToolsEnabled"]!.GetValue<bool>());
-        Assert.Equal(6, body.AsObject().Count);
+        Assert.Equal(7, body.AsObject().Count);
     }
 
     [Fact]
@@ -98,6 +99,31 @@ public sealed class FeaturesApiTests
             multiAgentDispatchEnabled: true);
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
         Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Features_ContextEnrichmentRequiresDispatch()
+    {
+        using var factory = new TestWebAppFactory(contextEnrichmentEnabled: true);
+
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+
+        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.False(body["contextEnrichmentEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Features_ContextEnrichmentEnabledWithDispatch_IsExposed()
+    {
+        using var factory = new TestWebAppFactory(
+            workflowDesignerEnabled: true,
+            multiAgentDispatchEnabled: true,
+            contextEnrichmentEnabled: true);
+
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+
+        Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.True(body["contextEnrichmentEnabled"]!.GetValue<bool>());
     }
 
     [Fact]

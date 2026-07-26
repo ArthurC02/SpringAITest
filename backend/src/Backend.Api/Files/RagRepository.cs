@@ -124,7 +124,7 @@ public sealed class RagRepository : IRagRepository
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<RetrievedChunk>(new CommandDefinition(
-            "SELECT c.document_id::text AS DocumentId, d.title AS Title, c.content AS Content,"
+            "SELECT c.document_id::text AS DocumentId, c.id::text AS ChunkId, d.title AS Title, c.content AS Content,"
             + " 1 - (c.embedding <=> @query::vector) AS Score"
             + " FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id"
             + " WHERE c.tenant_id = @tenantId"
@@ -148,7 +148,7 @@ public sealed class RagRepository : IRagRepository
 
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<RetrievedChunk>(new CommandDefinition(
-            "SELECT c.document_id::text AS DocumentId, d.title AS Title, c.content AS Content,"
+            "SELECT c.document_id::text AS DocumentId, c.id::text AS ChunkId, d.title AS Title, c.content AS Content,"
             + " 1 - (c.embedding <=> @query::vector) AS Score"
             + " FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id"
             + " WHERE c.tenant_id = @tenantId AND d.tenant_id = @tenantId"

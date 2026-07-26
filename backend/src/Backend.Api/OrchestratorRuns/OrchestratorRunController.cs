@@ -1,4 +1,5 @@
 using Backend.Api.Common;
+using Backend.Api.Contexts;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Backend.Api.OrchestratorRuns;
@@ -38,7 +39,14 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
     { var workerId = Worker(request.WorkerId, request.Limit, request.LeaseSeconds); return Ok(await runs.ClaimRecoveryAsync(workerId, request.Limit, request.LeaseSeconds, ct)); }
     [HttpPost("orchestrator-runs/{runId:guid}/children")]
     public async Task<IActionResult> CreateChild(Guid runId, OrchestratorChildCreateRequest request, CancellationToken ct)
-    { Child(request); return Ok(await runs.CreateChildAsync(Request.RequireTenant(), Request.RequireUserId(), runId, request, ct) ?? throw new ApiException(409, "Child task is not authorized by the immutable root snapshot")); }
+    {
+        Child(request);
+        // The server-owned Context projection re-validates the envelope it produced (oversized view,
+        // missing role view, mismatched context_ref).  That is a permanent 400 like the caller-side
+        // check above — never a 500 Workflow would treat as retryable.
+        try { return Ok(await runs.CreateChildAsync(Request.RequireTenant(), Request.RequireUserId(), runId, request, ct) ?? throw new ApiException(409, "Child task is not authorized by the immutable root snapshot")); }
+        catch (ArgumentException e) { throw new ApiException(400, e.Message); }
+    }
     [HttpGet("orchestrator-runs/{runId:guid}/children/{childId:guid}")]
     public async Task<IActionResult> ChildStatus(Guid runId, Guid childId, CancellationToken ct)
         => Ok(await runs.GetChildAsync(Request.RequireTenant(), Request.RequireUserId(), runId, childId, ct) ?? throw Missing());
@@ -48,6 +56,37 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
     [HttpPost("orchestrator-runs/{runId:guid}/context/acquire")]
     public async Task<IActionResult> AcquireContext(Guid runId, OrchestratorContextAcquireRequest request, CancellationToken ct)
         => Ok(await runs.AcquireContextAsync(Request.RequireTenant(), Request.RequireUserId(), runId, request, ct) ?? throw new ApiException(409, "Context acquisition authority is invalid"));
+    [HttpPost("orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests")]
+    public async Task<IActionResult> CreateContextRequest(Guid runId, Guid childId, CancellationToken ct)
+    {
+        var result = await runs.GetOrCreateContextRequestAsync(Request.RequireTenant(), Request.RequireUserId(), runId, childId, ct) ?? throw Missing();
+        Response.SetVersionETag(result.Version);
+        return Ok(result);
+    }
+    [HttpGet("orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests/{requestId:guid}")]
+    public async Task<IActionResult> GetContextRequest(Guid runId, Guid childId, Guid requestId, CancellationToken ct)
+    {
+        var result = await runs.GetContextRequestAsync(Request.RequireTenant(), Request.RequireUserId(), runId, childId, requestId, ct) ?? throw Missing();
+        Response.SetVersionETag(result.Version);
+        return Ok(result);
+    }
+    [HttpPost("orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests/{requestId:guid}/deltas")]
+    public async Task<IActionResult> AppendContextDelta(Guid runId, Guid childId, Guid requestId, OrchestratorContextDeltaRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var result = await runs.AppendContextDeltaAsync(Request.RequireTenant(), Request.RequireUserId(), runId, childId, requestId, Request.RequireIfMatchVersion(), request, ct);
+            if (result.Status == OrchestratorContextDeltaStatus.NotFound) throw Missing();
+            if (result.Status == OrchestratorContextDeltaStatus.Conflict)
+                throw new ApiException(409, "Context request version conflicted")
+                { FieldErrors = new Dictionary<string, string> { ["If-Match"] = "Context request version is stale" } };
+            Response.SetVersionETag(result.Version);
+            return Ok(result.Revision);
+        }
+        catch (ContextPolicyUnavailableException) { throw new ApiException(503, "No active context policy is available"); }
+        catch (ContextPolicyInvalidException e) { throw new ApiException(422, e.Message); }
+        catch (ArgumentException e) { throw new ApiException(400, e.Message); }
+    }
     private IActionResult Accepted(OrchestratorRunWriteResult r) { if (r.Status == OrchestratorRunWriteStatus.NotFound) throw Missing(); if (r.Status is OrchestratorRunWriteStatus.Conflict or OrchestratorRunWriteStatus.InvalidState) throw new ApiException(409, r.Message ?? "Orchestrator run state conflict"); Response.Headers["X-Orchestrator-Run-Replayed"] = r.Replayed ? "true" : "false"; if (r.Dispatch is not null) Response.Headers["X-Orchestrator-Run-Command-Id"] = r.Dispatch.CommandId.ToString("D"); return StatusCode(202, r.Run! with { CommandId = r.Dispatch?.CommandId }); }
     private void RequireSystemAdmin() { if (!Request.HasCapability("workflow.manage")) throw new ApiException(403, "workflow.manage capability is required"); }
     // The recovery repositories throw on these bounds; validate them here so an invalid

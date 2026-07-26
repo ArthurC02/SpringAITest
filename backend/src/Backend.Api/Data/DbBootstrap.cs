@@ -721,6 +721,70 @@ public static class DbBootstrap
           WHERE dispatch_completed_at IS NULL;
         CREATE INDEX IF NOT EXISTS ix_agent_run_command_run_sequence
           ON agent_run_command (run_id, command_sequence DESC);
+        -- E1 Context Enrichment: canonical bytes are authoritative; jsonb is only query projection.
+        CREATE TABLE IF NOT EXISTS context_policy (
+          id uuid PRIMARY KEY, tenant_id text NOT NULL, name text NOT NULL,
+          is_active boolean NOT NULL DEFAULT false, values jsonb NOT NULL DEFAULT '{}',
+          created_by text NOT NULL DEFAULT 'system', created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_context_policy_tenant_name UNIQUE(tenant_id,name));
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_context_policy_active
+          ON context_policy(tenant_id) WHERE is_active;
+        CREATE TABLE IF NOT EXISTS source_catalog (
+          source_id text PRIMARY KEY, tenant_id text NULL, source_type text NOT NULL,
+          evidence_type text NOT NULL DEFAULT 'document',
+          authority_class text NOT NULL, date_coverage jsonb, freshness_sla jsonb,
+          adapter_id text NOT NULL, acl_policy_id text, enabled boolean NOT NULL DEFAULT true,
+          required boolean NOT NULL DEFAULT true, timeout_seconds integer NOT NULL DEFAULT 15,
+          minimum_deadline_seconds integer NOT NULL DEFAULT 2);
+        ALTER TABLE source_catalog ADD COLUMN IF NOT EXISTS evidence_type text NOT NULL DEFAULT 'document';
+        ALTER TABLE source_catalog ADD COLUMN IF NOT EXISTS required boolean NOT NULL DEFAULT true;
+        ALTER TABLE source_catalog ADD COLUMN IF NOT EXISTS timeout_seconds integer NOT NULL DEFAULT 15;
+        ALTER TABLE source_catalog ADD COLUMN IF NOT EXISTS minimum_deadline_seconds integer NOT NULL DEFAULT 2;
+        CREATE TABLE IF NOT EXISTS metric_definition (
+          metric_id text NOT NULL, definition_version text NOT NULL, pack_id text,
+          tenant_id text, formula jsonb, unit text, aggregation text, grain text, dimensions jsonb,
+          PRIMARY KEY(metric_id,definition_version));
+        CREATE TABLE IF NOT EXISTS context_revision (
+          context_id uuid NOT NULL, revision integer NOT NULL, tenant_id text NOT NULL,
+          root_run_id uuid NULL REFERENCES orchestrator_run(id), status text NOT NULL,
+          canonical bytea NOT NULL, sha256 char(64) NOT NULL, definition jsonb NOT NULL,
+          as_of timestamptz NOT NULL, readiness numeric NOT NULL, policy_id uuid NOT NULL REFERENCES context_policy(id),
+          selected_source_id text, adapter_id text,
+          unmet_requirements jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz,
+          PRIMARY KEY(context_id,revision));
+        CREATE INDEX IF NOT EXISTS ix_context_revision_tenant_root ON context_revision(tenant_id,root_run_id);
+        ALTER TABLE context_revision ADD COLUMN IF NOT EXISTS selected_source_id text;
+        ALTER TABLE context_revision ADD COLUMN IF NOT EXISTS adapter_id text;
+        CREATE TABLE IF NOT EXISTS context_evidence (
+          evidence_id uuid PRIMARY KEY, context_id uuid NOT NULL, revision integer NOT NULL, tenant_id text NOT NULL,
+          evidence_type text NOT NULL, source_id text NOT NULL, snapshot_id text NOT NULL, content_ref text NOT NULL,
+          content_hash char(64) NOT NULL, scope jsonb, observations jsonb, acl_decision_id text,
+          observed_at timestamptz NOT NULL, lineage jsonb,
+          CONSTRAINT fk_context_evidence_revision FOREIGN KEY(context_id,revision) REFERENCES context_revision(context_id,revision),
+          CONSTRAINT uq_context_evidence_snapshot_ref UNIQUE(context_id,revision,snapshot_id,content_ref));
+        CREATE TABLE IF NOT EXISTS context_view (
+          view_id uuid PRIMARY KEY, context_id uuid NOT NULL, revision integer NOT NULL, tenant_id text NOT NULL,
+          view_type text NOT NULL, canonical bytea NOT NULL, sha256 char(64) NOT NULL, definition jsonb NOT NULL,
+          CONSTRAINT fk_context_view_revision FOREIGN KEY(context_id,revision) REFERENCES context_revision(context_id,revision),
+          CONSTRAINT uq_context_view_type UNIQUE(context_id,revision,view_type));
+        -- E3 task-local ContextRequest aggregate.  The request is one durable owner-scoped
+        -- stream per immutable child; deltas never overwrite their prior revision.
+        CREATE TABLE IF NOT EXISTS context_request (
+          id uuid PRIMARY KEY, orchestrator_root_run_id uuid NOT NULL REFERENCES orchestrator_run(id),
+          orchestrator_child_id uuid NOT NULL REFERENCES orchestrator_run_child(id), context_id uuid NOT NULL,
+          task_id text NOT NULL, role text NOT NULL CHECK(role IN ('worker','verifier')),
+          base_context_ref jsonb, current_context_ref jsonb, version bigint NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE(orchestrator_child_id));
+        CREATE INDEX IF NOT EXISTS ix_context_request_root_child
+          ON context_request(orchestrator_root_run_id, orchestrator_child_id);
+        CREATE TABLE IF NOT EXISTS context_delta (
+          id uuid PRIMARY KEY, context_request_id uuid NOT NULL REFERENCES context_request(id),
+          version bigint NOT NULL, context_id uuid NOT NULL, revision integer NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE(context_request_id, version),
+          UNIQUE(context_id, revision));
         """;
 
     public static async Task RunAsync(NpgsqlDataSource dataSource, ILogger logger, CancellationToken ct = default)
@@ -1079,6 +1143,18 @@ public static class DbBootstrap
             cancellationToken: ct));
 
         await SeedDefaultWorkflowAsync(conn, ct);
+        await SeedContextEnrichmentAsync(conn, ct);
+    }
+
+    private static async Task SeedContextEnrichmentAsync(NpgsqlConnection conn, CancellationToken ct)
+    {
+        const string values = "{\"readiness\":{\"ready_threshold\":0.85,\"assumptions_min\":0.70,\"optional_failure_penalty\":0.10},\"bootstrap_requirements\":[{\"name\":\"document\",\"evidence_type\":\"document\",\"mandatory\":true}],\"source_requirements\":[{\"source_id\":\"backend_documents\",\"required\":true}],\"source_precedence\":[\"backend_documents\"]}";
+        await conn.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO source_catalog(source_id,tenant_id,source_type,evidence_type,authority_class,date_coverage,freshness_sla,adapter_id,acl_policy_id,enabled,required,timeout_seconds,minimum_deadline_seconds) VALUES('backend_documents',NULL,'knowledge-source','document','server-owned','{}'::jsonb,'{}'::jsonb,'backend.retrieval_search',NULL,true,true,15,2) ON CONFLICT(source_id) DO UPDATE SET evidence_type=EXCLUDED.evidence_type,adapter_id=EXCLUDED.adapter_id,required=EXCLUDED.required,timeout_seconds=EXCLUDED.timeout_seconds,minimum_deadline_seconds=EXCLUDED.minimum_deadline_seconds",
+            cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO context_policy(id,tenant_id,name,is_active,values,created_by) SELECT gen_random_uuid(),code,'default',true,@values::jsonb,'system' FROM tenants ON CONFLICT(tenant_id,name) DO UPDATE SET values=EXCLUDED.values,updated_at=now() WHERE context_policy.created_by='system'",
+            new { values }, cancellationToken: ct));
     }
 
     /// <summary>

@@ -7,6 +7,8 @@ using Backend.Api.OrchestratorRuns;
 using Backend.Api.Orchestrators;
 using Backend.Api.RuntimeDiscovery;
 using Backend.Api.Workflows;
+using Backend.Api.Contexts;
+using Backend.Api.Data.InMemory;
 using Dapper;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -274,6 +276,91 @@ public sealed class OrchestratorRunRepositoryTests
         Assert.Null(await fixture.Runs.AcquireContextAsync("other-tenant", "u", runId, request, default));
     }
 
+    // H1:`current_context.user_input` 的澄清短路必須隨旗標分岔 —— 旗標關閉時位元同 E1 之前
+    // (ready:true 原樣回傳 caller context),旗標開啟時改走新 revision(ready:false + 明確缺口碼)。
+    // 這兩格原本全 repo 零覆蓋,是 E1 一度把關閉路徑一起改掉而沒被抓到的原因。
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AcquireContext_UserInputClarification_DependsOnTheEnrichmentFlag(bool enrichmentEnabled)
+    {
+        const string source = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        var fixture = await FixtureAsync(contextTools: ["search_documents"], knowledgeSources: [source],
+            contexts: enrichmentEnabled ? new InMemoryContextRepository(policyTenants: ["t"]) : null);
+        var created = await fixture.Runs.CreateAsync("t", "u", "ADMIN", [], [], fixture.OrchestratorId, "clarify", "plan", "clarify-key", default);
+        var current = JsonSerializer.SerializeToElement(new { user_input = "2026 Q1" });
+        var request = new OrchestratorContextAcquireRequest(1, current, ["search_documents"], [source]);
+
+        var result = await fixture.Runs.AcquireContextAsync("t", "u", created.Run!.Id, request, default);
+
+        Assert.NotNull(result);
+        if (enrichmentEnabled)
+        {
+            Assert.False(result!.Ready);
+            Assert.Equal(["clarification-revision-required"], result.Missing);
+            Assert.Equal("{}", result.Context.GetRawText());
+        }
+        else
+        {
+            Assert.True(result!.Ready);
+            Assert.Empty(result.Missing);
+            Assert.Equal("2026 Q1", result.Context.GetProperty("user_input").GetString());
+        }
+    }
+
+    // A-CTX-14 + M7:child 拿到的 payload 只有自己的 view;投影後 envelope 超過 65 536 是永久性的
+    // 400 材料(ArgumentException),不能逃逸成 Workflow 會無限重試的 500。
+    [Fact]
+    public async Task CreateChild_ProjectsOnlyItsOwnView_AndRejectsAnOversizedProjection()
+    {
+        var rag = new InMemoryRagRepository();
+        var documentId = Guid.NewGuid();
+        await rag.InsertProcessingDocumentAsync(documentId.ToString("D"), "t", "evidence", default);
+        await rag.CompleteDocumentAsync(documentId.ToString("D"), "t", ["source"], [new[] { 1f }], default);
+        var chunk = Assert.Single(await rag.SearchAsync("t", [1f], 1, default));
+        var contexts = new InMemoryContextRepository(rag, policyTenants: ["t"]);
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(maxConcurrency: 2, contextTools: ["backend.retrieval_search"],
+            knowledgeSources: [documentId.ToString("D")], agentRuns: childRuns, contexts: contexts);
+        var root = await fixture.Runs.CreateAsync("t", "u", "ADMIN", [], [], fixture.OrchestratorId, "projection", "plan", "projection-key", default);
+        var rootId = root.Run!.Id;
+        var evidence = new ContextEvidenceInput("document", documentId.ToString("D"), "s1", $"document://{documentId:D}#chunk/{chunk.ChunkId}", Backend.Api.Skills.SkillHash.Sha256("source"),
+            Lineage: JsonSerializer.SerializeToElement(new { catalog_source_id = "backend_documents", adapter_id = "backend.retrieval_search" }));
+        ContextViewInput[] views =
+        [
+            new("planner", JsonSerializer.SerializeToElement(new { plan = "root only" })),
+            new("worker", JsonSerializer.SerializeToElement(new { task_fact = "worker only" })),
+            new("verifier", JsonSerializer.SerializeToElement(new { claims = "verifier only" })),
+        ];
+        await contexts.CreateRevisionAsync("t", "u", Guid.NewGuid(), new ContextRevisionSubmitRequest(rootId,
+            JsonSerializer.SerializeToElement(new { secret_envelope_field = "must not reach the child" }), [evidence], views,
+            new ContextObjectiveMeasurements(1, 2)), default);
+
+        var child = await ChildAsync(fixture, rootId, "worker-task");
+
+        Assert.NotNull(child);
+        var envelope = childRuns.DispatchedEnvelope;
+        Assert.Equal("worker only", envelope.GetProperty("context").GetProperty("task_fact").GetString());
+        var raw = envelope.GetRawText();
+        Assert.DoesNotContain("secret_envelope_field", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("root only", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("verifier only", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("evidence", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("unmet_requirements", raw, StringComparison.Ordinal);
+
+        var oversized = new ContextRevisionSubmitRequest(rootId,
+            JsonSerializer.SerializeToElement(new { }), [evidence],
+            [new("planner", JsonSerializer.SerializeToElement(new { plan = "root" })), new("worker", JsonSerializer.SerializeToElement(new { bulk = new string('w', 65_400) }))],
+            new ContextObjectiveMeasurements(1, 2));
+        var replacement = new InMemoryContextRepository(rag, policyTenants: ["t"]);
+        var oversizedFixture = await FixtureAsync(contextTools: ["backend.retrieval_search"],
+            knowledgeSources: [documentId.ToString("D")], contexts: replacement);
+        var oversizedRoot = await oversizedFixture.Runs.CreateAsync("t", "u", "ADMIN", [], [], oversizedFixture.OrchestratorId, "oversize", "plan", "oversize-key", default);
+        await replacement.CreateRevisionAsync("t", "u", Guid.NewGuid(), oversized with { RootRunId = oversizedRoot.Run!.Id }, default);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => ChildAsync(oversizedFixture, oversizedRoot.Run.Id, "worker-task"));
+    }
+
     // child 狀態是從 D3 run 鏡射過來的:轉終局時必須恰好補一筆 child_terminal 事件(連呼兩次不得重複),
     // 並把 result 裡的 citations 抽出來。重複事件會讓 root 的聚合把同一個 child 算兩次。
     [Fact]
@@ -381,12 +468,76 @@ public sealed class OrchestratorRunRepositoryTests
         Assert.Equal("""{"status":"completed"}""", OrchestratorRunEvents.RootTerminal("completed"));
     }
 
-    private sealed record RunFixture(InMemoryOrchestratorRunRepository Runs, Guid OrchestratorId, Guid WorkerId);
+    [Fact]
+    public async Task ContextRequests_AreTaskLocal_CasProtected_RoleScoped_AndCursorVisible()
+    {
+        var rag = new InMemoryRagRepository();
+        var documentId = Guid.NewGuid();
+        await rag.InsertProcessingDocumentAsync(documentId.ToString("D"), "t", "evidence", default);
+        await rag.CompleteDocumentAsync(documentId.ToString("D"), "t", ["source"], [new[] { 1f }], default);
+        var chunk = Assert.Single(await rag.SearchAsync("t", [1f], 1, default));
+        var contexts = new InMemoryContextRepository(rag, policyTenants: ["t"]);
+        var fixture = await FixtureAsync(maxConcurrency: 2,
+            contextTools: ["backend.retrieval_search"], knowledgeSources: [documentId.ToString("D")], contexts: contexts);
+        var root = await fixture.Runs.CreateAsync("t", "u", "ADMIN", [], [], fixture.OrchestratorId, "context", "plan", "context-root", default);
+        var rootId = root.Run!.Id;
+        var evidence = new ContextEvidenceInput("document", documentId.ToString("D"), "s1", $"document://{documentId:D}#chunk/{chunk.ChunkId}", Backend.Api.Skills.SkillHash.Sha256("source"),
+            Observations: JsonSerializer.SerializeToElement(new { completeness = 1m }),
+            Lineage: JsonSerializer.SerializeToElement(new { catalog_source_id = "backend_documents", adapter_id = "backend.retrieval_search" }));
+        var measures = new ContextObjectiveMeasurements(1, 2);
+        var baseRevision = await contexts.CreateRevisionAsync("t", "u", Guid.NewGuid(), new ContextRevisionSubmitRequest(rootId,
+            JsonSerializer.SerializeToElement(new { base_value = 1 }), [evidence],
+            [new("planner", JsonSerializer.SerializeToElement(new { role = "planner" })), new("worker", JsonSerializer.SerializeToElement(new { role = "worker" })), new("verifier", JsonSerializer.SerializeToElement(new { role = "verifier" }))], measures), default);
+        Assert.Equal(ContextStatuses.Ready, baseRevision.Revision.Status);
+
+        var worker = await ChildAsync(fixture, rootId, "worker-task");
+        Assert.NotNull(worker);
+        var request = await fixture.Runs.GetOrCreateContextRequestAsync("t", "u", rootId, worker!.Id, default);
+        Assert.NotNull(request);
+        Assert.Equal("worker", request!.Role);
+        Assert.Equal(baseRevision.Revision.ContextRef!.ContextId, request.BaseContextRef!.ContextId);
+        Assert.Null(await fixture.Runs.GetContextRequestAsync("t", "other", rootId, worker.Id, request.Id, default));
+
+        var delta = new OrchestratorContextDeltaRequest(JsonSerializer.SerializeToElement(new { task_local = true }), [evidence],
+            [new("worker", JsonSerializer.SerializeToElement(new { role = "worker", facts = new { value = 2 } }))], measures);
+        var applied = await fixture.Runs.AppendContextDeltaAsync("t", "u", rootId, worker.Id, request.Id, request.Version, delta, default);
+        Assert.Equal(OrchestratorContextDeltaStatus.Success, applied.Status);
+        Assert.Equal(1, applied.Revision!.Revision);
+        Assert.Equal(2, applied.Version);
+        Assert.Equal(request.ContextId, applied.Revision.ContextId);
+        var stale = await fixture.Runs.AppendContextDeltaAsync("t", "u", rootId, worker.Id, request.Id, 1, delta, default);
+        Assert.Equal(OrchestratorContextDeltaStatus.Conflict, stale.Status);
+        Assert.Equal(1, (await contexts.GetRevisionAsync("t", request.ContextId, 1, default))!.Revision);
+        Assert.Null(await contexts.GetRevisionAsync("t", request.ContextId, 2, default));
+
+        var verifier = await fixture.Runs.CreateChildAsync("t", "u", rootId,
+            new OrchestratorChildCreateRequest("verify-task", 1, "verifier", fixture.VerifierId, 1, TaskEnvelope: TaskEnvelope(), TokenCap: AgentExecutionContract.DefaultTokenBudget), default);
+        var verifierRequest = await fixture.Runs.GetOrCreateContextRequestAsync("t", "u", rootId, verifier!.Id, default);
+        Assert.Equal("verifier", verifierRequest!.Role);
+        var wrongRole = new OrchestratorContextDeltaRequest(JsonSerializer.SerializeToElement(new { }), [evidence],
+            [new("worker", JsonSerializer.SerializeToElement(new { conflict = "untrusted" }))], measures);
+        await Assert.ThrowsAsync<ArgumentException>(() => fixture.Runs.AppendContextDeltaAsync("t", "u", rootId, verifier.Id, verifierRequest.Id, verifierRequest.Version, wrongRole, default));
+        var verifierDelta = wrongRole with { Views = [new("verifier", JsonSerializer.SerializeToElement(new { conflicts = new[] { "fact conflict" } }))] };
+        Assert.Equal(OrchestratorContextDeltaStatus.Success, (await fixture.Runs.AppendContextDeltaAsync("t", "u", rootId, verifier.Id, verifierRequest.Id, verifierRequest.Version, verifierDelta, default)).Status);
+
+        var events = await fixture.Runs.EventsAsync("t", "u", rootId, 0, 50, default);
+        var contextEvents = events!.Events.Where(x => x.EventType.StartsWith("context.", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(["context.requested", "context.delta_applied", "context.requested", "context.delta_applied"], contextEvents.Select(x => x.EventType));
+        Assert.Equal(contextEvents.Select(x => x.Sequence).Order().ToArray(), contextEvents.Select(x => x.Sequence).ToArray());
+        Assert.All(contextEvents, x =>
+        {
+            Assert.False(x.Payload.TryGetProperty("definition", out _));
+            Assert.False(x.Payload.TryGetProperty("evidence", out _));
+            Assert.False(x.Payload.TryGetProperty("context", out _));
+        });
+    }
+
+    private sealed record RunFixture(InMemoryOrchestratorRunRepository Runs, Guid OrchestratorId, Guid WorkerId, Guid VerifierId);
 
     private static async Task<RunFixture> FixtureAsync(
         int maxTasks = 2, int maxChildRuns = 3, int maxConcurrency = 1,
         string[]? contextTools = null, string[]? knowledgeSources = null,
-        IAgentRunRepository? agentRuns = null)
+        IAgentRunRepository? agentRuns = null, IContextRepository? contexts = null)
     {
         var workflows = new Data.InMemory.InMemoryWorkflowRepository();
         var root = await workflows.CreateAsync("t", "root", "orchestrator", "{\"schemaVersion\":1}", "{}", "u", default);
@@ -401,9 +552,10 @@ public sealed class OrchestratorRunRepositoryTests
             Definition(root.Workflow.Id, workerId, verifierId, maxTasks, maxChildRuns, maxConcurrency, contextTools, knowledgeSources));
         var agents = new StubAgents(workerId, verifierId, workerWorkflow, verifierWorkflow);
         return new RunFixture(
-            new InMemoryOrchestratorRunRepository(orchestrators, workflows, agents, agentRuns),
+            new InMemoryOrchestratorRunRepository(orchestrators, workflows, agents, agentRuns, contexts,
+                contexts is null ? null : new ContextEnrichmentState(true)),
             orchestrators.Id,
-            workerId);
+            workerId, verifierId);
     }
 
     private static Task<OrchestratorChildResponse?> ChildAsync(RunFixture fixture, Guid rootRunId, string taskId)
@@ -419,12 +571,17 @@ public sealed class OrchestratorRunRepositoryTests
     {
         private AgentRunResponse? _run;
 
+        /// <summary>The exact canonical envelope the orchestrator persists on the child (same value
+        /// goes to `orchestrator_run_child.task_envelope` and to the D3 child start command).</summary>
+        public JsonElement DispatchedEnvelope { get; private set; }
+
         public Task<AgentRunWriteResult> CreateOrchestratorChildAsync(
             string tenantId, string userId, string role, IReadOnlyCollection<string> groups,
             IReadOnlyCollection<string> capabilityClaims, PublishedAgentSnapshotSource agent,
             WorkflowSnapshotSource workflow, OrchestratorChildSnapshotProvenance provenance,
             string runKind, int tokenCap, JsonElement taskEnvelope, string idempotencyKey, CancellationToken ct)
         {
+            DispatchedEnvelope = taskEnvelope.Clone();
             _run = new AgentRunResponse(
                 Guid.NewGuid(), provenance.RootRunId, provenance.RootRunId, provenance.TaskId, runKind,
                 agent.AgentId, agent.Revision, workflow.WorkflowId, workflow.Revision, agent.DefinitionSha256,
@@ -545,6 +702,114 @@ public sealed class OrchestratorRunRepositoryPostgresTests(PostgresFixture fixtu
         Assert.Equal(accepted.Dispatch!.CommandId, replay.Dispatch!.CommandId);
         var conflicting = await repo.ResumeAsync(Tenant, "user", resume, "different", "same-key", default);
         Assert.Equal(OrchestratorRunWriteStatus.Conflict, conflicting.Status);
+    }
+
+    // H1(PostgreSQL 權威側):同一組輸入,旗標關閉必須回既有的 ready:true 短路,開啟才走 revision。
+    [SkippableTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AcquireContext_UserInputClarification_DependsOnTheEnrichmentFlag(bool enrichmentEnabled)
+    {
+        fixture.SkipIfUnavailable();
+        var root = Guid.NewGuid(); var document = Guid.NewGuid();
+        await InsertContextRootAsync(root, JsonSerializer.Serialize(new
+        {
+            authority = new { knowledge_sources = new[] { document.ToString("D") }, context_tools = new[] { "backend.retrieval_search" } },
+        }));
+        var repo = new OrchestratorRunRepository(fixture.DataSource!, new ContextRepository(fixture.DataSource!), new ContextEnrichmentState(enrichmentEnabled));
+        var current = JsonSerializer.SerializeToElement(new { user_input = "2026 Q1" });
+
+        var result = await repo.AcquireContextAsync(Tenant, "user", root,
+            new OrchestratorContextAcquireRequest(1, current, ["backend.retrieval_search"], [document.ToString("D")]), default);
+
+        Assert.NotNull(result);
+        if (enrichmentEnabled)
+        {
+            Assert.False(result!.Ready);
+            Assert.Equal(["clarification-revision-required"], result.Missing);
+            Assert.Equal("{}", result.Context.GetRawText());
+        }
+        else
+        {
+            Assert.True(result!.Ready);
+            Assert.Empty(result.Missing);
+            Assert.Equal("2026 Q1", result.Context.GetProperty("user_input").GetString());
+        }
+    }
+
+    [SkippableFact]
+    public async Task ContextRequest_DapperStorage_IsOwnerScopedIdempotentAndUsesRootCursor()
+    {
+        fixture.SkipIfUnavailable();
+        var root = Guid.NewGuid(); var child = Guid.NewGuid();
+        await InsertAsync(root, "context-request", Guid.NewGuid(), "queued");
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            await connection.ExecuteAsync("INSERT INTO orchestrator_run_child(id,orchestrator_root_run_id,task_id,attempt,run_kind,agent_id,agent_revision,workflow_id,workflow_revision,agent_snapshot_sha256,task_envelope,dispatch_artifact,status) VALUES(@child,@root,'task',1,'worker',@agent,1,@workflow,1,@hash,@envelope::jsonb,'{}'::jsonb,'queued')", new { child, root, agent = Guid.NewGuid(), workflow = Guid.NewGuid(), hash = new string('b', 64), envelope = "{\"objective\":\"task\"}" });
+        }
+        var repo = new OrchestratorRunRepository(fixture.DataSource!, new ContextRepository(fixture.DataSource!), new ContextEnrichmentState(true));
+        var first = await repo.GetOrCreateContextRequestAsync(Tenant, "user", root, child, default);
+        var replay = await repo.GetOrCreateContextRequestAsync(Tenant, "user", root, child, default);
+        Assert.NotNull(first);
+        Assert.Equal(first!.Id, replay!.Id);
+        Assert.Equal("worker", first.Role);
+        Assert.Null(await repo.GetContextRequestAsync(Tenant, "other-user", root, child, first.Id, default));
+        await using var verify = await fixture.DataSource.OpenConnectionAsync();
+        Assert.Equal(1, await verify.ExecuteScalarAsync<int>("SELECT count(*) FROM context_request WHERE orchestrator_child_id=@child", new { child }));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<int>("SELECT count(*) FROM orchestrator_run_event WHERE run_id=@root AND event_type='context.requested'", new { root }));
+    }
+
+    [SkippableFact]
+    public async Task ContextDelta_DapperLifecycle_IsAtomicRoleScopedAndDoesNotReplaceRootReadyContext()
+    {
+        fixture.SkipIfUnavailable();
+        var root = Guid.NewGuid(); var child = Guid.NewGuid(); var document = Guid.NewGuid(); var chunk = Guid.NewGuid();
+        const string content = "authoritative source";
+        var rootSnapshot = JsonSerializer.Serialize(new
+        {
+            authority = new { knowledge_sources = new[] { document.ToString("D") }, context_tools = new[] { "backend.retrieval_search" } },
+            limits = new { max_context_rounds = 2, max_tasks = 2, max_child_runs = 2, max_concurrency = 2, max_repair_rounds = 1, timeout_seconds = 60 },
+            token_budget = 10,
+        });
+        await InsertContextRootAsync(root, rootSnapshot);
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            const string policy = "{\"readiness\":{\"ready_threshold\":0.85,\"assumptions_min\":0.70,\"optional_failure_penalty\":0.10},\"bootstrap_requirements\":[{\"name\":\"document\",\"evidence_type\":\"document\",\"mandatory\":true}],\"source_requirements\":[{\"source_id\":\"backend_documents\",\"required\":true}],\"source_precedence\":[\"backend_documents\"]}";
+            var embedding = "[" + string.Join(',', Enumerable.Repeat("0", 1536)) + "]";
+            await connection.ExecuteAsync("INSERT INTO context_policy(id,tenant_id,name,is_active,values,created_by) VALUES(@id,@tenant,'e3',true,@policy::jsonb,'test'); INSERT INTO rag_documents(id,tenant_id,title,chunk_count,status) VALUES(@document,@tenant,'e3',1,'ready'); INSERT INTO rag_chunks(id,document_id,tenant_id,content,embedding) VALUES(@chunk,@document,@tenant,@content,@embedding::vector)", new { id = Guid.NewGuid(), tenant = Tenant, policy, document, chunk, content, embedding });
+        }
+        var contexts = new ContextRepository(fixture.DataSource!);
+        var evidence = new ContextEvidenceInput("document", document.ToString("D"), "snapshot", $"document://{document:D}#chunk/{chunk:D}", Skills.SkillHash.Sha256(content),
+            Observations: JsonSerializer.SerializeToElement(new { completeness = 1m }), Lineage: JsonSerializer.SerializeToElement(new { catalog_source_id = "backend_documents", adapter_id = "backend.retrieval_search" }));
+        var measurements = new ContextObjectiveMeasurements(1, 2);
+        var baseRevision = await contexts.CreateRevisionAsync(Tenant, "user", Guid.NewGuid(), new ContextRevisionSubmitRequest(root,
+            JsonSerializer.SerializeToElement(new { root = true }), [evidence],
+            [new("planner", JsonSerializer.SerializeToElement(new { role = "planner" })), new("worker", JsonSerializer.SerializeToElement(new { role = "worker" })), new("verifier", JsonSerializer.SerializeToElement(new { role = "verifier" }))], measurements), default);
+        await using (var connection = await fixture.DataSource.OpenConnectionAsync())
+        {
+            var envelope = JsonSerializer.Serialize(new { context_ref = baseRevision.Revision.ContextRef, objective = "task" });
+            await connection.ExecuteAsync("INSERT INTO orchestrator_run_child(id,orchestrator_root_run_id,task_id,attempt,run_kind,agent_id,agent_revision,workflow_id,workflow_revision,agent_snapshot_sha256,task_envelope,dispatch_artifact,status) VALUES(@child,@root,'worker-task',1,'worker',@agent,1,@workflow,1,@hash,@envelope::jsonb,'{}'::jsonb,'queued')", new { child, root, agent = Guid.NewGuid(), workflow = Guid.NewGuid(), hash = new string('b', 64), envelope });
+        }
+        var repo = new OrchestratorRunRepository(fixture.DataSource!, contexts, new ContextEnrichmentState(true));
+        var request = await repo.GetOrCreateContextRequestAsync(Tenant, "user", root, child, default);
+        Assert.Equal(baseRevision.Revision.ContextRef, request!.BaseContextRef);
+        var delta = new OrchestratorContextDeltaRequest(JsonSerializer.SerializeToElement(new { task = true }), [evidence], [new("worker", JsonSerializer.SerializeToElement(new { role = "worker", facts = new { value = 2 } }))], measurements);
+        var applied = await repo.AppendContextDeltaAsync(Tenant, "user", root, child, request.Id, request.Version, delta, default);
+        Assert.Equal(OrchestratorContextDeltaStatus.Success, applied.Status);
+        Assert.Equal(ContextStatuses.Ready, applied.Revision!.Status);
+        Assert.Equal(2, applied.Version);
+        var stale = await repo.AppendContextDeltaAsync(Tenant, "user", root, child, request.Id, 1, delta, default);
+        Assert.Equal(OrchestratorContextDeltaStatus.Conflict, stale.Status);
+        var wrongRole = delta with { Views = [new("verifier", JsonSerializer.SerializeToElement(new { conflict = "only verifier sees this" }))] };
+        await Assert.ThrowsAsync<ArgumentException>(() => repo.AppendContextDeltaAsync(Tenant, "user", root, child, request.Id, applied.Version, wrongRole, default));
+        var acquire = await repo.AcquireContextAsync(Tenant, "user", root, new OrchestratorContextAcquireRequest(1, JsonSerializer.SerializeToElement(new { }), ["backend.retrieval_search"], [document.ToString("D")]), default);
+        Assert.True(acquire!.Ready);
+        Assert.Equal(baseRevision.Revision.ContextRef!.ContextId.ToString("D"), acquire.Context.GetProperty("context_ref").GetProperty("context_id").GetString());
+        await using var verify = await fixture.DataSource.OpenConnectionAsync();
+        Assert.Equal(1, await verify.ExecuteScalarAsync<int>("SELECT count(*) FROM context_revision WHERE context_id=@context", new { context = request.ContextId }));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<int>("SELECT count(*) FROM context_delta WHERE context_request_id=@request", new { request = request.Id }));
+        Assert.Equal(2L, await verify.ExecuteScalarAsync<long>("SELECT version FROM context_request WHERE id=@request", new { request = request.Id }));
+        Assert.Equal(1, await verify.ExecuteScalarAsync<int>("SELECT count(*) FROM orchestrator_run_event WHERE run_id=@root AND event_type='context.delta_applied'", new { root }));
     }
 
     [SkippableFact]
@@ -670,12 +935,20 @@ public sealed class OrchestratorRunRepositoryPostgresTests(PostgresFixture fixtu
             await connection.ExecuteAsync("INSERT INTO orchestrator_run_command(id,run_id,command_type) VALUES(@command,@id,'start')", new { command = Guid.NewGuid(), id });
     }
 
+    private async Task InsertContextRootAsync(Guid id, string snapshot)
+    {
+        var canonical = AgentCanonicalizer.CanonicalizeDefinition(snapshot);
+        var hash = Skills.SkillHash.Sha256(canonical);
+        await using var connection = await fixture.DataSource!.OpenConnectionAsync();
+        await connection.ExecuteAsync("INSERT INTO orchestrator_run(id,tenant_id,user_id,caller_role,orchestrator_id,orchestrator_revision,conversation_id,workflow_id,workflow_revision,execution_snapshot,execution_snapshot_canonical,snapshot_sha256,request_sha256,idempotency_key_sha256,status,deadline_at) VALUES(@id,@tenant,'user','USER',@orchestrator,1,'context-lifecycle',@workflow,1,@snapshot::jsonb,@bytes,@hash,@hash,@key,'queued',clock_timestamp()+interval '1 hour')", new { id, tenant = Tenant, orchestrator = Guid.NewGuid(), workflow = Guid.NewGuid(), snapshot = canonical, bytes = Encoding.UTF8.GetBytes(canonical), hash, key = Skills.SkillHash.Sha256(Guid.NewGuid().ToString("N")) });
+    }
+
     private static OrchestratorRunReplayRequest ReplayRequest(string conversation, Guid orchestrator, string message) => new(conversation, orchestrator, message);
 
     private async Task CleanupAsync()
     {
         if (!fixture.Available) return;
         await using var connection = await fixture.DataSource!.OpenConnectionAsync();
-        await connection.ExecuteAsync("DELETE FROM agent_run_command WHERE run_id IN (SELECT id FROM agent_run WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant)); DELETE FROM agent_run_event WHERE run_id IN (SELECT id FROM agent_run WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant)); DELETE FROM agent_run WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run_event WHERE run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run_command WHERE run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run_child WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run WHERE tenant_id=@tenant;", new { tenant = Tenant });
+        await connection.ExecuteAsync("DELETE FROM context_delta WHERE context_request_id IN (SELECT id FROM context_request WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant)); DELETE FROM context_request WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM context_evidence WHERE tenant_id=@tenant; DELETE FROM context_view WHERE tenant_id=@tenant; DELETE FROM context_revision WHERE tenant_id=@tenant; DELETE FROM context_policy WHERE tenant_id=@tenant; DELETE FROM rag_chunks WHERE tenant_id=@tenant; DELETE FROM rag_documents WHERE tenant_id=@tenant; DELETE FROM agent_run_command WHERE run_id IN (SELECT id FROM agent_run WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant)); DELETE FROM agent_run_event WHERE run_id IN (SELECT id FROM agent_run WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant)); DELETE FROM agent_run WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run_event WHERE run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run_command WHERE run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run_child WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id=@tenant); DELETE FROM orchestrator_run WHERE tenant_id=@tenant;", new { tenant = Tenant });
     }
 }

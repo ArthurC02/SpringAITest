@@ -66,6 +66,10 @@ var workflowDesignerEnabled = string.Equals(
     StringComparison.OrdinalIgnoreCase);
 var multiAgentDispatchEnabled = workflowDesignerEnabled
     && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+// Context Enrichment 只服務於 D5/D6 的 Root Orchestrator；沒有 dispatch 時即使
+// 個別旗標被誤設為 true 也不得對外宣告可用（fail-closed）。
+var contextEnrichmentEnabled = multiAgentDispatchEnabled
+    && string.Equals(cfg["CONTEXT_ENRICHMENT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentChatEnabled = string.Equals(
     cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentWriteToolsEnabled = string.Equals(
@@ -525,6 +529,25 @@ if (!multiAgentDispatchEnabled)
     });
 }
 
+// Context Enrichment 沒有 Platform controller；這個前置 gate 仍保護 Context API
+// 路徑，避免日後新增 proxy 時在未啟用的 rollout 狀態意外暴露端點。D5 的既有
+// orchestrator-run API 不在此 gate 的範圍內，關閉 enrichment 不會改變其行為。
+if (!contextEnrichmentEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/contexts")
+            || context.Request.Path.StartsWithSegments("/api/context-views")
+            || context.Request.Path.StartsWithSegments("/api/context-policies"))
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
+            return;
+        }
+
+        await next();
+    });
+}
+
 // D4 authoring surfaces are independently fail-closed before authentication. This keeps
 // capability-bearing principals from discovering disabled management endpoints.
 if (!workflowDesignerEnabled)
@@ -558,7 +581,7 @@ app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAno
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
 app.MapGet(
     "/api/features",
-    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled, agentChatEnabled, agentWriteToolsEnabled }))
+    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled, contextEnrichmentEnabled, agentChatEnabled, agentWriteToolsEnabled }))
     .AllowAnonymous();
 
 // ---------------------------------------------------------------------------

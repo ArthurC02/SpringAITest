@@ -472,6 +472,12 @@ async def invoke_skill(
     名稱先查內建、再向 backend 查自訂。backend 不可達 → 500（受控）而不是 404：
     「取不到定義」與「skill 不存在」是兩件事，混為一談會讓呼叫端刪錯東西。
     """
+    # This skill is an internal Root runtime component, not an API-invokable
+    # user asset.  Hide it before config/backend work regardless of feature
+    # state so direct invocation can never bypass Root authority or budgets.
+    if name in {"context-enrichment", "context-task-local"}:
+        raise HTTPException(status_code=404, detail="Not Found")
+
     # P4c apply-at-execution：先取本租戶 active Configuration Set 的有效設定與 per-config
     # deps（取不到/故障 → per_config=None + 全域逾時，走全域路徑）。custom skill 直接以
     # per_config 編圖；builtin 若有覆寫則在下方以 per_config 重編（縫⑤）。

@@ -24,6 +24,7 @@ public sealed record SearchRequest(
 /// score = 1 - cosine distance,與 pgvector cosine 查詢一致(此查詢現由 backend 持有,workflow 經 HTTP 取用)。</summary>
 public sealed record RetrievedChunk(
     [property: JsonPropertyName("document_id")] string DocumentId,
+    [property: JsonPropertyName("chunk_id")] string ChunkId,
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("content")] string Content,
     [property: JsonPropertyName("score")] double Score);
