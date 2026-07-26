@@ -12,6 +12,7 @@ from typing import Any
 from app.engine import tool_registry
 from app.engine.tool_registry import ToolContext, ToolSpec
 from app.runtime.artifacts import LoadedSkillArtifact
+from app.runtime.bounded_json import bounded_canonical_json
 from app.runtime.models import DirectAgentExecutionSnapshot, canonical_json_bytes
 from app.settings import settings
 
@@ -218,17 +219,9 @@ def _validate_arguments(spec: ToolSpec, arguments: dict[str, Any]) -> None:
 
 
 def _bounded_observation(value: Any) -> str:
-    try:
-        text = json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-            default=str,
-        )
-    except (TypeError, ValueError):
-        text = json.dumps({"status": "unserializable_result"})
-    if len(text) > MAX_TOOL_OBSERVATION_CHARS:
-        return text[:MAX_TOOL_OBSERVATION_CHARS] + "…[truncated]"
-    return text
+    return bounded_canonical_json(
+        value,
+        max_chars=MAX_TOOL_OBSERVATION_CHARS,
+        on_unserializable=lambda _exc: json.dumps({"status": "unserializable_result"}),
+        truncated_suffix="…[truncated]",
+    )

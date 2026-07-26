@@ -87,6 +87,10 @@ public static class IdentityHeaders
     public static string RequireTenant(this HttpRequest request) =>
         Value(request, TenantHeader) ?? throw new ApiException(StatusCodes.Status400BadRequest, "缺少租戶識別標頭：X-Tenant-Id");
 
+    /// <summary>需要呼叫者身分的端點:缺 X-User-Id 直接 400。</summary>
+    public static string RequireUserId(this HttpRequest request) =>
+        Value(request, UserHeader) ?? throw new ApiException(StatusCodes.Status400BadRequest, "X-User-Id is required");
+
     private static string? Value(HttpRequest request, string name)
     {
         var v = request.Headers[name].ToString();

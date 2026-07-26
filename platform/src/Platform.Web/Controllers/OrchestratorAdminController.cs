@@ -1,56 +1,16 @@
 using System.Text.Json;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Platform.Service.Abstractions;
-using Platform.Web.Auth;
 
 namespace Platform.Web.Controllers;
 
-[ApiController]
 [Route("api/admin/orchestrators")]
-[Authorize(Policy = "workflow.manage")]
-public sealed class OrchestratorAdminController : ControllerBase
+public sealed class OrchestratorAdminController : WorkflowAdminControllerBase
 {
-    private readonly IWorkflowAdminService _service;
-
-    public OrchestratorAdminController(IWorkflowAdminService service) => _service = service;
-
-    private string? IfMatch => Request.Headers.IfMatch.Count > 0
-        ? Request.Headers.IfMatch.ToString()
-        : null;
-
-    private IActionResult Write(AdminProxyResponse response)
+    public OrchestratorAdminController(IWorkflowAdminService service) : base(service, "orchestrators")
     {
-        if (response.ETag is not null)
-        {
-            Response.Headers.ETag = response.ETag;
-        }
-
-        return new ContentResult
-        {
-            StatusCode = response.Status,
-            Content = response.Body,
-            ContentType = "application/json; charset=utf-8",
-        };
     }
-
-    private Task<AdminProxyResponse> Send(
-        HttpMethod method,
-        Guid? id,
-        string? suffix,
-        JsonElement? body,
-        bool forwardIfMatch,
-        CancellationToken cancellationToken)
-        => _service.SendAsync(
-            method,
-            "orchestrators",
-            id,
-            suffix,
-            User.ToUserContext(),
-            forwardIfMatch ? IfMatch : null,
-            body,
-            cancellationToken);
 
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct) =>

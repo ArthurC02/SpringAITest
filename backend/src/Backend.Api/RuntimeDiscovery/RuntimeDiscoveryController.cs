@@ -13,7 +13,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
 
     [HttpPost("runtime-discovery/resolve")]
     public async Task<IActionResult> Resolve(RuntimeResolveRequest request, CancellationToken ct) => Ok(
-        await service.ResolveAsync(Request.RequireTenant(), CurrentUser(), Role(), Request.UserGroups(), request.OrchestratorId, ct));
+        await service.ResolveAsync(Request.RequireTenant(), Request.RequireUserId(), Role(), Request.UserGroups(), request.OrchestratorId, ct));
 
     [HttpPut("admin/runtime-binding")]
     public async Task<IActionResult> PutBinding(TenantRuntimeBindingUpsert request, CancellationToken ct)
@@ -32,7 +32,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     [HttpPost("chat-runs")]
     public async Task<IActionResult> Start(ChatRunStartRequest request, CancellationToken ct)
     {
-        var value = await service.StartAsync(Request.RequireTenant(), CurrentUser(), Role(), Request.UserGroups(), Request.UserCapabilities(), request, Key(), ct);
+        var value = await service.StartAsync(Request.RequireTenant(), Request.RequireUserId(), Role(), Request.UserGroups(), Request.UserCapabilities(), request, Key(), ct);
         Response.Headers["X-Chat-Run-Replayed"] = value.Replayed ? "true" : "false";
         return StatusCode(202, value);
     }
@@ -40,7 +40,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     [HttpGet("chat-runs/{runId:guid}")]
     public async Task<IActionResult> Get(Guid runId, CancellationToken ct)
     {
-        var run = await runs.GetAsync(Request.RequireTenant(), CurrentUser(), runId, ct) ?? throw new ApiException(404, "Chat root run not found");
+        var run = await runs.GetAsync(Request.RequireTenant(), Request.RequireUserId(), runId, ct) ?? throw new ApiException(404, "Chat root run not found");
         return Ok(new ChatRunResponse("orchestrator", run, run.CommandId));
     }
 
@@ -49,7 +49,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     {
         var conversation = conversationId?.Trim();
         if (string.IsNullOrWhiteSpace(conversation) || conversation.Length > 128 || conversation.Any(char.IsControl)) throw new ApiException(400, "conversation_id is required");
-        var active = await runs.FindActiveAsync(Request.RequireTenant(), CurrentUser(), conversation, ct);
+        var active = await runs.FindActiveAsync(Request.RequireTenant(), Request.RequireUserId(), conversation, ct);
         if (active.IsAmbiguous) throw new ApiException(409, "Multiple active chat root runs require operator intervention");
         var run = active.Run ?? throw new ApiException(404, "Active chat root run not found");
         return Ok(new ChatRunResponse("orchestrator", run, run.CommandId));
@@ -61,7 +61,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
         request = CanonicalizeReplay(request);
         ValidateReplay(request);
         var prior = await runs.FindByIdempotencyKeyAsync(
-            Request.RequireTenant(), CurrentUser(), Key(), request, ct);
+            Request.RequireTenant(), Request.RequireUserId(), Key(), request, ct);
         if (prior.IsAmbiguous)
             throw new ApiException(409, "Multiple chat root runs share this logical attempt");
         if (prior.IsMismatch)
@@ -75,7 +75,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     {
         var input = request.Input?.Trim();
         if (string.IsNullOrEmpty(input) || input.Length > 16_384 || input.Any(char.IsControl)) throw new ApiException(400, "input is required");
-        var result = await runs.ResumeAsync(Request.RequireTenant(), CurrentUser(), runId, input, Key(), ct);
+        var result = await runs.ResumeAsync(Request.RequireTenant(), Request.RequireUserId(), runId, input, Key(), ct);
         if (result.Status == OrchestratorRunWriteStatus.NotFound) throw new ApiException(404, "Chat root run not found");
         if (result.Status is OrchestratorRunWriteStatus.InvalidState or OrchestratorRunWriteStatus.Conflict) throw new ApiException(409, result.Message ?? "Chat root run state conflict");
         var run = result.Run ?? throw new InvalidOperationException("Resume returned no run");
@@ -84,7 +84,6 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     }
 
     private void RequireManage() { if (!Request.HasCapability("workflow.manage")) throw new ApiException(403, "workflow.manage capability is required"); }
-    private string CurrentUser() => Request.UserId() ?? throw new ApiException(400, "X-User-Id is required");
     private string Role() => Request.UserRole() ?? throw new ApiException(400, "X-User-Role is required");
     private string Key()
     {

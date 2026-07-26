@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +21,7 @@ from app.engine.skill import (
     resolve_node,
 )
 from app.runtime.artifacts import LoadedSkillArtifact
+from app.runtime.bounded_json import bounded_canonical_json
 from app.runtime.models import DirectAgentExecutionSnapshot
 from app.runtime.tool_boundary import (
     effective_knowledge_sources,
@@ -209,18 +209,12 @@ def _validate_steps(
 
 
 def _bounded_json(value: dict[str, Any]) -> str:
-    try:
-        text = json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    except (TypeError, ValueError) as exc:
+    def _deny(exc: TypeError | ValueError) -> str:
         raise LegacyFlowDenied("legacy flow result is not serializable") from exc
-    return text[:MAX_LEGACY_RESULT_CHARS]
+
+    return bounded_canonical_json(
+        value, max_chars=MAX_LEGACY_RESULT_CHARS, on_unserializable=_deny
+    )
 
 
 def _tool_call_bound(steps: list[dict[str, Any]]) -> int:

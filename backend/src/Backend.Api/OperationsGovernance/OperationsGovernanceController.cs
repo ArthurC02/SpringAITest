@@ -18,7 +18,7 @@ public sealed class OperationsGovernanceController(
     {
         RequireManage(); var tenant = Request.RequireTenant();
         var suite = Required(request.Suite, "suite", 128); var evidence = Required(request.EvidenceRef, "evidence_ref", 256);
-        var gate = await governance.RecordRegressionAsync(tenant, suite, request.Passed, evidence, RequireActor(), ct);
+        var gate = await governance.RecordRegressionAsync(tenant, suite, request.Passed, evidence, Request.RequireUserId(), ct);
         return Ok(Public(gate));
     }
 
@@ -29,7 +29,7 @@ public sealed class OperationsGovernanceController(
         var reason = Required(request.Reason, "an explicit override reason", 1000);
         if (reason.Length < 8) throw new ApiException(400, "an explicit override reason is required");
         var gate = await governance.GetCurrentGateAsync(tenant, ct) ?? throw new ApiException(409, "no regression result is available to override");
-        var result = await governance.CreateOverrideAsync(tenant, gate.Id, SkillHash.Sha256(key), reason, RequireActor(), ct);
+        var result = await governance.CreateOverrideAsync(tenant, gate.Id, SkillHash.Sha256(key), reason, Request.RequireUserId(), ct);
         return result.Status switch
         {
             OverrideWriteStatus.Accepted or OverrideWriteStatus.Replay => Ok(Public(result.Gate!)),
@@ -44,7 +44,7 @@ public sealed class OperationsGovernanceController(
         RequireManage(); var tenant = Request.RequireTenant();
         var binding = runtime.ValidateBinding(new TenantRuntimeBindingUpsert(
             request.Enabled, request.OrchestratorId, request.Revision, request.CanaryUserIds));
-        if (await governance.ApplyRolloutAsync(tenant, binding, RequireActor(), ct)
+        if (await governance.ApplyRolloutAsync(tenant, binding, Request.RequireUserId(), ct)
             == RolloutWriteStatus.RegressionBlocked)
             throw new ApiException(409, "regression gate blocks rollout without an audited override");
         return Ok(new RolloutResponse(binding, true));
@@ -70,7 +70,6 @@ public sealed class OperationsGovernanceController(
     { RequireManage(); return Ok(await governance.GetLegacyInventoryAsync(Request.RequireTenant(), ct)); }
 
     private void RequireManage() { if (!Request.HasCapability("workflow.manage")) throw new ApiException(403, "workflow.manage capability is required"); }
-    private string RequireActor() => Request.UserId() ?? throw new ApiException(400, "X-User-Id is required");
     private string Key()
     {
         var values = Request.Headers["Idempotency-Key"]; var key = values.Count == 1 ? values[0]?.Trim() : null;

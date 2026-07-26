@@ -4,7 +4,6 @@ import hashlib
 import base64
 import binascii
 import json
-import math
 import re
 import uuid
 from decimal import Decimal
@@ -17,6 +16,11 @@ from pydantic import (
     PrivateAttr,
     field_validator,
     model_validator,
+)
+from app.canonical_json import (
+    RawNumberToken,
+    canonical_json_bytes,
+    canonical_json_sha256,
 )
 from app.runtime.output_contract import validate_output_contract
 
@@ -320,10 +324,6 @@ class DirectAgentExecutionSnapshot(StrictModel):
         return validated
 
 
-class RawNumberToken(str):
-    """A syntactically validated JSON number lexeme."""
-
-
 def parse_json_preserving_numbers(raw: bytes | str) -> Any:
     return json.loads(
         raw,
@@ -342,51 +342,10 @@ def _validation_json_value(value: Any) -> Any:
     return value
 
 
-def canonical_json_bytes(value: Any) -> bytes:
-    """Cross-service canonical JSON using .NET StringComparer.Ordinal keys."""
-    return _write_canonical_json(value).encode("utf-8")
-
-
-def _utf16_ordinal_key(value: str) -> bytes:
-    # Big-endian bytes preserve lexicographic UTF-16 code-unit ordering.
-    return value.encode("utf-16-be", errors="surrogatepass")
-
-
-def _write_canonical_json(value: Any) -> str:
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, RawNumberToken):
-        return str(value)
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            raise ValueError("canonical JSON numbers must be finite")
-        return str(value)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("canonical JSON numbers must be finite")
-        return json.dumps(value, allow_nan=False)
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, dict):
-        if any(not isinstance(key, str) for key in value):
-            raise TypeError("canonical JSON object keys must be strings")
-        return "{" + ",".join(
-            f"{json.dumps(key, ensure_ascii=False)}:{_write_canonical_json(value[key])}"
-            for key in sorted(value, key=_utf16_ordinal_key)
-        ) + "}"
-    if isinstance(value, list | tuple):
-        return "[" + ",".join(_write_canonical_json(item) for item in value) + "]"
-    raise TypeError(f"unsupported canonical JSON value: {type(value).__name__}")
-
-
-def canonical_json_sha256(value: Any) -> str:
-    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+# canonical_json_bytes/canonical_json_sha256/RawNumberToken 的實作已搬到
+# app/canonical_json.py（D4 的 app/orchestration/canonical.py 共用同一份，
+# 兩邊統一用 .NET StringComparer.Ordinal 排序）；這裡 import 後即完成 re-export，
+# 呼叫端（本檔內以及 app/runtime/ 其他模組）的既有 import 路徑不受影響。
 
 
 def backend_result_wire_size(result: dict[str, Any]) -> int:

@@ -24,7 +24,7 @@ public sealed class AgentRunController : ControllerBase
     {
         var result = await _runs.CreateDirectAsync(
             Request.RequireTenant(),
-            RequireUser(),
+            Request.RequireUserId(),
             Request.UserRole()!,
             Request.UserGroups(),
             Request.UserCapabilities(),
@@ -37,7 +37,7 @@ public sealed class AgentRunController : ControllerBase
 
     [HttpGet("runs/{runId:guid}")]
     public async Task<ActionResult<AgentRunResponse>> Get(Guid runId, CancellationToken ct)
-        => Ok(await _runs.GetAsync(Request.RequireTenant(), RequireUser(), runId, ct)
+        => Ok(await _runs.GetAsync(Request.RequireTenant(), Request.RequireUserId(), runId, ct)
               ?? throw RunNotFound());
 
     [HttpGet("runs/{runId:guid}/events")]
@@ -55,7 +55,7 @@ public sealed class AgentRunController : ControllerBase
         }
 
         return Ok(await _runs.GetEventsAsync(
-                      Request.RequireTenant(), RequireUser(), runId, afterSequence, limit, ct)
+                      Request.RequireTenant(), Request.RequireUserId(), runId, afterSequence, limit, ct)
                   ?? throw RunNotFound());
     }
 
@@ -72,7 +72,7 @@ public sealed class AgentRunController : ControllerBase
 
         var result = await _runs.ResumeAsync(
             Request.RequireTenant(),
-            RequireUser(),
+            Request.RequireUserId(),
             runId,
             RequireMessage(request.Message),
             checkpointVersion,
@@ -93,7 +93,7 @@ public sealed class AgentRunController : ControllerBase
 
         var result = await _runs.CancelAsync(
             Request.RequireTenant(),
-            RequireUser(),
+            Request.RequireUserId(),
             runId,
             reason,
             RequireIdempotencyKey(),
@@ -106,7 +106,7 @@ public sealed class AgentRunController : ControllerBase
     public async Task<IActionResult> ExecutionArtifact(Guid runId, CancellationToken ct)
     {
         var json = await _runs.GetExecutionArtifactAsync(
-            Request.RequireTenant(), RequireUser(), runId, ct) ?? throw RunNotFound();
+            Request.RequireTenant(), Request.RequireUserId(), runId, ct) ?? throw RunNotFound();
         return Content(json, "application/json; charset=utf-8");
     }
 
@@ -114,20 +114,20 @@ public sealed class AgentRunController : ControllerBase
     public async Task<ActionResult<AgentRunResponse>> Transition(
         Guid runId, [FromBody] AgentRunTransitionRequest request, CancellationToken ct)
         => WriteResult(await _runs.TransitionAsync(
-            Request.RequireTenant(), RequireUser(), runId, request, ct));
+            Request.RequireTenant(), Request.RequireUserId(), runId, request, ct));
 
     [HttpPost("agent-runs/{runId:guid}/events")]
     public async Task<ActionResult<AgentRunResponse>> AppendEvents(
         Guid runId, [FromBody] AgentRunEventsAppendRequest request, CancellationToken ct)
         => WriteResult(await _runs.AppendEventsAsync(
-            Request.RequireTenant(), RequireUser(), runId, request, ct));
+            Request.RequireTenant(), Request.RequireUserId(), runId, request, ct));
 
     [HttpPost("agent-runs/{runId:guid}/lease")]
     public async Task<ActionResult<AgentRunLeaseResponse>> ClaimLease(
         Guid runId, [FromBody] AgentRunLeaseRequest request, CancellationToken ct)
     {
         var result = await _runs.ClaimLeaseAsync(
-            Request.RequireTenant(), RequireUser(), runId, request, ct);
+            Request.RequireTenant(), Request.RequireUserId(), runId, request, ct);
         return result.Status switch
         {
             AgentRunWriteStatus.NotFound => throw RunNotFound(),
@@ -152,7 +152,7 @@ public sealed class AgentRunController : ControllerBase
 
         return await _runs.CompleteDispatchAsync(
             Request.RequireTenant(),
-            RequireUser(),
+            Request.RequireUserId(),
             runId,
             commandId,
             token,
@@ -183,7 +183,7 @@ public sealed class AgentRunController : ControllerBase
 
         var result = await _runs.ClaimCommandAsync(
             Request.RequireTenant(),
-            RequireUser(),
+            Request.RequireUserId(),
             runId,
             commandId,
             request with { WorkerId = workerId },
@@ -244,10 +244,6 @@ public sealed class AgentRunController : ControllerBase
         }
         return key;
     }
-
-    private string RequireUser()
-        => Request.UserId() is { } user ? user : throw new ApiException(
-            StatusCodes.Status400BadRequest, "缺少使用者識別標頭：X-User-Id");
 
     private static string RequireMessage(string? message)
     {

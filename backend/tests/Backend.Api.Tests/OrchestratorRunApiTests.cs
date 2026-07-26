@@ -36,12 +36,13 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
     }
 
     // Idempotency-Key / conversation_id / message 的長度與空白邊界。上限剛好通過(會走到倉儲、
-    // 因為 orchestrator 不存在而 404),上限 +1 必須在 controller 就被擋成 400。
+    // 因為 orchestrator 不存在而 404),上限 +1 必須在 controller 就被擋成 400 或 413。
+    // message 過長對外是 413(與 AgentRunController.RequireMessage 的行為一致),空/空白仍是 400。
     public static TheoryData<string, object, HttpStatusCode> StartInputs => new()
     {
         { "start-key", new { conversation_id = "c-1", message = "" }, HttpStatusCode.BadRequest },
         { "start-key", new { conversation_id = "c-1", message = "   " }, HttpStatusCode.BadRequest },
-        { "start-key", new { conversation_id = "c-1", message = new string('m', 16_385) }, HttpStatusCode.BadRequest },
+        { "start-key", new { conversation_id = "c-1", message = new string('m', 16_385) }, HttpStatusCode.RequestEntityTooLarge },
         { "start-key", new { conversation_id = "", message = "plan" }, HttpStatusCode.BadRequest },
         { "start-key", new { conversation_id = new string('c', 129), message = "plan" }, HttpStatusCode.BadRequest },
         { "", new { conversation_id = "c-1", message = "plan" }, HttpStatusCode.BadRequest },
@@ -58,6 +59,24 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
 
         using var request = StartRequest(body, key);
         Assert.Equal(expected, (await client.SendAsync(request)).StatusCode);
+    }
+
+    // message 過長要單獨鎖住 413 的 ApiError 形狀,不能只驗狀態碼:400/413 對「訊息太長」講出兩種
+    // 不同的話會讓呼叫端(Workflow 的 _request)分不出「請求本身壞掉」跟「內容超過大小上限」。
+    [Fact]
+    public async Task Start_OversizedMessage_ReturnsApiErrorShapeWith413()
+    {
+        var client = Client("workflow.manage");
+
+        using var request = StartRequest(
+            new { conversation_id = "c-1", message = new string('m', 16_385) }, "oversized-key");
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<ApiError>();
+        Assert.Equal(413, error!.Status);
+        Assert.Equal("message is too large", error.Message);
+        Assert.Empty(error.FieldErrors);
     }
 
     [Fact]
