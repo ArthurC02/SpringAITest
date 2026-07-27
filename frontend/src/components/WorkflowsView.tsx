@@ -47,8 +47,8 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   async function validate() { if (etag) setValidation(await validateWorkflow(id, etag)) }
   async function simulate() { if (etag) setSimulation(await simulateWorkflow(id, etag)) }
   async function publish() { if (workflow && etag) { await publishWorkflow(id, workflow.draft_version, etag); await load(); toast('已發布不可變 revision', 'success') } }
-  if (!workflow || !draft) return <div className="view"><button className="btn" onClick={onClose}>返回清單</button><ErrorText msg={error} /><Skeleton rows={4} /></div>
-  return <div className="view">
+  if (!workflow || !draft) return <><button className="btn" onClick={onClose}>返回清單</button><ErrorText msg={error} /><Skeleton rows={4} /></>
+  return <>
     <div className="view__head"><h2 className="view__title">{workflow.name}</h2><button className="btn" onClick={onClose}>返回清單</button></div>
     {blocked && <div className="agent-errors" role="alert">草稿已由其他人更新；為避免覆寫，所有操作已鎖定。<button className="btn" onClick={() => void load()}>重新載入</button></div>}
     <ErrorText msg={error} /><ErrorText msg={catalog.error} />
@@ -63,7 +63,7 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
     {validation && <section className="agent-block"><h4>Validation</h4>{validation.valid ? <p className="notice-text">驗證通過。</p> : <ul className="agent-errors">{validation.errors.map((issue, index) => <li key={`${issue.id ?? 'graph'}-${index}`}>{issue.id ? `[${issue.id}] ` : ''}{issue.message}</li>)}</ul>}</section>}
     {simulation?.trace && <section className="agent-block"><h4>Simulation trace（敏感資料已由 server 遮罩）</h4><ul>{simulation.trace.map((entry) => <li key={entry.node_id}>{entry.node_id}: {entry.status}{entry.summary ? ` — ${entry.summary}` : ''}</li>)}</ul></section>}
     <section className="agent-block"><h4>Revisions / Semantic Diff</h4>{revisions.loading ? <Skeleton rows={2} /> : <ul className="agent-preview__list">{(revisions.data ?? []).map((revision) => { const diff = revision.definition ? semanticDiff(draft.definition, revision.definition) : null; return <li key={revision.revision}><span>r{revision.revision} · {revision.definition_sha256.slice(0, 12)}{diff ? ` · +${diff.added.length} −${diff.removed.length} ~${diff.changed.length}` : ''}</span><button className="btn" onClick={() => void runWithToast(toast, () => restoreWorkflowRevision(id, revision.revision), { success: '已從歷史 revision 建立新 revision', onSuccess: () => { void load(); void revisions.reload() } })}>還原為新 revision</button></li> })}</ul>}</section>
-  </div>
+  </>
 }
 
 export default function WorkflowsView() {
@@ -74,7 +74,7 @@ export default function WorkflowsView() {
   const blankDraft = (selectedKind: WorkflowKind) => createBlankDraft(selectedKind, runtimeVariant)
   const rows = resource.data ?? []
   if (editing) return <WorkflowEditor id={editing} onClose={() => { setEditing(null); void resource.reload() }} />
-  return <div className="view"><div className="view__head"><h2 className="view__title">Workflow Designer</h2></div><ErrorText msg={resource.error} />
+  return <><ErrorText msg={resource.error} />
     {kind === 'agent-runtime' && <label className="field">Runtime variant
       <select className="input" aria-label="Runtime variant" value={runtimeVariant} onChange={(event) => setRuntimeVariant(event.target.value as WorkflowRuntimeVariant)}>
         <option value="worker">Worker Harness</option>
@@ -82,5 +82,5 @@ export default function WorkflowsView() {
       </select>
     </label>}
     <section className="agent-block"><h4>建立 Execution Harness</h4><div className="agent-runtime-grid"><input className="input" placeholder="名稱" value={name} onChange={(e) => setName(e.target.value)} /><select className="input" value={kind} onChange={(e) => setKind(e.target.value as WorkflowKind)}><option value="orchestrator">Orchestrator</option><option value="agent-runtime">Agent Runtime</option></select><button className="btn btn--primary" disabled={!name.trim()} onClick={() => void runWithToast(toast, async () => { const created = await createWorkflow({ name, kind, draft: blankDraft(kind) }); setEditing(created.id) }, { success: '已建立草稿' })}>建立</button></div><p className="muted">只可編輯 Harness graph；Prompt、Rule、Skill instruction 與 Agent binding 一律不在 Graph IR。</p></section>
-    {resource.loading && rows.length === 0 ? <Skeleton rows={3} /> : <div className="table-wrap"><table className="table"><thead><tr><th>名稱</th><th>種類</th><th>發布</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.kind}</td><td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td><td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td></tr>)}</tbody></table></div>}</div>
+    {resource.loading && rows.length === 0 ? <Skeleton rows={3} /> : <div className="table-wrap"><table className="table"><thead><tr><th>名稱</th><th>種類</th><th>發布</th><th>操作</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.kind}</td><td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td><td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td></tr>)}</tbody></table></div>}</>
 }

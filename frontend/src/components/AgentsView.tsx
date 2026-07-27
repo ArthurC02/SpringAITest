@@ -18,7 +18,8 @@ function statusOf(a: AgentSummary): { label: string; kind: 'admin' | 'user' } {
 
 /**
  * Agent Builder 工作區(D1):清單(名稱/狀態/目前 revision)＋建立精靈＋草稿編輯路由。
- * 入口本身已在 AppShell 以 features flag 把關;此處寫入操作再依 isAdmin 隱藏(伺服器為權威)。
+ * 入口本身已在 AgentPlatformView 以 features flag 把關;此處寫入操作再依 isAdmin 隱藏(伺服器為權威)。
+ * 外層 .view 容器由 AgentPlatformView 提供,此處不再自帶(避免雙重 padding 與巢狀捲動)。
  */
 export default function AgentsView({
   isAdmin,
@@ -63,33 +64,30 @@ export default function AgentsView({
 
   if (editing) {
     return (
-      <div className="view">
-        <AgentEditor
-          key={editing.id ?? 'new'}
-          agentId={editing.id}
-          isAdmin={isAdmin}
-          agentTestRunEnabled={agentTestRunEnabled}
-          onClose={() => {
-            setEditing(null)
-            void reload()
-          }}
-          onCreated={(id) => setEditing({ id })}
-          onChanged={() => void reload()}
-        />
-      </div>
+      <AgentEditor
+        key={editing.id ?? 'new'}
+        agentId={editing.id}
+        isAdmin={isAdmin}
+        agentTestRunEnabled={agentTestRunEnabled}
+        onClose={() => {
+          setEditing(null)
+          void reload()
+        }}
+        onCreated={(id) => setEditing({ id })}
+        onChanged={() => void reload()}
+      />
     )
   }
 
   return (
-    <div className="view">
-      <div className="view__head">
-        <h2 className="view__title">Agents</h2>
-        {isAdmin && (
+    <>
+      {isAdmin && (
+        <div className="skills__bar">
           <button className="btn btn--info" onClick={() => setEditing({ id: null })}>
             ＋ 建立 Agent
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       <ErrorText msg={error} />
 
@@ -144,6 +142,6 @@ export default function AgentsView({
           </table>
         </div>
       )}
-    </div>
+    </>
   )
 }

@@ -1253,6 +1253,10 @@ cpk-thread-inspector {
   font-size: 14px;
   color: var(--text-h);
 }
+/* 進階設定摺疊區:summary 沿用 agent-block__title,只補回 heading 的字重。 */
+.agent-advanced > summary {
+  font-weight: 600;
+}
 /* 併發衝突橫幅：沿用 danger token，不新造顏色。 */
 .agent-conflict {
   display: flex;

@@ -18,6 +18,7 @@ import {
   factCatalogItems,
   factsForGate,
   isRuleLeaf,
+  metadataValues,
   newLeaf,
   operatorEntries,
   operatorNeedsValue,
@@ -61,14 +62,6 @@ function gateLabel(gate: RuleGate): string {
     'pre-response': '回應前',
   }
   return labels[gate] ?? gate
-}
-
-function metadataValues(metadata: {
-  enumValues?: unknown[]
-  enum_values?: unknown[]
-  values?: unknown[]
-}): unknown[] {
-  return metadata.enumValues ?? metadata.enum_values ?? metadata.values ?? []
 }
 
 function InputForType({

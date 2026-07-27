@@ -14,8 +14,9 @@ const CHAT = /聊天/
 const DOCUMENTS = /文件/
 const ANALYSIS = /分析/
 const CONFIG = /系統設定/
-const WORKFLOWS = /Workflow Designer/
-const ORCHESTRATORS = /Orchestrators/
+// D1/D4 now share one sidebar entry; the per-tab flag+capability gating lives inside
+// `AgentPlatformView` and is asserted by the tab-level cases at the bottom of this file.
+const AGENT_PLATFORM = /Agent 平台/
 const APPROVALS = /Approvals/
 const OPERATIONS = /Operations/
 
@@ -76,8 +77,8 @@ const scenarios: Scenario[] = [
     name: 'exact workflow.manage opens the D4 entries',
     capabilities: ['workflow.manage'],
     features: { workflowDesignerEnabled: true, agentWriteToolsEnabled: true },
-    expected: [...ADMIN_BASE, WORKFLOWS, ORCHESTRATORS, APPROVALS, OPERATIONS],
-    control: 'nav-workflows',
+    expected: [...ADMIN_BASE, AGENT_PLATFORM, APPROVALS, OPERATIONS],
+    control: 'nav-agentPlatform',
     forbidden: [],
   },
   {
@@ -108,8 +109,8 @@ const scenarios: Scenario[] = [
     name: 'disabled write tools hide both Approvals and Operations',
     capabilities: ['workflow.manage'],
     features: { workflowDesignerEnabled: true, agentWriteToolsEnabled: false },
-    expected: [...ADMIN_BASE, WORKFLOWS, ORCHESTRATORS],
-    control: 'nav-workflows',
+    expected: [...ADMIN_BASE, AGENT_PLATFORM],
+    control: 'nav-agentPlatform',
     forbidden: ['/api/runs', '/api/admin/operations'],
   },
   {
@@ -165,6 +166,34 @@ for (const scenario of scenarios) {
   })
 }
 
+// The merged workspace keeps three independent gates, so the two capability/role combinations
+// that each open exactly one tab are the ones that could silently leak the other side.
+test('a non-ADMIN with workflow.manage gets the D4 tabs but never the Agents tab', async ({ page }) => {
+  const requested = await mountShell(page, {
+    role: 'USER',
+    capabilities: ['workflow.manage'],
+    features: { agentBuilderEnabled: true, workflowDesignerEnabled: true },
+  })
+  await page.getByTestId('nav-agentPlatform').click()
+  await expect(page.getByTestId('agent-platform-tab-workflows')).toBeVisible()
+  await expect(page.getByTestId('agent-platform-tab-orchestrators')).toBeVisible()
+  await expect(page.getByTestId('agent-platform-tab-agents')).toHaveCount(0)
+  expect(requested.filter((path) => path.startsWith('/api/agents'))).toEqual([])
+})
+
+test('an ADMIN without workflow.manage gets only the Agents tab and no tab bar', async ({ page }) => {
+  const requested = await mountShell(page, {
+    capabilities: [],
+    features: { agentBuilderEnabled: true, workflowDesignerEnabled: true },
+  })
+  await page.getByTestId('nav-agentPlatform').click()
+  await expect.poll(() => requested.includes('/api/agents')).toBe(true)
+  // A single visible tab means there is no real choice — the segmented control is not rendered.
+  await expect(page.locator('.seg')).toHaveCount(0)
+  expect(requested.filter((path) => path.startsWith('/api/admin/workflows'))).toEqual([])
+  expect(requested.filter((path) => path.startsWith('/api/admin/orchestrators'))).toEqual([])
+})
+
 test('a disabled agentChatEnabled flag never requests the Orchestrator chat catalog', async ({ page }) => {
   const requested = await mountShell(page, {
     capabilities: [],
@@ -216,7 +245,8 @@ for (const multiAgentDispatchEnabled of [true, false]) {
     await page.getByTestId('auth-username').fill('tester')
     await page.getByTestId('auth-password').fill('password123')
     await page.getByTestId('auth-submit').click()
-    await page.getByTestId('nav-orchestrators').click()
+    await page.getByTestId('nav-agentPlatform').click()
+    await page.getByTestId('agent-platform-tab-orchestrators').click()
     await page.getByRole('button', { name: '編輯' }).click()
     // Reaching the editor already proves the flags resolved, and the draft-loaded actions
     // prove the editor body rendered — so the console check sees a settled tree.

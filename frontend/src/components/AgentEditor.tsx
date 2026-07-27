@@ -11,6 +11,7 @@ import {
   validateAgent,
 } from '../api/agents'
 import { listSkillCatalog } from '../api/skills'
+import { listConfig } from '../api/config'
 import type {
   AgentDraft,
   AgentExecutionRole,
@@ -20,6 +21,7 @@ import type {
   SkillCatalogEntry,
 } from '../types'
 import {
+  applyAgentDefaultConfig,
   audiencePrincipalError,
   businessRuleCount,
   createEmptyAgentDraft,
@@ -37,6 +39,7 @@ import { useConfirm } from './ConfirmDialog'
 import { runWithToast, useToast } from './Toast'
 import BusinessRuleEditor from './BusinessRuleEditor'
 import AgentTestConsole from './AgentTestConsole'
+import AgentBuilderCopilot from './AgentBuilderCopilot'
 
 interface Props {
   /** null = 建立模式；有值 = 編輯既有 Agent。 */
@@ -54,6 +57,25 @@ const ROLES: { id: AgentExecutionRole; label: string }[] = [
   { id: 'worker', label: 'Worker' },
   { id: 'verifier', label: 'Verifier' },
 ]
+
+/** 收在「進階設定」裡的欄位;這些欄位一有錯就必須自動展開,否則使用者看不到錯誤卻按不了發布。 */
+const ADVANCED_FIELDS = new Set([
+  'slug',
+  'execution_roles',
+  'capabilities',
+  'output_contract',
+  'allowed_tools',
+  'business_rules',
+  'runtime_limits',
+])
+
+/**
+ * 伺服器的 field 大量是點號路徑(`runtime_limits.timeout_seconds`、`business_rules.rules[0].when`),
+ * 所以只能比對根欄位名 —— 精確字串比對會讓最常出錯的那兩區永遠不自動展開。
+ */
+function isAdvancedField(field: string | null | undefined): boolean {
+  return ADVANCED_FIELDS.has((field ?? '').split('.')[0])
+}
 
 /** 建立時 slug 撞名 → 409。其餘沿用後端 message。 */
 function createErrorMessage(e: unknown): string {
@@ -299,7 +321,10 @@ export default function AgentEditor({
   const [validatedVersion, setValidatedVersion] = useState<number | null>(null)
   const [conflict, setConflict] = useState(false)
   const [sub, setSub] = useState<'edit' | 'history' | 'test'>('edit')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
+  /** 使用者一動表單就不再套用後到的系統預設值(避免蓋掉已輸入內容)。 */
+  const editedRef = useRef(false)
   const previewTriggerRef = useRef<HTMLButtonElement | null>(null)
   const previewCancelRef = useRef<HTMLButtonElement | null>(null)
   const previewConfirmRef = useRef<HTMLButtonElement | null>(null)
@@ -313,6 +338,19 @@ export default function AgentEditor({
   const nonBindableSkills = catalog.filter((skill) => !isSkillBindable(skill))
   const toolCatalogRes = useResource(listAgentToolCatalog)
   const toolCatalog: AgentToolCatalogEntry[] = toolCatalogRes.data ?? []
+
+  // 建立模式才讀系統設定;失敗靜默(輔助資料,不是主功能)→ 沿用程式內建 fallback。
+  const fetchDefaults = useCallback(
+    () => (creating ? listConfig() : Promise.resolve([])),
+    [creating],
+  )
+  const defaultsRes = useResource(fetchDefaults)
+  const configDefaults = defaultsRes.data
+
+  useEffect(() => {
+    if (!creating || !configDefaults || editedRef.current) return
+    setForm((current) => applyAgentDefaultConfig(current, configDefaults))
+  }, [creating, configDefaults])
 
   const fetchRevisions = useCallback(
     () => (agentId ? listAgentRevisions(agentId) : Promise.resolve([])),
@@ -385,11 +423,13 @@ export default function AgentEditor({
 
   // 任何欄位編輯都讓上次的 validation 失效(規格 §2.2:draft 再修改後必須重新驗證)。
   function patch(p: Partial<AgentDraft>) {
+    editedRef.current = true
     setForm((f) => ({ ...f, ...p }))
     setValidation(null)
   }
 
   function patchOutputContract(text: string) {
+    editedRef.current = true
     setOutputContractText(text)
     const parsed = parseOutputContract(text)
     setOutputContractError(parsed.error)
@@ -481,6 +521,19 @@ export default function AgentEditor({
     if (!validatedForCurrent) return undefined
     return validation?.errors.find((e) => e.field === key)?.message
   }
+
+  // 進階區裡出現任何錯誤就自動展開 —— 錯誤不可以被摺疊藏起來。dep 只有這個布林,
+  // 所以使用者手動收合後不會被立刻彈開,但下一次「無錯 → 有錯」仍會再展開。
+  const advancedHasError =
+    (validatedForCurrent && !!validation?.errors.some((e) => isAdvancedField(e.field))) ||
+    !!outputContractError ||
+    missingTools.length > 0 ||
+    // 目錄還在路上不是錯誤(tool catalog 要繞到 workflow,常比 getAgent 慢),
+    // 否則任何有工具授權的 Agent 一載入就把進階區彈開,而且不會再收回。
+    (hasUnverifiedTools && !toolCatalogRes.loading)
+  useEffect(() => {
+    if (advancedHasError) setAdvancedOpen(true)
+  }, [advancedHasError])
 
   // ---- 建立模式:只有表單 + 建立鈕(建立後由父層切換到編輯模式載入完整功能) ----
   async function onCreate() {
@@ -716,7 +769,18 @@ export default function AgentEditor({
         </section>
       ) : (
         <>
-          {/* ── 身分 ── */}
+          {/* headless:讓 AI 副駕在編輯器開著時能解釋欄位、依描述填草稿、加商業規則(只改表單)。 */}
+          <AgentBuilderCopilot
+            form={form}
+            creating={creating}
+            locked={locked}
+            skills={bindableSkills}
+            tools={toolCatalog}
+            onPatch={patch}
+            onRevealAdvanced={() => setAdvancedOpen(true)}
+          />
+
+          {/* ── 基本區:建一個可用 Agent 只需要這些 ── */}
           <section className="agent-block">
             <h4 className="agent-block__title">身分</h4>
             <div className="field">
@@ -733,24 +797,6 @@ export default function AgentEditor({
               {fieldError('name') && (
                 <span className="field-error" role="alert">
                   {fieldError('name')}
-                </span>
-              )}
-            </div>
-            <div className="field">
-              <label htmlFor="agent-slug">slug</label>
-              <input
-                id="agent-slug"
-                className="input"
-                value={form.slug}
-                disabled={locked || !creating}
-                aria-invalid={!!fieldError('slug')}
-                placeholder="租戶內唯一、穩定的 API 識別字"
-                onChange={(e) => patch({ slug: e.target.value })}
-              />
-              {!creating && <p className="muted">slug 是穩定識別字,建立後不可變更。</p>}
-              {fieldError('slug') && (
-                <span className="field-error" role="alert">
-                  {fieldError('slug')}
                 </span>
               )}
             </div>
@@ -793,132 +839,6 @@ export default function AgentEditor({
                 </span>
               )}
             </div>
-          </section>
-
-          {/* ── 執行角色 ── */}
-          <section className="agent-block">
-            <h4 className="agent-block__title">執行角色</h4>
-            <div className="agent-roles">
-              {ROLES.map((r) => (
-                <label key={r.id} className="agent-check">
-                  <input
-                    type="checkbox"
-                    checked={form.execution_roles.includes(r.id)}
-                    disabled={locked}
-                    onChange={() => toggleRole(r.id)}
-                  />
-                  {r.label}
-                </label>
-              ))}
-            </div>
-          </section>
-
-          {/* ── Discovery / audience / output contract ── */}
-          <section className="agent-block">
-            <h4 className="agent-block__title">能力與使用範圍</h4>
-            <StringSetEditor
-              id="agent-capabilities"
-              label="Capabilities"
-              hint="供 Orchestrator discovery/selection 使用的 typed tags；空集合代表不會被能力條件選中。"
-              items={form.capabilities}
-              placeholder="例如 research、analysis"
-              disabled={locked}
-              onChange={(next) => patch({ capabilities: next })}
-            />
-            <AudienceEditor
-              items={form.audience}
-              disabled={locked}
-              error={audienceError}
-              onChange={(next) => patch({ audience: next })}
-            />
-            <div className="field">
-              <label htmlFor="agent-output-contract">Output contract（JSON object）</label>
-              <textarea
-                id="agent-output-contract"
-                className="textarea code-textarea"
-                value={outputContractText}
-                disabled={locked}
-                aria-invalid={!!outputContractError}
-                aria-describedby={outputContractError ? 'agent-output-contract-error' : undefined}
-                onChange={(event) => patchOutputContract(event.target.value)}
-              />
-              {outputContractError && (
-                <span id="agent-output-contract-error" className="field-error" role="alert">
-                  {outputContractError}
-                </span>
-              )}
-              {!outputContractError && fieldError('output_contract') && (
-                <span className="field-error" role="alert">
-                  {fieldError('output_contract')}
-                </span>
-              )}
-            </div>
-          </section>
-
-          {/* ── 工具 allowlist ── */}
-          <section className="agent-block">
-            <h4 className="agent-block__title">工具 allowlist</h4>
-            <p className="muted">
-              只可從 server Tool Catalog 選取；目錄不包含 endpoint/token。空集合代表不授權任何工具。
-            </p>
-            <ErrorText msg={toolCatalogRes.error} />
-            {missingTools.map((name) => (
-              <p key={name} className="field-error" role="alert">
-                已允許的工具「{name}」不在目前 Tool Catalog，請移除後才能發布。
-                {!locked && (
-                  <button type="button" className="btn" onClick={() => toggleTool(name)}>
-                    移除
-                  </button>
-                )}
-              </p>
-            ))}
-            {!toolCatalogRes.data && !toolCatalogRes.error ? (
-              <Skeleton rows={3} />
-            ) : toolCatalog.length === 0 ? (
-              <p className="agent-set__empty" role="note">
-                Tool Catalog 目前沒有可選工具；此 Agent 將保持無工具權限。
-              </p>
-            ) : (
-              <ul className="agent-skills">
-                {toolCatalog.map((tool) => (
-                  <li key={tool.name} className="agent-skills__row">
-                    <label className="agent-check">
-                      <input
-                        type="checkbox"
-                        checked={form.allowed_tools.includes(tool.name)}
-                        disabled={locked}
-                        onChange={() => toggleTool(tool.name)}
-                      />
-                      <span className="agent-skills__name">{tool.name}</span>
-                    </label>
-                    <span className="muted agent-skills__desc">{tool.description}</span>
-                    <span className="badge badge--user">{tool.kind}</span>
-                    <span
-                      className={`badge badge--${
-                        tool.risk === 'write' || tool.risk === 'privileged' ? 'admin' : 'user'
-                      }`}
-                      title={`回傳：${tool.returns}`}
-                    >
-                      風險：{tool.risk}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-
-          {/* ── 知識來源 ── */}
-          <section className="agent-block">
-            <h4 className="agent-block__title">知識來源</h4>
-            <StringSetEditor
-              id="agent-knowledge-sources"
-              label="knowledge_sources"
-              hint="可用的知識來源範圍;空集合 = 不授權任何知識來源。"
-              items={form.knowledge_sources}
-              placeholder="知識來源識別字"
-              disabled={locked}
-              onChange={(next) => patch({ knowledge_sources: next })}
-            />
           </section>
 
           {/* ── Skill 綁定 ── */}
@@ -990,50 +910,217 @@ export default function AgentEditor({
             )}
           </section>
 
-          <BusinessRuleEditor
-            value={form.business_rules}
-            disabled={locked}
-            onChange={(business_rules) => patch({ business_rules })}
-          />
-
-          {/* ── Runtime limits / Harness pin ── */}
+          {/* ── 知識來源 ── */}
           <section className="agent-block">
-            <h4 className="agent-block__title">Runtime limits</h4>
-            <p className="muted">
-              0 代表尚未配置；正式 Runtime 會依 Harness 與政策交集 fail-closed，不會解讀成無上限。
-            </p>
-            <div className="agent-runtime-grid">
-              {(
-                [
-                  ['max_tool_rounds', '工具輪數'],
-                  ['max_context_rounds', 'Context 輪數'],
-                  ['timeout_seconds', '逾時秒數'],
-                  ['token_budget', 'Token budget'],
-                  ['step_budget', 'Step budget'],
-                ] as const
-              ).map(([key, label]) => (
-                <div className="field" key={key}>
-                  <label htmlFor={`agent-runtime-${key}`}>{label}</label>
-                  <input
-                    id={`agent-runtime-${key}`}
-                    className="input"
-                    type="number"
-                    min={0}
-                    step={1}
-                    value={form.runtime_limits[key]}
-                    disabled={locked}
-                    onChange={(event) => patchRuntimeLimit(key, event.target.value)}
-                  />
-                </div>
-              ))}
-            </div>
-            <p className="muted">
-              Execution Harness：
-              {form.runtime_workflow
-                ? `${form.runtime_workflow.id} · r${form.runtime_workflow.revision}`
-                : '建立／發布時由 server 固定到 Default Agent-Runtime Workflow'}
-            </p>
+            <h4 className="agent-block__title">知識來源</h4>
+            <StringSetEditor
+              id="agent-knowledge-sources"
+              label="knowledge_sources"
+              hint="可用的知識來源範圍;空集合 = 不授權任何知識來源。"
+              items={form.knowledge_sources}
+              placeholder="知識來源識別字"
+              disabled={locked}
+              onChange={(next) => patch({ knowledge_sources: next })}
+            />
           </section>
+
+          {/* ── 使用範圍 ── */}
+          <section className="agent-block">
+            <h4 className="agent-block__title">使用範圍</h4>
+            <AudienceEditor
+              items={form.audience}
+              disabled={locked}
+              error={audienceError}
+              onChange={(next) => patch({ audience: next })}
+            />
+          </section>
+
+          {/* ── 進階區:預設收合,但進階欄位一有錯就自動展開(見 advancedHasError)。 ── */}
+          <details
+            className="agent-block agent-advanced"
+            open={advancedOpen}
+            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+          >
+            <summary className="agent-block__title">
+              進階設定（slug、執行角色、Capabilities、Output contract、工具權限、商業規則、Runtime
+              限制…）
+            </summary>
+            <p className="muted">不確定就先不用改,以上欄位都已有可用的預設值。</p>
+
+            <section className="agent-block">
+              <h4 className="agent-block__title">識別字</h4>
+              <div className="field">
+                <label htmlFor="agent-slug">slug</label>
+                <input
+                  id="agent-slug"
+                  className="input"
+                  value={form.slug}
+                  disabled={locked || !creating}
+                  aria-invalid={!!fieldError('slug')}
+                  placeholder="租戶內唯一、穩定的 API 識別字"
+                  onChange={(e) => patch({ slug: e.target.value })}
+                />
+                {!creating && <p className="muted">slug 是穩定識別字,建立後不可變更。</p>}
+                {fieldError('slug') && (
+                  <span className="field-error" role="alert">
+                    {fieldError('slug')}
+                  </span>
+                )}
+              </div>
+            </section>
+
+            <section className="agent-block">
+              <h4 className="agent-block__title">執行角色</h4>
+              <div className="agent-roles">
+                {ROLES.map((r) => (
+                  <label key={r.id} className="agent-check">
+                    <input
+                      type="checkbox"
+                      checked={form.execution_roles.includes(r.id)}
+                      disabled={locked}
+                      onChange={() => toggleRole(r.id)}
+                    />
+                    {r.label}
+                  </label>
+                ))}
+              </div>
+            </section>
+
+            {/* ── Discovery / output contract ── */}
+            <section className="agent-block">
+              <h4 className="agent-block__title">能力與輸出</h4>
+              <StringSetEditor
+                id="agent-capabilities"
+                label="Capabilities"
+                hint="供 Orchestrator discovery/selection 使用的 typed tags；空集合代表不會被能力條件選中。"
+                items={form.capabilities}
+                placeholder="例如 research、analysis"
+                disabled={locked}
+                onChange={(next) => patch({ capabilities: next })}
+              />
+              <div className="field">
+                <label htmlFor="agent-output-contract">Output contract（JSON object）</label>
+                <textarea
+                  id="agent-output-contract"
+                  className="textarea code-textarea"
+                  value={outputContractText}
+                  disabled={locked}
+                  aria-invalid={!!outputContractError}
+                  aria-describedby={outputContractError ? 'agent-output-contract-error' : undefined}
+                  onChange={(event) => patchOutputContract(event.target.value)}
+                />
+                {outputContractError && (
+                  <span id="agent-output-contract-error" className="field-error" role="alert">
+                    {outputContractError}
+                  </span>
+                )}
+                {!outputContractError && fieldError('output_contract') && (
+                  <span className="field-error" role="alert">
+                    {fieldError('output_contract')}
+                  </span>
+                )}
+              </div>
+            </section>
+
+            {/* ── 工具 allowlist ── */}
+            <section className="agent-block">
+              <h4 className="agent-block__title">工具 allowlist</h4>
+              <p className="muted">
+                只可從 server Tool Catalog 選取；目錄不包含 endpoint/token。空集合代表不授權任何工具。
+              </p>
+              <ErrorText msg={toolCatalogRes.error} />
+              {missingTools.map((name) => (
+                <p key={name} className="field-error" role="alert">
+                  已允許的工具「{name}」不在目前 Tool Catalog，請移除後才能發布。
+                  {!locked && (
+                    <button type="button" className="btn" onClick={() => toggleTool(name)}>
+                      移除
+                    </button>
+                  )}
+                </p>
+              ))}
+              {!toolCatalogRes.data && !toolCatalogRes.error ? (
+                <Skeleton rows={3} />
+              ) : toolCatalog.length === 0 ? (
+                <p className="agent-set__empty" role="note">
+                  Tool Catalog 目前沒有可選工具；此 Agent 將保持無工具權限。
+                </p>
+              ) : (
+                <ul className="agent-skills">
+                  {toolCatalog.map((tool) => (
+                    <li key={tool.name} className="agent-skills__row">
+                      <label className="agent-check">
+                        <input
+                          type="checkbox"
+                          checked={form.allowed_tools.includes(tool.name)}
+                          disabled={locked}
+                          onChange={() => toggleTool(tool.name)}
+                        />
+                        <span className="agent-skills__name">{tool.name}</span>
+                      </label>
+                      <span className="muted agent-skills__desc">{tool.description}</span>
+                      <span className="badge badge--user">{tool.kind}</span>
+                      <span
+                        className={`badge badge--${
+                          tool.risk === 'write' || tool.risk === 'privileged' ? 'admin' : 'user'
+                        }`}
+                        title={`回傳：${tool.returns}`}
+                      >
+                        風險：{tool.risk}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <BusinessRuleEditor
+              value={form.business_rules}
+              disabled={locked}
+              onChange={(business_rules) => patch({ business_rules })}
+            />
+
+            {/* ── Runtime limits / Harness pin ── */}
+            <section className="agent-block">
+              <h4 className="agent-block__title">Runtime limits</h4>
+              <p className="muted">
+                新建時的預設值來自系統設定 `agent.defaults.*`（未設定則用內建值）；填 0
+                代表交由 Runtime 預設決定。正式 Runtime 會依 Harness 與政策交集
+                fail-closed，不會解讀成無上限。
+              </p>
+              <div className="agent-runtime-grid">
+                {(
+                  [
+                    ['max_tool_rounds', '工具輪數'],
+                    ['max_context_rounds', 'Context 輪數'],
+                    ['timeout_seconds', '逾時秒數'],
+                    ['token_budget', 'Token budget'],
+                    ['step_budget', 'Step budget'],
+                  ] as const
+                ).map(([key, label]) => (
+                  <div className="field" key={key}>
+                    <label htmlFor={`agent-runtime-${key}`}>{label}</label>
+                    <input
+                      id={`agent-runtime-${key}`}
+                      className="input"
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={form.runtime_limits[key]}
+                      disabled={locked}
+                      onChange={(event) => patchRuntimeLimit(key, event.target.value)}
+                    />
+                  </div>
+                ))}
+              </div>
+              <p className="muted">
+                Execution Harness：
+                {form.runtime_workflow
+                  ? `${form.runtime_workflow.id} · r${form.runtime_workflow.revision}`
+                  : '建立／發布時由 server 固定到 Default Agent-Runtime Workflow'}
+              </p>
+            </section>
+          </details>
 
           {/* ── 驗證結果(非欄位級) ── */}
           {validatedForCurrent && (validation!.valid ? otherErrors.length === 0 : true) && (

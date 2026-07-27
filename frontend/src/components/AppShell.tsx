@@ -13,15 +13,13 @@ import ChatView from './ChatView'
 import DocumentsView from './DocumentsView'
 import AnalysisView from './AnalysisView'
 import ConfigView from './ConfigView'
-import AgentsView from './AgentsView'
-import WorkflowsView from './WorkflowsView'
-import OrchestratorsView from './OrchestratorsView'
+import AgentPlatformView, { agentPlatformTabs } from './AgentPlatformView'
 import ApprovalInbox from './ApprovalInbox'
 import OperationsGovernanceView from './OperationsGovernanceView'
 
-type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agents' | 'workflows' | 'orchestrators' | 'approvals' | 'operations'
+type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agentPlatform' | 'approvals' | 'operations'
 
-// copilot 的 switchView 只認四個原視圖(不含 agents,副駕不涉入 Agent Builder)。
+// copilot 的 switchView 只認四個原視圖(不含 Agent 平台,副駕不涉入 Agent Builder)。
 const VIEWS: View[] = ['chat', 'documents', 'analysis', 'config']
 
 const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
@@ -31,10 +29,9 @@ const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
   { id: 'config', icon: '🔧', label: '系統設定', adminOnly: true },
 ]
 
-// Agents 入口只在 features flag 為 true 且使用者為 ADMIN 時加入(fail-closed)。
-const AGENTS_NAV = { id: 'agents' as const, icon: '🧑‍💼', label: 'Agents' }
-const WORKFLOWS_NAV = { id: 'workflows' as const, icon: '🧩', label: 'Workflow Designer' }
-const ORCHESTRATORS_NAV = { id: 'orchestrators' as const, icon: '🧭', label: 'Orchestrators' }
+// Agent 平台入口:Agents(D1)/Workflow Designer(D4)/Orchestrators(D4)三個分頁的共用入口,
+// 只要其中一個分頁的 flag + 權限成立就出現;個別分頁仍在 AgentPlatformView 各自 fail-closed。
+const AGENT_PLATFORM_NAV = { id: 'agentPlatform' as const, icon: '🧑‍💼', label: 'Agent 平台' }
 const APPROVALS_NAV = { id: 'approvals' as const, icon: '✅', label: 'Approvals' }
 const OPERATIONS_NAV = { id: 'operations' as const, icon: '📈', label: 'Operations' }
 
@@ -64,9 +61,12 @@ export default function AppShell({
   // Capability comparison is exact: `workflow.manage.other` is never sufficient.
   const canManageWorkflow = (session.capabilities ?? []).includes('workflow.manage')
   const items = NAV.filter((n) => !n.adminOnly || isAdmin)
+  // 入口與內層分頁共用同一份閘門判斷,避免「側欄有入口、進去卻是空分頁」的漂移。
+  const showAgentPlatform =
+    agentPlatformTabs({ isAdmin, agentBuilderEnabled, workflowDesignerEnabled, canManageWorkflow }).length > 0
   const navItems = [
-    ...(agentBuilderEnabled && isAdmin ? [...items, AGENTS_NAV] : items),
-    ...(workflowDesignerEnabled && canManageWorkflow ? [WORKFLOWS_NAV, ORCHESTRATORS_NAV] : []),
+    ...items,
+    ...(showAgentPlatform ? [AGENT_PLATFORM_NAV] : []),
     ...(agentWriteToolsEnabled ? [APPROVALS_NAV] : []),
     ...(agentWriteToolsEnabled && canManageWorkflow ? [OPERATIONS_NAV] : []),
   ]
@@ -131,11 +131,9 @@ export default function AppShell({
   // 分頁標題隨視圖更新（沿用 NAV 的中文 label，不另建映射）。
   useEffect(() => {
     const label =
-      view === 'agents' ? AGENTS_NAV.label
-        : view === 'workflows' ? WORKFLOWS_NAV.label
-          : view === 'orchestrators' ? ORCHESTRATORS_NAV.label
-            : view === 'approvals' ? APPROVALS_NAV.label
-              : view === 'operations' ? OPERATIONS_NAV.label
+      view === 'agentPlatform' ? AGENT_PLATFORM_NAV.label
+        : view === 'approvals' ? APPROVALS_NAV.label
+          : view === 'operations' ? OPERATIONS_NAV.label
             : NAV.find((n) => n.id === view)?.label ?? ''
     document.title = `${label} — 資料分析平台`
   }, [view])
@@ -305,11 +303,16 @@ export default function AppShell({
               {view === 'documents' && <DocumentsView documents={documents} />}
               {view === 'analysis' && <AnalysisView />}
               {view === 'config' && <ConfigView isAdmin={isAdmin} />}
-              {view === 'agents' && isAdmin && (
-                <AgentsView isAdmin agentTestRunEnabled={agentTestRunEnabled} />
+              {view === 'agentPlatform' && showAgentPlatform && (
+                <AgentPlatformView
+                  isAdmin={isAdmin}
+                  agentBuilderEnabled={agentBuilderEnabled}
+                  agentTestRunEnabled={agentTestRunEnabled}
+                  workflowDesignerEnabled={workflowDesignerEnabled}
+                  canManageWorkflow={canManageWorkflow}
+                  multiAgentDispatchEnabled={multiAgentDispatchEnabled}
+                />
               )}
-              {view === 'workflows' && workflowDesignerEnabled && canManageWorkflow && <WorkflowsView />}
-              {view === 'orchestrators' && workflowDesignerEnabled && canManageWorkflow && <OrchestratorsView multiAgentDispatchEnabled={multiAgentDispatchEnabled} />}
               {view === 'approvals' && agentWriteToolsEnabled && <ApprovalInbox />}
               {view === 'operations' && agentWriteToolsEnabled && canManageWorkflow && <OperationsGovernanceView />}
             </ErrorBoundary>
@@ -328,6 +331,7 @@ export default function AppShell({
               '- 聊天:與 AI 對話(串流回覆),「新對話」會重開上下文。',
               '- 分析:查看統計摘要。',
               '- 系統設定:僅管理員(ADMIN)可見可改。Skill 編輯在「系統設定 › Skill」(僅管理員):可新增/編輯/試跑/查版本;試跑會執行已存在的 Skill 並可展開節點軌跡。',
+              '- Agent 平台 › Agents:開著 Agent 編輯器時,你可以解釋每個欄位在問什麼、依使用者的描述幫忙填草稿(fillAgentDraft)、加一條商業規則(addAgentBusinessRule)。Skill/工具/fact/動作一律只能從畫面上的目錄挑,沒有的就說沒有。你只會改表單,「儲存草稿 → 驗證 → 發布」一律由使用者自己按,你不會也不能代為發布。',
               '文件依租戶隔離,使用者只看得到自己租戶的資料。',
               '',
               '你可代為執行的動作:createDocument(建文件)、deleteDocument(刪文件,務必先經使用者確認)、askKnowledgeBase(用知識庫回答問題)、switchView(切換視圖)。',

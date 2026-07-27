@@ -1,4 +1,4 @@
-import { expect, test, type Route } from '@playwright/test'
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 const agentId = '11111111-1111-4111-8111-111111111111'
 
@@ -39,6 +39,11 @@ const agent = {
 
 async function json(route: Route, body: unknown, headers: Record<string, string> = {}) {
   await route.fulfill({ status: 200, contentType: 'application/json', headers, body: JSON.stringify(body) })
+}
+
+/** slug/tools/Business Rules/runtime limits live in the collapsed advanced group. */
+function advancedSummary(page: Page) {
+  return page.getByText('進階設定（slug、')
 }
 
 test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog keyboard behavior', async ({
@@ -128,8 +133,8 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   await page.getByTestId('auth-username').fill('admin')
   await page.getByTestId('auth-password').fill('password123')
   await page.getByTestId('auth-submit').click()
-  await expect(page.getByTestId('nav-agents')).toBeVisible()
-  await page.getByTestId('nav-agents').click()
+  await expect(page.getByTestId('nav-agentPlatform')).toBeVisible()
+  await page.getByTestId('nav-agentPlatform').click()
   await page.getByRole('button', { name: '編輯' }).click()
 
   const builtin = page.locator('.agent-skills__row').filter({ hasText: 'builtin-rag' })
@@ -197,6 +202,148 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   await expect.poll(() => validateIfMatch).toBe('"3"')
 })
 
+// The advanced group is collapsed by default, so every error whose field lives inside it would be
+// invisible while still blocking publish. The auto-expand is the only branch that prevents that.
+test('validation errors inside the collapsed advanced group force it open', async ({ page }) => {
+  let validationResponse: unknown = { valid: true, errors: [] }
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'advanced-token',
+        username: 'admin',
+        role: 'ADMIN',
+        tenantCode: 'demo',
+      })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, agent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === `/api/agents/${agentId}/validate`) return json(route, validationResponse)
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+
+  // Basic fields are always visible; advanced ones start hidden behind the collapsed <details>.
+  const slug = page.getByLabel('slug')
+  await expect(page.getByLabel('名稱')).toBeVisible()
+  await expect(slug).toBeHidden()
+
+  // A clean validation must not pop the group open — otherwise the collapse is pointless.
+  await page.getByRole('button', { name: '驗證', exact: true }).click()
+  await expect(page.getByText('驗證通過,可以發布。')).toBeVisible()
+  await expect(slug).toBeHidden()
+
+  validationResponse = {
+    valid: false,
+    errors: [{ field: 'slug', message: 'slug 已被其他 Agent 使用。' }],
+  }
+  await page.getByRole('button', { name: '驗證', exact: true }).click()
+  await expect(slug).toBeVisible()
+  await expect(page.getByText('slug 已被其他 Agent 使用。')).toBeVisible()
+
+  // Collapsing again is allowed; the effect only re-fires when a new error appears.
+  await advancedSummary(page).click()
+  await expect(slug).toBeHidden()
+
+  // `slug` happens to be the only advanced field the server names bare. Runtime limits and
+  // Business Rules — the two that fail validation most often — arrive as dotted paths
+  // (backend AgentCanonicalizer.ValidateLimit → `runtime_limits.timeout_seconds`,
+  // AgentController.BusinessRulePath → `business_rules.<path>`), so an exact-string match
+  // leaves those errors invisible inside the collapsed group while publish stays blocked.
+  validationResponse = { valid: true, errors: [] }
+  await page.getByRole('button', { name: '驗證', exact: true }).click()
+  await expect(page.getByText('驗證通過,可以發布。')).toBeVisible()
+  await expect(slug).toBeHidden()
+
+  validationResponse = {
+    valid: false,
+    errors: [
+      {
+        field: 'runtime_limits.timeout_seconds',
+        message: 'runtime_limits.timeout_seconds 必須介於 0 與 3600',
+      },
+    ],
+  }
+  await page.getByRole('button', { name: '驗證', exact: true }).click()
+  await expect(page.getByLabel('逾時秒數')).toBeVisible()
+})
+
+// The Tool Catalog hops through workflow, so it routinely resolves after getAgent. "Not verified
+// yet" must not be treated as an error: the auto-expand effect only ever sets open=true, so one
+// premature trigger disables the collapsed default for every Agent that has any tool granted.
+test('a still-loading Tool Catalog is not an error and must not pop the advanced group open', async ({
+  page,
+}) => {
+  let releaseTools!: () => void
+  const toolsGate = new Promise<void>((resolve) => {
+    releaseTools = resolve
+  })
+  const toolAgent = { ...agent, draft: { ...agent.draft, allowed_tools: ['kb_search'] } }
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'slow-tools', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [toolAgent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, toolAgent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog') return json(route, [])
+    if (path === '/api/tools') {
+      await toolsGate
+      return json(route, [
+        {
+          name: 'kb_search',
+          kind: 'http',
+          description: 'Search authorized tenant knowledge',
+          risk: 'read',
+          returns: 'ranked passages',
+        },
+      ])
+    }
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+
+  // Editor is up and the catalog is still in flight: no error is on screen, so nothing may expand.
+  await expect(page.getByLabel('名稱')).toHaveValue('Finance Agent')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByLabel('slug')).toBeHidden()
+
+  releaseTools()
+  await advancedSummary(page).click()
+  const tool = page.locator('.agent-skills__row').filter({ hasText: 'kb_search' })
+  await expect(tool.getByRole('checkbox')).toBeChecked()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})
+
 test('USER cannot see or enter the Agents workspace when the Builder flag is enabled', async ({
   page,
 }) => {
@@ -233,8 +380,9 @@ test('USER cannot see or enter the Agents workspace when the Builder flag is ena
   await page.getByTestId('auth-submit').click()
 
   await expect.poll(() => featuresRequested).toBe(true)
-  await expect(page.getByTestId('nav-agents')).toHaveCount(0)
-  await expect(page.locator('.agents-workspace')).toHaveCount(0)
+  await expect(page.getByTestId('nav-agentPlatform')).toHaveCount(0)
+  // 入口不在之外,工作區本體(AgentPlatformView 的標題)也必須沒有被渲染出來。
+  await expect(page.getByRole('heading', { name: 'Agent 平台' })).toHaveCount(0)
   expect(agentApiRequested).toBe(false)
 })
 
@@ -285,8 +433,9 @@ test('catalog-provided rule limits drive nesting depth instead of a hardcoded co
   await page.getByTestId('auth-username').fill('admin')
   await page.getByTestId('auth-password').fill('password123')
   await page.getByTestId('auth-submit').click()
-  await page.getByTestId('nav-agents').click()
+  await page.getByTestId('nav-agentPlatform').click()
   await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
   await page.getByRole('button', { name: '＋ 新增空白規則' }).click()
 
   // The root condition starts at depth 1, so two nesting steps land the leaf at depth 3.
@@ -466,8 +615,9 @@ test('Business Rule editor round-trips canonical AST and uses server validation/
   await page.getByTestId('auth-username').fill('admin')
   await page.getByTestId('auth-password').fill('password123')
   await page.getByTestId('auth-submit').click()
-  await page.getByTestId('nav-agents').click()
+  await page.getByTestId('nav-agentPlatform').click()
   await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
 
   await page.getByRole('button', { name: '低信心時要求更多 Context' }).click()
   const card = page.locator('.rule-card').first()

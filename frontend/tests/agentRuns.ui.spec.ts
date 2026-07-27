@@ -62,7 +62,7 @@ async function loginAndOpenAgent(page: import('@playwright/test').Page) {
     await page.getByTestId('auth-password').fill('password123')
     await page.getByTestId('auth-submit').click()
   }
-  await page.getByTestId('nav-agents').click()
+  await page.getByTestId('nav-agentPlatform').click()
   await page.getByRole('button', { name: '編輯' }).click()
 }
 

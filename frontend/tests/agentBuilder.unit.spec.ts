@@ -5,6 +5,10 @@
 // server rule without updating this copy fails here instead of silently blocking legal authoring.
 import { expect, test } from 'vitest'
 import {
+  AGENT_DEFAULT_CONFIG_FALLBACKS,
+  AGENT_DEFAULT_RUNTIME_LIMITS,
+  AGENT_DEFAULT_SYSTEM_PROMPT,
+  applyAgentDefaultConfig,
   audiencePrincipalError,
   businessRuleCount,
   createEmptyAgentDraft,
@@ -79,9 +83,55 @@ test.describe('Agent Builder model contracts', () => {
     expect(draft.capabilities).toEqual([])
     expect(draft.audience).toEqual(['role:USER', 'role:ADMIN'])
     expect(businessRuleCount(draft.business_rules)).toBe(0)
+    // Governed sets stay fail-closed, but the purely technical fields must ship usable values —
+    // an all-zero runtime + blank prompt used to create an Agent nobody could actually run.
+    expect(draft.runtime_limits).toEqual(AGENT_DEFAULT_RUNTIME_LIMITS)
+    expect(Object.values(draft.runtime_limits).every((v) => v > 0)).toBe(true)
+    expect(draft.system_prompt).toBe(AGENT_DEFAULT_SYSTEM_PROMPT)
     // A never-published Agent previews r1, not r0; an existing one previews published + 1.
     expect(nextAgentRevision(null)).toBe(1)
     expect(nextAgentRevision(4)).toBe(5)
+  })
+
+  test('system config overrides create-mode defaults, but a bad value never yields a bad draft', () => {
+    const base = createEmptyAgentDraft()
+    const entry = (key: string, value: string) => ({ key, value, updatedAt: '' })
+
+    const applied = applyAgentDefaultConfig(base, [
+      entry('agent.defaults.max_tool_rounds', ' 4 '),
+      entry('agent.defaults.timeout_seconds', '0'),
+      entry('agent.defaults.system_prompt', '你是財務助理。'),
+      entry('unrelated.key', '999'),
+    ])
+    expect(applied.runtime_limits.max_tool_rounds).toBe(4)
+    expect(applied.runtime_limits.timeout_seconds).toBe(0) // 0 is a legal "let Runtime decide"
+    expect(applied.system_prompt).toBe('你是財務助理。')
+    // Untouched keys keep the built-in fallback.
+    expect(applied.runtime_limits.token_budget).toBe(AGENT_DEFAULT_RUNTIME_LIMITS.token_budget)
+
+    // Missing / blank / non-numeric / negative / fractional all fall back instead of corrupting
+    // the draft. Fractions matter: backend `AgentCanonicalizer.ValidateLimit` reads the limit with
+    // `TryGetValue<int>`, so letting 2.5 through would seed a draft that can never validate.
+    const rejected = applyAgentDefaultConfig(base, [
+      entry('agent.defaults.max_tool_rounds', 'lots'),
+      entry('agent.defaults.max_context_rounds', '-1'),
+      entry('agent.defaults.step_budget', '   '),
+      entry('agent.defaults.timeout_seconds', '2.5'),
+      entry('agent.defaults.system_prompt', '  '),
+    ])
+    expect(rejected.runtime_limits).toEqual(AGENT_DEFAULT_RUNTIME_LIMITS)
+    expect(rejected.system_prompt).toBe(AGENT_DEFAULT_SYSTEM_PROMPT)
+    expect(applyAgentDefaultConfig(base, [])).toEqual(base)
+
+    // The "一般設定" table renders exactly these keys when the server has none of them yet.
+    expect(Object.keys(AGENT_DEFAULT_CONFIG_FALLBACKS).sort()).toEqual([
+      'agent.defaults.max_context_rounds',
+      'agent.defaults.max_tool_rounds',
+      'agent.defaults.step_budget',
+      'agent.defaults.system_prompt',
+      'agent.defaults.timeout_seconds',
+      'agent.defaults.token_budget',
+    ])
   })
 
   test('uses server bindable metadata instead of source/name guesses', () => {

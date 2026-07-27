@@ -138,6 +138,15 @@ export function conditionChildren(condition: RuleCondition): RuleCondition[] {
   return []
 }
 
+/** fact／action 參數的允許值:catalog 兩種命名並存(camel/snake),一律由此讀取。 */
+export function metadataValues(metadata: {
+  enumValues?: unknown[]
+  enum_values?: unknown[]
+  values?: unknown[]
+}): unknown[] {
+  return metadata.enumValues ?? metadata.enum_values ?? metadata.values ?? []
+}
+
 export function defaultTypedValue(type: string, values: unknown[] = []): unknown {
   if (type === 'collection') return []
   if (values.length > 0) return values[0]
