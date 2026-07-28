@@ -71,9 +71,36 @@ public static class DbBootstrap
         -- 需 pgvector >= 0.5(hnsw);extension 過舊時此 DDL 會明確報錯而中止啟動(fail fast)。
         CREATE INDEX IF NOT EXISTS rag_chunks_embedding_hnsw_idx
           ON rag_chunks USING hnsw (embedding vector_cosine_ops);
+        -- 一般設定 key-value,**租戶隔離**(tenant_id = 租戶 code,與 rag_documents/skill 一致)。
         CREATE TABLE IF NOT EXISTS app_config (
-          key text PRIMARY KEY, value text NOT NULL,
-          updated_at timestamptz NOT NULL DEFAULT now());
+          tenant_id text NOT NULL, key text NOT NULL, value text NOT NULL,
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (tenant_id, key));
+        -- 既有 appdb 的舊 shape(單欄 key 主鍵、全平台共用一份)就地升級。偵測 tenant_id 欄位
+        -- 不存在才動作 → 新 DB 與已遷移的 DB 重跑皆為 no-op。
+        -- 歸屬:舊列 CROSS JOIN 每一個現存租戶各複製一份 — 升級後每位 ADMIN 看到的值與升級前
+        -- 完全相同,之後才各自分岔,不靜默丟掉任何人已設定好的 System Prompt。
+        -- 無主舊列(租戶表為空的 fail-safe 情況)直接刪除:tenant_id NOT NULL 之後每次查詢都帶
+        -- X-Tenant-Id,沒有任何 caller 讀得到它們,留著只會讓 NOT NULL 卡死啟動。
+        DO $app_config_tenant$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid = 'app_config'::regclass
+              AND attname = 'tenant_id' AND NOT attisdropped) THEN
+            ALTER TABLE app_config ADD COLUMN tenant_id text;
+            -- 先卸舊主鍵:否則同一 key 複製給第二個租戶時會撞 UNIQUE(key)。
+            ALTER TABLE app_config DROP CONSTRAINT IF EXISTS app_config_pkey;
+            INSERT INTO app_config (tenant_id, key, value, updated_at)
+              SELECT t.code, c.key, c.value, c.updated_at
+              FROM app_config c CROSS JOIN tenants t
+              WHERE c.tenant_id IS NULL;
+            DELETE FROM app_config WHERE tenant_id IS NULL;
+            ALTER TABLE app_config ALTER COLUMN tenant_id SET NOT NULL;
+            ALTER TABLE app_config ADD PRIMARY KEY (tenant_id, key);
+          END IF;
+        END
+        $app_config_tenant$;
         -- 使用者撰寫的 Skill。definition = YAML 原文(權威格式,引擎執行的事實來源);
         -- name/description/required_role 都寫在 YAML 裡,存檔時由引擎 validate 回報的中繼資料落欄位
         -- (backend 不解析 YAML — 兩個 parser 就是兩份事實)。

@@ -20,7 +20,8 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'general', label: '一般設定' },
 ]
 
-/** 一般設定：GET 表格；ADMIN 可就地編輯 value + 儲存(PUT)。非 ADMIN 只讀。 */
+/** 一般設定：GET 表格；就地編輯 value + 儲存(PUT)。GET/PUT 兩端都只開放 ADMIN
+ *  (側欄 adminOnly + 後端 [AdminOnly]),下面的 isAdmin 分支只是第二道防線。 */
 function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
   const toast = useToast()
   const { data, loading, error } = useResource(listConfig)
@@ -59,7 +60,7 @@ function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
       )
       toast('已儲存', 'success')
     } catch (e) {
-      // PUT 403(非 ADMIN)或其他錯誤在此顯示;真正授權以後端把關為準。
+      // 儲存失敗在此顯示;真正授權以後端把關為準(非 ADMIN 連這個畫面都進不來)。
       setSaveError((e as Error).message)
     } finally {
       setSavingKey(null)
@@ -70,13 +71,11 @@ function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
     <>
       <ErrorText msg={error ?? saveError} />
 
-      {/* GET /api/config 只要求已登入(platform ConfigController 只有 [Authorize],
-          app_config 也沒有 tenant 欄位),所以這張表不是私密的 —— ADMIN 在這裡寫的
-          System Prompt 內容,別的租戶與一般 USER 都讀得到。 */}
+      {/* 讀寫皆需 ADMIN(由後端把關);app_config 以 (tenant_id, key) 複合主鍵做租戶隔離,
+          GET/PUT 都經 RequireTenant() —— 每個租戶各有一份值,跨租戶讀不到。 */}
       <p className="muted" role="note">
-        此處所有設定值(含 <code>agent.defaults.system_prompt</code>)全平台共用、不分租戶:別的租戶
-        ADMIN 會拿它當建立 Agent 的預設值,任何已登入使用者也都能透過 API 讀到全文。請勿填入機密內容
-        (例如內部規章原文、客戶資料、金鑰或未公開的商業規則)。
+        此處所有設定值(含 <code>agent.defaults.system_prompt</code>)僅適用於目前租戶:同租戶的其他
+        ADMIN 可讀寫,並會成為本租戶建立 Agent 時的預設值;不影響其他租戶。
       </p>
 
       {loading && entries.length === 0 ? (

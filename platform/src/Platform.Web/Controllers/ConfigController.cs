@@ -7,7 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace Platform.Web.Controllers;
 
 /// <summary>
-/// 系統組態端點,需認證。ADMIN 把關在 backend(PUT 非 ADMIN → backend 403 → 對外 403)。
+/// 系統組態端點,需認證。ADMIN 把關在 backend(GET 與 PUT 非 ADMIN → backend 403 → 對外 403)。
 /// 從 JWT 主體組 UserContext(轉發身分 header)傳給 service。
 /// </summary>
 [ApiController]

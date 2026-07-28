@@ -966,10 +966,18 @@ public sealed class FakeAgentService : IAgentService
 public sealed class FakeConfigService : IConfigService
 {
     public Task<IReadOnlyList<ConfigItem>> ListAsync(UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult<IReadOnlyList<ConfigItem>>(new List<ConfigItem>
+    {
+        // backend 的 GET /api/config 也是 ADMIN-only(403);fake 照抄該契約,才測得到 platform 的轉發。
+        if (ctx.Role != "ADMIN")
+        {
+            throw new WorkflowForbiddenException("權限不足，無法讀取系統組態");
+        }
+
+        return Task.FromResult<IReadOnlyList<ConfigItem>>(new List<ConfigItem>
         {
             new("chat_model", "gpt-4o-mini", DateTime.UtcNow),
         });
+    }
 
     public Task<ConfigItem> UpdateAsync(string key, ConfigUpdateRequest request, UserContext ctx, CancellationToken ct = default)
     {

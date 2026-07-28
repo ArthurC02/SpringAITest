@@ -33,7 +33,7 @@ export const AGENT_DEFAULT_SYSTEM_PROMPT = `你是一位協助處理內部業務
 語氣:專業、簡潔、使用繁體中文;不確定時明說不確定,不要猜測或編造。
 邊界:只回答被授權範圍內的問題;需要外部資料時使用被允許的工具,不要臆測數字。`
 
-/** 系統設定 key 命名:全平台共用一份(app_config 無 tenant 欄位),不是每租戶一份。 */
+/** 系統設定 key 命名:key 本身不帶租戶,租戶隔離由 app_config 的 (tenant_id, key) 主鍵負責。 */
 export function agentDefaultConfigKey(field: string): string {
   return `agent.defaults.${field}`
 }

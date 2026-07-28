@@ -22,10 +22,15 @@ public sealed class PostgresFixture : IAsyncLifetime
 
     public ConfigurationSetRepository Repo => new(DataSource!);
 
+    /// <summary>原始連線字串(含密碼)。NpgsqlDataSource.ConnectionString 會遮蔽密碼,
+    /// 需要衍生連線(例如 migration 測試建臨時資料庫)時必須用這一份。</summary>
+    public string ConnectionString { get; private set; } = string.Empty;
+
     public async Task InitializeAsync()
     {
         var connString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING")
             ?? "Host=localhost;Port=5433;Username=postgres;Password=postgres;Database=springaitest";
+        ConnectionString = connString;
         try
         {
             DataSource = NpgsqlDataSource.Create(connString);
@@ -67,6 +72,7 @@ public sealed class PostgresFixture : IAsyncLifetime
             {
                 await using var conn = await DataSource.OpenConnectionAsync();
                 await conn.ExecuteAsync("DELETE FROM configuration_set WHERE tenant_id LIKE 'p4repo-%'");
+                await conn.ExecuteAsync("DELETE FROM app_config WHERE tenant_id LIKE 'cfgrepo-%'");
             }
             catch
             {

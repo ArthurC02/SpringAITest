@@ -27,6 +27,8 @@ public sealed class ConfigServiceTests
         Assert.Equal("http://backend/api/config", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
         Assert.Equal("USER", stub.Header("X-User-Role"));
+        // app_config 是租戶隔離的:backend 的 RequireTenant() 缺這個 header 就 400。
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
     }
 
     [Fact]
@@ -44,6 +46,7 @@ public sealed class ConfigServiceTests
         Assert.Equal("http://backend/api/config/a", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Put, stub.LastRequest!.Method);
         Assert.Equal("ADMIN", stub.Header("X-User-Role"));
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
 
         using var doc = JsonDocument.Parse(stub.LastBody!);
         Assert.Equal("2", doc.RootElement.GetProperty("value").GetString());

@@ -10,22 +10,23 @@ public sealed class ConfigRepository : IConfigRepository
 
     public ConfigRepository(NpgsqlDataSource dataSource) => _dataSource = dataSource;
 
-    public async Task<IReadOnlyList<ConfigItem>> ListAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<ConfigItem>> ListAsync(string tenantId, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<ConfigItem>(new CommandDefinition(
-            "SELECT key AS Key, value AS Value, updated_at AS UpdatedAt FROM app_config ORDER BY key",
-            cancellationToken: ct));
+            "SELECT key AS Key, value AS Value, updated_at AS UpdatedAt FROM app_config"
+            + " WHERE tenant_id = @tenantId ORDER BY key",
+            new { tenantId }, cancellationToken: ct));
         return rows.AsList();
     }
 
-    public async Task<ConfigItem> UpsertAsync(string key, string value, CancellationToken ct)
+    public async Task<ConfigItem> UpsertAsync(string tenantId, string key, string value, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         return await conn.QuerySingleAsync<ConfigItem>(new CommandDefinition(
-            "INSERT INTO app_config (key, value) VALUES (@key, @value)"
-            + " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"
+            "INSERT INTO app_config (tenant_id, key, value) VALUES (@tenantId, @key, @value)"
+            + " ON CONFLICT (tenant_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"
             + " RETURNING key AS Key, value AS Value, updated_at AS UpdatedAt",
-            new { key, value }, cancellationToken: ct));
+            new { tenantId, key, value }, cancellationToken: ct));
     }
 }

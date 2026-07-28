@@ -18,14 +18,29 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
-    public async Task List_Returns200_WithToken()
+    public async Task List_Returns200_AsAdmin()
     {
-        var resp = await _factory.UserClient().GetAsync("/api/config");
+        var resp = await _factory.AdminClient().GetAsync("/api/config");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var arr = (await resp.ReadJsonAsync()).AsArray();
         Assert.Single(arr);
         Assert.Equal("chat_model", arr[0]!["key"]!.GetValue<string>());
+    }
+
+    // 讀取收成 ADMIN-only 後的另一半決策表:backend 403 → 對外 403 + 標準 ApiError 形狀
+    // (授權在 backend,platform 透明轉發 —— 見 ConfigServiceTests.List_Backend403_ThrowsWorkflowForbidden)。
+    [Fact]
+    public async Task List_Returns403_AsNonAdmin_WithApiError()
+    {
+        var resp = await _factory.UserClient().GetAsync("/api/config");
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("權限不足，無法讀取系統組態", body["message"]!.GetValue<string>());
+        Assert.Equal(403, body["status"]!.GetValue<int>());
+        Assert.NotNull(body["timestamp"]);
+        Assert.NotNull(body["fieldErrors"]);
     }
 
     [Fact]
