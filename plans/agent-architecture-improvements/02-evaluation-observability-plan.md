@@ -28,7 +28,7 @@ flowchart LR
 - Backend：suite/revision、run/result/cases、extended operations evidence 與 release eligibility 的唯一 authority。
 - Workflow：執行 deterministic/live eval candidate，不保存 release state。
 - Platform：提供 chat/AG-UI evidence，不能自行宣告 PASS。
-- Langfuse/OTel：診斷視圖，不是 durable release authority。
+- Langfuse/OTel：診斷視圖，不是 durable release authority。實際接線：Platform 端在 `platform/src/Platform.Web/Platform.Web.csproj:16-19` 的四個 OpenTelemetry 套件 + `Program.cs` 讀 `LANGFUSE_OTEL_ENDPOINT`/`OTEL_MODE` env 驅動；Workflow 端在 `workflow/pyproject.toml:16` 的 `langfuse>=3.0` + `workflow/app/tracing.py`（`LANGFUSE_ENABLED` 開關）。
 
 ## 3. Phase E0：先消除現有矛盾
 
@@ -41,7 +41,7 @@ flowchart LR
 
 ## 4. Phase E1：Run evidence envelope
 
-擴充既有 `operations_execution_metric`/operations telemetry authority，而非平行建立第二套 usage/cost ledger。由 Backend durable run events/outbox 派生；Platform/Workflow 無法與本地 run event transactionally commit 的 telemetry，透過 producer outbox 投遞。為 model/tool/node/run completion 建立 append-only、tenant-scoped、event-ID-idempotent envelope：
+擴充既有 `operations_execution_metric`/operations telemetry authority，而非平行建立第二套 usage/cost ledger。既有主鍵 `(tenant_id, run_id, event_id)`（`backend/src/Backend.Api/Data/DbBootstrap.cs:511`）與 `ON CONFLICT(tenant_id,run_id,event_id) DO NOTHING`（`backend/src/Backend.Api/OperationsGovernance/OperationsGovernanceRepository.cs:103`）已提供 event-ID idempotency 與 tenant/run 歸屬檢查；E1 是擴充欄位與來源，不是新建 ledger。由 Backend durable run events/outbox 派生；Platform/Workflow 無法與本地 run event transactionally commit 的 telemetry，透過 producer outbox 投遞。為 model/tool/node/run completion 建立 append-only、tenant-scoped、event-ID-idempotent envelope：
 
 - root/run/child IDs、event ID、timestamp、outcome/error class。
 - immutable snapshot SHA、Agent/Orchestrator/Skill revisions。

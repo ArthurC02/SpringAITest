@@ -5,7 +5,7 @@
 
 ## 1. 問題
 
-Published Agent `system_prompt` 已是 immutable revision 的一部分，但 legacy chat 與 shared core 還由多個 constants/providers 組合 guard、routing、summary、persona、memory 與 tool instructions。D3 model runtime 也缺 Backend-pinned 的明確 retry/fallback policy。結果是 run 可以 pin Agent revision，卻未必能完整回答「當時用了哪套 composition 與 model policy」。
+Published Agent `system_prompt` 已是 immutable revision 的一部分，但 legacy chat 與 shared core 還由多個 constants/providers 組合 guard、routing、summary、persona、memory 與 tool instructions。Workflow 側更在 `_system_frame()`（`workflow/app/runtime/model.py:282-310`）串接三段 composition 之一：SYSTEM GOVERNANCE + PINNED SKILL SUMMARIES + AGENT INSTRUCTION，而該組裝也無 Backend pinning。D3 model runtime 也缺 Backend-pinned 的明確 retry/fallback policy。結果是 run 可以 pin Agent revision，卻未必能完整回答「當時用了哪套 composition 與 model policy」。
 
 ## 2. 不建立 prompt CMS
 
@@ -18,13 +18,15 @@ Published Agent `system_prompt` 已是 immutable revision 的一部分，但 leg
 - context role-view policy revision。
 - model policy revision 與 generation settings。
 - composition schema version 與 canonical SHA。
+- workflow runtime governance frame revision（`_system_frame()` 的 SYSTEM GOVERNANCE 段，Backend 發布的明確 revision，同樣禁止 `latest`）。
+- pinned skill catalog hash（snapshot 當下的 PINNED SKILL SUMMARIES 內容雜湊，含截斷旗標）。
 
 Raw prompt text 留在既有 protected artifact store；operations/browser 預設只見 revision/hash/server-authored summary。
 
 ## 3. Phase P1：Canonical prompt manifest
 
-1. Backend 定義 manifest schema、canonical serialization、immutable revision 與 tenant scope；manifest 本身不獨立發布 prompt content。
-2. Platform/Workflow 各自有 deterministic assembler，輸入同一 manifest 後產生其 transport/runtime 所需 messages。
+1. Backend 定義 manifest schema、canonical serialization、immutable revision 與 tenant scope；manifest 本身不獨立發布 prompt content。Canonical serialization 必須複用既有實作：Backend 的 `AgentCanonicalizer`（`backend/src/Backend.Api/Agents/AgentCanonicalizer.cs:58-76`，固定 key 順序）與 Workflow 的 `workflow/app/canonical_json.py`（UTF-16 ordinal 排序，已與 .NET `StringComparer.Ordinal` 對齊），不得新增第三套。
+2. Platform/Workflow 各自有 deterministic assembler，輸入同一 manifest 後產生其 transport/runtime 所需 messages。Workflow assembler 既有實作起點為 `_system_frame()`（`:282-310`），是改造對象而非新建。
 3. Agent/Orchestrator publish 或 root allocation 時，以同一 publish capability/ETag boundary 驗證、lock 並 pin 所有 component revisions 與 manifest SHA；active runs 不追 latest。
 4. Off path 使用目前 constants byte-for-byte，先做 shadow hash comparison。
 
@@ -88,7 +90,7 @@ Workflow/Platform 只執行 snapshot pin 的 policy。Provider 回傳 resolved m
 
 ## 8. 驗證
 
-- Canonicalization golden tests 與 cross-language fixtures。
+- Canonicalization golden tests 與 cross-language fixtures（必須複用 `AgentCanonicalizer` 與 `canonical_json.py`；禁止新增第三套 canonical 實作）。
 - Platform/Workflow assembler parity：guard order、tool catalog、memory policy、transport-specific persona。
 - Model policy matrix：timeout/retry/fallback/no-capability/cost ceiling/streaming；所有 fallback 保持原 authority。
 - Tenant isolation、cross-tenant component reference、concurrent publish/ETag、active-run immutability、rollback revision tests。

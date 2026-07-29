@@ -85,7 +85,7 @@ PostgreSQL checkpoint/HMAC/reopen 測試已人工以真實 DSN 跑過並通過�
 
 ### 4.4 Script sandbox 不是 security boundary
 
-`workflow/app/engine/script_runner.py` 已誠實記載 v1 限制：script 與 internal token 同程序、timeout 無法停止 CPU thread、中間 memory 無 OS limit。這對 trusted ADMIN authoring 可接受，但不能延伸成 untrusted package/plugin/MCP execution boundary。
+`workflow/app/engine/script_runner.py` 已誠實記載 v1 限制：namespace default-deny 且 script 無法讀取 `INTERNAL_API_TOKEN`/DB URL/env（`:574-582` 白名單設計、`:209-211` AST analyzer），但目前可證實的暴露是同程序資源耗盡（CPU 與 memory 炸彈可拖垮整個 Workflow worker；docstring `:7-15` 自承中間配置無上限、`MAX_ITERATIONS` 只界定圈數不界定量級、`MAX_WRITE_BYTES` 只檢查寫回值不管中間配置）。「同程序」的 secret 風險需先假設 AST analyzer 有洞才成立，是次級而非首要理由。這對 trusted ADMIN authoring 可接受，但不能延伸成 untrusted package/plugin/MCP execution boundary。
 
 ### 4.5 Plan index 已同步，歷史狀態仍需 reconciliation
 

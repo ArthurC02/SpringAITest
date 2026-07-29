@@ -5,7 +5,7 @@
 
 ## 1. 決策
 
-Custom Skill script 目前是 trusted ADMIN authoring convenience，不是 hostile-code sandbox。AST allowlist、iteration/write limits 與 timeout 仍有價值，但同程序 thread 無法隔離 Workflow secrets、CPU 或中間 memory。
+Custom Skill script 目前是 trusted ADMIN authoring convenience，不是 hostile-code sandbox。AST allowlist、iteration/write limits 與 timeout 仍有價值。已證實的隔離失效是 CPU 與 memory（worker thread 無 OS-level process boundary；resource bomb 可拖垮整個 Workflow 程序）；secrets 隔離仰賴 AST analyzer 無漏洞，一旦有洞才成立，是縱深防禦而非首層邊界。
 
 MCP/connector 不得直接把 discovered tools 暴露給模型，也不得讓 Workflow 持有 arbitrary server credentials。正確方向是 Backend-governed immutable connector revision，經 canonical discovery 映射到既有 safe tool catalog，再走 grant/rule/risk/approval/effect boundary。
 
@@ -29,7 +29,7 @@ Windows/Linux 開發與 container production 可使用不同 isolation adapter�
 
 Child 不拿 credentials；只透過 parent broker 發出 typed request。Parent 重新驗證 snapshot grants、tool name/schema、risk、timeout、call count 與 output size。Write tools 預設禁止；若未來允許，仍須走 D7 approval/effect identity，不能由 subprocess 直接執行。
 
-**驗收**：CPU/memory bomb 被 OS 終止且 worker 可繼續服務；child 看不到 secrets/env/network/filesystem；timeout 無 orphan process；malformed IPC/output fail closed；相同 valid scripts 與既有 behavior parity。
+**驗收**：首要為 CPU/memory bomb 被 OS 終止且 worker 可繼續服務（核心資源隔離）；次級為 child 看不到 secrets/env/network/filesystem（縱深防禦）；timeout 無 orphan process；malformed IPC/output fail closed；相同 valid scripts 與既有 behavior parity。
 
 ## 3. Phase S2：Governed connector catalog
 
@@ -85,7 +85,7 @@ Native tools 不受 connector flag 影響。Rollback connector 不可讓已 revo
 
 ## 8. 驗證
 
-- Script adversarial matrix：CPU、memory、fork/process、filesystem、network、env、oversized output、IPC corruption、timeout cleanup。
+- **Script adversarial matrix**（首要檢驗 resource isolation）：CPU、memory 炸彈被 OS 終止且 worker 可繼續服務；次級檢驗 fork/process、filesystem、network、env、oversized output、IPC corruption、timeout cleanup。
 - Behavior parity：現有 valid script corpus 在 isolated adapter 輸出相同 state/trace contract。
 - Connector SSRF/DNS rebinding/redirect/TLS、credential exfiltration、schema drift、oversized/slow response tests。
 - Authority matrix：tenant、grant、rule、risk、health、revision、approval 任一不符即 fail closed。
