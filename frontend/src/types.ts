@@ -598,6 +598,117 @@ export interface RunApproval {
   decidedAt: string | null
 }
 
+// ── D7 Operations/release cockpit(Phase O1)。metrics 混用命名:外層/release_gate 是
+// 顯式 snake_case,agents/skills/tools/nodes/aggregation 內層是 record 預設 camelCase
+// (backend 沒有額外標 JsonPropertyName)——這裡統一正規化成 camelCase 給前端用,
+// 見 api/operations.ts 的正規化函式。────────────────────────────────────────────
+
+/** null = 尚無觀測資料;UI 一律顯示「未知」badge,絕不假裝成 0。 */
+export interface OperationsReleaseGate {
+  regressionPassed: boolean
+  overrideActive: boolean
+  auditEntries: number
+}
+
+export interface OperationsAgentMetric {
+  agentId: string
+  revision: number
+  runs: number
+  completed: number
+  failed: number
+  averageLatencyMs: number
+  reservedBudgetUnits: number
+  observedUsageUnits: number | null
+  observedCostUnits: number | null
+  observedLatencyMs: number | null
+}
+
+export interface OperationsSkillMetric {
+  name: string
+  revision: number
+  runs: number
+  observedLatencyMs: number | null
+  observedUsageUnits: number | null
+  observedCostUnits: number | null
+  reservedBudgetUnits: number
+}
+
+export interface OperationsToolMetric {
+  kind: string
+  count: number
+  observedLatencyMs: number | null
+  observedUsageUnits: number | null
+  observedCostUnits: number | null
+  reservedBudgetUnits: number
+}
+
+export interface OperationsNodeMetric {
+  nodeId: string
+  executions: number
+  averageLatencyMs: number
+  maxLatencyMs: number
+}
+
+export interface OperationsAggregateMetric {
+  completed: number
+  partialOrFailed: number
+  averageFanOut: number
+  averageLatencyMs: number
+}
+
+/** GET /api/admin/operations/metrics(已正規化)。 */
+export interface OperationsMetrics {
+  releaseGate: OperationsReleaseGate
+  rolloutEvents: number
+  rootRuns: number
+  childRuns: number
+  childSuccess: number
+  verifierReject: number
+  repairRounds: number
+  writeEffects: number
+  agents: OperationsAgentMetric[]
+  skills: OperationsSkillMetric[]
+  tools: OperationsToolMetric[]
+  nodes: OperationsNodeMetric[]
+  aggregation: OperationsAggregateMetric
+}
+
+export interface OperationsRevisionMetric {
+  revision: number
+  runs: number
+  completed: number
+  failed: number
+  averageLatencyMs: number
+  reservedBudgetUnits: number
+  activeRuns: number
+}
+
+export interface OperationsRevisionDelta {
+  fromRevision: number
+  toRevision: number
+  runDelta: number
+  completedDelta: number
+  averageLatencyDeltaMs: number
+  reservedBudgetDeltaUnits: number
+}
+
+/** GET /api/admin/operations/version-comparison(已正規化)。 */
+export interface OperationsVersionComparison {
+  selectedRevision: number | null
+  rolloutEvents: number
+  newRootsOnly: boolean
+  activeRunsKeepImmutableSnapshot: boolean
+  revisions: OperationsRevisionMetric[]
+  selectedVsPrevious: OperationsRevisionDelta | null
+}
+
+/** GET /api/admin/operations/legacy-inventory 一列。 */
+export interface OperationsLegacyInventoryItem {
+  id: string
+  disposition: string
+  trigger: string
+}
+
 /** 已發布 revision 的 Skill 綁定讀取形狀（backend 權威，含固定的 skill_revision）。 */
 export interface AgentRevisionBinding {
   skill: string

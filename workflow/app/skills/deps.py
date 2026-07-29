@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.engine.package_reader import AgentSkillPackageReader
+from app.engine.script_isolation import IsolatedSubprocessRunner
 from app.llm import get_llm
 from app.nodes.kbquery.adapters import (
     BackendVectorSearch,
@@ -70,6 +71,9 @@ class KbQueryDeps:
     context_store: ContextStorePort | None = None
     context_retrieval: ContextRetrievalPort | None = None
     context_task_backend: TaskContextPort | None = None
+    # ScriptRunnerPort（Phase S1）：None 時編譯器用 in-process runner，旗標開啟才注入
+    # 隔離 adapter。節點不碰全域 settings，旗標只在 _default_deps 這個組裝點讀一次。
+    script_runner: Any | None = None
 
 
 def _default_deps() -> KbQueryDeps:
@@ -100,4 +104,9 @@ def _default_deps() -> KbQueryDeps:
         context_store=BackendContextStore(),
         context_retrieval=BackendContextRetrieval(settings.multi_agent_context_top_k),
         context_task_backend=OrchestratorBackendClient(),
+        script_runner=(
+            IsolatedSubprocessRunner()
+            if settings.isolated_skill_scripts_enabled
+            else None
+        ),
     )

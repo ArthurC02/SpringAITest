@@ -12,6 +12,7 @@ import {
   AGENT_RUN_ATTEMPT_STORAGE_PREFIX,
   clearLogicalAttemptStorage,
   LogicalAttemptKey,
+  OPERATIONS_ATTEMPT_STORAGE_PREFIX,
 } from '../src/logicalAttemptKey'
 
 class MemoryStorage implements Storage {
@@ -108,16 +109,18 @@ test.describe('D3 Agent run public contracts', () => {
     }
   })
 
-  test('cleans only Agent run attempt records at logout', () => {
+  test('cleans Agent run and Operations attempt records at logout, nothing else', () => {
     const storage = new MemoryStorage()
     storage.setItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:start:agent-1`, '{}')
     storage.setItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:cancel:run-1`, '{}')
+    storage.setItem(`${OPERATIONS_ATTEMPT_STORAGE_PREFIX}override-idempotency`, '{}')
     storage.setItem('unrelated', 'keep')
 
     clearLogicalAttemptStorage(storage)
 
     expect(storage.getItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:start:agent-1`)).toBeNull()
     expect(storage.getItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:cancel:run-1`)).toBeNull()
+    expect(storage.getItem(`${OPERATIONS_ATTEMPT_STORAGE_PREFIX}override-idempotency`)).toBeNull()
     expect(storage.getItem('unrelated')).toBe('keep')
   })
 

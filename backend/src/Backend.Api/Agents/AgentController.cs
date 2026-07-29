@@ -1,4 +1,5 @@
 using Backend.Api.Common;
+using Backend.Api.PromptArtifacts;
 using Backend.Api.Skills;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
@@ -23,11 +24,19 @@ public sealed class AgentController : ControllerBase
     private const string AgentRuleGate = "pre-action";
     private readonly IAgentRepository _repo;
     private readonly IBusinessRuleValidator _ruleValidator;
+    private readonly IPromptArtifactRepository _promptArtifacts;
+    private readonly PromptArtifactsState _promptArtifactsState;
 
-    public AgentController(IAgentRepository repo, IBusinessRuleValidator ruleValidator)
+    public AgentController(
+        IAgentRepository repo,
+        IBusinessRuleValidator ruleValidator,
+        IPromptArtifactRepository promptArtifacts,
+        PromptArtifactsState promptArtifactsState)
     {
         _repo = repo;
         _ruleValidator = ruleValidator;
+        _promptArtifacts = promptArtifacts;
+        _promptArtifactsState = promptArtifactsState;
     }
 
     /// <summary>列出本租戶所有 Agent(含已停用;enabled 欄位區分狀態)。</summary>
@@ -177,6 +186,9 @@ public sealed class AgentController : ControllerBase
         {
             throw InvalidBusinessRules(ruleValidation.Errors);
         }
+        // P1 prompt manifest pin(可選)。flag 關閉時完全不讀這個欄位 — publish 路徑與 P1 之前
+        // 逐位元組相同;帶了不存在/跨租戶的 manifest 則 fail closed(422),不會產生 revision。
+        var manifestPin = await ResolvePromptManifestPinAsync(tenantId, request, ct);
         var result = await _repo.PublishAsync(
             tenantId,
             id,
@@ -184,7 +196,8 @@ public sealed class AgentController : ControllerBase
             ruleValidation.CanonicalDefinition,
             SkillHash.Sha256(ruleValidation.CanonicalDefinition),
             Request.UserIdOrEmpty(),
-            ct);
+            ct,
+            manifestPin);
 
         return result.Status switch
         {
@@ -275,6 +288,25 @@ public sealed class AgentController : ControllerBase
         }
 
         return WithETag((await _repo.GetAsync(tenantId, id, ct))!);
+    }
+
+    /// <summary>
+    /// 解析可選的 prompt manifest pin。PROMPT_ARTIFACTS_ENABLED 關閉 → 一律 null(欄位視同不存在);
+    /// 開啟且有帶 → manifest 必須是本租戶已建立的 revision,否則 422(跨租戶查不到,一樣 422)。
+    /// </summary>
+    private async Task<PromptManifestPin?> ResolvePromptManifestPinAsync(
+        string tenantId, AgentPublishRequest request, CancellationToken ct)
+    {
+        if (!_promptArtifactsState.Enabled || request.PromptManifestRevision is not int revision)
+        {
+            return null;
+        }
+
+        var manifest = await _promptArtifacts.GetManifestAsync(tenantId, revision, ct)
+                       ?? throw new ApiException(
+                           StatusCodes.Status422UnprocessableEntity,
+                           $"找不到 prompt manifest revision：{revision}");
+        return new PromptManifestPin(manifest.Revision, manifest.ManifestSha256);
     }
 
     private const string Message = "權限不足，無法存取 Agent";

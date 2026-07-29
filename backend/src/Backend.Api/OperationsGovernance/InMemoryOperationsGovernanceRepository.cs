@@ -10,7 +10,13 @@ public sealed class InMemoryOperationsGovernanceRepository(
     private readonly object _gate = new();
     private readonly Dictionary<string, TenantState> _states = new(StringComparer.Ordinal);
     private readonly List<(string Tenant, OperationsTelemetry Value)> _telemetry = [];
+    private readonly List<(string Tenant, RunEvidenceEnvelope Value)> _evidence = [];
     public IReadOnlyList<(string Tenant, OperationsTelemetry Value)> Telemetry { get { lock (_gate) return _telemetry.ToArray(); } }
+    // Lite mode has no real agent_run table to fence against, so -- exactly like the legacy
+    // telemetry path above -- tenant scoping here is simply "written under the tenant key the
+    // caller supplied", with no cross-run existence/snapshot check. That check is real-DB-only
+    // (see OperationsGovernanceRepository) and covered by the Dapper/Postgres test.
+    public IReadOnlyList<(string Tenant, RunEvidenceEnvelope Value)> Evidence { get { lock (_gate) return _evidence.ToArray(); } }
 
     public Task<RegressionGate> RecordRegressionAsync(string tenantId, string suite, bool passed, string evidenceRef, string actorId, CancellationToken ct)
     {
@@ -61,6 +67,26 @@ public sealed class InMemoryOperationsGovernanceRepository(
 
     public Task RecordTelemetryAsync(string tenantId, OperationsTelemetry telemetry, CancellationToken ct)
     { lock (_gate) { if (!_telemetry.Any(x => x.Tenant == tenantId && x.Value.RunId == telemetry.RunId && x.Value.EventId == telemetry.EventId)) _telemetry.Add((tenantId, telemetry)); return Task.CompletedTask; } }
+
+    public Task RecordEvidenceAsync(string tenantId, RunEvidenceEnvelope envelope, CancellationToken ct)
+    { lock (_gate) { if (!_evidence.Any(x => x.Tenant == tenantId && x.Value.RunId == envelope.RunId && x.Value.EventId == envelope.EventId)) _evidence.Add((tenantId, envelope)); return Task.CompletedTask; } }
+
+    public Task<EvidenceReconcileSummary> GetEvidenceReconcileAsync(string tenantId, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            var metricCount = _telemetry.Count(x => x.Tenant == tenantId);
+            var envelope = _evidence.Where(x => x.Tenant == tenantId).Select(x => x.Value).ToArray();
+            var mismatched = envelope.Count(e =>
+            {
+                var metric = _telemetry.FirstOrDefault(x => x.Tenant == tenantId && x.Value.RunId == e.RunId && x.Value.EventId == e.EventId).Value;
+                return metric is not null && (metric.UsageUnits != e.UsageUnits || metric.CostUnits != e.CostUnits || metric.LatencyMs != e.LatencyMs);
+            });
+            var unknown = envelope.Count(e => e.ObservationQuality == "unknown");
+            var measured = envelope.Where(e => e.ObservationQuality != "unknown" && e.UsageUnits is not null).Select(e => e.UsageUnits!.Value).ToArray();
+            return Task.FromResult(new EvidenceReconcileSummary(metricCount, envelope.Length, mismatched, unknown, measured.Length == 0 ? null : measured.Sum()));
+        }
+    }
 
     public Task<OperationsMetrics> GetMetricsAsync(string tenantId, CancellationToken ct)
     {

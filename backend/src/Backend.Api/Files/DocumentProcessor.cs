@@ -1,12 +1,32 @@
+using System.Data.Common;
+
 namespace Backend.Api.Files;
+
+/// <summary>ProcessAsync 的處理結果,供消費者決定 ack/requeue/死信佇列。</summary>
+public enum DocumentProcessingOutcome
+{
+    /// <summary>成功處理完成(或重複投遞的 ready 文件已跳過)。</summary>
+    Success,
+
+    /// <summary>暫時性失敗(如 DB/嵌入服務暫時不可用)且未達重試上限;呼叫端應重新投遞。</summary>
+    RetryableFailure,
+
+    /// <summary>終態失敗(payload 無法處理、或暫時性失敗已達重試上限);不得再重試,文件已標記 failed(best effort)。</summary>
+    TerminalFailure,
+}
 
 /// <summary>
 /// 文件處理核心(原 POST /api/documents 端點的邏輯,現由佇列消費者驅動):
-/// 建列(processing)→ 切塊 → 嵌入 → 寫入切塊並標 ready;任一步失敗則標 failed(保留文件列供查詢)、
-/// 記錄錯誤、不重丟(訊息由消費者 ack,不重試)。
+/// 建列(processing)→ 切塊 → 嵌入 → 寫入切塊並標 ready。
+/// 失敗時區分暫時性(DB/嵌入服務暫時不可用等)與終態:暫時性且未達重試上限回傳 RetryableFailure,
+/// 交由消費者依 bounded retry 規則重新投遞,不在此標記 failed(文件可能在重試後成功);
+/// 其餘一律視為終態,標記為 failed(保留文件列供查詢)並回傳 TerminalFailure,交由消費者轉入死信佇列。
 /// </summary>
 public sealed class DocumentProcessor
 {
+    /// <summary>暫時性失敗的重試上限(不含首次嘗試);超過即視為終態。</summary>
+    public const int MaxRetries = 3;
+
     private readonly IRagRepository _rag;
     private readonly IEmbeddingProvider _embeddings;
     private readonly ILogger<DocumentProcessor> _logger;
@@ -18,7 +38,7 @@ public sealed class DocumentProcessor
         _logger = logger;
     }
 
-    public async Task ProcessAsync(DocumentMessage message, CancellationToken ct)
+    public async Task<DocumentProcessingOutcome> ProcessAsync(DocumentMessage message, int retryCount, CancellationToken ct)
     {
         try
         {
@@ -28,7 +48,7 @@ public sealed class DocumentProcessor
             if (existing == "ready")
             {
                 _logger.LogInformation("文件已處理完成,重複投遞略過:documentId={DocumentId}", message.DocumentId);
-                return;
+                return DocumentProcessingOutcome.Success;
             }
 
             await _rag.InsertProcessingDocumentAsync(message.DocumentId, message.TenantId, message.Title, ct);
@@ -42,11 +62,20 @@ public sealed class DocumentProcessor
 
             var embeddings = await _embeddings.EmbedDocumentsAsync(chunks, ct);
             await _rag.CompleteDocumentAsync(message.DocumentId, message.TenantId, chunks, embeddings, ct);
+            return DocumentProcessingOutcome.Success;
         }
         catch (Exception ex)
         {
-            // ponytail: 瞬時故障(如 DB 短暫不可達 → insert 失敗 → markFailed 也失敗)時,訊息仍會被消費者
-            // ack 丟棄,不重試 — 刻意取捨。需要更強保證時改 nack+requeue,或加死信佇列(DLQ)。
+            if (IsTransient(ex) && retryCount < MaxRetries)
+            {
+                _logger.LogWarning(
+                    ex, "文件處理暫時性失敗,將重新投遞(第 {NextAttempt} 次重試):documentId={DocumentId}",
+                    retryCount + 1, message.DocumentId);
+                return DocumentProcessingOutcome.RetryableFailure;
+            }
+
+            // 終態:非暫時性錯誤,或暫時性錯誤已達重試上限。標記為 failed(best effort,markFailed
+            // 本身失敗也不得讓 ProcessAsync 拋出 —— 訊息仍要由消費者轉入死信佇列,不得無限重投)。
             _logger.LogError(ex, "文件處理失敗,標記為 failed:documentId={DocumentId}", message.DocumentId);
             try
             {
@@ -56,6 +85,21 @@ public sealed class DocumentProcessor
             {
                 _logger.LogError(markEx, "標記文件 failed 狀態時發生錯誤:documentId={DocumentId}", message.DocumentId);
             }
+
+            return DocumentProcessingOutcome.TerminalFailure;
         }
     }
+
+    /// <summary>
+    /// 暫時性失敗分類:DB 連線層錯誤(<see cref="DbException.IsTransient"/>,Npgsql 已正確標記逾時/斷線)、
+    /// HTTP 呼叫失敗(嵌入 provider 逾時/不可達)。其餘(payload 解析錯誤、格式錯誤等)一律視為終態。
+    /// </summary>
+    private static bool IsTransient(Exception ex) => ex switch
+    {
+        DbException { IsTransient: true } => true,
+        HttpRequestException => true,
+        TimeoutException => true,
+        TaskCanceledException => true,
+        _ => false,
+    };
 }

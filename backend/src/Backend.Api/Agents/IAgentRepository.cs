@@ -1,3 +1,5 @@
+using Backend.Api.PromptArtifacts;
+
 namespace Backend.Api.Agents;
 
 /// <summary>
@@ -59,6 +61,9 @@ public interface IAgentRepository
     /// 寫入 Workflow 本次重新驗證的 canonical definition/hash，建立不可變 revision
     /// (status=published,舊 published → superseded)，並消耗 validated version。
     /// 版本不符或未驗證 → VersionConflict(不發布未驗證/漂移的內容,A-DATA-09)。
+    /// promptManifestPin 是 P1 的可選 pin(controller 已驗證同 tenant 存在);null = 不 pin,
+    /// 寫入路徑與 P1 之前完全相同。刻意放在 ct 之後當選擇性參數:pin 本來就是選擇性契約,
+    /// 且讓既有呼叫端維持原樣(C# 選擇性參數必須在無預設值的 ct 之後)。
     /// </summary>
     Task<AgentPublishResult> PublishAsync(
         string tenantId,
@@ -67,7 +72,8 @@ public interface IAgentRepository
         string canonicalDefinition,
         string definitionSha256,
         string createdBy,
-        CancellationToken ct);
+        CancellationToken ct,
+        PromptManifestPin? promptManifestPin = null);
 
     Task<IReadOnlyList<AgentRevisionInfo>> ListRevisionsAsync(string tenantId, Guid id, CancellationToken ct);
 

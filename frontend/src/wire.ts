@@ -33,3 +33,8 @@ export function shortText(value: unknown, maxLength = 160): string | null {
 export function integer(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) ? value : null
 }
+
+/** 允許小數(如 cost_units)；非有限數一律視為缺席，不硬轉成 0。 */
+export function number(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}

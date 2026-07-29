@@ -26,6 +26,7 @@ from app.business_rules.validator import (
 from app.engine import compiler, node_registry, package, tool_registry
 from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
 from app.engine.skill import ValidationResult, validate_source
+from app.evals.api import router as evals_router
 from app.skills import config_apply, custom
 
 # 這幾行 import 執行各節點模組頂層的 @node 裝飾器，讓 GET /nodes 的目錄完整
@@ -222,9 +223,15 @@ app.add_middleware(
     prefix="/orchestrator-runs",
     flag_name="multi_agent_dispatch_enabled",
 )
+app.add_middleware(
+    FeatureGateMiddleware,
+    prefix="/evals/",
+    flag_name="run_eval_enabled",
+)
 app.include_router(agent_runtime_router)
 app.include_router(orchestrator_runtime_router)
 app.include_router(workflow_designer_router)
+app.include_router(evals_router)
 
 
 @app.exception_handler(RequestValidationError)

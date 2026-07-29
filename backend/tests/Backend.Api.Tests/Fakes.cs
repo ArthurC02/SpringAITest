@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.Agents;
 using Backend.Api.Common;
+using Backend.Api.OperationsGovernance;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Tests;
@@ -41,7 +42,7 @@ public sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> re
 }
 
 // 六個儲存庫 fake 已升格為 Backend.Api.Data.InMemory.InMemory*Repository(見 FakeRepositoryAliases.cs 的 re-export)。
-// 本檔僅保留 Skill 驗證器 fake — 它取代的是對 workflow(:8001)的 HTTP 呼叫,不是資料層,故不升格。
+// 本檔僅保留取代對 workflow(:8001)出站 HTTP 呼叫的 fake(Skill 驗證器、Eval runner)——不是資料層,故不升格。
 
 /// <summary>
 /// Skill 驗證器 fake(取代真的打 workflow :8001 的 POST /skills/validate)。
@@ -367,5 +368,59 @@ public sealed class FakeSkillPackageValidator : ISkillPackageValidator
         }
 
         return Task.FromResult(responder(package));
+    }
+}
+
+/// <summary>
+/// Eval runner fake(取代真的打 workflow :8001 的 POST /evals/run)。預設對每個轉送過去的 case_id
+/// 回一個 PASS(對「required case 全 PASS」的 happy path 最方便);測試需要 FAIL/ERROR 或 502 時呼叫
+/// <see cref="Setup"/> / <see cref="SetupUnreachable"/> 覆寫。記錄每次呼叫供斷言。
+/// </summary>
+public sealed class FakeEvalRunner : IEvalRunner
+{
+    public sealed record Call(string SuiteId, int Revision, string CandidateKind, string TenantId, int? BudgetMs);
+
+    public List<Call> Calls { get; } = new();
+
+    private Func<string, int, JsonElement, EvalRunResponseWire>? _script;
+    private bool _unreachable;
+
+    public void Setup(Func<string, int, JsonElement, EvalRunResponseWire> responder)
+    {
+        _script = responder;
+        _unreachable = false;
+    }
+
+    public void SetupUnreachable() => _unreachable = true;
+
+    public void ClearUnreachable() => _unreachable = false;
+
+    public Task<EvalRunResponseWire> RunAsync(
+        string suiteId, int revision, JsonElement cases, string candidateKind, JsonElement candidateRef,
+        JsonElement? candidatePins, int? budgetMs, string tenantId, string? userId, string? role, CancellationToken ct)
+    {
+        lock (Calls)
+        {
+            Calls.Add(new Call(suiteId, revision, candidateKind, tenantId, budgetMs));
+        }
+
+        if (_unreachable)
+        {
+            throw new ApiException(502, "Eval runner 呼叫失敗：連線被拒");
+        }
+
+        if (_script is not null)
+        {
+            return Task.FromResult(_script(suiteId, revision, cases));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var caseIds = cases.ValueKind == JsonValueKind.Array
+            ? cases.EnumerateArray().Select(c => c.GetProperty("case_id").GetString()!).ToArray()
+            : Array.Empty<string>();
+        var results = caseIds
+            .Select(id => new EvalCaseResultWire(id, "identity-" + id, "PASS", null, null))
+            .ToArray();
+        return Task.FromResult(new EvalRunResponseWire("fake-runner-1", suiteId, revision, now, now.AddSeconds(1), results));
     }
 }

@@ -1,4 +1,5 @@
 using Dapper;
+using Backend.Api.PromptArtifacts;
 using Backend.Api.Skills;
 using Npgsql;
 using System.Text;
@@ -203,7 +204,8 @@ public sealed class AgentRepository : IAgentRepository
         string canonicalDefinition,
         string definitionSha256,
         string createdBy,
-        CancellationToken ct)
+        CancellationToken ct,
+        PromptManifestPin? promptManifestPin = null)
     {
         canonicalDefinition =
             AgentCanonicalizer.CanonicalizeForLifecycleWrite(canonicalDefinition);
@@ -290,7 +292,8 @@ public sealed class AgentRepository : IAgentRepository
             "INSERT INTO agent_revision (agent_id, revision, status, system_prompt, execution_roles,"
             + "  capabilities, output_contract, audience, business_rules, allowed_tools, knowledge_sources,"
             + "  runtime_limits, runtime_workflow_id, runtime_workflow_revision,"
-            + "  definition_sha256, canonical_definition, created_by)"
+            + "  definition_sha256, canonical_definition, created_by,"
+            + "  prompt_manifest_revision, prompt_manifest_sha256)"
             + " SELECT id, @newRevision, 'published',"
             + "  draft_definition->>'system_prompt', draft_definition->'execution_roles',"
             + "  draft_definition->'capabilities', draft_definition->'output_contract',"
@@ -299,7 +302,8 @@ public sealed class AgentRepository : IAgentRepository
             + "  draft_definition->'runtime_limits',"
             + "  NULLIF(draft_definition->'runtime_workflow'->>'id','')::uuid,"
             + "  NULLIF(draft_definition->'runtime_workflow'->>'revision','')::int,"
-            + "  @definitionSha256, @canonicalDefinitionBytes, @createdBy"
+            + "  @definitionSha256, @canonicalDefinitionBytes, @createdBy,"
+            + "  @promptManifestRevision, @promptManifestSha256"
             + " FROM agent WHERE id = @id",
             new
             {
@@ -308,6 +312,8 @@ public sealed class AgentRepository : IAgentRepository
                 definitionSha256,
                 canonicalDefinitionBytes,
                 createdBy,
+                promptManifestRevision = promptManifestPin?.Revision,
+                promptManifestSha256 = promptManifestPin?.Sha256,
             },
             tx,
             cancellationToken: ct));
@@ -332,6 +338,8 @@ public sealed class AgentRepository : IAgentRepository
         var revisions = (await conn.QueryAsync<RevisionRow>(new CommandDefinition(
             "SELECT r.revision AS Revision, r.status AS Status, r.definition_sha256 AS DefinitionSha256,"
             + " r.runtime_workflow_id AS RuntimeWorkflowId, r.runtime_workflow_revision AS RuntimeWorkflowRevision,"
+            + " r.prompt_manifest_revision AS PromptManifestRevision,"
+            + " r.prompt_manifest_sha256 AS PromptManifestSha256,"
             + " r.created_by AS CreatedBy, r.created_at AS CreatedAt"
             + " FROM agent_revision r JOIN agent a ON a.id = r.agent_id"
             + " WHERE a.tenant_id = @tenantId AND a.id = @id ORDER BY r.revision DESC",
@@ -356,7 +364,7 @@ public sealed class AgentRepository : IAgentRepository
         return revisions.Select(r => new AgentRevisionInfo(
             r.Revision, r.Status, r.DefinitionSha256, r.RuntimeWorkflowId, r.RuntimeWorkflowRevision,
             byRevision.GetValueOrDefault(r.Revision, Array.Empty<AgentRevisionSkillInfo>()),
-            r.CreatedBy, r.CreatedAt)).ToList();
+            r.CreatedBy, r.CreatedAt, r.PromptManifestRevision, r.PromptManifestSha256)).ToList();
     }
 
     public async Task<string?> GetRevisionDefinitionAsync(
@@ -621,9 +629,12 @@ public sealed class AgentRepository : IAgentRepository
         return new ReferenceResolution(errors, resolved);
     }
 
+    // Dapper materializes records positionally: keep this parameter order identical to the SELECT list.
     private sealed record RevisionRow(
         int Revision, string Status, string DefinitionSha256,
-        Guid? RuntimeWorkflowId, int? RuntimeWorkflowRevision, string CreatedBy, DateTime CreatedAt);
+        Guid? RuntimeWorkflowId, int? RuntimeWorkflowRevision,
+        int? PromptManifestRevision, string? PromptManifestSha256,
+        string CreatedBy, DateTime CreatedAt);
 
     private sealed record BindingRow(
         int AgentRevision, string Skill, int SkillRevision, int Position, bool Enabled);

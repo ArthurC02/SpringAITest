@@ -513,6 +513,54 @@ public static class DbBootstrap
         CREATE INDEX IF NOT EXISTS ix_operations_execution_metric_tenant_time
           ON operations_execution_metric(tenant_id,observed_at DESC);
         ALTER TABLE operations_execution_metric ADD COLUMN IF NOT EXISTS skill_name text, ADD COLUMN IF NOT EXISTS skill_revision integer, ADD COLUMN IF NOT EXISTS agent_id text, ADD COLUMN IF NOT EXISTS agent_revision integer;
+        -- E1 run evidence envelope: an append-only, tenant-scoped, event-ID-idempotent companion
+        -- to operations_execution_metric (same PK shape, same ON CONFLICT DO NOTHING idempotency).
+        -- It is a *companion*, not a competing usage/cost ledger: usage_units/cost_units/latency_ms
+        -- here are the same values written to the metric row above by the same request, kept only
+        -- so a reconcile query can prove there is a single authority during dual-write. Root/child
+        -- lineage and snapshot_sha256 are always derived server-side from agent_run/
+        -- orchestrator_run_child, never trusted from the caller. Never stores raw prompt, context
+        -- body, memory fact, tool argument/result, JWT, credential or chain-of-thought.
+        CREATE TABLE IF NOT EXISTS operations_run_evidence (
+          tenant_id text NOT NULL, run_id uuid NOT NULL REFERENCES agent_run(id), event_id uuid NOT NULL,
+          root_run_id uuid, child_id uuid, occurred_at timestamptz NOT NULL DEFAULT now(),
+          kind text NOT NULL CHECK(kind IN ('model','tool','node')),
+          outcome text NOT NULL CHECK(outcome IN ('success','failure','unknown')),
+          error_class text, snapshot_sha256 text,
+          agent_id text, agent_revision integer, orchestrator_revision integer,
+          skill_name text, skill_revision integer,
+          prompt_manifest_sha256 text, context_revision integer, role_view text, policy_revision integer,
+          model_provider text, model_deployment text, model_id text, model_fingerprint text, model_settings_hash text,
+          tool_name text, tool_revision integer, node_id text, trace_id text, span_id text,
+          reserved_budget_units bigint, usage_units bigint, cost_units numeric(18,6), latency_ms bigint,
+          observation_quality text NOT NULL CHECK(observation_quality IN ('measured','estimated','unknown')),
+          verifier_verdict text, case_verdict text, redaction_note text,
+          PRIMARY KEY(tenant_id,run_id,event_id),
+          CHECK (error_class IS NULL OR error_class ~ '^[A-Za-z0-9_.:+-]{1,200}$'),
+          CHECK (snapshot_sha256 IS NULL OR char_length(snapshot_sha256) <= 128),
+          CHECK (prompt_manifest_sha256 IS NULL OR char_length(prompt_manifest_sha256) <= 128),
+          CHECK (role_view IS NULL OR char_length(role_view) <= 128),
+          CHECK (model_provider IS NULL OR char_length(model_provider) <= 128),
+          CHECK (model_deployment IS NULL OR char_length(model_deployment) <= 128),
+          CHECK (model_id IS NULL OR char_length(model_id) <= 200),
+          CHECK (model_fingerprint IS NULL OR char_length(model_fingerprint) <= 256),
+          CHECK (model_settings_hash IS NULL OR char_length(model_settings_hash) <= 128),
+          CHECK (trace_id IS NULL OR char_length(trace_id) <= 128),
+          CHECK (span_id IS NULL OR char_length(span_id) <= 128),
+          CHECK (verifier_verdict IS NULL OR char_length(verifier_verdict) <= 64),
+          CHECK (case_verdict IS NULL OR char_length(case_verdict) <= 64),
+          CHECK (redaction_note IS NULL OR char_length(redaction_note) <= 256),
+          CHECK (reserved_budget_units IS NULL OR reserved_budget_units >= 0),
+          CHECK (usage_units IS NULL OR usage_units >= 0),
+          CHECK (cost_units IS NULL OR cost_units >= 0),
+          CHECK (latency_ms IS NULL OR latency_ms >= 0));
+        CREATE INDEX IF NOT EXISTS ix_operations_run_evidence_tenant_time
+          ON operations_run_evidence(tenant_id,occurred_at DESC);
+        -- A table already created before this token-shape constraint existed keeps its old
+        -- length-only CHECK (CREATE TABLE IF NOT EXISTS is a no-op there), so replace it explicitly.
+        ALTER TABLE operations_run_evidence DROP CONSTRAINT IF EXISTS operations_run_evidence_error_class_check;
+        ALTER TABLE operations_run_evidence ADD CONSTRAINT operations_run_evidence_error_class_check
+          CHECK (error_class IS NULL OR error_class ~ '^[A-Za-z0-9_.:+-]{1,200}$');
         CREATE UNIQUE INDEX IF NOT EXISTS uq_orchestrator_run_active_conversation
           ON orchestrator_run(tenant_id,user_id,conversation_id,orchestrator_id)
           WHERE status IN ('queued','running','waiting_input');
@@ -812,6 +860,70 @@ public static class DbBootstrap
           created_at timestamptz NOT NULL DEFAULT now(),
           UNIQUE(context_request_id, version),
           UNIQUE(context_id, revision));
+        -- E2/E3 durable eval suite/result authority. eval_suite/eval_suite_revision mirrors the
+        -- skill/skill_revision pattern (current pointer + immutable, never-deleted revisions);
+        -- cases_canonical is canonical JSON text produced by AgentCanonicalizer.CanonicalizeDefinition
+        -- (no second canonicalizer), hashed with SkillHash.Sha256. Republishing identical content is
+        -- a no-op (same revision, same SHA); different content always creates the next revision.
+        CREATE TABLE IF NOT EXISTS eval_suite (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL, suite_id text NOT NULL,
+          current_revision integer NOT NULL DEFAULT 0,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_eval_suite_tenant_suite UNIQUE (tenant_id, suite_id));
+        CREATE TABLE IF NOT EXISTS eval_suite_revision (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), suite_id uuid NOT NULL REFERENCES eval_suite(id),
+          revision integer NOT NULL, cases_canonical text NOT NULL, cases_sha256 text NOT NULL,
+          case_count integer NOT NULL, created_by text NOT NULL DEFAULT '',
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_eval_suite_revision UNIQUE (suite_id, revision));
+        CREATE INDEX IF NOT EXISTS ix_eval_suite_revision_suite ON eval_suite_revision (suite_id);
+        -- eval_run pins the suite revision's policy (required_case_ids/freshness_seconds) at write
+        -- time -- the suite revision is immutable anyway, so this avoids a second join on every gate
+        -- evaluation without any staleness risk. idempotency_key_sha256 is the caller's hashed
+        -- `Idempotency-Key` header (same idempotent-write pattern as operations_regression_override):
+        -- a replay with matching suite/candidate identity returns the stored run, a mismatched one
+        -- is rejected by the controller as a conflict -- either way, run+cases are only ever written
+        -- together (see EvalRepository.CreateRunAsync), so no half-written run is ever observable.
+        CREATE TABLE IF NOT EXISTS eval_run (
+          id uuid PRIMARY KEY, tenant_id text NOT NULL, suite_id text NOT NULL, suite_revision integer NOT NULL,
+          candidate_kind text NOT NULL CHECK(candidate_kind IN ('skill','agent')),
+          candidate_ref jsonb NOT NULL, candidate_pins jsonb, candidate_identity_sha256 text NOT NULL,
+          required_case_ids text[] NOT NULL DEFAULT '{}', freshness_seconds bigint,
+          runner_version text NOT NULL, started_at timestamptz NOT NULL, completed_at timestamptz NOT NULL,
+          actor_id text NOT NULL, idempotency_key_sha256 text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_eval_run_idempotency UNIQUE (tenant_id, idempotency_key_sha256));
+        CREATE INDEX IF NOT EXISTS ix_eval_run_tenant_suite ON eval_run (tenant_id, suite_id, suite_revision);
+        CREATE TABLE IF NOT EXISTS eval_case_result (
+          run_id uuid NOT NULL REFERENCES eval_run(id), case_id text NOT NULL,
+          canonical_identity text, verdict text NOT NULL CHECK(verdict IN ('PASS','FAIL','ERROR')),
+          metrics jsonb, failure_reason text,
+          PRIMARY KEY(run_id, case_id));
+        -- P1 canonical prompt artifacts (PROMPT_ARTIFACTS_ENABLED). prompt_component_revision is the
+        -- protected store for raw component text: no read path projects `content`, only its digest
+        -- and length. Revisions are immutable and never deleted; republishing identical content is a
+        -- no-op (same revision/SHA), different content always creates the next revision.
+        CREATE TABLE IF NOT EXISTS prompt_component_revision (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL,
+          kind text NOT NULL CHECK(kind IN ('governance_frame','guard','routing','summary','persona','memory_policy')),
+          revision integer NOT NULL, content text NOT NULL, content_sha256 text NOT NULL,
+          created_by text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_prompt_component_revision UNIQUE (tenant_id, kind, revision));
+        -- manifest_canonical is canonical JSON text produced by AgentCanonicalizer.CanonicalizeDefinition
+        -- (no second canonicalizer) and hashed with SkillHash.Sha256. It references explicit component
+        -- revisions only -- `latest` is not representable -- and carries no prompt text itself.
+        CREATE TABLE IF NOT EXISTS prompt_manifest_revision (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL, revision integer NOT NULL,
+          manifest_canonical text NOT NULL, manifest_sha256 text NOT NULL,
+          created_by text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_prompt_manifest_revision UNIQUE (tenant_id, revision));
+        CREATE INDEX IF NOT EXISTS ix_prompt_manifest_revision_sha
+          ON prompt_manifest_revision (tenant_id, manifest_sha256);
+        -- A published Agent snapshot pins the manifest revision + canonical SHA it was composed with.
+        -- NULL means "published without a prompt manifest": the off path stays exactly as it was.
+        ALTER TABLE agent_revision
+          ADD COLUMN IF NOT EXISTS prompt_manifest_revision integer,
+          ADD COLUMN IF NOT EXISTS prompt_manifest_sha256 text;
         """;
 
     public static async Task RunAsync(NpgsqlDataSource dataSource, ILogger logger, CancellationToken ct = default)
@@ -828,7 +940,7 @@ public static class DbBootstrap
                 await conn.ExecuteAsync(new CommandDefinition(Ddl, cancellationToken: ct));
                 await MigrateAgentRunCommandInputHashesAsync(conn, logger, ct);
                 await MigrateSkillPackagesAndNamesAsync(conn, logger, ct);
-                await SeedAsync(conn, ct);
+                await SeedAsync(conn, dataSource, ct);
             }
             finally
             {
@@ -1103,7 +1215,7 @@ public static class DbBootstrap
         byte[]? Package,
         string? PackageSha256);
 
-    private static async Task SeedAsync(NpgsqlConnection conn, CancellationToken ct)
+    private static async Task SeedAsync(NpgsqlConnection conn, NpgsqlDataSource dataSource, CancellationToken ct)
     {
         // 租戶冪等寫入(以 code 唯一)。
         await conn.ExecuteAsync(new CommandDefinition(
@@ -1171,6 +1283,30 @@ public static class DbBootstrap
 
         await SeedDefaultWorkflowAsync(conn, ct);
         await SeedContextEnrichmentAsync(conn, ct);
+        await SeedEvalSuiteAsync(conn, dataSource, ct);
+    }
+
+    /// <summary>
+    /// CSR-EVAL-001 becomes the first durable eval suite revision, seeded once per tenant (its
+    /// tenant_custom_skill cases are inherently tenant-specific, same posture as per-tenant
+    /// context_policy seeding above). Goes through <see cref="OperationsGovernance.EvalRepository.PublishSuiteRevisionAsync"/>
+    /// -- the same write path Backend's own publish endpoint uses -- instead of a second,
+    /// hand-rolled raw-SQL insert: canonicalization/hash/idempotency (same content republished is a
+    /// no-op; different content always creates the next revision) then can never silently diverge
+    /// from what a real publish call does.
+    /// </summary>
+    private static async Task SeedEvalSuiteAsync(NpgsqlConnection conn, NpgsqlDataSource dataSource, CancellationToken ct)
+    {
+        var canonical = Agents.AgentCanonicalizer.CanonicalizeDefinition(OperationsGovernance.CsrEval001Suite.CasesJson);
+        var tenantCodes = (await conn.QueryAsync<string>(
+            new CommandDefinition("SELECT code FROM tenants", cancellationToken: ct))).AsList();
+
+        var repository = new OperationsGovernance.EvalRepository(dataSource);
+        foreach (var tenantCode in tenantCodes)
+        {
+            await repository.PublishSuiteRevisionAsync(
+                tenantCode, OperationsGovernance.CsrEval001Suite.SuiteId, canonical, "system", ct);
+        }
     }
 
     private static async Task SeedContextEnrichmentAsync(NpgsqlConnection conn, CancellationToken ct)

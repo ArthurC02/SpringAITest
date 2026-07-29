@@ -18,6 +18,12 @@
 白名單預設拒絕、`range()` 長度上限 10^6（range 物件唯一來源是 `range` 名稱，長度精確可算）、
 `for` 迴圈執行期迭代上限 10000、寫回 state 256KB、`timeout_ms`（讓步驟出場，非中斷執行緒）。
 
+**以上只描述 in-process path**（`ISOLATED_SKILL_SCRIPTS_ENABLED=false`，預設）。旗標開啟時
+改走 `app/engine/script_isolation.py` 的子行程 adapter：CPU/記憶體/行程數由 OS 上限強制、
+環境變數從零重建、逾時整組 process group 強制終止 —— 上面「擋不住」的那些在隔離路徑下
+是真的擋得住。兩條路共用本檔的 `execute_sync`（白名單、預算、保留鍵剝除、寫入上限只有
+一份實作），差別只在 execution boundary。
+
 ## 白名單的形狀
 
 對齊 app/engine/expressions.py：_analyse（parse + 完整走訪、不短路）→ 轉寫植入執行期
@@ -552,6 +558,43 @@ def _value_size(value: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
+def execute_sync(
+    source: str, state_view: dict, tools: Any, limits: ScriptLimits
+) -> dict:
+    """同步執行一段 script，回傳「要合併進 state 的鍵值」（已剝除保留鍵、已驗大小上限）。
+
+    白名單、執行期預算、保留鍵剝除、寫入大小上限**只有這一份實作**：in-process runner
+    在 worker thread 呼叫它，隔離子行程（script_child）也呼叫同一份。兩條 adapter 因此
+    不可能在治理語義上分岔（Phase S1 的 behavior parity 由此保證，不靠兩邊各寫一次）。
+    """
+    contract, code = _prepare(source)  # 執行前再驗一次白名單（規格 §5.2）
+    view = StateView(state_view)
+    budget = _Budget(limits)  # 計時從這裡起算：拷貝的耗時也算進 timeout
+
+    namespace: dict[str, Any] = {
+        "__builtins__": {
+            **{name: getattr(builtins, name) for name in SAFE_BUILTIN_NAMES},
+            "range": budget.range,  # 換成有長度上限的版本
+        },
+        "state": view,
+        "tools": tools,
+        _ITER_GUARD: budget.iterate,
+    }
+    # 沙箱：namespace 的 __builtins__ 已換成白名單，且 code 來自 _prepare 的
+    # 白名單 AST —— 這行的安全性完全由上面兩者保證。
+    exec(code, namespace)  # noqa: S102
+
+    writes = view.written()
+    total = sum(_value_size(v) for v in writes.values())
+    if total > limits.max_write_bytes:
+        raise ScriptLimitExceeded(
+            f"script 寫入 state 的值總大小 {total} 位元組，"
+            f"超過上限 {limits.max_write_bytes} 位元組"
+        )
+    # contract.writes 是靜態可知的寫入鍵；執行期實際寫入必為其子集（鍵是字面字串）
+    return {k: v for k, v in writes.items() if k in contract.writes}
+
+
 class ScriptRunnerPort(Protocol):
     """規格 §5.4 的 v2 升級介面：v1 是 in-process，v2 換 subprocess，呼叫端不變。"""
 
@@ -567,39 +610,13 @@ class RestrictedInProcessRunner:
         self, source: str, state_view: dict, tools: Any, limits: ScriptLimits
     ) -> dict:
         """執行 script，回傳「要合併進 state 的鍵值」（已剝除保留鍵、已驗大小上限）。"""
-        contract, code = _prepare(source)  # 執行前再驗一次白名單（規格 §5.2）
-        view = StateView(state_view)
-        budget = _Budget(limits)  # 計時從這裡起算：編譯與拷貝的耗時也算進 timeout
-
-        namespace: dict[str, Any] = {
-            "__builtins__": {
-                **{name: getattr(builtins, name) for name in SAFE_BUILTIN_NAMES},
-                "range": budget.range,  # 換成有長度上限的版本
-            },
-            "state": view,
-            "tools": tools,
-            _ITER_GUARD: budget.iterate,
-        }
-
-        def _execute() -> None:
-            # 沙箱：namespace 的 __builtins__ 已換成白名單，且 code 來自 _prepare 的
-            # 白名單 AST —— 這行的安全性完全由上面兩者保證。
-            exec(code, namespace)  # noqa: S102
-
+        _prepare(source)  # 白名單違規在建立執行緒之前就出局（lru_cache → 下面不重算）
         try:
             async with asyncio.timeout(limits.timeout_ms / 1000):
                 # 跑在 worker thread：同步碼不會卡住事件圈，逾時才有辦法讓步驟出場
                 # （執行緒本身中斷不了 —— 見 module docstring 的威脅模型）
-                await asyncio.to_thread(_execute)
+                return await asyncio.to_thread(
+                    execute_sync, source, state_view, tools, limits
+                )
         except TimeoutError as e:
             raise ScriptTimeout(f"script 執行超過 {limits.timeout_ms}ms") from e
-
-        writes = view.written()
-        total = sum(_value_size(v) for v in writes.values())
-        if total > limits.max_write_bytes:
-            raise ScriptLimitExceeded(
-                f"script 寫入 state 的值總大小 {total} 位元組，"
-                f"超過上限 {limits.max_write_bytes} 位元組"
-            )
-        # contract.writes 是靜態可知的寫入鍵；執行期實際寫入必為其子集（鍵是字面字串）
-        return {k: v for k, v in writes.items() if k in contract.writes}

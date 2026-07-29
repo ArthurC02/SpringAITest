@@ -1,6 +1,7 @@
 # Operations、Recovery 與 Durable Trigger 計畫
 
 > 優先級：P0–P2。  
+> 交付狀態：Phase O1 已實作（2026-07-30）；Phase O2–O5 未實作。  
 > 目標：把已存在的 durable runtime 變成可操作產品，再以同一 command path 增加有限 trigger 能力。
 
 ## 1. 問題

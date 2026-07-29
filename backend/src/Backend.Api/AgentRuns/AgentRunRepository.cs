@@ -1579,6 +1579,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
         await using var tx = await conn.BeginTransactionAsync(ct);
         var databaseNow = await conn.ExecuteScalarAsync<DateTime>(new CommandDefinition(
             "SELECT clock_timestamp()", transaction: tx, cancellationToken: ct));
+        var recoveryBefore = databaseNow.AddSeconds(-30);
         var rows = (await conn.QueryAsync<RecoveryCandidateRow>(new CommandDefinition(
             "SELECT c.id AS CommandId,r.id AS RunId,c.command_type AS CommandType,"
             + " c.command_input::text AS Input,"
@@ -1602,7 +1603,8 @@ public sealed class AgentRunRepository : IAgentRunRepository
             + " r.latest_event_sequence AS LatestEventSequence,"
             + " r.deadline_at AS DeadlineAt,"
             + " (r.cancel_requested_at IS NOT NULL) AS CancelRequested,"
-            + " r.lease_token_sha256 AS RunLeaseTokenHash"
+            + " r.lease_token_sha256 AS RunLeaseTokenHash,"
+            + " r.lease_expires_at AS RunLeaseExpiresAt"
             + " FROM agent_run r"
             + " JOIN LATERAL (SELECT cmd.* FROM agent_run_command cmd"
             + " WHERE cmd.run_id=r.id"
@@ -1651,7 +1653,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
             new
             {
                 databaseNow,
-                recoveryBefore = databaseNow.AddSeconds(-30),
+                recoveryBefore,
                 take = request.Limit + 1,
             },
             tx,
@@ -1683,11 +1685,33 @@ public sealed class AgentRunRepository : IAgentRunRepository
             {
                 row = await EnsureDeadlineCleanupCommandAsync(conn, tx, row, ct);
             }
-            _ = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-                "SELECT 1 FROM agent_run_command WHERE id=@commandId FOR UPDATE",
-                new { row.CommandId },
-                tx,
-                cancellationToken: ct));
+            // 候選查詢用 FOR UPDATE OF r SKIP LOCKED 只鎖 run 列,join 來的 command 列停在
+            // 交易的 MVCC 快照:EvalPlanQual 只會用最新的 r 重驗條件,c 的欄位不重讀。若 ACK
+            // (CompleteDispatchAsync,同樣先鎖 run 列)在快照之後、我們拿到 run 鎖之前 commit,
+            // 候選帶的就是過期的 command 狀態。鎖住 command 列後必須重讀真值再重驗資格。
+            var locked = await conn.QuerySingleAsync<RecoveryCommandStateRow>(
+                new CommandDefinition(
+                    RecoveryCommandStateColumns
+                    + " FROM agent_run_command WHERE id=@commandId FOR UPDATE",
+                    new { row.CommandId },
+                    tx,
+                    cancellationToken: ct));
+            row = row with
+            {
+                Input = locked.Input,
+                InputHash = locked.InputHash,
+                DispatchAttempts = locked.DispatchAttempts,
+                DispatchClaimTokenHash = locked.DispatchClaimTokenHash,
+                DispatchClaimExpiresAt = locked.DispatchClaimExpiresAt,
+                DispatchCompletedAt = locked.DispatchCompletedAt,
+                ExecutionRecoveryLeaseTokenHash =
+                    locked.ExecutionRecoveryLeaseTokenHash,
+            };
+            if (!IsRecoveryDispatchEligible(row, databaseNow, recoveryBefore))
+            {
+                // 輸掉與 ACK/其他 recovery 的競態:跳過,不是不變式破壞。
+                continue;
+            }
 
             if (row.DispatchAttempts is < 0 or >= int.MaxValue - 1)
             {
@@ -1851,6 +1875,8 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 cancellationToken: ct));
             if (changed != 1)
             {
+                // 期望值皆來自上面鎖後重讀,且 command 列鎖持有到交易結束,理應不可達;
+                // 保留為最後防線:真的觸發代表有人在鎖區間內另行改動了同一列。
                 throw new InvalidOperationException(
                     "Recovery command changed while its row lock was held");
             }
@@ -1932,17 +1958,10 @@ public sealed class AgentRunRepository : IAgentRunRepository
             },
             transaction,
             cancellationToken: ct));
-        var command = await connection.QuerySingleAsync<RecoveryCommandStateRow>(
+        // 只解析並鎖住 command id;其餘欄位由呼叫端統一的鎖後重讀取得(單一真值來源)。
+        var resolvedCommandId = await connection.QuerySingleAsync<Guid>(
             new CommandDefinition(
-                "SELECT id AS CommandId,command_input::text AS Input,"
-                + " command_input_sha256 AS InputHash,"
-                + " dispatch_attempts AS DispatchAttempts,"
-                + " dispatch_claim_token_sha256 AS DispatchClaimTokenHash,"
-                + " dispatch_claim_expires_at AS DispatchClaimExpiresAt,"
-                + " dispatch_completed_at AS DispatchCompletedAt,"
-                + " execution_recovery_lease_token_sha256"
-                + " AS ExecutionRecoveryLeaseTokenHash"
-                + " FROM agent_run_command"
+                "SELECT id FROM agent_run_command"
                 + " WHERE run_id=@runId AND command_type='deadline_cleanup'"
                 + " FOR UPDATE",
                 new { row.RunId },
@@ -1950,18 +1969,44 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 cancellationToken: ct));
         return row with
         {
-            CommandId = command.CommandId,
+            CommandId = resolvedCommandId,
             CommandType = "deadline_cleanup",
-            Input = command.Input,
-            InputHash = command.InputHash,
-            DispatchAttempts = command.DispatchAttempts,
-            DispatchClaimTokenHash = command.DispatchClaimTokenHash,
-            DispatchClaimExpiresAt = command.DispatchClaimExpiresAt,
-            DispatchCompletedAt = command.DispatchCompletedAt,
-            ExecutionRecoveryLeaseTokenHash =
-                command.ExecutionRecoveryLeaseTokenHash,
         };
     }
+
+    private const string RecoveryCommandStateColumns =
+        "SELECT id AS CommandId,command_input::text AS Input,"
+        + " command_input_sha256 AS InputHash,"
+        + " dispatch_attempts AS DispatchAttempts,"
+        + " dispatch_claim_token_sha256 AS DispatchClaimTokenHash,"
+        + " dispatch_claim_expires_at AS DispatchClaimExpiresAt,"
+        + " dispatch_completed_at AS DispatchCompletedAt,"
+        + " execution_recovery_lease_token_sha256"
+        + " AS ExecutionRecoveryLeaseTokenHash";
+
+    /// <summary>
+    /// 候選查詢 WHERE 中屬於 command 側的資格條件,用鎖後重讀的真值複驗。run 側僅
+    /// deadline/cancel/status 由 FOR UPDATE OF r 的 EvalPlanQual 以最新 r 重驗,租約活性
+    /// 須自行複驗:未 ACK 分支只需 command 側(無有效 dispatch claim);已 ACK 分支除了
+    /// command 側(執行租約已換代的 lease-generation marker,或超過 30 秒無租約寬限期)外,
+    /// 也要求 run 側租約已非活躍(lease_expires_at 已過期或從未核發),否則會在寬限期內
+    /// 搶開一個 worker 仍持有活躍租約的已 ACK command。RunLeaseExpiresAt 來自候選查詢的
+    /// r.lease_expires_at:候選查詢以 FOR UPDATE OF r 鎖定 run 列,EvalPlanQual 保證取得的
+    /// 是鎖後最新提交值,不需再對 run 列做第二次重讀。
+    /// </summary>
+    private static bool IsRecoveryDispatchEligible(
+        RecoveryCandidateRow row,
+        DateTime databaseNow,
+        DateTime recoveryBefore)
+        => row.DispatchCompletedAt is null
+            ? row.DispatchClaimExpiresAt is null
+              || row.DispatchClaimExpiresAt <= databaseNow
+            : (row.RunLeaseExpiresAt is null || row.RunLeaseExpiresAt <= databaseNow)
+              && (!string.Equals(
+                      row.RunLeaseTokenHash,
+                      row.ExecutionRecoveryLeaseTokenHash,
+                      StringComparison.Ordinal)
+                  || row.DispatchCompletedAt <= recoveryBefore);
 
     private static bool HasValidCheckpointSeed(RecoveryCandidateRow row)
         => row.CheckpointVersion == 0
@@ -2810,7 +2855,8 @@ public sealed class AgentRunRepository : IAgentRunRepository
         long LatestEventSequence,
         DateTime DeadlineAt,
         bool CancelRequested,
-        string? RunLeaseTokenHash);
+        string? RunLeaseTokenHash,
+        DateTime? RunLeaseExpiresAt);
 
     private sealed record RecoveryCommandStateRow(
         Guid CommandId,

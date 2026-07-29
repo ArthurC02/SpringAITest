@@ -642,8 +642,16 @@ def cache_key(skill: Skill) -> tuple[str, int, str]:
     return (skill.name, skill.revision, digest)
 
 
-def compile(skill: Skill, deps: Any = None) -> CompiledStateGraph:
-    """Skill → CompiledStateGraph；同 revision + 同內容 + 同依賴第二次呼叫直接命中快取。"""
+def compile(skill: Skill, deps: Any = None, *, cache: bool = True) -> CompiledStateGraph:
+    """Skill → CompiledStateGraph；同 revision + 同內容 + 同依賴第二次呼叫直接命中快取。
+
+    cache=False：略過全域快取的讀寫，單純建一次圖即回傳。給每次呼叫都換一組新
+    deps 的呼叫端用（如 app.evals.runner——每個 eval case 各自 build_fixture_deps）：
+    否則每個 case 的 id(deps) 都不同、快取鍵永遠不命中，只會把 32 格 FIFO 塞滿
+    一次性物件，將正式 skill 的編譯圖擠掉。
+    """
+    if not cache:
+        return _build_graph(skill, deps)
     key = (*cache_key(skill), id(deps))
     cached = _CACHE.get(key)
     if cached is None:

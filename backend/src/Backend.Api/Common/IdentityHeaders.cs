@@ -95,6 +95,21 @@ public static class IdentityHeaders
     public static string RequireUserId(this HttpRequest request) =>
         Value(request, UserHeader) ?? throw new ApiException(StatusCodes.Status400BadRequest, "X-User-Id is required");
 
+    /// <summary>
+    /// Shared idempotent-write header contract (regression-overrides, eval-runs): exactly one
+    /// non-blank, control-char-free `Idempotency-Key` header up to 128 chars, or 400.
+    /// </summary>
+    public static string RequireIdempotencyKey(this HttpRequest request)
+    {
+        var values = request.Headers["Idempotency-Key"];
+        var key = values.Count == 1 ? values[0]?.Trim() : null;
+        if (string.IsNullOrWhiteSpace(key) || key.Length > 128 || key.Any(char.IsControl))
+        {
+            throw new ApiException(StatusCodes.Status400BadRequest, "Idempotency-Key is required");
+        }
+        return key;
+    }
+
     private static string? Value(HttpRequest request, string name)
     {
         var v = request.Headers[name].ToString();

@@ -15,6 +15,7 @@ using Backend.Api.RuntimeDiscovery;
 using Backend.Api.OperationsGovernance;
 using Backend.Api.Data.InMemory;
 using Backend.Api.Contexts;
+using Backend.Api.PromptArtifacts;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -74,11 +75,18 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
             services.AddSingleton<IRuntimeBindingRepository, InMemoryRuntimeBindingRepository>();
             services.RemoveAll<IOperationsGovernanceRepository>();
             services.AddSingleton<IOperationsGovernanceRepository, InMemoryOperationsGovernanceRepository>();
+            services.RemoveAll<IEvalRepository>();
+            services.AddSingleton<IEvalRepository, InMemoryEvalRepository>();
+            services.RemoveAll<IEvalRunner>();
+            services.AddSingleton<IEvalRunner, FakeEvalRunner>();
             services.RemoveAll<IWorkflowCompiler>();
             services.AddSingleton<IWorkflowCompiler, FakeWorkflowCompiler>();
 
             services.RemoveAll<IContextRepository>();
             services.AddSingleton<IContextRepository, InMemoryContextRepository>();
+
+            services.RemoveAll<IPromptArtifactRepository>();
+            services.AddSingleton<IPromptArtifactRepository, InMemoryPromptArtifactRepository>();
 
             // Skill 驗證不打真的 workflow(:8001)。
             services.RemoveAll<ISkillValidator>();
@@ -113,7 +121,7 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         var id = Guid.NewGuid().ToString();
         using var scope = Services.CreateScope();
         var processor = scope.ServiceProvider.GetRequiredService<DocumentProcessor>();
-        await processor.ProcessAsync(new DocumentMessage(id, tenantId, "seed-user", title, text), CancellationToken.None);
+        await processor.ProcessAsync(new DocumentMessage(id, tenantId, "seed-user", title, text), retryCount: 0, CancellationToken.None);
         return id;
     }
 }

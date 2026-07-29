@@ -16,6 +16,7 @@ using Backend.Api.OrchestratorRuns;
 using Backend.Api.RuntimeDiscovery;
 using Backend.Api.OperationsGovernance;
 using Backend.Api.Contexts;
+using Backend.Api.PromptArtifacts;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -44,6 +45,19 @@ var agentWriteToolsEnabled = string.Equals(cfg["AGENT_WRITE_TOOLS_ENABLED"], "tr
 var contextEnrichmentEnabled = multiAgentDispatchEnabled
     && string.Equals(cfg["CONTEXT_ENRICHMENT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 builder.Services.AddSingleton(new ContextEnrichmentState(contextEnrichmentEnabled));
+// E1: independently fail-closed. Off just stops new envelope writes; it neither depends on nor
+// gates any other flag, and never hides an existing route (see plan §8).
+var runEvidenceEnabled = string.Equals(cfg["RUN_EVIDENCE_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+builder.Services.AddSingleton(new RunEvidenceState(runEvidenceEnabled));
+// E2/E3: independently fail-closed, same posture as RUN_EVIDENCE_ENABLED -- off only hides the new
+// eval-suite/eval-run routes and stops new eval runs; it never depends on or gates another flag,
+// and never rewrites the pre-existing caller-supplied `passed` regression contract (plan §8).
+// Gating itself is the middleware closure below (runEvalEnabled), not a DI-injected state type.
+var runEvalEnabled = string.Equals(cfg["RUN_EVAL_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+// P1: independently fail-closed. Off hides the prompt component/manifest routes and makes Agent
+// publish ignore `prompt_manifest_revision`, leaving the publish path byte-for-byte unchanged.
+var promptArtifactsEnabled = string.Equals(cfg["PROMPT_ARTIFACTS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+builder.Services.AddSingleton(new PromptArtifactsState(promptArtifactsEnabled));
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -67,7 +81,9 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IOrchestratorRunRepository, InMemoryOrchestratorRunRepository>();
     builder.Services.AddSingleton<IRuntimeBindingRepository, InMemoryRuntimeBindingRepository>();
     builder.Services.AddSingleton<IOperationsGovernanceRepository, InMemoryOperationsGovernanceRepository>();
+    builder.Services.AddSingleton<IEvalRepository, InMemoryEvalRepository>();
     builder.Services.AddSingleton<IContextRepository, InMemoryContextRepository>();
+    builder.Services.AddSingleton<IPromptArtifactRepository, InMemoryPromptArtifactRepository>();
 }
 else
 {
@@ -86,7 +102,9 @@ else
     builder.Services.AddScoped<IOrchestratorRunRepository, OrchestratorRunRepository>();
     builder.Services.AddScoped<IRuntimeBindingRepository, RuntimeBindingRepository>();
     builder.Services.AddScoped<IOperationsGovernanceRepository, OperationsGovernanceRepository>();
+    builder.Services.AddScoped<IEvalRepository, EvalRepository>();
     builder.Services.AddScoped<IContextRepository, ContextRepository>();
+    builder.Services.AddScoped<IPromptArtifactRepository, PromptArtifactRepository>();
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +136,12 @@ builder.Services.AddScoped<IWorkflowCompiler>(sp => new WorkflowDesignerCompiler
 builder.Services.AddHttpClient("skill-package-validator", c => c.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddScoped<ISkillPackageValidator>(sp => new WorkflowSkillPackageValidator(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("skill-package-validator"), workflowBaseUrl, internalToken));
+
+// E2 eval runner:呼叫引擎(:8001)的 POST /evals/run(workflow-internal、無 /api prefix)。
+// 引擎 flag 關閉或不可達皆為 502(比照 skill validate 的 request-time dependency 慣例)。
+builder.Services.AddHttpClient("eval-runner", c => c.Timeout = TimeSpan.FromMinutes(5));
+builder.Services.AddScoped<IEvalRunner>(sp => new WorkflowEvalRunner(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient("eval-runner"), workflowBaseUrl, internalToken));
 
 // 嵌入 provider 由 EMBEDDINGS_PROVIDER 決定;預設 fake(確定性、免金鑰)。
 if (string.Equals(embeddingsProvider, "openai", StringComparison.OrdinalIgnoreCase))
@@ -253,6 +277,39 @@ if (!agentChatEnabled)
         if (context.Request.Path.StartsWithSegments("/api/runtime-discovery")
             || context.Request.Path.StartsWithSegments("/api/chat-runs")
             || context.Request.Path.StartsWithSegments("/api/admin/runtime-binding"))
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
+            return;
+        }
+        await next();
+    });
+}
+
+// E2/E3 eval-suite/eval-run routes stay invisible while off, independently of every other flag
+// (including AGENT_WRITE_TOOLS_ENABLED, which separately gates the whole /api/admin/operations
+// prefix these routes also live under -- both must be on for the routes to be reachable).
+if (!runEvalEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/admin/operations/eval-suites")
+            || context.Request.Path.StartsWithSegments("/api/admin/operations/eval-runs"))
+        {
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
+            return;
+        }
+        await next();
+    });
+}
+
+// P1 prompt artifact routes stay invisible while off, independently of every other flag. Publish
+// pinning is gated separately inside AgentController (the publish route itself never disappears).
+if (!promptArtifactsEnabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/prompt-components")
+            || context.Request.Path.StartsWithSegments("/api/prompt-manifests"))
         {
             await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
             return;

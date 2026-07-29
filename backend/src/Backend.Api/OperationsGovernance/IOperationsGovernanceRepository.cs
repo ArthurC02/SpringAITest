@@ -17,10 +17,45 @@ public interface IOperationsGovernanceRepository
     Task<OperationsMetrics> GetMetricsAsync(string tenantId, CancellationToken ct);
     Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, CancellationToken ct);
     Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct);
+
+    /// <summary>
+    /// E1 extended envelope, dual-written alongside <see cref="RecordTelemetryAsync"/> when
+    /// <see cref="RunEvidenceState.Enabled"/> is true. Fails closed (no row written) on
+    /// tenant/run mismatch or a caller-asserted snapshot SHA that disagrees with the run's own
+    /// pinned snapshot; never throws for those cases, it just writes nothing.
+    /// </summary>
+    Task RecordEvidenceAsync(string tenantId, RunEvidenceEnvelope envelope, CancellationToken ct);
+
+    /// <summary>Per-tenant, per-event comparison between the legacy metric and the extended
+    /// envelope so dual-write never lets usage/cost carry two authorities.</summary>
+    Task<EvidenceReconcileSummary> GetEvidenceReconcileAsync(string tenantId, CancellationToken ct);
 }
 
 public sealed record RegressionGate(Guid Id, bool Passed, string Suite, DateTime RecordedAt, bool OverrideActive, int AuditEntries);
 public sealed record OperationsTelemetry(Guid RunId, Guid EventId, string Kind, string? NodeId, string? ToolName, string? SkillName, int? SkillRevision, string? AgentId, int? AgentRevision, long? UsageUnits, decimal? CostUnits, long? LatencyMs);
+
+/// <summary>
+/// E1 run evidence envelope. Identity/revision/hash/trace fields only -- deliberately excludes
+/// raw prompt, context body, memory fact, tool argument/result, JWT, credential or
+/// chain-of-thought (see plan §4). Root/child lineage and the immutable snapshot SHA are not
+/// carried here: the repository resolves and validates them server-side from the run's own
+/// <c>agent_run</c>/<c>orchestrator_run_child</c> rows, never from the caller.
+/// </summary>
+public sealed record RunEvidenceEnvelope(
+    Guid RunId, Guid EventId, string Kind, string Outcome, string? ErrorClass, string? SnapshotSha256,
+    string? AgentId, int? AgentRevision, int? OrchestratorRevision, string? SkillName, int? SkillRevision,
+    string? PromptManifestSha256, int? ContextRevision, string? RoleView, int? PolicyRevision,
+    string? ModelProvider, string? ModelDeployment, string? ModelId, string? ModelFingerprint, string? ModelSettingsHash,
+    string? ToolName, int? ToolRevision, string? NodeId, string? TraceId, string? SpanId,
+    long? UsageUnits, decimal? CostUnits, long? LatencyMs, string ObservationQuality,
+    string? VerifierVerdict, string? CaseVerdict, string? RedactionNote);
+
+public sealed record EvidenceReconcileSummary(
+    [property: JsonPropertyName("metric_event_count")] int MetricEventCount,
+    [property: JsonPropertyName("envelope_event_count")] int EnvelopeEventCount,
+    [property: JsonPropertyName("mismatched_event_count")] int MismatchedEventCount,
+    [property: JsonPropertyName("unknown_observation_count")] int UnknownObservationCount,
+    [property: JsonPropertyName("measured_usage_units_sum")] long? MeasuredUsageUnitsSum);
 public enum OverrideWriteStatus { Accepted, Replay, NoLongerRequired, GateChanged }
 public enum RolloutWriteStatus { Applied, RegressionBlocked }
 public sealed record OverrideWriteResult(OverrideWriteStatus Status, RegressionGate? Gate);

@@ -11,14 +11,28 @@ namespace Backend.Api.OperationsGovernance;
 public sealed class OperationsGovernanceController(
     RuntimeDiscoveryService runtime,
     IRuntimeBindingRepository bindings,
-    IOperationsGovernanceRepository governance) : ControllerBase
+    IOperationsGovernanceRepository governance,
+    IEvalRepository evals) : ControllerBase
 {
     [HttpPost("regressions")]
     public async Task<IActionResult> RecordRegression(RegressionRequest request, CancellationToken ct)
     {
         RequireManage(); var tenant = Request.RequireTenant();
         var suite = Required(request.Suite, "suite", 128); var evidence = Required(request.EvidenceRef, "evidence_ref", 256);
-        var gate = await governance.RecordRegressionAsync(tenant, suite, request.Passed, evidence, Request.RequireUserId(), ct);
+
+        // E3 gate closure: when the caller pins a completed eval result, Backend recomputes
+        // pass/fail itself from stored suite policy/case results -- it never trusts request.Passed
+        // in that case. Omitting eval_run_id keeps the pre-existing caller-supplied `passed`
+        // contract byte-for-byte unchanged (removing that path entirely is C2 cleanup, not this phase).
+        var passed = request.Passed;
+        if (request.EvalRunId is Guid evalRunId)
+        {
+            var evaluation = await evals.EvaluateGateAsync(tenant, evalRunId, suite, ct)
+                ?? throw new ApiException(400, "eval_run_id not found for this tenant");
+            passed = evaluation.Passed;
+        }
+
+        var gate = await governance.RecordRegressionAsync(tenant, suite, passed, evidence, Request.RequireUserId(), ct);
         return Ok(Public(gate));
     }
 
@@ -69,13 +83,14 @@ public sealed class OperationsGovernanceController(
     public async Task<IActionResult> LegacyInventory(CancellationToken ct)
     { RequireManage(); return Ok(await governance.GetLegacyInventoryAsync(Request.RequireTenant(), ct)); }
 
+    /// <summary>E1 dual-write audit: proves the extended envelope never becomes a second
+    /// usage/cost authority alongside the legacy metric ledger.</summary>
+    [HttpGet("evidence-reconcile")]
+    public async Task<IActionResult> EvidenceReconcile(CancellationToken ct)
+    { RequireManage(); return Ok(await governance.GetEvidenceReconcileAsync(Request.RequireTenant(), ct)); }
+
     private void RequireManage() => Request.RequireCapability("workflow.manage");
-    private string Key()
-    {
-        var values = Request.Headers["Idempotency-Key"]; var key = values.Count == 1 ? values[0]?.Trim() : null;
-        if (string.IsNullOrWhiteSpace(key) || key.Length > 128 || key.Any(char.IsControl)) throw new ApiException(400, "Idempotency-Key is required");
-        return key;
-    }
+    private string Key() => Request.RequireIdempotencyKey();
     private static string Required(string? value, string field, int max)
     {
         value = value?.Trim();
@@ -85,7 +100,7 @@ public sealed class OperationsGovernanceController(
     private static ReleaseGateResponse Public(RegressionGate gate) => new(gate.Passed, gate.OverrideActive, gate.AuditEntries);
 }
 
-public sealed record RegressionRequest([property: JsonPropertyName("suite")] string? Suite, [property: JsonPropertyName("passed")] bool Passed, [property: JsonPropertyName("evidence_ref")] string? EvidenceRef);
+public sealed record RegressionRequest([property: JsonPropertyName("suite")] string? Suite, [property: JsonPropertyName("passed")] bool Passed, [property: JsonPropertyName("evidence_ref")] string? EvidenceRef, [property: JsonPropertyName("eval_run_id")] Guid? EvalRunId = null);
 public sealed record OverrideRequest([property: JsonPropertyName("reason")] string? Reason);
 public sealed record RolloutRequest([property: JsonPropertyName("enabled")] bool Enabled, [property: JsonPropertyName("orchestrator_id")] Guid? OrchestratorId, [property: JsonPropertyName("revision")] int? Revision, [property: JsonPropertyName("canary_user_ids")] IReadOnlyList<string>? CanaryUserIds);
 public sealed record ReleaseGateResponse([property: JsonPropertyName("regression_passed")] bool RegressionPassed, [property: JsonPropertyName("override_active")] bool OverrideActive, [property: JsonPropertyName("audit_entries")] int AuditEntries);

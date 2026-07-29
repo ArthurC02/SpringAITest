@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using System.Text;
 using Backend.Api.Agents;
 using Backend.Api.AgentRuns;
+using Backend.Api.PromptArtifacts;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Data.InMemory;
@@ -218,7 +219,8 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         string canonicalDefinition,
         string definitionSha256,
         string createdBy,
-        CancellationToken ct)
+        CancellationToken ct,
+        PromptManifestPin? promptManifestPin = null)
     {
         canonicalDefinition =
             AgentCanonicalizer.CanonicalizeForLifecycleWrite(canonicalDefinition);
@@ -281,7 +283,8 @@ public sealed class InMemoryAgentRepository : IAgentRepository
                         .Select(b => new AgentRevisionSkillInfo(
                             b.SkillName, b.SkillRevision, b.Position, true))
                         .ToList(),
-                    createdBy);
+                    createdBy,
+                    promptManifestPin);
                 // 清 validated:要求再驗證才能再發,避免同一 draft 重複 publish 產生重複 revision。
                 entry.DraftValidatedVersion = null;
                 return Task.FromResult(new AgentPublishResult(AgentWriteStatus.Success, revision));
@@ -390,7 +393,8 @@ public sealed class InMemoryAgentRepository : IAgentRepository
     /// <summary>新增一筆 published revision,舊 published → superseded,並更新 published_revision 指標。</summary>
     private static int AppendRevisionUnsafe(
         Entry entry, string definitionSnapshot, string definitionSha256,
-        Guid? workflowId, int? workflowRevision, List<AgentRevisionSkillInfo> bindings, string createdBy)
+        Guid? workflowId, int? workflowRevision, List<AgentRevisionSkillInfo> bindings, string createdBy,
+        PromptManifestPin? promptManifestPin = null)
     {
         foreach (var r in entry.Revisions.Where(r => r.Status == "published"))
         {
@@ -409,6 +413,8 @@ public sealed class InMemoryAgentRepository : IAgentRepository
             Bindings = bindings,
             CreatedBy = createdBy,
             CreatedAt = Now(),
+            PromptManifestRevision = promptManifestPin?.Revision,
+            PromptManifestSha256 = promptManifestPin?.Sha256,
         });
         entry.PublishedRevision = revision;
         entry.UpdatedAt = Now();
@@ -513,10 +519,13 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         public List<AgentRevisionSkillInfo> Bindings = new();
         public string CreatedBy = "";
         public DateTime CreatedAt;
+        public int? PromptManifestRevision;
+        public string? PromptManifestSha256;
 
         public AgentRevisionInfo ToInfo() => new(
             Revision, Status, DefinitionSha256, RuntimeWorkflowId, RuntimeWorkflowRevision,
-            Bindings.OrderBy(b => b.Position).ToList(), CreatedBy, CreatedAt);
+            Bindings.OrderBy(b => b.Position).ToList(), CreatedBy, CreatedAt,
+            PromptManifestRevision, PromptManifestSha256);
     }
 
     private sealed record ReferenceResolution(

@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # 工作流執行的逾時保護（秒），可由個別工作流的 timeout_seconds 覆蓋。
     workflow_timeout_seconds: int = 120
 
+    # Skill script 的 execution boundary（Phase S1）。false（預設）＝既有 in-process
+    # path；true ＝短生命週期子行程 + OS 級 CPU/記憶體上限 + 空環境。平台若給不出可信
+    # 的 OS 上限，開旗標後 script 步驟直接 fail closed，不會退回 in-process。
+    isolated_skill_scripts_enabled: bool = False
+
     # kb_query 工作流的檢索參數。
     kb_query_top_k: int = 8                     # 檢索計畫預設取回筆數；requires_multi_doc 時節點內會加倍
     kb_query_max_retrieval_attempts: int = 2    # 檢索嘗試上限（含首次），防止驗證 RETRY 無限重試
@@ -52,6 +57,11 @@ class Settings(BaseSettings):
     # multi_agent_dispatch_enabled, so this flag can never activate a second
     # runtime path on its own.
     context_enrichment_enabled: bool = False
+    # Phase E2 versioned eval runner (POST /evals/run): fail-closed 404 while
+    # disabled, matching the other internal runtime routes. Workflow is
+    # stateless for eval — no suite catalog, no release state; suites arrive
+    # per-request from Backend.
+    run_eval_enabled: bool = False
     multi_agent_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10)
     multi_agent_root_lease_seconds: int = Field(default=300, ge=30, le=300)
     multi_agent_heartbeat_seconds: float = Field(default=30, ge=5, le=120)

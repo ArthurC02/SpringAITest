@@ -752,6 +752,46 @@ def test_compile_cache_evicts_beyond_max(monkeypatch):
     assert len(calls) == compiler._CACHE_MAX + 2
 
 
+# ---------------------------------------------------------------------------
+# compile(cache=False):給 eval runner 用,略過全域快取(不讀也不寫)
+# ---------------------------------------------------------------------------
+
+
+def test_compile_with_cache_false_bypasses_global_cache(monkeypatch):
+    """cache=False 每次呼叫都重新建圖,且全域快取一格都不會多——eval 每 case 各自
+    build_fixture_deps,若走一般快取,id(deps) 永遠不同只會塞滿 FIFO。"""
+    calls = _counting_build(monkeypatch)
+    deps = _deps()
+    skill = Skill.model_validate(
+        {"name": "no-cache-probe", "revision": 1, "flow": [{"node": "t_a"}]}
+    )
+    before = len(compiler._CACHE)
+
+    first = compiler.compile(skill, deps, cache=False)
+    second = compiler.compile(skill, deps, cache=False)
+
+    assert len(calls) == 2  # 兩次都真的重建，沒有命中快取
+    assert first is not second
+    assert len(compiler._CACHE) == before  # 全域快取未被寫入
+
+
+def test_compile_cache_false_does_not_evict_cached_entries():
+    """eval 的 cache=False 呼叫不會擠掉既有的 cache=True 快取項(≥32 筆也不影響)。"""
+    deps = _deps()
+    cached_skill = Skill.model_validate(
+        {"name": "stays-cached-probe", "revision": 1, "flow": [{"node": "t_a"}]}
+    )
+    cached_first = compiler.compile(cached_skill, deps)  # 一般快取路徑
+
+    for i in range(compiler._CACHE_MAX * 2):
+        probe = Skill.model_validate(
+            {"name": f"nocache-probe-{i}", "flow": [{"node": "t_a"}]}
+        )
+        compiler.compile(probe, deps, cache=False)
+
+    assert compiler.compile(cached_skill, deps) is cached_first  # 仍命中，沒被擠掉
+
+
 def test_compile_rejects_empty_flow():
     """引擎層護欄：flow 為空在驗證 API 已擋（invalid_flow），繞過它直接 compile 也擋。"""
     skill = Skill.model_validate({"name": "probe-skill", "flow": []})

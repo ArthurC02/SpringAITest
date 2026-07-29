@@ -56,3 +56,28 @@ pwsh -File scripts\verify-copilot-shared-core-evidence.ps1 `
 4. `code-reviewer` 與 fresh-image `e2e-verifier` 完成獨立檢查，確認沒有 response-only 假綠、重複 tool result、cross-tenant 漏洩或測試資料 cleanup 遺留。
 
 在上述條件完成前，release 保持 **blocked/failed**。
+
+## Reconciliation Status (2026-07-29)
+
+### 現況
+
+對帳記錄如下：
+
+| 項目 | 發現 |
+| --- | --- |
+| D6 delivery row PASS bundle | `01-plan.md` D6 delivery row 末行引用 RealModel bundle `20260725T111722672Z-90c9119f`，宣稱 E-04/E-05 PASS。 |
+| Workspace 驗證 | 當前 workspace 的 `artifacts/copilot-shared-core/` 目錄中**找不到**該 bundle（無 `20260725T111722672Z-*` 目錄）。 |
+| Canonical record | 本文件（05-release-evidence-plan.md）仍為唯一 durable evidence record：E-04/E-05 FAIL；即使 Deterministic lane PASS，也不能取代 RealModel lane 未達 PASS 的事實。 |
+| Artifact identity 缺失 | 未能提供該 PASS bundle 的 runner manifest、artifact identity、case results 與 secret scan 驗證證據。 |
+
+### 決議
+
+按 Gate E0 原則（4.1 節與 02-evaluation-observability-plan.md §3）fail-closed：
+
+- Release sign-off 保持 **blocked**，直到以下條件全部滿足：
+  1. 若 PASS bundle 實際存在，需驗證並記入本文件；
+  2. 若 PASS bundle 無法驗證或已遺失，需修復 E-04 mem0 recall 與 E-05 routing/answer fidelity 缺陷，重跑完整 E-01–E-06 RealModel lane 並產生新 bundle；
+  3. Bundle 路徑、runner manifest、artifact identity 與 case results 必須記入新增的「已保存的 evidence」小節；
+  4. 供 code-reviewer 與 e2e-verifier 的獨立檢查清單完成。
+- 發布宣稱不得選擇方便的一邊（Deterministic PASS ≠ RealModel lane skip）。
+- 此狀態已在 [agent-platform-redesign/01-plan.md](../agent-platform-redesign/01-plan.md) D6 delivery row 末行加註。

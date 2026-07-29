@@ -45,9 +45,14 @@ public sealed record AgentWorkflowRef(
     [property: JsonPropertyName("id")] string? Id,
     [property: JsonPropertyName("revision")] int Revision = 0);
 
-/// <summary>publish 請求:必帶 expected_draft_version(對到當時 draft version 才發布,防覆蓋他人更新)。</summary>
+/// <summary>
+/// publish 請求:必帶 expected_draft_version(對到當時 draft version 才發布,防覆蓋他人更新)。
+/// prompt_manifest_revision 是 P1 的**可選** pin:提供時該 manifest 必須存在且同 tenant,
+/// 其 revision + canonical SHA 會一併寫入不可變 snapshot;未提供(或 flag 關閉)時 publish 行為不變。
+/// </summary>
 public sealed record AgentPublishRequest(
-    [property: JsonPropertyName("expected_draft_version")] long? ExpectedDraftVersion);
+    [property: JsonPropertyName("expected_draft_version")] long? ExpectedDraftVersion,
+    [property: JsonPropertyName("prompt_manifest_revision")] int? PromptManifestRevision = null);
 
 /// <summary>Agent 讀取模型(repo → controller)。DraftDefinition 是 canonical JSON 原文。</summary>
 public sealed record Agent(
@@ -97,7 +102,10 @@ public sealed record AgentInfo(
     [property: JsonPropertyName("created_at")] DateTime CreatedAt,
     [property: JsonPropertyName("updated_at")] DateTime UpdatedAt);
 
-/// <summary>不可變 revision 摘要(含固定的 Skill bindings 與 definition hash)。</summary>
+/// <summary>
+/// 不可變 revision 摘要(含固定的 Skill bindings 與 definition hash)。P1 prompt manifest pin 兩欄
+/// 在未 pin 時整個欄位不輸出(WhenWritingNull)— 沒帶 manifest 的 publish 回應與 P1 之前逐位元組相同。
+/// </summary>
 public sealed record AgentRevisionInfo(
     [property: JsonPropertyName("revision")] int Revision,
     [property: JsonPropertyName("status")] string Status,
@@ -106,7 +114,11 @@ public sealed record AgentRevisionInfo(
     [property: JsonPropertyName("runtime_workflow_revision")] int? RuntimeWorkflowRevision,
     [property: JsonPropertyName("skill_bindings")] IReadOnlyList<AgentRevisionSkillInfo> SkillBindings,
     [property: JsonPropertyName("created_by")] string CreatedBy,
-    [property: JsonPropertyName("created_at")] DateTime CreatedAt);
+    [property: JsonPropertyName("created_at")] DateTime CreatedAt,
+    [property: JsonPropertyName("prompt_manifest_revision")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? PromptManifestRevision = null,
+    [property: JsonPropertyName("prompt_manifest_sha256")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PromptManifestSha256 = null);
 
 /// <summary>revision 內固定的一筆 Skill binding。skill = 名稱,skill_revision = 發布時固定的確切 revision。</summary>
 public sealed record AgentRevisionSkillInfo(

@@ -1,6 +1,7 @@
 # Prompt、Model 與 Runtime Policy 計畫
 
 > 優先級：P0/P1。  
+> 交付狀態：Phase P1 已實作（2026-07-30）；Phase P2–P4 未實作。  
 > 目標：讓每次 execution 的 prompt composition 與 model behavior 可 pin、可重建、可評估、可 rollback，同時保持 raw content 不進 operations surface。
 
 ## 1. 問題

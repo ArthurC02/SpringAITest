@@ -1,6 +1,7 @@
 # Extension Security 與 Connector/MCP 計畫
 
 > 優先級：Script isolation 為 P0；Connector/MCP 為 P2 且需產品需求。  
+> 交付狀態：Phase S1 已實作（2026-07-30）；Phase S2–S3 未實作。  
 > 目標：先修正已存在的 execution boundary，再用現有 tool authority 安全接入外部協定。
 
 ## 1. 決策
