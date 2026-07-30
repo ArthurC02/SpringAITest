@@ -10,4 +10,11 @@ public interface IConfigService
 
     /// <summary>更新組態;backend 對非 ADMIN 回 403 → WorkflowForbiddenException(對外 403)。</summary>
     Task<ConfigItem> UpdateAsync(string key, ConfigUpdateRequest request, UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>
+    /// 執行期單鍵讀取(backend <c>GET /api/config/runtime/{key}</c>,不掛 ADMIN):供伺服器端執行期呼叫端
+    /// (如 <see cref="Platform.Service.PromptCompositionResolver"/>)取用。backend allowlist 外的 key 或
+    /// 未設定值都回 404 → 本方法回 null;其餘非 2xx 仍依 <see cref="BackendErrorMapper"/> 拋例外。
+    /// </summary>
+    Task<ConfigItem?> GetRuntimeAsync(string key, UserContext ctx, CancellationToken ct = default);
 }

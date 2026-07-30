@@ -1,7 +1,7 @@
 # Evaluation 與 Observability 閉環計畫
 
 > 優先級：P0。  
-> 交付狀態：Phase E0/E1/E2/E3 已實作（2026-07-30）；Phase E4 未實作。  
+> 交付狀態：Phase E0/E1/E2/E3 已實作（2026-07-30）；Phase E4 部分交付（eval suites/runs UI；operations productization 其餘項目未實作）。  
 > 目標：重用既有 events、OTel/Langfuse、operations metrics、`CSR-EVAL-001` 與 regression gate，建立可執行且可稽核的 improvement loop。
 
 ## 1. 問題

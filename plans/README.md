@@ -12,7 +12,7 @@ This directory records the evolution of the Skill and Agent platform. Source cod
 - [Extension Security 與 Connector/MCP](agent-architecture-improvements/05-extension-security-plan.md)：script process isolation 與 governed connector boundary。
 - [Cleanup 與 Consolidation](agent-architecture-improvements/06-cleanup-and-consolidation.md)：跨計畫 deletion gates、順序與保留項。
 
-這組文件不取代 [Agent Platform Redesign](agent-platform-redesign/01-plan.md) 或 D1–D7/E1–E3 contracts；它以已交付架構為基礎規劃下一階段。P0 tranche（evidence/eval、prompt/model identity、script isolation；2026-07-30）已實作 phases：E0–E3（02 評估計畫，非 Context Enrichment 的 E1/E3）、O1、S1、P1；未實作 phases：E4、O2–O5、S2–S3、P2–P4。
+這組文件不取代 [Agent Platform Redesign](agent-platform-redesign/01-plan.md) 或 D1–D7/E1–E3 contracts；它以已交付架構為基礎規劃下一階段。P0 tranche（evidence/eval、prompt/model identity、script isolation；2026-07-30）已實作 phases：E0–E3（02 評估計畫，非 Context Enrichment 的 E1/E3）、O1、S1、P1（Platform/Workflow assemblers 完整交付）；部分實作 phases：E4（eval suites/runs UI）；未實作 phases：O2–O5、S2–S3、P2–P4、E4 其餘項目。
 
 ## Current Delivery Map
 

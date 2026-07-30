@@ -455,6 +455,28 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         Assert.DoesNotContain("XYZZY", rawA);
     }
 
+    // ---- P1 prompt manifest(plans/agent-architecture-improvements/03-…-plan.md §3/§7)----
+
+    // 旗標關閉(TestWebAppFactory 預設不設 PROMPT_ARTIFACTS_ENABLED)時,副駕送進模型的 Instructions 必須
+    // 逐位元等於「操作助理 persona + \n + 護欄」——persona 從 ChatOptions 搬到 ChatContextProvider 之後
+    // 這條組成沒有任何測試釘住過,golden 就在這裡。兩段字串皆為逐字副本,任一常數被改動本案即失敗。
+    [Fact]
+    public async Task Agui_PromptArtifactsDisabled_InstructionsArePersonaThenGuard_ByteForByte()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+        // 低8 修復:用清單長度增量而非尾端索引斷言,免得共用清單的意外重複呼叫被 [^1] 誤判成綠燈。
+        var countBefore = ChatClient.RunOptions.Count;
+        var resp = await SendAguiAsync(client, RunInputFor("p1-persona-golden", "你好"));
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        await resp.Content.ReadAsStringAsync();
+
+        Assert.Equal(countBefore + 1, ChatClient.RunOptions.Count);
+        Assert.Equal(
+            Platform.Service.PromptComposition.CopilotPersonaDefault + "\n" + Platform.Service.PromptComposition.GuardDefault,
+            ChatClient.RunOptions[^1]!.Instructions);
+    }
+
     // ---- P3(copilot-shared-core §4.3/§11 步驟 12):副駕對話會進歷史,mem0 順序 ----
 
     // B-P3-07:副駕聊一輪 → FakeConversationStore.Saved 出現該輪(key=(tenant,user)),

@@ -71,6 +71,19 @@ public sealed class PromptArtifactRepository(NpgsqlDataSource dataSource) : IPro
             new { tenantId, kind, revision }, cancellationToken: ct));
     }
 
+    public async Task<(string Content, string ContentSha256)?> GetComponentContentAsync(
+        string tenantId, string kind, int revision, CancellationToken ct)
+    {
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        var row = await conn.QuerySingleOrDefaultAsync<ComponentContentRow>(new CommandDefinition(
+            "SELECT content AS Content, content_sha256 AS ContentSha256 FROM prompt_component_revision"
+            + " WHERE tenant_id=@tenantId AND kind=@kind AND revision=@revision",
+            new { tenantId, kind, revision }, cancellationToken: ct));
+        return row is null ? null : (row.Content, row.ContentSha256);
+    }
+
+    private sealed record ComponentContentRow(string Content, string ContentSha256);
+
     public async Task<PromptManifestRecord> CreateManifestAsync(
         string tenantId, string manifestCanonical, string createdBy, CancellationToken ct)
     {

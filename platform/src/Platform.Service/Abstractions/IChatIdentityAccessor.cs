@@ -39,4 +39,15 @@ public interface IChatIdentityAccessor
     /// threadId 走 wire、身分完全來自 JWT。
     /// </summary>
     void SetRequestKeys(string? userId, string? conversationId, UserContext? userCtx);
+
+    /// <summary>
+    /// 本輪(一個 HTTP request)已解析過的 prompt manifest 快取(<see cref="PromptCompositionResolver"/>
+    /// 寫入/讀取)。一輪內 <see cref="SkillRoutingAgent"/>(路由/摘要)與 <see cref="ChatContextProvider"/>
+    /// (護欄/persona/mem0)各自開新 scope 呼叫 <c>ResolveAsync</c>,若各自獨立解析,兩次讀取之間
+    /// tenant config 若剛好變動,同一輪就可能一半用 manifest、一半用 constants,或混用不同 revision。
+    /// 第一個消費點解析後把結果(含「解析失敗、已改用 constants」這個結果本身)寫回這裡,第二個消費點
+    /// 直接複用,不再重讀 config/backend。null = 本輪尚未解析過;預設無實作(回傳 null 且 set 為 no-op)
+    /// 讓既有測試 fake 不必修改——沒有提供真正儲存的呼叫端等同於「不快取,逐次全新解析」,行為與改動前相同。
+    /// </summary>
+    Platform.Service.PromptManifestResolutionCache? PromptManifestCache { get => null; set { } }
 }

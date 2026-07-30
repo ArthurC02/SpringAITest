@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using Backend.Api.Config;
 
 namespace Backend.Api.Tests;
 
@@ -117,6 +118,61 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
         Assert.Equal("權限不足，無法修改系統組態", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // ---- P1 runtime read(/api/config/runtime/{key}):執行期單鍵讀取,非 ADMIN、非整包 ----
+
+    [Fact]
+    public async Task GetRuntime_AllowlistedKeyWithValue_Returns200_WithoutAdminRole()
+    {
+        var admin = Admin("runtime-ok");
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await admin.PutAsJsonAsync(
+                "/api/config/" + ConfigController.PromptManifestRevisionKey, new { value = "7" })).StatusCode);
+
+        // 執行期讀取刻意不帶 X-User-Role:比照 ConfigurationSetController 的 active 路由,只靠
+        // X-Internal-Token + X-Tenant-Id 的信任邊界,不要求呼叫端的角色。
+        var nonAdmin = _factory.CreateInternalClient().WithTenant("runtime-ok");
+        var resp = await nonAdmin.GetAsync("/api/config/runtime/" + ConfigController.PromptManifestRevisionKey);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(ConfigController.PromptManifestRevisionKey, body["key"]!.GetValue<string>());
+        Assert.Equal("7", body["value"]!.GetValue<string>());
+    }
+
+    // allowlist 外的 key(即使是完全合法、已寫入的組態值)一律 404 —— 不得成為讀任意 ADMIN 內容的後門。
+    [Fact]
+    public async Task GetRuntime_KeyOutsideAllowlist_Returns404()
+    {
+        var admin = Admin("runtime-outside-allowlist");
+        await admin.PutAsJsonAsync("/api/config/theme", new { value = "dark" });
+
+        var resp = await _factory.CreateInternalClient().WithTenant("runtime-outside-allowlist")
+            .GetAsync("/api/config/runtime/theme");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    // allowlist 內但本租戶尚未設定值 → 同樣 404(canary 未啟用,不是伺服器錯誤)。
+    [Fact]
+    public async Task GetRuntime_AllowlistedKeyWithoutValue_Returns404()
+    {
+        var resp = await _factory.CreateInternalClient().WithTenant("runtime-unset")
+            .GetAsync("/api/config/runtime/" + ConfigController.PromptManifestRevisionKey);
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetRuntime_MissingTenantHeader_Returns400()
+    {
+        var resp = await _factory.CreateInternalClient()
+            .GetAsync("/api/config/runtime/" + ConfigController.PromptManifestRevisionKey);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal("缺少租戶識別標頭：X-Tenant-Id", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
     }
 
     [Fact]

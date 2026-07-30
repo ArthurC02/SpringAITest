@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
@@ -31,6 +33,22 @@ public sealed class ConfigService : IConfigService
             MapErrorAsync,
             () => new WorkflowInvocationException(FailurePrefix + "回應內容為空"),
             ct);
+
+    public async Task<ConfigItem?> GetRuntimeAsync(string key, UserContext ctx, CancellationToken ct = default)
+    {
+        using var resp = await _backend.SendAsync(
+            _backend.BuildRequest(HttpMethod.Get, $"/api/config/runtime/{key}", ctx), WrapTransport, ct);
+        if (resp.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+        if (!resp.IsSuccessStatusCode)
+        {
+            throw await MapErrorAsync(resp, ct);
+        }
+
+        return await resp.Content.ReadFromJsonAsync<ConfigItem>(_backend.Json, ct);
+    }
 
     private Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)
         => BackendErrorMapper.MapErrorAsync(resp, _backend, FailurePrefix, ct);

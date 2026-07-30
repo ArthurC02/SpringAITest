@@ -74,6 +74,13 @@ var agentChatEnabled = string.Equals(
     cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentWriteToolsEnabled = string.Equals(
     cfg["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+// P1 prompt manifest(plans/agent-architecture-improvements/03-prompt-model-runtime-plan.md §7):
+// 關閉時 PromptCompositionResolver 完全不註冊,兩條聊天鏈路的組成逐位元回到現行 constants;
+// shadow 是它的子模式(兩種組成都算、只比 hash、實際仍用 constants)。
+var promptArtifactsEnabled = string.Equals(
+    cfg["PROMPT_ARTIFACTS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+var promptArtifactsShadow = promptArtifactsEnabled
+    && string.Equals(cfg["PROMPT_ARTIFACTS_SHADOW"], "true", StringComparison.OrdinalIgnoreCase);
 var agentChatTenants = (cfg["AGENT_CHAT_TENANT_ALLOWLIST"] ?? string.Empty)
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 var agentChatOptions = new AgentChatOptions
@@ -129,6 +136,16 @@ builder.Services.AddHttpClient<IAgentChatRuntime, AgentChatRuntime>(
     .ConfigurePrimaryHttpMessageHandler(
         () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
 
+// P1 prompt manifest 解析器:只在旗標開啟時註冊(Singleton —— (tenant, revision) 的 resolved manifest
+// 快取要跨請求存活)。關閉時兩條鏈路的 GetService 取到 null 直接用 constants,連 backend 都不打。
+if (promptArtifactsEnabled)
+{
+    builder.Services.AddSingleton(sp => new PromptCompositionResolver(
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        promptArtifactsShadow,
+        sp.GetRequiredService<ILogger<PromptCompositionResolver>>()));
+}
+
 // 供 agent pipeline(P1+)取得本次請求的登入身分與記憶 key;Platform.Service 不能引用 ASP.NET Core。
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<IChatIdentityAccessor, HttpChatIdentityAccessor>();
@@ -141,12 +158,14 @@ builder.Services.AddSingleton<ILlmAgent>(_ => new AgentFrameworkLlmAgent(llmOpti
 // 讓 AG-UI 端點的 AIAgent 由它建立;測試可替換為 fake IChatClient 免打真 LLM。
 // 系統提示定位為操作本平台的助理;實際操作工具由前端以 AG-UI client tools 提供,
 // 助理只需正常回答並在需要時呼叫收到的工具。
+//
+// P1:這段 persona 不再寫進 ChatClientAgentOptions.ChatOptions.Instructions,而是交給該鏈路自己的
+// ChatContextProvider 逐輪組進 AIContext.Instructions —— 唯一目的是讓 persona 能跟著 prompt manifest
+// 逐租戶替換(startup Singleton 的 ChatOptions 做不到)。輸出位元不變:框架原本就是
+// agent instructions + "\n" + context instructions,PromptComposition.Instructions 照同一順序組。
+// 常數住在 PromptComposition.CopilotPersonaDefault,golden 測試與這裡引用同一份,不逐字重抄。
 // ---------------------------------------------------------------------------
-const string copilotInstructions =
-    "你是本系統的操作助理,協助使用者操作這個 AI 資料檢索與分析平台:" +
-    "查詢與管理文件、執行工作流(例如檢索式問答)、查看分析摘要、切換視圖。" +
-    "請一律以繁體中文回答,簡潔專業。當使用者的請求需要實際操作時," +
-    "呼叫前端提供的工具(client tools)來完成;你只需正常回答並在需要時呼叫收到的工具。";
+const string copilotInstructions = PromptComposition.CopilotPersonaDefault;
 
 builder.Services.AddSingleton<IChatClient>(_ =>
     LlmClientFactory.Create(llmOptions).AsIChatClient());
@@ -207,13 +226,14 @@ var copilotAgent = builder.Services.AddAIAgent(
                 // Tools = null(預設模式)與不設 Tools 等價;console 模式掛 get_recent_traces。
                 ChatOptions = new ChatOptions
                 {
-                    Instructions = copilotInstructions,
                     Tools = traceTool is not null ? new List<AITool> { traceTool } : null,
                 },
                 ChatHistoryProvider = chatHistoryProvider,
                 AIContextProviders = new AIContextProvider[]
                 {
-                    new ChatContextProvider(scopeFactory, loggerFactory.CreateLogger<ChatContextProvider>()),
+                    // 副駕是唯一有 persona 的鏈路(鏈路 A 刻意沒有),persona 因此在這裡傳入。
+                    new ChatContextProvider(
+                        scopeFactory, loggerFactory.CreateLogger<ChatContextProvider>(), copilotInstructions),
                 },
             });
             var routing = new SkillRoutingAgent(

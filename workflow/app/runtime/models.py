@@ -54,6 +54,20 @@ class AgentRuntimeLimits(StrictModel):
     step_budget: int = Field(default=0, ge=0, le=10_000)
 
 
+class PromptManifestPin(StrictModel):
+    """Published Agent 所 pin 的 prompt composition 身分（revision + canonical SHA）。"""
+
+    revision: int = Field(ge=1)
+    sha256: str
+
+    @field_validator("sha256")
+    @classmethod
+    def sha_is_lower_hex(cls, value: str) -> str:
+        if not _SHA256_RE.fullmatch(value):
+            raise ValueError("prompt manifest sha256 must be a lowercase SHA-256")
+        return value
+
+
 class AgentExecutionSnapshot(StrictModel):
     id: str = Field(min_length=1, max_length=128)
     revision: int = Field(ge=1)
@@ -66,6 +80,12 @@ class AgentExecutionSnapshot(StrictModel):
     allowed_tools: list[str] = Field(default_factory=list, max_length=256)
     knowledge_sources: list[str] = Field(default_factory=list, max_length=512)
     runtime_limits: AgentRuntimeLimits = Field(default_factory=AgentRuntimeLimits)
+    # 只有「發布時有 pin」的 Agent revision 才帶這個鍵；沒 pin 的 snapshot 不含它，
+    # 因此 canonical 序列化必須跟著省略（否則舊 snapshot 的 hash 會被算成不同值）。
+    prompt_manifest: PromptManifestPin | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @field_validator(
         "execution_roles", "audience", "allowed_tools", "knowledge_sources"

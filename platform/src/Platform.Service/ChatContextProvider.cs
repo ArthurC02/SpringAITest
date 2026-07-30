@@ -7,7 +7,7 @@ using Platform.Service.Abstractions;
 namespace Platform.Service;
 
 /// <summary>
-/// 兩條聊天鏈路共用的 per-run context:固定護欄 prompt + mem0 長期記憶 recall。兩者都注入
+/// 兩條聊天鏈路共用的 per-run context:persona + 固定護欄 prompt + mem0 長期記憶 recall。三者都注入
 /// <see cref="AIContext.Instructions"/>(不是 <see cref="AIContext.Messages"/>)——Messages 會被寫進持久化的
 /// chat history 並每輪重複累積(1.13.0 實測,copilot-shared-core 03-design.md N3),Instructions 則每輪重組、
 /// 不入 history,且與 agent 自身 instructions 換行共存(N4)。
@@ -26,21 +26,23 @@ namespace Platform.Service;
 /// </summary>
 public sealed class ChatContextProvider : AIContextProvider
 {
-    // mem0 記憶注入的固定前綴(逐字沿用 ChatService.cs 的 SystemMemoryPrefix,一字不改)。
-    private const string SystemMemoryPrefix =
-        "以下是你先前記住、關於這位使用者的長期記憶，回答時可參考（與當前問題無關者請忽略）：";
-
-    // 每輪都注入的固定護欄(逐字沿用 ChatService.cs 的 ChatGuardPrompt,一字不改)。
-    private const string ChatGuardPrompt =
-        "回答前先判斷問題類型，不要急著搶答。若問題涉及任何數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，你「必須」先呼叫對應的 skill 工具，並只依工具回傳的結果作答。嚴禁在未呼叫工具的情況下自行給出數字；嚴禁自己做任何算術（加減乘除、百分比、成長率）——這類計算一律交給工具，因為你自行心算常常算錯。若沒有合適的工具、文件未提供該數據、或你無法確定，請直接說「查無此數據」，不要編造或估算。只有純聊天或不涉及數字的問題，才可直接回答。";
-
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ChatContextProvider> _logger;
+    private readonly string? _transportPersona;
 
-    public ChatContextProvider(IServiceScopeFactory scopeFactory, ILogger<ChatContextProvider> logger)
+    /// <param name="transportPersona">
+    /// 本鏈路的 persona(P1:AG-UI 傳操作助理 persona,<c>/api/chat*</c> 傳 null —— 該鏈路刻意沒有 persona)。
+    /// 改由本類逐輪組進 Instructions(而非 <c>ChatOptions.Instructions</c>),persona 才能跟著 manifest
+    /// 逐租戶替換;組出的位元與框架原本「agent instructions 換行接 context instructions」完全相同。
+    /// </param>
+    public ChatContextProvider(
+        IServiceScopeFactory scopeFactory,
+        ILogger<ChatContextProvider> logger,
+        string? transportPersona = null)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _transportPersona = transportPersona;
     }
 
     protected override async ValueTask<AIContext> ProvideAIContextAsync(
@@ -51,7 +53,15 @@ public sealed class ChatContextProvider : AIContextProvider
 
         var lastUser = context.AIContext.Messages?.LastOrDefault(m => m.Role == ChatRole.User)?.Text ?? "";
 
-        var instructions = ChatGuardPrompt;
+        // P1:manifest-aware 組成。PROMPT_ARTIFACTS_ENABLED 關閉時 resolver 根本沒註冊(GetService 回 null),
+        // 直接用 constants —— 旗標關閉時逐位元不變是結構保證(plans/…/03-prompt-model-runtime-plan.md §7)。
+        var resolver = scope.ServiceProvider.GetService<PromptCompositionResolver>();
+        var prompts = resolver is null
+            ? PromptComposition.Defaults(_transportPersona)
+            : await resolver.ResolveAsync(
+                identity.CurrentUser?.TenantCode, _transportPersona, identity, cancellationToken);
+
+        string? memories = null;
 
         // 匿名仍保留短期 session continuity，但不讀寫長期記憶。
         if (identity.CurrentUser is not null)
@@ -60,11 +70,7 @@ public sealed class ChatContextProvider : AIContextProvider
             var (uid, _) = identity.DeriveMemoryKeys();
             try
             {
-                var memories = await mem0.RecallAsync(uid, lastUser, cancellationToken);
-                if (!string.IsNullOrWhiteSpace(memories))
-                {
-                    instructions += "\n" + SystemMemoryPrefix + "\n" + memories;
-                }
+                memories = await mem0.RecallAsync(uid, lastUser, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
@@ -72,7 +78,7 @@ public sealed class ChatContextProvider : AIContextProvider
             }
         }
 
-        return new AIContext { Instructions = instructions };
+        return new AIContext { Instructions = prompts.Instructions(memories) };
 
         // 刻意不覆寫 StoreAIContextAsync——remember/持久化在 ChatTurnRecorder(§3.3,兩個接縫拆分)。
     }

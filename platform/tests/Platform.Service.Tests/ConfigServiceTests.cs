@@ -90,4 +90,53 @@ public sealed class ConfigServiceTests
         var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(() => svc.ListAsync(UserCtx));
         Assert.Equal("權限不足", ex.Message);
     }
+
+    // ---- 中2:GetRuntimeAsync(/api/config/runtime/{key},不帶角色) ----
+
+    [Fact]
+    public async Task GetRuntime_Found_ReturnsItem_SendsEmptyRole_NoAdminSynthesis()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(
+            HttpStatusCode.OK, "{\"key\":\"prompt.manifest_revision\",\"value\":\"7\",\"updatedAt\":\"2026-07-12T00:00:00Z\"}"));
+        var svc = Build(stub);
+
+        var item = await svc.GetRuntimeAsync("prompt.manifest_revision", new UserContext(string.Empty, "demo-a", string.Empty));
+
+        Assert.NotNull(item);
+        Assert.Equal("7", item!.Value);
+        Assert.Equal(
+            "http://backend/api/config/runtime/prompt.manifest_revision", stub.LastRequest!.RequestUri!.ToString());
+        // 執行期讀取不合成 ADMIN 角色:空角色才代表這不是「讀者的授權」而是伺服器端執行期讀取。
+        Assert.Equal(string.Empty, stub.Header("X-User-Role"));
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+    }
+
+    // backend allowlist 外的 key、或未設定值,一律 404 → 本方法回 null(不是例外)。
+    [Fact]
+    public async Task GetRuntime_404_ReturnsNull()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.NotFound, "找不到")));
+
+        Assert.Null(await svc.GetRuntimeAsync("prompt.manifest_revision", UserCtx));
+    }
+
+    [Fact]
+    public async Task GetRuntime_403_ThrowsWorkflowForbidden()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足")));
+
+        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(
+            () => svc.GetRuntimeAsync("prompt.manifest_revision", UserCtx));
+        Assert.Equal("權限不足", ex.Message);
+    }
+
+    // 「沒有回應」與「404」是兩條不同的程式路徑(WrapTransport vs 直接判 StatusCode),對外分別是 502 例外與 null。
+    [Fact]
+    public async Task GetRuntime_TransportFailure_ThrowsWorkflowInvocation()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("backend 不可達")));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => svc.GetRuntimeAsync("prompt.manifest_revision", UserCtx));
+    }
 }

@@ -1,6 +1,6 @@
 # Agent Architecture 改善總覽
 
-> 狀態：P0 tranche 已實作（2026-07-30），phases：E0–E3、O1、S1、P1；未實作 phases：E4、O2–O5、S2–S3、P2–P4（03 計畫的 model policy 等後續 phase）。  
+> 狀態：P0 tranche 已實作（2026-07-30），phases：E0–E3、O1、S1、P1；部分實作 phases：E4（eval suites/runs UI）；未實作 phases：O2–O5、S2–S3、P2–P4（03 計畫的 model policy 等後續 phase）、E4 其餘項目。P1 現在含 Platform/Workflow assemblers 完整交付。  
 > 外部參考：[hardness1020/awesome-agent-architecture](https://github.com/hardness1020/awesome-agent-architecture)（00–21 章）。  
 > 本文件是比較與決策入口；逐章證據見 [01-section-comparison.md](01-section-comparison.md)，可交付計畫見本資料夾其餘文件。
 

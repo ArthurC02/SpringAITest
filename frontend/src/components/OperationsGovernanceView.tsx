@@ -25,6 +25,8 @@ import { useConfirm } from './ConfirmDialog'
 import { runWithToast, useToast } from './Toast'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
+import { Observed } from './Observed'
+import EvaluationPanel from './EvaluationPanel'
 
 const OVERRIDE_ATTEMPT_KEY = `${OPERATIONS_ATTEMPT_STORAGE_PREFIX}override-idempotency`
 
@@ -46,20 +48,6 @@ async function loadOperations(): Promise<OperationsData> {
     getLegacyInventory(),
   ])
   return { metrics, comparison, inventory }
-}
-
-/** null = 尚無觀測資料;一律顯示明確的「未知」badge,絕不假裝成 0。 */
-function Observed({ value, unit = '' }: { value: number | null; unit?: string }) {
-  return value === null ? (
-    <span className="chip chip--warn" title="尚無觀測資料,顯示未知而非假裝精確的 0">
-      未知
-    </span>
-  ) : (
-    <>
-      {value}
-      {unit}
-    </>
-  )
 }
 
 function SummaryCards({ metrics }: { metrics: OperationsMetrics }) {
@@ -309,16 +297,19 @@ function RevisionComparison({ comparison }: { comparison: OperationsVersionCompa
 function RegressionPanel({
   gate,
   onChanged,
+  evalRunId,
+  onEvalRunIdChange,
 }: {
   gate: OperationsReleaseGate
   onChanged: () => void
+  evalRunId: string
+  onEvalRunIdChange: (value: string) => void
 }) {
   const toast = useToast()
   const confirm = useConfirm()
   const [suite, setSuite] = useState('')
   const [passed, setPassed] = useState(true)
   const [evidenceRef, setEvidenceRef] = useState('')
-  const [evalRunId, setEvalRunId] = useState('')
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const attempts = useRef(new LogicalAttemptKey(newIdempotencyKey, getSessionStorage(), OVERRIDE_ATTEMPT_KEY))
@@ -343,7 +334,7 @@ function RegressionPanel({
         onSuccess: () => {
           setSuite('')
           setEvidenceRef('')
-          setEvalRunId('')
+          onEvalRunIdChange('')
           onChanged()
         },
       },
@@ -401,7 +392,7 @@ function RegressionPanel({
         <input
           id="ops-eval-run-id"
           value={evalRunId}
-          onChange={(e) => setEvalRunId(e.target.value)}
+          onChange={(e) => onEvalRunIdChange(e.target.value)}
           disabled={busy}
           aria-invalid={evalRunIdInvalid}
           aria-describedby={evalRunIdInvalid ? 'ops-eval-run-id-err' : 'ops-eval-run-id-hint'}
@@ -577,6 +568,7 @@ function RolloutPanel({ onChanged }: { onChanged: () => void }) {
  */
 export default function OperationsGovernanceView() {
   const { data, loading, error, reload } = useResource(loadOperations)
+  const [regressionEvalRunId, setRegressionEvalRunId] = useState('')
 
   return (
     <section className="agent-block">
@@ -603,7 +595,13 @@ export default function OperationsGovernanceView() {
           <NodeTable rows={data.metrics.nodes} />
 
           <RevisionComparison comparison={data.comparison} />
-          <RegressionPanel gate={data.metrics.releaseGate} onChanged={reload} />
+          <EvaluationPanel onUseForRegressionGate={setRegressionEvalRunId} />
+          <RegressionPanel
+            gate={data.metrics.releaseGate}
+            onChanged={reload}
+            evalRunId={regressionEvalRunId}
+            onEvalRunIdChange={setRegressionEvalRunId}
+          />
           <RolloutPanel onChanged={reload} />
 
           <section className="agent-block">

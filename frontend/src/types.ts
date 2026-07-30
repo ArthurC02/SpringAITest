@@ -709,6 +709,71 @@ export interface OperationsLegacyInventoryItem {
   trigger: string
 }
 
+// ── E2/E3/E4 durable eval suite/run authority(RUN_EVAL_ENABLED gate,見
+// EvalController.cs/EvalDtos.cs)。目前 wire 是顯式 snake_case,但正規化函式仍用
+// pick() 雙別名(見 api/operations.ts),與本檔其餘 Operations 型別風格一致。────
+
+/** `GET .../eval-suites` 一列;`eval-suites/{id}` 的外層欄位形狀相同。 */
+export interface EvalSuite {
+  suiteId: string
+  currentRevision: number
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** Suite 單一 revision 的稽核列(不含 case 內容本身)。 */
+export interface EvalSuiteRevision {
+  revision: number
+  casesSha256: string | null
+  caseCount: number
+  createdBy: string | null
+  createdAt: string | null
+}
+
+/** `GET .../eval-suites/{id}`。 */
+export interface EvalSuiteDetail extends EvalSuite {
+  revisions: EvalSuiteRevision[]
+}
+
+/** 單一 case 結果(run 詳情才有;list 摘要的 `cases` 為 null)。 */
+export interface EvalCaseResult {
+  caseId: string
+  canonicalIdentity: string | null
+  verdict: string
+  latencyMs: number | null
+  failureReason: string | null
+}
+
+export interface EvalRunCandidate {
+  kind: string
+  identitySha256: string
+}
+
+/** `GET/POST .../eval-runs*`。`cases: null` 代表 list 摘要(未含逐 case 結果)。 */
+export interface EvalRun {
+  id: string
+  suiteId: string
+  suiteRevision: number
+  candidate: EvalRunCandidate
+  runnerVersion: string | null
+  startedAt: string | null
+  completedAt: string | null
+  passCount: number
+  failCount: number
+  errorCount: number
+  cases: EvalCaseResult[] | null
+}
+
+export type EvalCaseDeltaStatus = 'unchanged' | 'changed' | 'regressed' | 'improved' | 'added' | 'removed'
+
+/** 純前端 baseline/candidate 逐 case verdict 比對結果;不呼叫任何後端 API(規格 §7)。 */
+export interface EvalCaseDelta {
+  caseId: string
+  baselineVerdict: string | null
+  candidateVerdict: string | null
+  status: EvalCaseDeltaStatus
+}
+
 /** 已發布 revision 的 Skill 綁定讀取形狀（backend 權威，含固定的 skill_revision）。 */
 export interface AgentRevisionBinding {
   skill: string

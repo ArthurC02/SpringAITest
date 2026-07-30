@@ -143,7 +143,9 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 + " r.canonical_definition AS CanonicalDefinition,"
                 + " r.runtime_workflow_id AS WorkflowId,"
                 + " r.runtime_workflow_revision AS WorkflowRevision,"
-                + " r.definition_sha256 AS DefinitionSha256"
+                + " r.definition_sha256 AS DefinitionSha256,"
+                + " r.prompt_manifest_revision AS PromptManifestRevision,"
+                + " r.prompt_manifest_sha256 AS PromptManifestSha256"
                 + " FROM agent a"
                 + " JOIN agent_revision r ON r.agent_id = a.id AND r.revision = a.published_revision"
                 + " WHERE a.tenant_id = @tenantId AND a.id = @agentId AND a.enabled"
@@ -287,7 +289,9 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 skillRows.OrderBy(s => s.Position)
                     .Select(s => new AgentRevisionSkillInfo(
                         s.Name, s.Revision, s.Position, true))
-                    .ToList());
+                    .ToList(),
+                source.PromptManifestRevision,
+                source.PromptManifestSha256);
             var workflowSource = new WorkflowSnapshotSource(
                 workflowId,
                 workflowRevision,
@@ -2740,7 +2744,9 @@ public sealed class AgentRunRepository : IAgentRunRepository
         byte[]? CanonicalDefinition,
         Guid? WorkflowId,
         int? WorkflowRevision,
-        string DefinitionSha256);
+        string DefinitionSha256,
+        int? PromptManifestRevision,
+        string? PromptManifestSha256);
 
     private sealed record WorkflowRow(
         int SchemaVersion,

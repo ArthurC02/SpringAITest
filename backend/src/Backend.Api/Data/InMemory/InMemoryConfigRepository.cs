@@ -19,6 +19,9 @@ public sealed class InMemoryConfigRepository : IConfigRepository
             .OrderBy(i => i.Key, StringComparer.Ordinal)
             .ToList());
 
+    public Task<ConfigItem?> GetAsync(string tenantId, string key, CancellationToken ct)
+        => Task.FromResult(_store.TryGetValue((tenantId, key), out var item) ? item : null);
+
     public Task<ConfigItem> UpsertAsync(string tenantId, string key, string value, CancellationToken ct)
     {
         var item = new ConfigItem(key, value, DateTime.UtcNow);

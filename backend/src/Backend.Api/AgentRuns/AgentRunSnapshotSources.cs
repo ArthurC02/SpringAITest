@@ -12,7 +12,13 @@ internal sealed record PublishedAgentSnapshotSource(
     string DefinitionSha256,
     Guid WorkflowId,
     int WorkflowRevision,
-    IReadOnlyList<AgentRevisionSkillInfo> SkillBindings);
+    IReadOnlyList<AgentRevisionSkillInfo> SkillBindings,
+    // P1 optional manifest pin (plan 03 §3). NULL on both means "published without a prompt
+    // manifest" -- AgentRunSnapshotBuilder.Build then omits the whole `prompt_manifest` key, keeping
+    // the pre-P1 snapshot byte-for-byte. Root snapshots (BuildOrchestratorRoot) never read these;
+    // D3 direct runs and D5 worker/verifier child snapshots do.
+    int? PromptManifestRevision = null,
+    string? PromptManifestSha256 = null);
 
 internal sealed record SkillSnapshotSource(
     Guid SkillId,

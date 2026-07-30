@@ -17,6 +17,9 @@ public sealed class FakeChatClient : IChatClient
     /// </summary>
     public List<IReadOnlyList<ChatMessage>> Runs { get; } = new();
 
+    /// <summary>與 <see cref="Runs"/> 同索引的 <see cref="ChatOptions"/>(供斷言送進模型的 Instructions)。</summary>
+    public List<ChatOptions?> RunOptions { get; } = new();
+
     /// <summary>
     /// 補 G2(copilot-shared-core 02-spec §7.2):原本 GetService 恆回 null,搭配「無腳本化 function call」
     /// 使 AG-UI 的 client tools 迴路在單元層結構上不可能產生 tool call。這裡用最小腳本觸發:當最後一則
@@ -37,6 +40,7 @@ public sealed class FakeChatClient : IChatClient
     {
         var list = messages.ToList();
         Runs.Add(list);
+        RunOptions.Add(options);
         await Task.Yield();
 
         // P2:鏈路 A 的「未命中」純聊天也改跑共用 hosted agent(此 fake 因而同時扮演 AG-UI 與鏈路 A

@@ -21,6 +21,16 @@ public interface IPromptArtifactRepository
         string tenantId, string kind, int revision, CancellationToken ct);
 
     /// <summary>
+    /// Raw component text plus its stored digest. The sole caller is the resolved-manifest route
+    /// (service-to-service prompt composition) — every other read path in this repository
+    /// deliberately omits content. The caller re-verifies <c>ContentSha256</c> against the returned
+    /// <c>Content</c> before use (fail closed on a mismatch — the one artifact-read path in this
+    /// service that used to skip that check). Not found (including cross-tenant) → null.
+    /// </summary>
+    Task<(string Content, string ContentSha256)?> GetComponentContentAsync(
+        string tenantId, string kind, int revision, CancellationToken ct);
+
+    /// <summary>
     /// Create a manifest revision from already-canonicalized text (same idempotency rule as
     /// components). Callers resolve and verify every referenced component revision first.
     /// </summary>

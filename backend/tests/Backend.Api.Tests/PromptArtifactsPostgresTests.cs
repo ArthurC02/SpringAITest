@@ -1,7 +1,12 @@
+using System.Net;
 using Backend.Api.Agents;
 using Backend.Api.PromptArtifacts;
 using Backend.Api.Skills;
 using Dapper;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Backend.Api.Tests;
 
@@ -54,6 +59,89 @@ public sealed class PromptArtifactsPostgresTests(PostgresFixture fixture) : IAsy
         // Cross-tenant: same kind/revision number is a different, invisible artifact.
         Assert.Null(await Repo.GetComponentAsync(other, "guard", 1, default));
         Assert.Empty(await Repo.ListComponentsAsync(other, default));
+    }
+
+    [SkippableFact]
+    public async Task ComponentContent_IsProjectedOnlyByGetComponentContentAsync_AndTenantIsolated()
+    {
+        fixture.SkipIfUnavailable();
+        var tenant = TenantPrefix + "content";
+        var other = TenantPrefix + "content-other";
+        await Repo.PublishComponentAsync(tenant, "governance_frame", "GOVERNANCE-SECRET", "tester", default);
+
+        var (content, sha) = (await Repo.GetComponentContentAsync(tenant, "governance_frame", 1, default))!.Value;
+        Assert.Equal("GOVERNANCE-SECRET", content);
+        Assert.Equal(SkillHash.Sha256("GOVERNANCE-SECRET"), sha);
+        Assert.Null(await Repo.GetComponentContentAsync(other, "governance_frame", 1, default));
+        Assert.Null(await Repo.GetComponentContentAsync(tenant, "governance_frame", 2, default));
+    }
+
+    /// <summary>
+    /// backend/AGENTS.md 中1 修復:resolved 路由現在讀取時重驗庫存 content 的 SHA-256,竄改(或損毀)過
+    /// 的庫存內容必須 fail closed(500),絕不能把被動過手腳的文字原樣送給 Platform/Workflow 的組裝器。
+    /// 直接以 SQL UPDATE 繞過應用層竄改,模擬資料被動過手腳或儲存層損毀。
+    /// </summary>
+    [SkippableFact]
+    public async Task ResolvedRoute_FailsClosed_WhenStoredComponentContentIsTampered()
+    {
+        fixture.SkipIfUnavailable();
+        var tenant = TenantPrefix + "tamper-component";
+        await Repo.PublishComponentAsync(tenant, "guard", "GUARD-ORIGINAL", "tester", default);
+        var manifest = await Repo.CreateManifestAsync(tenant, Canonical(("guard", 1)), "tester", default);
+
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            await connection.ExecuteAsync(
+                "UPDATE prompt_component_revision SET content=@content"
+                + " WHERE tenant_id=@tenant AND kind='guard' AND revision=1",
+                new { tenant, content = "TAMPERED-CONTENT" });
+        }
+
+        using var factory = new DapperPromptArtifactFactory();
+        var client = factory.CreateInternalClient().WithTenant(tenant).WithRole("USER").WithUser("caller");
+        var response = await client.GetAsync($"/api/prompt-manifests/{manifest.Revision}/resolved");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+    }
+
+    /// <summary>同一條防線的 manifest 那一半:manifest_canonical 被竄改(manifest_sha256 不動)同樣 500。</summary>
+    [SkippableFact]
+    public async Task ResolvedRoute_FailsClosed_WhenStoredManifestCanonicalIsTampered()
+    {
+        fixture.SkipIfUnavailable();
+        var tenant = TenantPrefix + "tamper-manifest";
+        await Repo.PublishComponentAsync(tenant, "guard", "GUARD-ORIGINAL", "tester", default);
+        var manifest = await Repo.CreateManifestAsync(tenant, Canonical(("guard", 1)), "tester", default);
+
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            await connection.ExecuteAsync(
+                "UPDATE prompt_manifest_revision SET manifest_canonical=@canonical"
+                + " WHERE tenant_id=@tenant AND revision=@revision",
+                new { tenant, revision = manifest.Revision, canonical = Canonical(("guard", 999)) });
+        }
+
+        using var factory = new DapperPromptArtifactFactory();
+        var client = factory.CreateInternalClient().WithTenant(tenant).WithRole("USER").WithUser("caller");
+        var response = await client.GetAsync($"/api/prompt-manifests/{manifest.Revision}/resolved");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+    }
+
+    /// <summary>真 Dapper 版 <see cref="IPromptArtifactRepository"/>(其餘依賴仍走 TestWebAppFactory 的 fake),
+    /// 讓竄改測試能連真的 Postgres 直接下 SQL 破壞資料,再打真正的 HTTP 路由驗證 fail-closed。</summary>
+    private sealed class DapperPromptArtifactFactory : TestWebAppFactory
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            base.ConfigureWebHost(builder);
+            builder.UseSetting("PROMPT_ARTIFACTS_ENABLED", "true");
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IPromptArtifactRepository>();
+                services.AddScoped<IPromptArtifactRepository, PromptArtifactRepository>();
+            });
+        }
     }
 
     [SkippableFact]

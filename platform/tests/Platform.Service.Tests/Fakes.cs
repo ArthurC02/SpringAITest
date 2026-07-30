@@ -24,6 +24,21 @@ internal static class TestBackend
         => new(new HttpClient(stub), new BackendOptions { BaseUrl = baseUrl, InternalToken = token });
 }
 
+/// <summary>
+/// 可手動撥動的 <see cref="TimeProvider"/> fake(中1:負向快取 TTL 測試用)——手寫,不引入
+/// Microsoft.Extensions.Time.Testing 這個新套件(專案慣例是手寫 fake,見類別文件)。
+/// </summary>
+public sealed class FakeTimeProvider : TimeProvider
+{
+    private DateTimeOffset _now;
+
+    public FakeTimeProvider(DateTimeOffset start) => _now = start;
+
+    public void Advance(TimeSpan delta) => _now += delta;
+
+    public override DateTimeOffset GetUtcNow() => _now;
+}
+
 /// <summary>建 stub HttpResponseMessage 的共用輔助:任意 JSON body、ApiError 形狀的錯誤 body。</summary>
 internal static class TestHttp
 {
@@ -358,6 +373,11 @@ public sealed class FakeChatIdentityAccessor : IChatIdentityAccessor
     public Guid? RequestedOrchestratorId { get; private set; }
     public string? LogicalAttemptId { get; set; }
 
+    // 這顆 fake 常被跨多輪重用(見類別文件);真實 HttpChatIdentityAccessor 靠一次 HTTP request 一個全新
+    // HttpContext.Items 天然重置,這裡靠 SetRequestKeys 模擬同一件事,同一份 PromptCompositionResolver
+    // 中3 快取才不會從上一輪(模擬的舊 turn)滲進這一輪。
+    public PromptManifestResolutionCache? PromptManifestCache { get; set; }
+
     public void SetRequestedOrchestratorId(Guid? orchestratorId) =>
         RequestedOrchestratorId = orchestratorId;
 
@@ -369,6 +389,7 @@ public sealed class FakeChatIdentityAccessor : IChatIdentityAccessor
         PersistFailure = null;
         PersistedResponse = null;
         TurnMetadata = null;
+        PromptManifestCache = null;
     }
 
     public (string Uid, string Cid) DeriveMemoryKeys()
@@ -443,9 +464,16 @@ internal static class TestChatAgent
         FakeChatIdentityAccessor? identity = null,
         FakeLlmAgent? llmAgent = null,
         FakeWorkflowService? workflows = null,
-        FakeAgentChatRuntime? agentChat = null)
+        FakeAgentChatRuntime? agentChat = null,
+        PromptCompositionResolver? prompts = null)
     {
         var services = new ServiceCollection();
+        // P1:旗標關閉時 production 不註冊 resolver(GetService 回 null → constants),測試預設照此;
+        // 傳入 resolver 才等於「旗標開啟」。
+        if (prompts is not null)
+        {
+            services.AddSingleton(prompts);
+        }
         services.AddSingleton<IMem0Client>(mem0 ?? new FakeMem0Client());
         services.AddSingleton<IConversationStore>(convos ?? new FakeConversationStore());
         services.AddSingleton<IChatIdentityAccessor>(identity ?? new FakeChatIdentityAccessor());
@@ -466,6 +494,7 @@ internal static class TestChatAgent
             ChatHistoryProvider = historyProvider,
             AIContextProviders = new AIContextProvider[]
             {
+                // 鏈路 A 沒有 persona(AG-UI 的 persona 由 Program.cs 傳入,其 golden 在 Web.Tests)。
                 new ChatContextProvider(scopeFactory, NullLogger<ChatContextProvider>.Instance),
             },
         });

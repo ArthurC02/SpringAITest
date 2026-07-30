@@ -75,7 +75,9 @@ public sealed class InMemoryAgentRepository : IAgentRepository
                 published.DefinitionSha256,
                 workflowId,
                 workflowRevision,
-                published.Bindings.OrderBy(b => b.Position).Select(b => b with { }).ToList());
+                published.Bindings.OrderBy(b => b.Position).Select(b => b with { }).ToList(),
+                published.PromptManifestRevision,
+                published.PromptManifestSha256);
         }
     }
 

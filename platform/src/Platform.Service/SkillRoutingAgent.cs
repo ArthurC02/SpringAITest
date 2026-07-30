@@ -44,20 +44,8 @@ namespace Platform.Service;
 /// </summary>
 public sealed class SkillRoutingAgent : DelegatingAIAgent
 {
-    // 路由指令:LLM 只做「選工具」,只輸出工具名稱或 NONE;不帶歷史/mem0,避免污染路由判斷。
-    // 逐字沿用 ChatService.cs 的 RoutingInstruction,一字不改(既有 ChatSkillRoutingTests 以此斷言)。
-    private const string RoutingInstruction =
-        "你是一個路由器。以下是可用工具，每行「名稱: 說明」。判斷使用者訊息最適合哪一個工具，只輸出那個工具的名稱（原樣、不加任何其他字）；若只是閒聊、打招呼、或不需要查資料／計算，只輸出 NONE。"
-        + "若清單中有『說明明確對應到這個問題主題』的專門工具，優先選它；通用的知識庫檢索工具（例如一般文件問答）只有在沒有更專門的工具時才選。"
-        // 與 ChatContextProvider 的護欄同一組數字語義:純聊天兜底會把這類問題判成「查無此數據」,所以路由這一關就必須把它們導向工具,否則等於沒答。
-        + "特別注意：若使用者問題涉及數字、金額、比率、年增率（YoY）、統計、排名或跨期間比較，幾乎都需要專門工具查證,只要清單中有說明相符的工具就選它,不要因為題目像在算數學就輸出 NONE。"
-        + "務必只輸出一個工具名稱或 NONE，不要多餘文字。";
-
-    // 摘要指令:LLM 只把工具的確定性結果改寫成自然語言,嚴禁竄改任何數字(gpt-4o-mini 自行心算常算錯)。
-    // 逐字沿用 ChatService.cs 的 SummaryInstruction,一字不改(02-spec §5.1 明令,ChatSkillRoutingTests 有字串相等斷言)。
-    private const string SummaryInstruction =
-        "把以下『工具結果』改寫成給使用者的自然、完整中文回覆。數字、金額、比率、百分比一字都不得更改、刪除或新增，只做語言潤飾與說明。若工具結果表示查無資料或發生錯誤，如實轉達，不要編造。";
-
+    // 路由/摘要指令(以及護欄、mem0 前綴)都住在 PromptComposition:P1 起兩條鏈路共用同一個 assembler,
+    // 常數是其預設來源,manifest 生效時以同名 kind(routing / summary)替換。
     private readonly ILlmAgent _bareLlm;
     private readonly InMemoryChatHistoryProvider _historyProvider;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -89,7 +77,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
         var identity = scope.ServiceProvider.GetRequiredService<IChatIdentityAccessor>();
         var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowService>();
 
-        var summaryMessages = await TryRouteAndExecuteAsync(lastUser, identity.CurrentUser, workflows, cancellationToken);
+        var summaryMessages = await TryRouteAndExecuteAsync(
+            lastUser, identity.CurrentUser, identity, workflows, scope.ServiceProvider, cancellationToken);
 
         if (summaryMessages is null)
         {
@@ -116,7 +105,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
         var identity = scope.ServiceProvider.GetRequiredService<IChatIdentityAccessor>();
         var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowService>();
 
-        var summaryMessages = await TryRouteAndExecuteAsync(lastUser, identity.CurrentUser, workflows, cancellationToken);
+        var summaryMessages = await TryRouteAndExecuteAsync(
+            lastUser, identity.CurrentUser, identity, workflows, scope.ServiceProvider, cancellationToken);
 
         if (summaryMessages is null)
         {
@@ -181,7 +171,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     }
 
     // ============================================================================
-    // 以下逐字搬自 ChatService(02-spec §5:TryRouteAndExecuteAsync + 5 個私有方法 + 3 個 prompt 常數)。
+    // 以下逐字搬自 ChatService(02-spec §5:TryRouteAndExecuteAsync + 5 個私有方法;prompt 常數自 P1 起
+    // 住在 PromptComposition,由呼叫端逐輪傳入,內容一字不改)。
     // 語意逐項保留,不放寬:匿名不路由 / 角色過濾 / builtin template-* 跳過 / SingleRequiredStringKey
     // 靜默跳過 / 最多兩次路由 / MatchTool 全等再寬鬆取最長名 / 路由決策不帶歷史與 mem0(裸 ILlmAgent)/
     // kb-query ABSTAIN → rag-qa 兜底 / 目錄失敗 best-effort 退純聊天 / 單一工具失敗回錯誤字串。
@@ -206,7 +197,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// 整段以 try/catch 包住:任何例外都吞成 null(退純聊天)並記 warning——一輪聊天絕不可因路由失敗而 500。
     /// </summary>
     private async Task<IReadOnlyList<LlmMessage>?> TryRouteAndExecuteAsync(
-        string message, UserContext? userCtx, IWorkflowService workflows, CancellationToken ct)
+        string message, UserContext? userCtx, IChatIdentityAccessor identity, IWorkflowService workflows,
+        IServiceProvider scoped, CancellationToken ct)
     {
         if (userCtx is null)
         {
@@ -221,13 +213,21 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
                 return null;
             }
 
+            // P1:路由/摘要 prompt 與護欄共用同一個 assembler;旗標關閉時 resolver 未註冊 → constants
+            // (persona 傳 null:本層只用共享的 routing/summary,persona 是 transport 層的事)。傳入
+            // identity 讓本輪與 ChatContextProvider 共用同一次解析(中3,見 PromptCompositionResolver 文件)。
+            var resolver = scoped.GetService<PromptCompositionResolver>();
+            var prompts = resolver is null
+                ? PromptComposition.Defaults(null)
+                : await resolver.ResolveAsync(userCtx.TenantCode, null, identity, ct);
+
             // 路由最多兩次:第一次 NONE/無命中就再試一次(路由 LLM 偶爾漏選專門工具),第二次仍不中才退純聊天。
             LlmTool? selected = null;
             string lastReply = "";
             var attempt = 0;
             for (attempt = 1; attempt <= 2; attempt++)
             {
-                var (tool, reply) = await RouteAsync(tools, message, ct);
+                var (tool, reply) = await RouteAsync(tools, message, prompts.Routing, ct);
                 lastReply = reply;
                 if (tool is not null)
                 {
@@ -245,7 +245,7 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
             // 執行確定性工具:以使用者原訊息為輸入;回傳已是抽取後的答案字串(business_result 等)或工具自身的錯誤/查無字串。
             var toolResult = await selected.InvokeAsync(message, ct);
-            return BuildSummaryMessages(message, toolResult);
+            return BuildSummaryMessages(message, toolResult, prompts.Summary);
         }
         catch (Exception ex)
         {
@@ -258,12 +258,13 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// 路由:以工具目錄(每行「名稱: 說明」)+ 使用者訊息做一次「無工具」的路由呼叫,回選中的工具或 null(NONE/無法解析)。
     /// 刻意不帶短期歷史與 mem0,避免污染路由判斷。
     /// </summary>
-    private async Task<(LlmTool? Tool, string Reply)> RouteAsync(IReadOnlyList<LlmTool> tools, string message, CancellationToken ct)
+    private async Task<(LlmTool? Tool, string Reply)> RouteAsync(
+        IReadOnlyList<LlmTool> tools, string message, string routingInstruction, CancellationToken ct)
     {
         var catalog = string.Join("\n", tools.Select(t => $"{t.Name}: {t.Description}"));
         var routeMessages = new List<LlmMessage>
         {
-            new("system", RoutingInstruction + "\n\n" + catalog),
+            new("system", routingInstruction + "\n\n" + catalog),
             new("user", message),
         };
 
@@ -322,10 +323,11 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     }
 
     /// <summary>摘要訊息:system(禁改數字)+ user(原問題 + 工具結果)。LLM 只潤飾,不計算。</summary>
-    private static IReadOnlyList<LlmMessage> BuildSummaryMessages(string message, string toolResult) =>
+    private static IReadOnlyList<LlmMessage> BuildSummaryMessages(
+        string message, string toolResult, string summaryInstruction) =>
         new List<LlmMessage>
         {
-            new("system", SummaryInstruction),
+            new("system", summaryInstruction),
             new("user", $"使用者問題：{message}\n\n工具結果：\n{toolResult}"),
         };
 

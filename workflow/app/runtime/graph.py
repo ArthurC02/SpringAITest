@@ -38,6 +38,7 @@ from app.runtime.models import (
     canonical_json_sha256,
 )
 from app.runtime.policy import PolicyDecision, PreActionPolicy
+from app.runtime.prompt_manifest import PromptManifestUnavailable
 from app.runtime.output_contract import output_matches
 from app.runtime.tool_boundary import (
     DirectToolDenied,
@@ -251,6 +252,9 @@ async def _model_step(
                 0,
             ),
         )
+    except PromptManifestUnavailable:
+        # 帶 pin 的 run 不允許組成漂移：取不到 manifest 就終止，不退回 constants。
+        return _failure(state, context, "model_step", "prompt_manifest_unavailable")
     except ModelContextTooLarge:
         return _failure(state, context, "model_step", "runtime_context_too_large")
     except ModelProtocolError:

@@ -65,6 +65,20 @@ public sealed class InMemoryPromptArtifactRepository : IPromptArtifactRepository
         }
     }
 
+    public Task<(string Content, string ContentSha256)?> GetComponentContentAsync(
+        string tenantId, string kind, int revision, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            var entry = _components.TryGetValue((tenantId, kind), out var revisions)
+                ? revisions.FirstOrDefault(e => e.Record.Revision == revision)
+                : null;
+            return Task.FromResult(entry is null
+                ? ((string Content, string ContentSha256)?)null
+                : (entry.Content, entry.Record.ContentSha256));
+        }
+    }
+
     public Task<PromptManifestRecord> CreateManifestAsync(
         string tenantId, string manifestCanonical, string createdBy, CancellationToken ct)
     {

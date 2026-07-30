@@ -198,23 +198,37 @@ internal static class AgentRunSnapshotBuilder
             });
         }
 
+        var agentNode = new JsonObject
+        {
+            ["id"] = agent.AgentId,
+            ["revision"] = agent.Revision,
+            ["name"] = agent.Name,
+            ["system_prompt"] = definition["system_prompt"]?.DeepClone() ?? string.Empty,
+            ["execution_roles"] = definition["execution_roles"]?.DeepClone() ?? new JsonArray(),
+            ["audience"] = definition["audience"]?.DeepClone() ?? new JsonArray(),
+            ["output_contract"] = definition["output_contract"]?.DeepClone() ?? new JsonObject(),
+            ["business_rules"] = definition["business_rules"]?.DeepClone() ?? new JsonObject(),
+            ["allowed_tools"] = allowedTools.DeepClone(),
+            ["knowledge_sources"] = knowledgeSources.DeepClone(),
+            ["runtime_limits"] = runtimeLimits,
+        };
+        // P1 optional pin (plan 03 §3): present only when the published Agent revision pinned a
+        // prompt manifest. Absent entirely otherwise, so an unpinned snapshot stays byte-for-byte
+        // identical to the pre-P1 shape.
+        if (agent.PromptManifestRevision is int pinnedManifestRevision
+            && agent.PromptManifestSha256 is string pinnedManifestSha256)
+        {
+            agentNode["prompt_manifest"] = new JsonObject
+            {
+                ["revision"] = pinnedManifestRevision,
+                ["sha256"] = pinnedManifestSha256,
+            };
+        }
+
         var snapshot = new JsonObject
         {
             ["run_id"] = runId,
-            ["agent"] = new JsonObject
-            {
-                ["id"] = agent.AgentId,
-                ["revision"] = agent.Revision,
-                ["name"] = agent.Name,
-                ["system_prompt"] = definition["system_prompt"]?.DeepClone() ?? string.Empty,
-                ["execution_roles"] = definition["execution_roles"]?.DeepClone() ?? new JsonArray(),
-                ["audience"] = definition["audience"]?.DeepClone() ?? new JsonArray(),
-                ["output_contract"] = definition["output_contract"]?.DeepClone() ?? new JsonObject(),
-                ["business_rules"] = definition["business_rules"]?.DeepClone() ?? new JsonObject(),
-                ["allowed_tools"] = allowedTools.DeepClone(),
-                ["knowledge_sources"] = knowledgeSources.DeepClone(),
-                ["runtime_limits"] = runtimeLimits,
-            },
+            ["agent"] = agentNode,
             ["workflow"] = new JsonObject
             {
                 ["id"] = workflow.WorkflowId,

@@ -182,6 +182,85 @@ public sealed class AgentRunSnapshotContractTests
             SkillHash.Sha256(Encoding.UTF8.GetBytes(built.StoredSnapshot)));
     }
 
+    /// <summary>
+    /// P1 (plan 03 §3): an unpinned Agent (no <c>prompt_manifest_revision</c>/<c>_sha256</c>) must
+    /// produce a snapshot with no <c>agent.prompt_manifest</c> key at all -- not a null placeholder --
+    /// so every pre-P1 caller's canonical bytes/hash are completely unaffected. The literal hash below
+    /// pins that shape; if it ever changes for an unpinned Agent, this test catches the drift.
+    /// </summary>
+    [Fact]
+    public void Snapshot_WithoutPromptManifestPin_OmitsKey_AndKeepsPinnedCanonicalHash()
+    {
+        var (agent, workflow) = MinimalAgentAndWorkflow(
+            Guid.Parse("51111111-1111-4111-8111-111111111111"), "unpinned-agent");
+
+        var built = AgentRunSnapshotBuilder.Build(
+            Guid.Parse("52222222-2222-4222-8222-222222222222"),
+            "tenant-a", "admin-a", "ADMIN", Array.Empty<string>(),
+            agent, workflow, Array.Empty<SkillSnapshotSource>());
+
+        using var snapshot = JsonDocument.Parse(built.StoredSnapshot);
+        Assert.False(snapshot.RootElement.GetProperty("agent").TryGetProperty("prompt_manifest", out _));
+        Assert.Equal(
+            "b070628a2e7247136c5c02d9f4afe33c970eaf05462bf38e94b6f6922b6c7afc",
+            built.SnapshotHash);
+    }
+
+    /// <summary>Pinned counterpart: the key appears only under <c>agent</c>, with the exact values.</summary>
+    [Fact]
+    public void Snapshot_WithPromptManifestPin_EmbedsRevisionAndSha256_UnderAgentOnly()
+    {
+        var pinnedSha256 = new string('7', 64);
+        var (agent, workflow) = MinimalAgentAndWorkflow(
+            Guid.Parse("53111111-1111-4111-8111-111111111111"),
+            "pinned-agent",
+            promptManifestRevision: 5,
+            promptManifestSha256: pinnedSha256);
+
+        var built = AgentRunSnapshotBuilder.Build(
+            Guid.Parse("53222222-2222-4222-8222-222222222222"),
+            "tenant-a", "admin-a", "ADMIN", Array.Empty<string>(),
+            agent, workflow, Array.Empty<SkillSnapshotSource>());
+
+        using var snapshot = JsonDocument.Parse(built.StoredSnapshot);
+        var pin = snapshot.RootElement.GetProperty("agent").GetProperty("prompt_manifest");
+        Assert.Equal(5, pin.GetProperty("revision").GetInt32());
+        Assert.Equal(pinnedSha256, pin.GetProperty("sha256").GetString());
+        // The pin lives only under `agent`; nothing else in the snapshot shape moves.
+        Assert.False(snapshot.RootElement.TryGetProperty("prompt_manifest", out _));
+    }
+
+    private static (PublishedAgentSnapshotSource Agent, WorkflowSnapshotSource Workflow) MinimalAgentAndWorkflow(
+        Guid agentId,
+        string name,
+        int? promptManifestRevision = null,
+        string? promptManifestSha256 = null)
+    {
+        var definition = DefinitionWithPadding(
+            string.Empty, Array.Empty<AgentRevisionSkillInfo>());
+        var agent = new PublishedAgentSnapshotSource(
+            agentId,
+            name,
+            1,
+            definition,
+            SkillHash.Sha256(definition),
+            Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+            AgentDefaults.RuntimeWorkflowRevision,
+            Array.Empty<AgentRevisionSkillInfo>(),
+            promptManifestRevision,
+            promptManifestSha256);
+        var workflowDefinition = AgentRunSnapshotBuilder.CanonicalizeJson(
+            AgentDefaults.RuntimeWorkflowDefinition);
+        var workflow = new WorkflowSnapshotSource(
+            Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+            AgentDefaults.RuntimeWorkflowRevision,
+            1,
+            workflowDefinition,
+            SkillHash.Sha256(workflowDefinition),
+            "1");
+        return (agent, workflow);
+    }
+
     [Fact]
     public void CanonicalVector_PinsUtf16KeyOrderNumberLexemesAndEscapes()
     {

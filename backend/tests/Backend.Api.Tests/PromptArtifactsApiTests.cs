@@ -26,6 +26,7 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("POST", "/api/prompt-manifests")]
     [InlineData("GET", "/api/prompt-manifests/1")]
     [InlineData("GET", "/api/prompt-manifests/by-sha/abc")]
+    [InlineData("GET", "/api/prompt-manifests/1/resolved")]
     public async Task FlagOff_HidesEveryPromptArtifactRoute(string method, string path)
     {
         // PROMPT_ARTIFACTS_ENABLED is unset on the shared factory (defaults false). The gate sits
@@ -238,6 +239,105 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
+    public async Task ResolvedManifest_ReturnsComponentsInManifestOrder_AndIsTheOnlyRouteWithContent()
+    {
+        // Secret scan (plan 03 §3): raw content must appear on the resolved route and NOWHERE else.
+        const string GuardSecret = "RESOLVED-GUARD-SECRET";
+        const string PersonaSecret = "RESOLVED-PERSONA-SECRET";
+        using var factory = new PromptArtifactsEnabledFactory();
+        var client = Admin(factory);
+
+        // Published out of alphabetical order; the manifest's own canonical (ordinal-sorted) order
+        // is "guard" then "persona" regardless of publish/reference order.
+        await PublishComponentAsync(client, "persona", PersonaSecret);
+        await PublishComponentAsync(client, "guard", GuardSecret);
+        var manifest = await CreateManifestAsync(
+            client, new JsonObject { ["persona"] = 1, ["guard"] = 1 });
+        var revision = manifest["revision"]!.GetValue<int>();
+        var sha = manifest["manifest_sha256"]!.GetValue<string>();
+
+        var resolvedResponse = await client.GetAsync($"/api/prompt-manifests/{revision}/resolved");
+        Assert.Equal(HttpStatusCode.OK, resolvedResponse.StatusCode);
+        var resolved = await resolvedResponse.ReadJsonAsync();
+        Assert.Equal(revision, resolved["revision"]!.GetValue<int>());
+        Assert.Equal(sha, resolved["manifest_sha256"]!.GetValue<string>());
+        Assert.Equal(PromptArtifactContract.SchemaVersion, resolved["schema_version"]!.GetValue<int>());
+        Assert.Equal("tool-hash", resolved["tool_catalog_hash"]!.GetValue<string>());
+        Assert.Equal("skill-hash", resolved["skill_catalog_hash"]!.GetValue<string>());
+
+        var components = resolved["components"]!.AsArray();
+        Assert.Equal(
+            new[] { "guard", "persona" },
+            components.Select(c => c!["kind"]!.GetValue<string>()));
+        var guard = components.Single(c => c!["kind"]!.GetValue<string>() == "guard")!;
+        Assert.Equal(1, guard["revision"]!.GetValue<int>());
+        Assert.Equal(GuardSecret, guard["content"]!.GetValue<string>());
+        Assert.Equal(
+            Backend.Api.Skills.SkillHash.Sha256(GuardSecret), guard["content_sha256"]!.GetValue<string>());
+        var persona = components.Single(c => c!["kind"]!.GetValue<string>() == "persona")!;
+        Assert.Equal(PersonaSecret, persona["content"]!.GetValue<string>());
+
+        // Every sibling prompt-* route still projects only digest/summary -- never raw text.
+        var siblingBodies = new List<string>
+        {
+            await (await client.GetAsync("/api/prompt-components")).Content.ReadAsStringAsync(),
+            await (await client.GetAsync("/api/prompt-components/guard/1")).Content.ReadAsStringAsync(),
+            await (await client.GetAsync("/api/prompt-components/persona/1")).Content.ReadAsStringAsync(),
+            await (await client.GetAsync("/api/prompt-manifests")).Content.ReadAsStringAsync(),
+            await (await client.GetAsync($"/api/prompt-manifests/{revision}")).Content.ReadAsStringAsync(),
+            await (await client.GetAsync($"/api/prompt-manifests/by-sha/{sha}")).Content.ReadAsStringAsync(),
+        };
+        foreach (var body in siblingBodies)
+        {
+            Assert.DoesNotContain(GuardSecret, body, StringComparison.Ordinal);
+            Assert.DoesNotContain(PersonaSecret, body, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task ResolvedManifest_IsNotAdminGated_UnlikeItsSiblingBuilderRoutes()
+    {
+        // Deliberate divergence (plan 03 §3 / backend/AGENTS.md): every other prompt-* route is
+        // ADMIN-only Builder management; the resolved route is called at execution time by
+        // Platform/Workflow assemblers, so it must stay reachable with only a tenant header.
+        using var factory = new PromptArtifactsEnabledFactory();
+        var owner = Admin(factory, "resolved-nonadmin");
+        await PublishComponentAsync(owner, "guard", "GUARD");
+        await CreateManifestAsync(owner, new JsonObject { ["guard"] = 1 });
+
+        var nonAdmin = factory.CreateInternalClient()
+            .WithTenant("resolved-nonadmin")
+            .WithRole("USER")
+            .WithUser("caller");
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await nonAdmin.GetAsync("/api/prompt-manifests/1/resolved")).StatusCode);
+
+        // The sibling Builder route on the exact same tenant still requires ADMIN.
+        Assert.Equal(
+            HttpStatusCode.Forbidden,
+            (await nonAdmin.GetAsync("/api/prompt-manifests/1")).StatusCode);
+    }
+
+    [Fact]
+    public async Task ResolvedManifest_UnknownRevision_AndCrossTenant_AreNotFound()
+    {
+        using var factory = new PromptArtifactsEnabledFactory();
+        var owner = Admin(factory, "resolved-a");
+        await PublishComponentAsync(owner, "guard", "GUARD");
+        await CreateManifestAsync(owner, new JsonObject { ["guard"] = 1 });
+
+        Assert.Equal(
+            HttpStatusCode.NotFound,
+            (await owner.GetAsync("/api/prompt-manifests/999/resolved")).StatusCode);
+
+        var other = Admin(factory, "resolved-b");
+        Assert.Equal(
+            HttpStatusCode.NotFound,
+            (await other.GetAsync("/api/prompt-manifests/1/resolved")).StatusCode);
+    }
+
+    [Fact]
     public async Task Publish_PinsManifestIntoSnapshot_UnpinnedIsUnchanged_AndPinNeverDrifts()
     {
         using var factory = new PromptArtifactsEnabledFactory();
@@ -284,6 +384,48 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(
             HttpStatusCode.UnprocessableEntity,
             (await PublishAgentRequestAsync(client, id, promptManifestRevision: 1)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Publish_PinnedManifest_FlowsIntoDirectRunExecutionSnapshot()
+    {
+        using var factory = new PromptArtifactsEnabledFactory();
+        var client = Admin(factory);
+        await PublishComponentAsync(client, "guard", "GUARD-V1");
+        var manifest = await CreateManifestAsync(client, new JsonObject { ["guard"] = 1 });
+        var manifestRevision = manifest["revision"]!.GetValue<int>();
+        var manifestSha = manifest["manifest_sha256"]!.GetValue<string>();
+
+        // A runnable Agent needs an audience the caller matches; ValidAgentBody omits it (those tests
+        // never execute a run), so this test supplies it directly.
+        var body = ValidAgentBody("prompt-pin-run-" + Guid.NewGuid().ToString("N"));
+        body["audience"] = new JsonArray("ADMIN");
+        var create = await client.PostAsJsonAsync("/api/agents", body);
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        var agentId = (await create.ReadJsonAsync())["id"]!.GetValue<string>();
+        await ValidateAgentAsync(client, agentId);
+        var publish = await PublishAgentRequestAsync(client, agentId, manifestRevision);
+        Assert.Equal(HttpStatusCode.OK, publish.StatusCode);
+
+        var start = new HttpRequestMessage(HttpMethod.Post, $"/api/agents/{agentId}/runs")
+        {
+            Content = JsonContent.Create(new { message = "hi" }),
+        };
+        start.Headers.TryAddWithoutValidation("Idempotency-Key", "prompt-pin-run-1");
+        var response = await client.SendAsync(start);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var run = await response.ReadJsonAsync();
+
+        var artifactResponse = await client.GetAsync(
+            $"/api/agent-runs/{run["id"]!.GetValue<string>()}/execution-artifact");
+        Assert.Equal(HttpStatusCode.OK, artifactResponse.StatusCode);
+        var envelope = await artifactResponse.ReadJsonAsync();
+        var canonicalBytes = Convert.FromBase64String(
+            envelope["snapshot_canonical_base64"]!.GetValue<string>());
+        var snapshot = JsonNode.Parse(System.Text.Encoding.UTF8.GetString(canonicalBytes))!;
+        var pin = snapshot["agent"]!["prompt_manifest"]!;
+        Assert.Equal(manifestRevision, pin["revision"]!.GetValue<int>());
+        Assert.Equal(manifestSha, pin["sha256"]!.GetValue<string>());
     }
 
     // ---- helpers ----

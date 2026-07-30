@@ -1,3 +1,4 @@
+using Platform.Service;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Web.Auth;
@@ -19,6 +20,7 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
     private const string PersistedResponseKey = "chat.persist.response";
     private const string OrchestratorIdKey = "chat.request.orchestratorId";
     private const string TurnMetadataKey = "chat.turn.metadata";
+    private const string PromptManifestCacheKey = "chat.prompt.manifest.cache";
     private const int MaxLogicalAttemptIdLength = 512;
 
     private readonly IHttpContextAccessor _httpContextAccessor;
@@ -98,6 +100,17 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
         set => SetItem(TurnMetadataKey, value);
     }
 
+    /// <summary>
+    /// 存 HttpContext.Items(與其餘本輪狀態同一機制):agent 管線元件各自 CreateScope 解析到不同的
+    /// IChatIdentityAccessor 實例,但都讀寫同一個 HttpContext,故 SkillRoutingAgent 與 ChatContextProvider
+    /// 這裡天然共用同一份快取,不需要額外的 per-scope 傳遞機制。
+    /// </summary>
+    public PromptManifestResolutionCache? PromptManifestCache
+    {
+        get => _httpContextAccessor.HttpContext?.Items[PromptManifestCacheKey] as PromptManifestResolutionCache;
+        set => SetItem(PromptManifestCacheKey, value);
+    }
+
     public void SetRequestKeys(string? userId, string? conversationId, UserContext? userCtx)
     {
         // userCtx 參數在 Web 實作刻意不使用:CurrentUser 恆以 HttpContext.User 為準(唯一信任來源),
@@ -108,6 +121,7 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
         SetItem(PersistFailureKey, null);
         SetItem(PersistedResponseKey, null);
         SetItem(TurnMetadataKey, null);
+        SetItem(PromptManifestCacheKey, null);
     }
 
     private void SetItem(string key, object? value)

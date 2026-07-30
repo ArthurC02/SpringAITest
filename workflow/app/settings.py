@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     agent_write_tools_allowlist: str = ""
     agent_write_tools_tenant_allowlist: str = ""
     multi_agent_dispatch_enabled: bool = False
+    # P1 prompt composition artifacts。off（預設）＝ runtime 沿用 constants 組裝，輸出
+    # byte-for-byte 不變；on 且 snapshot 帶 prompt_manifest pin ＝ SYSTEM GOVERNANCE 段
+    # 改用 Backend pinned 的 governance_frame component（取不到／不符 pin 一律 fail closed）。
+    # shadow 是 on 之下的 observe-only 子模式：兩種組成都算、只比 SHA 並記錄差異，實際
+    # 送進 provider 的仍是 constants 版；shadow 關掉才真正切換。
+    prompt_artifacts_enabled: bool = False
+    prompt_artifacts_shadow: bool = False
     # E1 is independently fail-closed.  The Root composition also requires
     # multi_agent_dispatch_enabled, so this flag can never activate a second
     # runtime path on its own.

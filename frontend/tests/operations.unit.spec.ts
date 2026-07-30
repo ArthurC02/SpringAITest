@@ -1,5 +1,15 @@
 import { expect, test } from 'vitest'
-import { normalizeMetrics, recordRegression, sumOrUnknown } from '../src/api/operations'
+import {
+  createEvalRun,
+  diffEvalRuns,
+  normalizeEvalRun,
+  normalizeEvalSuiteDetail,
+  normalizeMetrics,
+  recordRegression,
+  sumOrUnknown,
+} from '../src/api/operations'
+import { ApiError, isNotFound } from '../src/api/http'
+import type { EvalRun } from '../src/types'
 
 const CAMEL_CASE_PAYLOAD = {
   releaseGate: { regressionPassed: true, overrideActive: false, auditEntries: 3 },
@@ -155,4 +165,222 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
       },
     ])
   })
+})
+
+const EVAL_SUITE_DETAIL_CAMEL = {
+  suiteId: 'CSR-EVAL-001',
+  currentRevision: 2,
+  createdAt: '2026-01-01T00:00:00Z',
+  updatedAt: '2026-02-01T00:00:00Z',
+  revisions: [
+    { revision: 2, casesSha256: 'abc123def456abc123def456', caseCount: 6, createdBy: 'admin-a', createdAt: '2026-02-01T00:00:00Z' },
+    { revision: 1, casesSha256: 'aaa111bbb222aaa111bbb222', caseCount: 5, createdBy: 'admin-a', createdAt: '2026-01-01T00:00:00Z' },
+  ],
+}
+
+const EVAL_SUITE_DETAIL_SNAKE = {
+  suite_id: 'CSR-EVAL-001',
+  current_revision: 2,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-02-01T00:00:00Z',
+  revisions: [
+    { revision: 2, cases_sha256: 'abc123def456abc123def456', case_count: 6, created_by: 'admin-a', created_at: '2026-02-01T00:00:00Z' },
+    { revision: 1, cases_sha256: 'aaa111bbb222aaa111bbb222', case_count: 5, created_by: 'admin-a', created_at: '2026-01-01T00:00:00Z' },
+  ],
+}
+
+const EVAL_SUITE_DETAIL_EXPECTED = {
+  suiteId: 'CSR-EVAL-001',
+  currentRevision: 2,
+  createdAt: '2026-01-01T00:00:00Z',
+  updatedAt: '2026-02-01T00:00:00Z',
+  revisions: [
+    { revision: 2, casesSha256: 'abc123def456abc123def456', caseCount: 6, createdBy: 'admin-a', createdAt: '2026-02-01T00:00:00Z' },
+    { revision: 1, casesSha256: 'aaa111bbb222aaa111bbb222', caseCount: 5, createdBy: 'admin-a', createdAt: '2026-01-01T00:00:00Z' },
+  ],
+}
+
+const EVAL_RUN_CAMEL = {
+  id: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+  suiteId: 'CSR-EVAL-001',
+  suiteRevision: 2,
+  candidate: { kind: 'skill', ref: { name: 'kb-query' }, identitySha256: 'deadbeefdeadbeef' },
+  runnerVersion: 'e2-runner-1',
+  startedAt: '2026-07-30T00:00:00Z',
+  completedAt: '2026-07-30T00:00:05Z',
+  passCount: 4,
+  failCount: 1,
+  errorCount: 0,
+  cases: [
+    { caseId: 'case-1', canonicalIdentity: 'identity-1', verdict: 'PASS', metrics: { latencyMs: 120 }, failureReason: null },
+    { caseId: 'case-2', canonicalIdentity: 'identity-2', verdict: 'FAIL', metrics: { latencyMs: 80 }, failureReason: 'mismatch' },
+  ],
+}
+
+const EVAL_RUN_SNAKE = {
+  id: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+  suite_id: 'CSR-EVAL-001',
+  suite_revision: 2,
+  candidate: { kind: 'skill', ref: { name: 'kb-query' }, identity_sha256: 'deadbeefdeadbeef' },
+  runner_version: 'e2-runner-1',
+  started_at: '2026-07-30T00:00:00Z',
+  completed_at: '2026-07-30T00:00:05Z',
+  pass_count: 4,
+  fail_count: 1,
+  error_count: 0,
+  cases: [
+    { case_id: 'case-1', canonical_identity: 'identity-1', verdict: 'PASS', metrics: { latency_ms: 120 }, failure_reason: null },
+    { case_id: 'case-2', canonical_identity: 'identity-2', verdict: 'FAIL', metrics: { latency_ms: 80 }, failure_reason: 'mismatch' },
+  ],
+}
+
+const EVAL_RUN_EXPECTED = {
+  id: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+  suiteId: 'CSR-EVAL-001',
+  suiteRevision: 2,
+  candidate: { kind: 'skill', identitySha256: 'deadbeefdeadbeef' },
+  runnerVersion: 'e2-runner-1',
+  startedAt: '2026-07-30T00:00:00Z',
+  completedAt: '2026-07-30T00:00:05Z',
+  passCount: 4,
+  failCount: 1,
+  errorCount: 0,
+  cases: [
+    { caseId: 'case-1', canonicalIdentity: 'identity-1', verdict: 'PASS', latencyMs: 120, failureReason: null },
+    { caseId: 'case-2', canonicalIdentity: 'identity-2', verdict: 'FAIL', latencyMs: 80, failureReason: 'mismatch' },
+  ],
+}
+
+test.describe('E4 eval suite/run normalizers: camel/snake dual-form parity', () => {
+  test('normalizeEvalSuiteDetail normalizes camelCase and snake_case identically', () => {
+    expect(normalizeEvalSuiteDetail(EVAL_SUITE_DETAIL_CAMEL)).toEqual(EVAL_SUITE_DETAIL_EXPECTED)
+    expect(normalizeEvalSuiteDetail(EVAL_SUITE_DETAIL_SNAKE)).toEqual(EVAL_SUITE_DETAIL_EXPECTED)
+  })
+
+  test('normalizeEvalRun normalizes camelCase and snake_case identically, including nested cases', () => {
+    expect(normalizeEvalRun(EVAL_RUN_CAMEL)).toEqual(EVAL_RUN_EXPECTED)
+    expect(normalizeEvalRun(EVAL_RUN_SNAKE)).toEqual(EVAL_RUN_EXPECTED)
+  })
+
+  test('normalizeEvalRun leaves cases null for a list-summary payload (no cases field)', () => {
+    const run = normalizeEvalRun({ id: 'r1', suite_id: 's', suite_revision: 1, candidate: { kind: 'skill' } })
+    expect(run.cases).toBeNull()
+  })
+
+  test('createEvalRun sends Idempotency-Key header and omits budget_ms when not given', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ body: unknown; headers: Record<string, string> }> = []
+    globalThis.fetch = async (_input, init) => {
+      requests.push({
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      })
+      return new Response(JSON.stringify(EVAL_RUN_SNAKE), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+
+    try {
+      await createEvalRun('CSR-EVAL-001', 2, { kind: 'skill', ref: { name: 'kb-query' } }, 'idem-key-1')
+      await createEvalRun('CSR-EVAL-001', 2, { kind: 'skill', ref: { name: 'kb-query' } }, 'idem-key-2', 5000)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(requests[0].body).toEqual({
+      suite_id: 'CSR-EVAL-001',
+      revision: 2,
+      candidate: { kind: 'skill', ref: { name: 'kb-query' } },
+    })
+    expect(requests[0].headers['idempotency-key']).toBe('idem-key-1')
+    expect(requests[1].body).toEqual({
+      suite_id: 'CSR-EVAL-001',
+      revision: 2,
+      candidate: { kind: 'skill', ref: { name: 'kb-query' } },
+      budget_ms: 5000,
+    })
+  })
+})
+
+test.describe('E4 eval baseline/candidate delta: pure client-side per-case diff', () => {
+  function run(id: string, suiteId: string, cases: EvalRun['cases']): EvalRun {
+    return {
+      id,
+      suiteId,
+      suiteRevision: 1,
+      candidate: { kind: 'skill', identitySha256: 'x' },
+      runnerVersion: 'v1',
+      startedAt: null,
+      completedAt: null,
+      passCount: 0,
+      failCount: 0,
+      errorCount: 0,
+      cases,
+    }
+  }
+
+  test('flags a PASS→FAIL case as regressed and a FAIL→PASS case as improved', () => {
+    const baseline = run('baseline', 'S', [
+      { caseId: 'case-1', canonicalIdentity: null, verdict: 'PASS', latencyMs: 10, failureReason: null },
+      { caseId: 'case-2', canonicalIdentity: null, verdict: 'FAIL', latencyMs: 10, failureReason: 'x' },
+    ])
+    const candidate = run('candidate', 'S', [
+      { caseId: 'case-1', canonicalIdentity: null, verdict: 'FAIL', latencyMs: 12, failureReason: 'broke' },
+      { caseId: 'case-2', canonicalIdentity: null, verdict: 'PASS', latencyMs: 9, failureReason: null },
+    ])
+
+    const delta = diffEvalRuns(baseline, candidate)
+
+    expect(delta).toEqual([
+      { caseId: 'case-1', baselineVerdict: 'PASS', candidateVerdict: 'FAIL', status: 'regressed' },
+      { caseId: 'case-2', baselineVerdict: 'FAIL', candidateVerdict: 'PASS', status: 'improved' },
+    ])
+  })
+
+  test('flags cases only present on one side as added/removed, and identical verdicts as unchanged', () => {
+    const baseline = run('baseline', 'S', [
+      { caseId: 'case-1', canonicalIdentity: null, verdict: 'PASS', latencyMs: 10, failureReason: null },
+      { caseId: 'case-removed', canonicalIdentity: null, verdict: 'PASS', latencyMs: 10, failureReason: null },
+    ])
+    const candidate = run('candidate', 'S', [
+      { caseId: 'case-1', canonicalIdentity: null, verdict: 'PASS', latencyMs: 11, failureReason: null },
+      { caseId: 'case-added', canonicalIdentity: null, verdict: 'PASS', latencyMs: 8, failureReason: null },
+    ])
+
+    const delta = diffEvalRuns(baseline, candidate)
+
+    expect(delta).toEqual([
+      { caseId: 'case-1', baselineVerdict: 'PASS', candidateVerdict: 'PASS', status: 'unchanged' },
+      { caseId: 'case-added', baselineVerdict: null, candidateVerdict: 'PASS', status: 'added' },
+      { caseId: 'case-removed', baselineVerdict: 'PASS', candidateVerdict: null, status: 'removed' },
+    ])
+  })
+
+  // Decision-table tail: only a PASS<->non-PASS flip is regressed/improved; any other verdict
+  // change (e.g. a non-PASS ERROR verdict, which the runner uses for infra/timeout failures
+  // distinct from an assertion FAIL) is just 'changed'.
+  test('flags a FAIL→ERROR case as changed, PASS→ERROR as regressed, and ERROR→PASS as improved', () => {
+    const baseline = run('baseline', 'S', [
+      { caseId: 'case-fail-error', canonicalIdentity: null, verdict: 'FAIL', latencyMs: 10, failureReason: 'x' },
+      { caseId: 'case-pass-error', canonicalIdentity: null, verdict: 'PASS', latencyMs: 10, failureReason: null },
+      { caseId: 'case-error-pass', canonicalIdentity: null, verdict: 'ERROR', latencyMs: null, failureReason: 'timeout' },
+    ])
+    const candidate = run('candidate', 'S', [
+      { caseId: 'case-fail-error', canonicalIdentity: null, verdict: 'ERROR', latencyMs: null, failureReason: 'timeout' },
+      { caseId: 'case-pass-error', canonicalIdentity: null, verdict: 'ERROR', latencyMs: null, failureReason: 'timeout' },
+      { caseId: 'case-error-pass', canonicalIdentity: null, verdict: 'PASS', latencyMs: 9, failureReason: null },
+    ])
+
+    const delta = diffEvalRuns(baseline, candidate)
+
+    expect(delta).toEqual([
+      { caseId: 'case-error-pass', baselineVerdict: 'ERROR', candidateVerdict: 'PASS', status: 'improved' },
+      { caseId: 'case-fail-error', baselineVerdict: 'FAIL', candidateVerdict: 'ERROR', status: 'changed' },
+      { caseId: 'case-pass-error', baselineVerdict: 'PASS', candidateVerdict: 'ERROR', status: 'regressed' },
+    ])
+  })
+})
+
+test('isNotFound only matches a 404 ApiError, not other statuses or plain errors', () => {
+  expect(isNotFound(new ApiError(404, 'not found'))).toBe(true)
+  expect(isNotFound(new ApiError(500, 'boom'))).toBe(false)
+  expect(isNotFound(new Error('not found'))).toBe(false)
 })

@@ -988,4 +988,9 @@ public sealed class FakeConfigService : IConfigService
 
         return Task.FromResult(new ConfigItem(key, request.Value!, DateTime.UtcNow));
     }
+
+    // 這批 Web.Tests 從不啟用 PROMPT_ARTIFACTS_ENABLED(PromptCompositionResolver 因此未註冊,見
+    // CopilotAguiApiTests 的說明),本方法目前沒有呼叫端會踩到——回 null(canary 未啟用)即可。
+    public Task<ConfigItem?> GetRuntimeAsync(string key, UserContext ctx, CancellationToken ct = default)
+        => Task.FromResult<ConfigItem?>(null);
 }

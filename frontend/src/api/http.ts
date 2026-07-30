@@ -22,6 +22,12 @@ export function isConflict(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 409 || error.status === 412)
 }
 
+/** 404 常代表 fail-closed 的 feature flag 關閉(例:RUN_EVAL_ENABLED=false),
+ * 呼叫端可藉此顯示「未啟用」空狀態而非當成一般錯誤噴出。 */
+export function isNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404
+}
+
 // 401 全域處理：useAuth 掛上登出函式；任一 API 收到 401 就呼叫它清 session 回登入頁。
 let logoutHandler: (() => void) | null = null
 export function setLogoutHandler(fn: (() => void) | null): void {

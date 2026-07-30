@@ -128,3 +128,27 @@ public sealed record PromptManifestSummary(
     [property: JsonPropertyName("revision")] int Revision,
     [property: JsonPropertyName("manifest_sha256")] string ManifestSha256,
     [property: JsonPropertyName("created_at")] DateTime CreatedAt);
+
+/// <summary>
+/// One manifest-referenced component with its raw text. Only ever appears in
+/// <see cref="PromptManifestResolvedResponse"/> — every other component projection in this service
+/// carries <c>summary</c>/hash instead (see <see cref="PromptComponentResponse"/>).
+/// </summary>
+public sealed record PromptResolvedComponent(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("revision")] int Revision,
+    [property: JsonPropertyName("content_sha256")] string ContentSha256,
+    [property: JsonPropertyName("content")] string Content);
+
+/// <summary>
+/// The resolved manifest: canonical identity plus every referenced component's raw text, in the
+/// manifest's own (ordinal-sorted) reference order. Service-to-service only — see
+/// <c>PromptManifestResolutionController</c>.
+/// </summary>
+public sealed record PromptManifestResolvedResponse(
+    [property: JsonPropertyName("revision")] int Revision,
+    [property: JsonPropertyName("manifest_sha256")] string ManifestSha256,
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("tool_catalog_hash")] string ToolCatalogHash,
+    [property: JsonPropertyName("skill_catalog_hash")] string SkillCatalogHash,
+    [property: JsonPropertyName("components")] IReadOnlyList<PromptResolvedComponent> Components);

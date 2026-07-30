@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -10,7 +11,14 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from app.engine.tool_registry import ToolSpec
 from app.llm import get_direct_agent_runtime_llm
 from app.runtime.models import DirectAgentExecutionSnapshot, RuntimeCommand
+from app.runtime.prompt_manifest import (
+    PromptManifestUnavailable,
+    read_resolved_manifest,
+    sha256_text,
+)
 from app.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ModelProtocolError(RuntimeError):
@@ -25,6 +33,15 @@ MAX_PROVIDER_INPUT_UTF8_BYTES = 1_048_576
 MAX_SKILL_CATALOG_UTF8_BYTES = 32_768
 MAX_SKILL_DESCRIPTION_CHARS = 256
 MAX_RESOURCE_CATALOG_UTF8_BYTES = 8_192
+
+# 旗標關閉（或 snapshot 沒有 prompt_manifest pin）時的 SYSTEM GOVERNANCE 段：
+# 這串字面值就是改造前的輸出，golden test 釘住它。
+GOVERNANCE_FRAME = (
+    "SYSTEM GOVERNANCE: You are inside a bounded, read-only test run. "
+    "Use only the exposed actions. Never invent authority, data scope, "
+    "tool results, or Skill names. Request user input only when a read "
+    "source cannot supply a required fact. Make at most one action per turn."
+)
 
 
 @dataclass(frozen=True)
@@ -68,7 +85,7 @@ class LangChainRuntimeModel:
             tools=tools,
             resource_paths=resource_paths,
         )
-        system_frame, skill_catalog_truncated = _system_frame(
+        system_frame, skill_catalog_truncated, prompt_audit = await _system_frame(
             snapshot, active_instruction, active_skill_name
         )
         langchain_messages = [
@@ -125,6 +142,16 @@ class LangChainRuntimeModel:
         else:
             token_usage = int(raw_usage)
             usage_source = "provider"
+        audit = {
+            **_audit_metadata(
+                serialized_size,
+                skill_catalog_truncated,
+                resource_catalog_truncated,
+                usage_source,
+                max_output_tokens,
+            ),
+            **prompt_audit,
+        }
         if token_usage > remaining_token_budget:
             raise ModelProtocolError("provider token usage exceeded the run budget")
         if len(calls) > 1:
@@ -133,13 +160,7 @@ class LangChainRuntimeModel:
             return ModelTurn(
                 command=RuntimeCommand(kind="final", content=_text(response.content)),
                 token_usage=token_usage,
-                audit_metadata=_audit_metadata(
-                    serialized_size,
-                    skill_catalog_truncated,
-                    resource_catalog_truncated,
-                    usage_source,
-                    max_output_tokens,
-                ),
+                audit_metadata=audit,
             )
         call = calls[0]
         wire_name = str(call.get("name") or "")
@@ -157,17 +178,17 @@ class LangChainRuntimeModel:
                     arguments=arguments.get("input") or {},
                 ),
                 token_usage,
-                _audit_metadata(serialized_size, skill_catalog_truncated, resource_catalog_truncated, usage_source, max_output_tokens),
+                audit,
             )
         if command_name == "exit_skill":
-            return ModelTurn(RuntimeCommand(kind="exit_skill"), token_usage, _audit_metadata(serialized_size, skill_catalog_truncated, resource_catalog_truncated, usage_source, max_output_tokens))
+            return ModelTurn(RuntimeCommand(kind="exit_skill"), token_usage, audit)
         if command_name == "request_input":
             return ModelTurn(
                 RuntimeCommand(
                     kind="request_input", content=arguments.get("question")
                 ),
                 token_usage,
-                _audit_metadata(serialized_size, skill_catalog_truncated, resource_catalog_truncated, usage_source, max_output_tokens),
+                audit,
             )
         if command_name == "read_resource":
             return ModelTurn(
@@ -175,14 +196,14 @@ class LangChainRuntimeModel:
                     kind="read_resource", name=arguments.get("path")
                 ),
                 token_usage,
-                _audit_metadata(serialized_size, skill_catalog_truncated, resource_catalog_truncated, usage_source, max_output_tokens),
+                audit,
             )
         return ModelTurn(
             RuntimeCommand(
                 kind="tool_call", name=command_name, arguments=arguments
             ),
             token_usage,
-            _audit_metadata(serialized_size, skill_catalog_truncated, resource_catalog_truncated, usage_source, max_output_tokens),
+            audit,
         )
 
 
@@ -279,11 +300,17 @@ def _json_type(value: type, *, nullable: bool = False) -> dict[str, Any]:
     return {"type": [resolved, "null"] if nullable else resolved}
 
 
-def _system_frame(
+async def _system_frame(
     snapshot: DirectAgentExecutionSnapshot,
     active_instruction: str,
     active_skill_name: str,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, dict[str, Any]]:
+    """Deterministic assembler：三段組成的唯一來源（plan 03 §3.2）。
+
+    SYSTEM GOVERNANCE 段的來源由旗標與 snapshot pin 決定；PINNED SKILL SUMMARIES 與
+    AGENT INSTRUCTION 一直都由 snapshot 自己 pin，所以不改來源。旗標關閉或該 snapshot
+    沒有 pin 時，輸出與改造前 byte-for-byte 相同。
+    """
     skill_lines = [
         f"- {item.name}@{item.revision} ({item.kind}): "
         f"{item.description[:MAX_SKILL_DESCRIPTION_CHARS]}"
@@ -299,16 +326,67 @@ def _system_frame(
         if active_skill_name
         else ""
     )
-    return (
-        "SYSTEM GOVERNANCE: You are inside a bounded, read-only test run. "
-        "Use only the exposed actions. Never invent authority, data scope, "
-        "tool results, or Skill names. Request user input only when a read "
-        "source cannot supply a required fact. Make at most one action per turn.\n"
-        f"PINNED SKILL SUMMARIES:\n{skill_catalog}\n"
-        f"AGENT INSTRUCTION:\n{snapshot.agent.system_prompt}\n"
-        f"{active}",
-        skill_catalog_truncated,
+
+    def compose(governance_frame: str) -> str:
+        return (
+            f"{governance_frame}\n"
+            f"PINNED SKILL SUMMARIES:\n{skill_catalog}\n"
+            f"AGENT INSTRUCTION:\n{snapshot.agent.system_prompt}\n"
+            f"{active}"
+        )
+
+    constants_frame = compose(GOVERNANCE_FRAME)
+    pin = snapshot.agent.prompt_manifest
+    if not settings.prompt_artifacts_enabled or pin is None:
+        return constants_frame, skill_catalog_truncated, {}
+
+    # snapshot.caller 已在 preflight 驗過等於請求身分，形狀也符合 internal_headers
+    # 需要的 Identity，所以這裡不必再多傳一個 RequestContext。
+    shadow = settings.prompt_artifacts_shadow
+    try:
+        manifest = await read_resolved_manifest(pin, snapshot.caller)
+    except PromptManifestUnavailable:
+        if not shadow:
+            raise
+        # Shadow 只是 observe-only：manifest 不可達不得殺掉整條 run，降級回 constants，
+        # 只記警告（不含 pin 以外的原文）。真正切換（shadow=false）仍維持 fail closed。
+        logger.warning(
+            "prompt manifest unavailable in shadow mode: pin_revision=%s "
+            "pin_sha256=%s",
+            pin.revision,
+            pin.sha256,
+        )
+        return (
+            constants_frame,
+            skill_catalog_truncated,
+            {
+                "prompt_composition_source": "constants_shadow",
+                "prompt_manifest_resolved": False,
+            },
+        )
+    manifest_frame = compose(manifest.required_governance_frame())
+    audit = {
+        "prompt_manifest_revision": manifest.revision,
+        "prompt_manifest_sha256": manifest.manifest_sha256,
+        "prompt_composition_source": "constants_shadow" if shadow else "manifest",
+    }
+    if not shadow:
+        return manifest_frame, skill_catalog_truncated, audit
+    # Observe-only：兩種組成都算、只比 SHA，實際送進 provider 的仍是 constants 版。
+    # 記錄兩個 hash 就足以判斷是否可以切換；原文永遠不進 log。
+    audit["prompt_shadow_match"] = sha256_text(manifest_frame) == sha256_text(
+        constants_frame
     )
+    if not audit["prompt_shadow_match"]:
+        logger.warning(
+            "prompt composition shadow mismatch: manifest_revision=%s "
+            "manifest_sha256=%s manifest_frame_sha256=%s constants_frame_sha256=%s",
+            manifest.revision,
+            manifest.manifest_sha256,
+            sha256_text(manifest_frame),
+            sha256_text(constants_frame),
+        )
+    return constants_frame, skill_catalog_truncated, audit
 
 
 def _bounded_strings(values: list[str], max_utf8_bytes: int) -> tuple[list[str], bool]:

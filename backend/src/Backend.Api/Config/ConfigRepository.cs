@@ -20,6 +20,15 @@ public sealed class ConfigRepository : IConfigRepository
         return rows.AsList();
     }
 
+    public async Task<ConfigItem?> GetAsync(string tenantId, string key, CancellationToken ct)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<ConfigItem>(new CommandDefinition(
+            "SELECT key AS Key, value AS Value, updated_at AS UpdatedAt FROM app_config"
+            + " WHERE tenant_id = @tenantId AND key = @key",
+            new { tenantId, key }, cancellationToken: ct));
+    }
+
     public async Task<ConfigItem> UpsertAsync(string tenantId, string key, string value, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
