@@ -180,6 +180,137 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         Assert.Equal(new[] { 2, 1 }, (await Repo.ListRevisionsAsync(t, name, default)).Select(r => r.Revision).ToArray());
     }
 
+    [SkippableFact]
+    public async Task FlowOnlyCreate_DoesNotReviveDisabledAgenticRow()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "skillrepo-kind-fenced-revive";
+        const string name = "kind-fenced-revive";
+        var package = Encoding.UTF8.GetBytes("agent-package");
+        await Repo.ImportAsync(
+            tenant, Meta(name, "kind: agentic", kind: "agentic"), package,
+            SkillHash.Sha256(package), "admin-a", default);
+        Assert.True(await Repo.DeleteAsync(tenant, name, default));
+
+        var revived = await Repo.CreateAsync(
+            tenant, "flow", Meta(name, "name: forbidden-flow\nflow: []"), "admin-a", default);
+
+        Assert.Null(revived);
+        var revisions = await Repo.ListRevisionsAsync(tenant, name, default);
+        Assert.Single(revisions);
+        var snapshot = await Repo.GetRevisionAsync(tenant, name, 1, default);
+        Assert.Equal("agentic", snapshot!.Kind);
+        Assert.Equal(package, snapshot.Package);
+        Assert.Equal(package, await DbPackageAsync(tenant, name));
+    }
+
+    // ---- Dapper kind 過濾直測:ListAsync/GetAsync/DeleteAsync/UpdateAsync 帶 kind 參數的 WHERE fence,
+    // 直接對 SkillRepository(真 Postgres)測,不走 API 層(controller 層已有等價 HTTP 案例,這裡驗 SQL 本身)。----
+
+    [SkippableFact]
+    public async Task ListAsync_WithKind_ExcludesOtherKindRows()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-kindlist";
+        var package = Encoding.UTF8.GetBytes("agentic-zip");
+        await Repo.CreateAsync(t, Meta("flow-item", "name: flow-item\nflow: []\n"), "admin-a", default);
+        await Repo.ImportAsync(
+            t, Meta("agentic-item", "kind: agentic\nname: agentic-item\n", kind: "agentic"),
+            package, SkillHash.Sha256(package), "admin-a", default);
+
+        var flows = await Repo.ListAsync(t, "flow", default);
+        var agentics = await Repo.ListAsync(t, "agentic", default);
+
+        Assert.Contains(flows, s => s.Name == "flow-item");
+        Assert.DoesNotContain(flows, s => s.Name == "agentic-item");
+        Assert.Contains(agentics, s => s.Name == "agentic-item");
+        Assert.DoesNotContain(agentics, s => s.Name == "flow-item");
+    }
+
+    [SkippableFact]
+    public async Task GetAsync_WithWrongKind_ReturnsNull()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-kindget";
+        const string name = "kindget-item";
+        var package = Encoding.UTF8.GetBytes("agentic-zip");
+        await Repo.ImportAsync(
+            t, Meta(name, "kind: agentic\nname: kindget-item\n", kind: "agentic"),
+            package, SkillHash.Sha256(package), "admin-a", default);
+
+        Assert.Null(await Repo.GetAsync(t, name, "flow", default));
+        Assert.NotNull(await Repo.GetAsync(t, name, "agentic", default));
+    }
+
+    [SkippableFact]
+    public async Task DeleteAsync_WithWrongKind_DoesNotDelete()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-kinddelete";
+        const string name = "kinddelete-item";
+        var package = Encoding.UTF8.GetBytes("agentic-zip");
+        await Repo.ImportAsync(
+            t, Meta(name, "kind: agentic\nname: kinddelete-item\n", kind: "agentic"),
+            package, SkillHash.Sha256(package), "admin-a", default);
+
+        Assert.False(await Repo.DeleteAsync(t, name, "flow", default));
+        Assert.NotNull(await Repo.GetAsync(t, name, default)); // 仍啟用,未被誤刪
+
+        Assert.True(await Repo.DeleteAsync(t, name, "agentic", default));
+        Assert.Null(await Repo.GetAsync(t, name, default));
+    }
+
+    [SkippableFact]
+    public async Task UpdateAsync_WithWrongExpectedKind_ReturnsNull_AndLeavesRowUnchanged()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-kindupdate";
+        const string name = "kindupdate-item";
+        var package = Encoding.UTF8.GetBytes("agentic-zip");
+        await Repo.ImportAsync(
+            t, Meta(name, "kind: agentic\nname: kindupdate-item\n", kind: "agentic"),
+            package, SkillHash.Sha256(package), "admin-a", default);
+
+        var updated = await Repo.UpdateAsync(
+            t, name, "flow", Meta(name, "name: kindupdate-item\nflow: []\n"), "admin-a", default);
+
+        Assert.Null(updated);
+        var current = await Repo.GetAsync(t, name, default);
+        Assert.Equal("agentic", current!.Kind);
+        Assert.Equal(1, current.CurrentRevision);
+        Assert.Equal(package, current.Package);
+    }
+
+    // ---- A1-4:遷移前 kind 為 NULL 的舊資料列(尚未跑過分類 UPDATE),DbBootstrap 一次性歸類為
+    // flow(definition 未宣告 `kind: agentic`)。實際遷移只發生在 kind 欄仍可為 NULL 的舊 schema,
+    // 這裡暫時放寬 NOT NULL 約束來重現那個窗口,而非另建一個從未跑過 bootstrap 的資料庫。----
+
+    [SkippableFact]
+    public async Task Migration_NullKindLegacyRow_ClassifiesAsFlow()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-nullkind";
+        const string name = "nullkind-item";
+        await Repo.CreateAsync(t, Meta(name, "name: nullkind-item\nflow: []\n"), "admin-a", default);
+        await ForceKindNullAsync(t, name);
+
+        await DbBootstrap.RunAsync(_fx.DataSource!, NullLogger.Instance);
+
+        var list = await Repo.ListAsync(t, default);
+        Assert.Equal("flow", Assert.Single(list, s => s.Name == name).Kind);
+        Assert.Equal("flow", (await Repo.GetAsync(t, name, default))!.Kind);
+    }
+
+    /// <summary>暫時放寬 NOT NULL 約束並把 kind 欄直接改回 NULL,模擬遷移前(尚未跑過 kind 分類)的舊資料列。</summary>
+    private async Task ForceKindNullAsync(string tenant, string name)
+    {
+        await using var conn = await _fx.DataSource!.OpenConnectionAsync();
+        await conn.ExecuteAsync("ALTER TABLE skill ALTER COLUMN kind DROP NOT NULL;");
+        await conn.ExecuteAsync(
+            "UPDATE skill SET kind = NULL WHERE tenant_id = @tenant AND name = @name",
+            new { tenant, name });
+    }
+
     // ---- definition-only flow update 必須清除舊 package，避免 export 舊 zip 與新 definition 漂移 ----
 
     [SkippableFact]

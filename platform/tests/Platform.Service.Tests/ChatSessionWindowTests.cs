@@ -205,7 +205,7 @@ public sealed class ChatSessionWindowTests
     public async Task ConsecutiveHits_At20Messages_NothingCompacted()
     {
         var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
@@ -237,7 +237,7 @@ public sealed class ChatSessionWindowTests
     public async Task ConsecutiveHits_At21Messages_OldestTurnDropped()
     {
         var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
@@ -277,7 +277,7 @@ public sealed class ChatSessionWindowTests
     public async Task ConsecutiveHits_ToolCallAndResult_NotSplitByManualCompaction()
     {
         var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
@@ -323,7 +323,7 @@ public sealed class ChatSessionWindowTests
     public async Task ManyConsecutiveHits_WindowStaysBounded_NeverGrowsUnbounded()
     {
         var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),

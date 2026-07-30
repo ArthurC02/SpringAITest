@@ -9,7 +9,7 @@ namespace Platform.Service;
 /// <summary>
 /// 呼叫內部下游(backend :8002 / workflow :8001)的共用請求樣板:內部憑證 + 身分 header 名稱常數、
 /// 組請求(強制 HTTP/1.1、X-Internal-Token + 需要時的身分 headers、可選 JSON body)、傳輸層 catch。
-/// BackendClient 與 WorkflowService 都走它 — 這四個 header 字串與 HTTP/1.1 強制只有這一份事實。
+/// BackendClient 與 WorkflowEngineClient 都走它 — 這四個 header 字串與 HTTP/1.1 強制只有這一份事實。
 /// 狀態碼→例外的映射仍由各呼叫端自理(不同端點對外語意不同)。
 /// </summary>
 public static class InternalRequest

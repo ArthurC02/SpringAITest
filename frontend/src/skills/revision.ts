@@ -38,8 +38,8 @@ export function isSynchronizedSkillSnapshot(
   detail: Pick<Skill, 'name' | 'current_revision' | 'kind'>,
   catalog: Pick<SkillCatalogEntry, 'name' | 'revision' | 'kind'>,
 ): boolean {
-  const detailKind = detail.kind ?? 'flow'
-  const catalogKind = catalog.kind ?? 'flow'
+  const detailKind = detail.kind
+  const catalogKind = catalog.kind
   return (
     detail.name === catalog.name
     && detail.current_revision === expectedRevision

@@ -449,7 +449,8 @@ def test_compiler_rejects_invalid_expression():
 def test_definition_declaring_agentic_kind_rejected():
     """crafted-valid-flow 洞：flow 本身合法但自稱 kind: agentic → 定義端點必須擋下。
 
-    agentic 只能經 package 匯入；定義原文宣稱 agentic 是漂移，會在 P1 變 active break。
+    Business Workflow API 是主防線；引擎層仍保留 fail-closed 縱深防禦，
+    避免繞過端點直接呼叫 validate_source 時接受 Agent Skill 投影。
     """
     result = validate_source(
         "name: probe-skill\nkind: agentic\nflow:\n  - node: query_intake@1.0\n"

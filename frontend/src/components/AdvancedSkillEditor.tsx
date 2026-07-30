@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/http'
-import { createSkill, exportSkill, getSkill, updateSkill, validateSkill } from '../api/skills'
+import {
+  createBusinessWorkflow,
+  exportBusinessWorkflow,
+  getBusinessWorkflow,
+  updateBusinessWorkflow,
+  validateBusinessWorkflow,
+} from '../api/businessWorkflows'
 import type { NodeInfo, Skill, SkillValidation } from '../types'
 import { CODE_LABEL, WARN_CODES, blockingErrors } from '../skills/validationLabels'
 import NodeCatalog from './NodeCatalog'
@@ -46,7 +52,7 @@ export default function AdvancedSkillEditor({ mode, initialDefinition, saved, on
     const seq = ++seqRef.current
     setValidating(true)
     try {
-      const v = await validateSkill(def)
+      const v = await validateBusinessWorkflow(def)
       if (seq === seqRef.current) setValidation(v)
     } catch (e) {
       if (seq === seqRef.current) {
@@ -93,15 +99,15 @@ export default function AdvancedSkillEditor({ mode, initialDefinition, saved, on
     setFormError(null)
     try {
       if (mode.kind === 'edit') {
-        await updateSkill(mode.name, definition)
-        const fresh = await getSkill(mode.name)
+        await updateBusinessWorkflow(mode.name, definition)
+        const fresh = await getBusinessWorkflow(mode.name)
         setSavedState(fresh)
         setDefinition(fresh.definition ?? definition)
         toast(`已儲存（r${fresh.current_revision}）`, 'success')
         onSaved(mode.name)
       } else {
         // 新建：名稱由後端從 YAML 解析（重複 → 409）。
-        await createSkill(definition)
+        await createBusinessWorkflow(definition)
         toast('已建立', 'success')
         onSaved(null)
       }
@@ -126,7 +132,7 @@ export default function AdvancedSkillEditor({ mode, initialDefinition, saved, on
     setBusy(true)
     setFormError(null)
     try {
-      await exportSkill(name)
+      await exportBusinessWorkflow(name)
     } catch (e) {
       const msg = (e as Error).message
       setFormError(msg)
@@ -140,7 +146,7 @@ export default function AdvancedSkillEditor({ mode, initialDefinition, saved, on
   const canSave = !readOnly && !busy && !validating && blocking.length === 0 && definition.trim().length > 0
   const name = mode.kind === 'create' ? null : mode.name
 
-  let title = '新增 Skill（進階）'
+  let title = '新增業務流程（進階）'
   if (mode.kind === 'view') title = `檢視 ${name}`
   else if (name) title = `編輯 ${name}`
 
@@ -195,7 +201,7 @@ export default function AdvancedSkillEditor({ mode, initialDefinition, saved, on
             value={definition}
             onChange={readOnly ? undefined : setDefinition}
             readOnly={readOnly}
-            label="Skill YAML 定義"
+            label="業務流程 YAML 定義"
           />
         </div>
 

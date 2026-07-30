@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from app.engine.harness import harnessed as traced
+from app.engine.node_shell import harnessed as traced
 from app.nodes.kbquery import calculator
 from app.nodes.kbquery.adapters import (
     LangChainStructuredLLM,

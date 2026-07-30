@@ -24,9 +24,9 @@ namespace Platform.Web.Controllers;
 public sealed class SkillController : ControllerBase
 {
     private readonly ISkillService _skills;
-    private readonly IWorkflowService _engine;
+    private readonly IWorkflowEngineClient _engine;
 
-    public SkillController(ISkillService skills, IWorkflowService engine)
+    public SkillController(ISkillService skills, IWorkflowEngineClient engine)
     {
         _skills = skills;
         _engine = engine;
@@ -144,15 +144,14 @@ public sealed class SkillController : ControllerBase
             ? "package.zip"
             : package.FileName;
 
-    /// <summary>建立 Skill — 201 Created;定義未通過引擎驗證 → 422(fieldErrors 帶引擎錯誤碼)。</summary>
+    /// <summary>P2–P5/C8 前相容窗口：建立 flow；新 UI 應改用 Business Workflow 面。</summary>
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SkillUpsert request, CancellationToken ct)
-    {
-        var created = await _skills.CreateAsync(request, User.ToUserContext(), ct);
-        return StatusCode(StatusCodes.Status201Created, created);
-    }
+        => StatusCode(
+            StatusCodes.Status201Created,
+            await _skills.CreateAsync(request, User.ToUserContext(), ct));
 
-    /// <summary>更新 Skill(產生新 revision)。</summary>
+    /// <summary>P2–P5/C8 前相容窗口：更新 flow；新 UI 應改用 Business Workflow 面。</summary>
     [HttpPut("{name}")]
     public async Task<ActionResult<Skill>> Update(
         string name, [FromBody] SkillUpsert request, CancellationToken ct)
@@ -166,12 +165,13 @@ public sealed class SkillController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>對一份定義跑靜態驗證(無副作用,編輯器即時校驗)。引擎一律回 200,結果在 body。</summary>
+    /// <summary>P2–P5/C8 前相容 alias；新 UI 應改用 /api/business-workflows/validate。</summary>
     [HttpPost("validate")]
-    public async Task<ActionResult<JsonElement>> Validate([FromBody] SkillUpsert request, CancellationToken ct)
+    public async Task<ActionResult<JsonElement>> Validate(
+        [FromBody] SkillUpsert request, CancellationToken ct)
         => Ok(await _engine.ValidateSkillAsync(request.Definition!, User.ToUserContext(), ct));
 
-    /// <summary>執行 Skill;錯誤碼映射見 WorkflowService.MapInvokeErrorAsync。</summary>
+    /// <summary>執行 Skill;錯誤碼映射見 WorkflowEngineClient.MapInvokeErrorAsync。</summary>
     [HttpPost("{name}/invoke")]
     public async Task<ActionResult<JsonElement>> Invoke(
         string name, [FromBody] WorkflowInvokeRequest request, CancellationToken ct)

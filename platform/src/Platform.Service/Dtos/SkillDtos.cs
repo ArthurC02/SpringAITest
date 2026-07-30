@@ -18,7 +18,13 @@ public sealed record Skill(
     [property: JsonPropertyName("enabled")] bool Enabled,
     [property: JsonPropertyName("current_revision")] int CurrentRevision,
     [property: JsonPropertyName("created_at")] string CreatedAt,
-    [property: JsonPropertyName("updated_at")] string UpdatedAt);
+    [property: JsonPropertyName("updated_at")] string UpdatedAt,
+    [property: JsonPropertyName("kind")]
+    [property: JsonRequired]
+    string Kind,
+    [property: JsonPropertyName("simpleForm")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    JsonElement? SimpleForm = null);
 
 /// <summary>
 /// 建立/更新 Skill 的請求 body — **只有 definition 一個欄位**(YAML 原文)。
@@ -40,3 +46,6 @@ public sealed record SkillUpsert(
 /// ContentType 取 backend 回應的 content-type,缺則 application/zip;FileName = "&lt;name&gt;.zip"。
 /// </summary>
 public sealed record SkillExport(byte[] Content, string ContentType, string FileName);
+
+/// <summary>建立結果連同 backend Location；Platform 必須把 Location 轉送給瀏覽器。</summary>
+public sealed record BusinessWorkflowCreated(Skill Workflow, string? Location);

@@ -1,6 +1,6 @@
-"""script 步驟經 Harness 執行的行為（AT3-12 ~ AT3-14、AT-GOV-03、AT-GOV-04）。
+"""script 步驟經 Node Shell 執行的行為（AT3-12 ~ AT3-14、AT-GOV-03、AT-GOV-04）。
 
-治理硬規則對 script 與對 node 是**同一套**：script 步驟不另開一條繞過 Harness 的
+治理硬規則對 script 與對 node 是**同一套**：script 步驟不另開一條繞過 Node Shell 的
 執行路徑 —— 所以 fatal 短路、保留鍵不可覆寫、稽核強制附加，對 script 一體適用。
 """
 
@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.engine import compiler, node_registry
-from app.engine.harness import CONFIG_SEED_KEYS
+from app.engine.node_shell import CONFIG_SEED_KEYS, RUNTIME_AUTHORITY_KEYS
 from app.engine.script_runner import ScriptTraceEntry
 from app.engine.skill import Skill
 from app.nodes.kbquery.adapters import StaticGlossary
@@ -21,7 +21,7 @@ from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from app.nodes.kbquery.models import QueryRewriteOutput
 from tests.kbquery_fakes import FakeStructuredLLM, RecordingAuditRepo
 
-TEST_NODES = ("s_next",)
+TEST_NODES = ("s_next", "s_authority_observer")
 
 # script 原始碼裡的哨兵：trace／audit 任何角落出現它 = 原始碼全文外洩（AT3-14／AT-GOV-04）
 SOURCE_SENTINEL = "SCRIPT_SOURCE_SENTINEL"
@@ -33,6 +33,22 @@ def _register_test_nodes():
     def make_s_next():
         async def fn(state: dict) -> dict:
             return {"next_ran": True}
+
+        return fn
+
+    @node_registry.node(
+        name="s_authority_observer",
+        reads=sorted(RUNTIME_AUTHORITY_KEYS),
+        writes=["authority_seen"],
+        description="驗證下游節點仍讀到 snapshot authority",
+    )
+    def make_authority_observer():
+        async def fn(state: dict) -> dict:
+            return {
+                "authority_seen": {
+                    key: state[key] for key in RUNTIME_AUTHORITY_KEYS
+                }
+            }
 
         return fn
 
@@ -98,7 +114,7 @@ def test_script_step_writes_into_state():
 
 
 # ---------------------------------------------------------------------------
-# AT3-12 timeout_ms 逾時 → 走 Harness 的 fatal 短路
+# AT3-12 timeout_ms 逾時 → 走 Node Shell 的 fatal 短路
 # ---------------------------------------------------------------------------
 
 
@@ -211,9 +227,39 @@ def test_script_cannot_forge_tenant_id():
     assert result["ran"] is True
 
 
+def test_script_cannot_replace_runtime_authority_seen_by_downstream_node():
+    """Malicious script writes are dropped; later nodes see the snapshot values."""
+    authentic = {
+        "run_id": "run-authentic",
+        "agent_id": "agent-authentic",
+        "agent_revision": 7,
+        "knowledge_sources": ["source-authentic"],
+        "enforce_data_scope": True,
+    }
+    assignments = "\n".join(
+        [
+            "state['run_id'] = 'run-forged'",
+            "state['agent_id'] = 'agent-forged'",
+            "state['agent_revision'] = 999",
+            "state['knowledge_sources'] = ['source-forged']",
+            "state['enforce_data_scope'] = False",
+            "state['ordinary'] = 'kept'",
+        ]
+    )
+
+    result = _run(
+        [{"script": assignments}, {"node": "s_authority_observer"}],
+        authentic,
+    )
+
+    assert result["ordinary"] == "kept"
+    assert result["authority_seen"] == authentic
+    assert {key: result[key] for key in RUNTIME_AUTHORITY_KEYS} == authentic
+
+
 @pytest.mark.parametrize("key", ["fatal_error", "errors", "trace"])
 def test_script_cannot_forge_engine_keys(key):
-    """引擎鍵（trace/errors/fatal_error）由 Harness 寫入：script 寫得進去就能偽造稽核與短路。"""
+    """引擎鍵（trace/errors/fatal_error）由 Node Shell 寫入：script 寫得進去就能偽造稽核與短路。"""
     result = _run([{"script": f"state[{key!r}] = 'forged'"}, {"node": "s_next"}])
 
     assert result.get("fatal_error") in (None, "")  # 沒有被偽造的 fatal

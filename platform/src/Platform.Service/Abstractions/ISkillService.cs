@@ -4,10 +4,11 @@ using Platform.Service.Dtos;
 namespace Platform.Service.Abstractions;
 
 /// <summary>
-/// Skill CRUD 服務:純代理 backend /api/skills。ADMIN 把關全在 backend
+/// Agent Skill 管理與 P2–P5/C8 前 public flow compatibility actions 的 backend /api/skills 純代理。
+/// ADMIN 把關全在 backend
 /// (backend 403 → WorkflowForbiddenException → 對外 403,同 Config PUT 模式);
 /// 定義的靜態驗證由 backend 轉呼叫引擎(backend 422 → SkillValidationFailedException → 對外 422)。
-/// Skill 的「執行/驗證/目錄」不在此介面 — 那些直接打 workflow 引擎,見 IWorkflowService。
+/// Skill 的「執行/驗證/目錄」不在此介面 — 那些直接打 workflow 引擎,見 IWorkflowEngineClient。
 /// 讀取端點(list/get/revisions)原樣穿透 backend JSON(snake_case),不套 DTO 以免吞掉 backend 新增欄位。
 /// </summary>
 public interface ISkillService
@@ -53,10 +54,10 @@ public interface ISkillService
     Task<JsonElement> ImportAsync(
         byte[] package, string fileName, UserContext ctx, CancellationToken ct = default);
 
-    /// <summary>建立 Skill;backend 409(同名) → DownstreamConflictException(對外 409)。</summary>
+    /// <summary>過渡窗口的 flow definition-only 建立；P5 C8 gate 完成前保留。</summary>
     Task<Skill> CreateAsync(SkillUpsert request, UserContext ctx, CancellationToken ct = default);
 
-    /// <summary>更新 Skill(產生新 revision)。</summary>
+    /// <summary>過渡窗口的 flow definition-only 更新；P5 C8 gate 完成前保留。</summary>
     Task<Skill> UpdateAsync(string name, SkillUpsert request, UserContext ctx, CancellationToken ct = default);
 
     /// <summary>停用 Skill(軟刪,對外 204)。</summary>

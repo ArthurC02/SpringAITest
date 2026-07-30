@@ -9,7 +9,7 @@ namespace Platform.Web.Tests;
 /// Skill 代理端點(AT4-12)。CRUD → backend;catalog/validate/invoke/nodes → workflow 引擎。
 /// 兩件事在這層驗:(a) 沒有 JWT 一律 401 且請求不得抵達任何下游;
 /// (b) 下游的狀態碼與 ApiError(含 fieldErrors)原樣穿透,代理層不改寫。
-/// 身分 header 的實際附加由 SkillServiceTests / WorkflowServiceTests 以 stub handler 驗(此處下游是 fake service)。
+/// 身分 header 的實際附加由 SkillServiceTests / WorkflowEngineClientTests 以 stub handler 驗(此處下游是 fake service)。
 /// </summary>
 [Collection("EngineCalls")]
 public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
@@ -43,7 +43,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     public async Task Endpoints_Return401_WithoutToken_AndNeverReachDownstream(string method, string path)
     {
         var beforeBackend = FakeSkillService.Calls.Count;
-        var beforeEngine = FakeWorkflowService.EngineCalls.Count;
+        var beforeEngine = FakeWorkflowEngineClient.EngineCalls.Count;
 
         using var req = new HttpRequestMessage(new HttpMethod(method), path);
         if (path.EndsWith("/import", StringComparison.Ordinal))
@@ -67,7 +67,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         // 兩個下游都不得被碰到。
         Assert.Equal(beforeBackend, FakeSkillService.Calls.Count);
-        Assert.Equal(beforeEngine, FakeWorkflowService.EngineCalls.Count);
+        Assert.Equal(beforeEngine, FakeWorkflowEngineClient.EngineCalls.Count);
     }
 
     // ---- AT4-12(後半):帶合法 JWT → 轉發並回傳下游內容 ----
@@ -78,12 +78,16 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         var resp = await _factory.AdminClient().GetAsync("/api/skills");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var item = Assert.Single((await resp.ReadJsonAsync()).AsArray())!;
-        Assert.Equal("echo-skill", item["name"]!.GetValue<string>());
-        Assert.Equal("USER", item["required_role"]!.GetValue<string>());
-        Assert.True(item["enabled"]!.GetValue<bool>());
-        Assert.Equal(1, item["current_revision"]!.GetValue<int>());
-        Assert.Equal("2026-07-14T00:00:00Z", item["updated_at"]!.GetValue<string>());
+        var items = (await resp.ReadJsonAsync()).AsArray();
+        Assert.Equal(2, items.Count);
+        var flow = items.Single(item => item!["name"]!.GetValue<string>() == "echo-flow")!;
+        var agent = items.Single(item => item!["name"]!.GetValue<string>() == "echo-agent")!;
+        Assert.Equal("USER", flow["required_role"]!.GetValue<string>());
+        Assert.True(flow["enabled"]!.GetValue<bool>());
+        Assert.Equal(1, flow["current_revision"]!.GetValue<int>());
+        Assert.Equal("2026-07-14T00:00:00Z", flow["updated_at"]!.GetValue<string>());
+        Assert.Equal("flow", flow["kind"]!.GetValue<string>());
+        Assert.Equal("agentic", agent["kind"]!.GetValue<string>());
     }
 
     [Fact]
@@ -430,7 +434,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
     }
 
-    // additive 欄位穿透由 WorkflowServiceTests(真 WorkflowService + stub handler)覆蓋;
+    // additive 欄位穿透由 WorkflowEngineClientTests(真 WorkflowEngineClient + stub handler)覆蓋;
     // 在這一層用 CatalogOverride 塞 JSON 再讀回來只驗到 JsonElement 序列化,不經任何 platform 分支。
 
     // invoke 的下游狀態碼映射:404 → NotFound、403 → Forbidden、422 → BadInput(400)、其他 → 502。

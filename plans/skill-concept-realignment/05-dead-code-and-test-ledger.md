@@ -1,6 +1,6 @@
 # Skill 概念重整 — 死碼與測試帳本
 
-> 狀態：規劃中（2026-07-30，基準 HEAD `49ead70`）。本帳本是 01-plan §5 的完整展開，也是 06-cleanup C8 gate 的證據基礎：每一項死碼/重複碼/孤兒測試都登記位置、死亡 Phase、處置與風險。**執行規則：每個 Phase 的 PR 必須對照本帳本勾銷該 Phase 到期的項目；「死亡時點未到」的項目嚴禁提前刪除（雙軌期依賴它們）。**
+> 狀態：執行中（2026-07-30，基準 HEAD `49ead70`）。P0 的 `node_shell.py` 與 `WorkflowEngineClient` 正名已落地；其餘項目仍以各 Phase 驗收 gate 為準。本帳本是 01-plan §5 的完整展開，也是 06-cleanup C8 gate 的證據基礎：每一項死碼/重複碼/孤兒測試都登記位置、死亡 Phase、處置與風險。**執行規則：每個 Phase 的 PR 必須對照本帳本勾銷該 Phase 到期的項目；「死亡時點未到」的項目嚴禁提前刪除（雙軌期依賴它們）。P5 不得因雙軌路由已存在而勾銷：必須先有新面流量承接、舊面 flow-write usage `= 0`、rollback window 結束、deletion evidence 與人工簽核。**
 
 ## 1. workflow（Python）
 
@@ -27,6 +27,7 @@
 | (a) P0/P1 必同批改 | 5 個 `from app.engine.harness import` 測試（見 1.1）；`test_skills_custom.py` 的 fake fixture 補 `kind` 欄 | 與生產碼同 PR |
 | (a) docstring 更新 | `test_engine_skill_validation.py:449-467`（`test_definition_declaring_agentic_kind_rejected` 等） | **斷言保留**（縱深防禦仍在），P2/P3 後補註「主防線已移至 API 層」 |
 | (b) P5 整檔可刪 | **無**——P5 收斂是 backend 層動作，workflow 53 個測試檔無一因 P5 失去意義 | — |
+| (c) P5 明確保留 | `/skills/validate` 與 `/business-workflows/validate` 同 handler alias 的 API 測試 | P5/C8 不刪；alias 退場須另立 consumer inventory、usage-zero、rollback gate 與驗收 |
 | (c) 升級為紅線迴歸（凍結斷言） | `test_agent_runtime.py:1199-1292`（`active_skill_scope` 形狀 + `skill_scope_entered` event/payload 鍵——現成 golden，P3 後標註斷言值不可改）；`test_agent_runtime_legacy_flow.py:158`（`legacy_flow_completed` 字串，backend 白名單對應的唯一 Python 釘子）；`test_agent_skill_runner.py:178-200,390-417`（invoke `{skill, output}` 形狀 + audit 終端，驗證 P3 搬家不改行為的黑盒）；`test_engine_skill_validation.py` AT-GOV-02 區塊（compiler 防呆對照組） | 不可修改斷言值，只能改實作 |
 | 不刪（R6 擁有） | `test_agent_runtime_legacy_flow.py`、`test_agent_skill_runner.py` 全檔 | 本案不動 |
 
@@ -136,3 +137,4 @@
 3. 03-design §1.2 的「約 9 檔」→ 實測 17 檔（§3.2）。
 4. 03-design §4 補：拆分目標檔名（`BusinessWorkflowHome.tsx`/`AgentSkillHome.tsx`）、共用 hook 抽取紀律、`AppShell.tsx:333`、`revision.ts` fallback。
 5. 04-acceptance 補：A1 fixture 同批修、A4-6 Playwright gate、A5-3 Skill 面讀取可見性收斂、雙軌一致性測試 P5 必刪。
+6. 03-design §3.3/§3.4 的依賴切分實作出一個計畫原文未列的新生產檔：`app/engine/graph_primitives.py`（kind-neutral 建圖原語：`build_state_schema`/`AUDIT_NODE`/`SkillCompileError`/`add_contract_node`），現由 `compiler.py` 與 `agent_skill_graph.py` 共同依賴。存在理由：讓 `agent_skill_graph.py` 不必 import compiler internals，滿足 §3.4「依賴方向規則」（避免 Agent Skill bridge 反向依賴 Business Workflow schema/compiler，形成循環依賴）；行為與原 compiler.py 內對應邏輯等價，非新增或變更行為。

@@ -7,7 +7,8 @@ using Platform.Service.Exceptions;
 namespace Platform.Service;
 
 /// <summary>
-/// Skill CRUD 服務:代理 backend /api/skills,不含任何商業邏輯(角色/唯一性/定義驗證全在 backend)。
+/// Agent Skill 管理與 P2–P5/C8 前 public flow compatibility actions 的 backend /api/skills 代理；
+/// 不含任何商業邏輯(角色/唯一性/定義驗證全在 backend)。
 /// backend 的錯誤原樣轉發:400/403/404/409/422 各自映射到對外同狀態碼的例外並沿用 backend 的 message;
 /// 其餘(5xx、傳輸失敗)→ WorkflowInvocationException(對外 502)。
 /// 400 與 422 的 fieldErrors 都要帶上來 — 前者是欄位驗證、後者是引擎錯誤碼,吞掉任一邊前端就顯示不了原因。
@@ -95,6 +96,12 @@ public sealed class SkillService : ISkillService
         return await _backend.SendForJsonElementAsync(req, WrapTransport, MapErrorAsync, ct);
     }
 
+    public Task DeleteAsync(string name, UserContext ctx, CancellationToken ct = default)
+        => _backend.SendExpectSuccessAsync(
+            _backend.BuildRequest(HttpMethod.Delete, $"/api/skills/{name}", ctx), WrapTransport, MapErrorAsync, ct);
+
+    // P2–P5/C8 前刻意保留的 public flow compatibility actions；
+    // ISkillService 與 SkillController 都必須維持此雙軌介面，直到 C8 cutover gate 完成。
     public Task<Skill> CreateAsync(SkillUpsert request, UserContext ctx, CancellationToken ct = default)
         => ReadSkillAsync(_backend.BuildRequest(HttpMethod.Post, "/api/skills", ctx, request), ct);
 
@@ -102,14 +109,18 @@ public sealed class SkillService : ISkillService
         string name, SkillUpsert request, UserContext ctx, CancellationToken ct = default)
         => ReadSkillAsync(_backend.BuildRequest(HttpMethod.Put, $"/api/skills/{name}", ctx, request), ct);
 
-    public Task DeleteAsync(string name, UserContext ctx, CancellationToken ct = default)
-        => _backend.SendExpectSuccessAsync(
-            _backend.BuildRequest(HttpMethod.Delete, $"/api/skills/{name}", ctx), WrapTransport, MapErrorAsync, ct);
-
-    private Task<Skill> ReadSkillAsync(HttpRequestMessage req, CancellationToken ct)
-        => _backend.SendForJsonAsync<Skill>(
+    private async Task<Skill> ReadSkillAsync(HttpRequestMessage req, CancellationToken ct)
+    {
+        var skill = await _backend.SendForJsonAsync<Skill>(
             req, WrapTransport, MapErrorAsync,
             () => new WorkflowInvocationException(FailurePrefix + "回應內容為空"), ct);
+        if (skill.Kind is not ("flow" or "agentic"))
+        {
+            throw new WorkflowInvocationException(FailurePrefix + "回應包含無效的 kind");
+        }
+
+        return skill;
+    }
 
     private Task<Exception> MapErrorAsync(HttpResponseMessage resp, CancellationToken ct)
         => BackendErrorMapper.MapErrorAsync(resp, _backend, FailurePrefix, ct);

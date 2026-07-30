@@ -2,6 +2,7 @@
 
 > 狀態: **已交付；以下是設計與驗收記錄，不是待辦清單。** 現行行為以 [plans README](../README.md) 與 `platform/src/Platform.Service/ChatService.cs` 為準。
 > **歷史草稿警示:** 第 1–7 節描述交付前的候選方案，包含已否決的 function-calling 與固定意圖分類；不得當成現行契約或後續實作需求。
+> **Skill 概念重整註記（P0）：** 現行路由以 catalog 名稱與統一 invoke `{skill, output}` 契約運作，**不依 artifact `kind` 分流**；Agent Skill 與 Business Workflow 的分類及載入由 workflow 引擎處理。此計畫中的歷史「Skill」字樣不得被解讀為「Skill 必為 YAML flow」。
 > 關聯:[settings-skill-redesign](../settings-skill-redesign/01-plan.md)(撰寫端);本計畫是**執行端**——讓撰寫好的 Skill 真正被用到。
 > 前提知識:使用者多為非技術人員、以自然語言在聊天中提問(專案記憶 non-technical-users-chat-first)。
 

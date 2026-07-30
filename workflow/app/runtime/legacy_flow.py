@@ -11,7 +11,7 @@ from pydantic import ValidationError
 # order to populate the Node Registry.
 from app.nodes.kbquery.nodes import audit_feedback as _audit_feedback  # noqa: F401
 from app.engine import compiler, node_registry, tool_registry
-from app.engine.harness import RUNTIME_AUTHORITY_KEYS
+from app.engine.node_shell import RUNTIME_AUTHORITY_KEYS
 from app.engine.skill import (
     ENGINE_KEYS,
     RESERVED_KEYS,

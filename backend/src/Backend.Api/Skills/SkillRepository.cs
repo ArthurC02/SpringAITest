@@ -35,6 +35,13 @@ public sealed class SkillRepository : ISkillRepository
     public SkillRepository(NpgsqlDataSource dataSource) => _dataSource = dataSource;
 
     public async Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, CancellationToken ct)
+        => await ListCoreAsync(tenantId, kind: null, ct);
+
+    public async Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, string kind, CancellationToken ct)
+        => await ListCoreAsync(tenantId, kind, ct);
+
+    private async Task<IReadOnlyList<SkillInfo>> ListCoreAsync(
+        string tenantId, string? kind, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<SkillInfo>(new CommandDefinition(
@@ -42,20 +49,37 @@ public sealed class SkillRepository : ISkillRepository
             + " enabled AS Enabled, current_revision AS CurrentRevision,"
             + " created_at AS CreatedAt, updated_at AS UpdatedAt, kind AS Kind,"
             + " simple_form::text AS SimpleForm"
-            + " FROM skill WHERE tenant_id = @tenantId AND enabled ORDER BY name",
-            new { tenantId }, cancellationToken: ct));
+            + " FROM skill WHERE tenant_id = @tenantId AND enabled"
+            + " AND (@kind IS NULL OR kind = @kind) ORDER BY name",
+            new { tenantId, kind }, cancellationToken: ct));
         return rows.AsList();
     }
 
     public async Task<Skill?> GetAsync(string tenantId, string name, CancellationToken ct)
+        => await GetCoreAsync(tenantId, name, kind: null, ct);
+
+    public async Task<Skill?> GetAsync(string tenantId, string name, string kind, CancellationToken ct)
+        => await GetCoreAsync(tenantId, name, kind, ct);
+
+    private async Task<Skill?> GetCoreAsync(
+        string tenantId, string name, string? kind, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<Skill>(new CommandDefinition(
-            $"SELECT {Cols} FROM skill WHERE tenant_id = @tenantId AND name = @name AND enabled",
-            new { tenantId, name }, cancellationToken: ct));
+            $"SELECT {Cols} FROM skill WHERE tenant_id = @tenantId AND name = @name AND enabled"
+            + " AND (@kind IS NULL OR kind = @kind)",
+            new { tenantId, name, kind }, cancellationToken: ct));
     }
 
     public async Task<Skill?> CreateAsync(string tenantId, Skill skill, string createdBy, CancellationToken ct)
+        => await CreateCoreAsync(tenantId, expectedExistingKind: null, skill, createdBy, ct);
+
+    public async Task<Skill?> CreateAsync(
+        string tenantId, string expectedExistingKind, Skill skill, string createdBy, CancellationToken ct)
+        => await CreateCoreAsync(tenantId, expectedExistingKind, skill, createdBy, ct);
+
+    private async Task<Skill?> CreateCoreAsync(
+        string tenantId, string? expectedExistingKind, Skill skill, string createdBy, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
 
@@ -80,11 +104,13 @@ public sealed class SkillRepository : ISkillRepository
             + "  kind = 'flow', package = NULL,"
             + "  simple_form = COALESCE(EXCLUDED.simple_form, skill.simple_form),"
             + "  current_revision = skill.current_revision + 1, updated_at = now()"
-            + " WHERE NOT skill.enabled",
+            + " WHERE NOT skill.enabled"
+            + " AND (@expectedExistingKind IS NULL OR skill.kind = @expectedExistingKind)",
             "createdBy",
             new
             {
                 tenantId,
+                expectedExistingKind,
                 skill.Name,
                 skill.Description,
                 skill.Definition,
@@ -98,6 +124,14 @@ public sealed class SkillRepository : ISkillRepository
 
     public async Task<Skill?> UpdateAsync(
         string tenantId, string name, Skill skill, string updatedBy, CancellationToken ct)
+        => await UpdateCoreAsync(tenantId, name, expectedKind: null, skill, updatedBy, ct);
+
+    public async Task<Skill?> UpdateAsync(
+        string tenantId, string name, string expectedKind, Skill skill, string updatedBy, CancellationToken ct)
+        => await UpdateCoreAsync(tenantId, name, expectedKind, skill, updatedBy, ct);
+
+    private async Task<Skill?> UpdateCoreAsync(
+        string tenantId, string name, string? expectedKind, Skill skill, string updatedBy, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
 
@@ -110,12 +144,14 @@ public sealed class SkillRepository : ISkillRepository
             + "  required_role = @RequiredRole, kind = 'flow', package = NULL,"
             + "  simple_form = COALESCE(@SimpleForm::jsonb, simple_form),"
             + "  current_revision = current_revision + 1, updated_at = now()"
-            + " WHERE tenant_id = @tenantId AND name = @name AND enabled",
+            + " WHERE tenant_id = @tenantId AND name = @name AND enabled"
+            + " AND (@expectedKind IS NULL OR kind = @expectedKind)",
             "updatedBy",
             new
             {
                 tenantId,
                 name,
+                expectedKind,
                 skill.Description,
                 skill.Definition,
                 skill.RequiredRole,
@@ -179,12 +215,20 @@ public sealed class SkillRepository : ISkillRepository
 
     /// <summary>軟刪:enabled=false。skill_revision 一列都不動(金融稽核:歷史永不消失)。</summary>
     public async Task<bool> DeleteAsync(string tenantId, string name, CancellationToken ct)
+        => await DeleteCoreAsync(tenantId, name, kind: null, ct);
+
+    public async Task<bool> DeleteAsync(string tenantId, string name, string kind, CancellationToken ct)
+        => await DeleteCoreAsync(tenantId, name, kind, ct);
+
+    private async Task<bool> DeleteCoreAsync(
+        string tenantId, string name, string? kind, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE skill SET enabled = false, updated_at = now()"
-            + " WHERE tenant_id = @tenantId AND name = @name AND enabled",
-            new { tenantId, name }, cancellationToken: ct));
+            + " WHERE tenant_id = @tenantId AND name = @name AND enabled"
+            + " AND (@kind IS NULL OR kind = @kind)",
+            new { tenantId, name, kind }, cancellationToken: ct));
         return rows > 0;
     }
 

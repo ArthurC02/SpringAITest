@@ -336,6 +336,10 @@ export default function AgentEditor({
   )
   const bindableSkills = catalog.filter(isSkillBindable)
   const nonBindableSkills = catalog.filter((skill) => !isSkillBindable(skill))
+  const catalogGroups = [
+    { kind: 'agentic' as const, label: '技能', entries: catalog.filter((skill) => skill.kind === 'agentic') },
+    { kind: 'flow' as const, label: '業務流程', entries: catalog.filter((skill) => skill.kind === 'flow') },
+  ]
   const toolCatalogRes = useResource(listAgentToolCatalog)
   const toolCatalog: AgentToolCatalogEntry[] = toolCatalogRes.data ?? []
 
@@ -843,9 +847,9 @@ export default function AgentEditor({
 
           {/* ── Skill 綁定 ── */}
           <section className="agent-block">
-            <h4 className="agent-block__title">Skill 綁定</h4>
+            <h4 className="agent-block__title">能力綁定</h4>
             <p className="muted">
-              只顯示同租戶、可執行的 Skill;發布時會把每個綁定固定到當時的確切 revision。
+              只顯示同租戶、可執行的技能與業務流程；發布時會把每個綁定固定到當時的確切 revision。
             </p>
             <ErrorText msg={catalogRes.error} />
             {/* 已綁定但 catalog 已無(停用/移除)的 Skill:定位為失效,禁止發布(A-UI-05)。 */}
@@ -869,33 +873,40 @@ export default function AgentEditor({
             {!catalogRes.data && !catalogRes.error ? (
               <Skeleton rows={3} />
             ) : (
-              <ul className="agent-skills">
-                {catalog.map((c) => {
-                  const bound = form.skill_bindings.some((b) => b.skill === c.name)
-                  const bindable = isSkillBindable(c)
-                  return (
-                    <li key={c.name} className="agent-skills__row">
-                      <label className="agent-check">
-                        <input
-                          type="checkbox"
-                          checked={bound}
-                          disabled={locked || !bindable}
-                          onChange={() => toggleBinding(c.name)}
-                        />
-                        <span className="agent-skills__name">{c.name}</span>
-                      </label>
-                      <span className="muted agent-skills__desc">{c.description}</span>
-                      <span className={`badge badge--${bindable ? 'user' : 'admin'}`}>
-                        {bindable
-                          ? c.revision != null
-                            ? `可綁 · r${c.revision}`
-                            : '可綁'
-                          : '不可綁 · 無持久 revision'}
-                      </span>
-                    </li>
-                  )
-                })}
-              </ul>
+              <div className="agent-skill-groups">
+                {catalogGroups.map((group) => group.entries.length > 0 && (
+                  <section key={group.kind} aria-label={group.label}>
+                    <h5 className="agent-block__title">{group.label}</h5>
+                    <ul className="agent-skills">
+                      {group.entries.map((c) => {
+                        const bound = form.skill_bindings.some((b) => b.skill === c.name)
+                        const bindable = isSkillBindable(c)
+                        return (
+                          <li key={c.name} className="agent-skills__row">
+                            <label className="agent-check">
+                              <input
+                                type="checkbox"
+                                checked={bound}
+                                disabled={locked || !bindable}
+                                onChange={() => toggleBinding(c.name)}
+                              />
+                              <span className="agent-skills__name">{c.name}</span>
+                            </label>
+                            <span className="muted agent-skills__desc">{c.description}</span>
+                            <span className={`badge badge--${bindable ? 'user' : 'admin'}`}>
+                              {bindable
+                                ? c.revision != null
+                                  ? `可綁 · r${c.revision}`
+                                  : '可綁'
+                                : '不可綁 · 無持久 revision'}
+                            </span>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </section>
+                ))}
+              </div>
             )}
             {nonBindableSkills.length > 0 && (
               <p className="muted" role="note">

@@ -3,6 +3,7 @@ import { ApiError } from '../api/http'
 import { exportSkill, getSkillPackage, importSkill } from '../api/skills'
 import {
   extractDescription,
+  extractName,
   readPackage,
   READONLY_DIR,
   setDescription,
@@ -93,6 +94,12 @@ export default function AgentSkillEditor({ name, onSaved, onClose }: Props) {
   }
 
   async function onSave() {
+    if (extractName(frontmatter) !== name) {
+      const msg = `Existing Agent Skill names are immutable. Keep the name as "${name}"; import a new package to create a different skill.`
+      setSaveError(msg)
+      toast(msg, 'error')
+      return
+    }
     setBusy(true)
     setSaveError(null)
     try {
@@ -173,6 +180,9 @@ export default function AgentSkillEditor({ name, onSaved, onClose }: Props) {
               value={frontmatter}
               onChange={(e) => setFrontmatter(e.target.value)}
             />
+            <p className="muted" role="note">
+              Existing Agent Skill name is immutable and must remain <strong>{name}</strong>. Use package import to create a skill with a different name.
+            </p>
             <p className="muted">
               標準欄位在頂層（name、description、allowed-tools、license/compatibility），引擎專屬欄位收在
               metadata（kind: agentic、required_role、timeout_seconds、input_schema 為 JSON 字串），由引擎驗證；描述可用上方欄位快速修改。

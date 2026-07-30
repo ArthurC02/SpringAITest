@@ -37,7 +37,7 @@ def make_query_intake_node(max_retrieval_attempts: int):
     async def query_intake_node(state: dict) -> dict:
         query = (state.get("query") or "").strip()
         if not query:
-            # 由 Harness（engine/harness.py::harnessed）轉為 fatal_error，走安全 ABSTAIN + 稽核路徑
+            # 由 Harness（engine/node_shell.py::harnessed）轉為 fatal_error，走安全 ABSTAIN + 稽核路徑
             raise ValueError("query 不可為空白")
         return {
             "query_id": str(uuid.uuid4()),

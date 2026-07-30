@@ -47,10 +47,10 @@ SpringAITest/
 
 ## 技術棧
 
-- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、**Agent Registry proxy**、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 660 個（Service 334 + Web 326）+ 手寫 fake（未引入 mocking 套件）。
-- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能、**Agent Registry CRUD/publish/revisions**、appdb 永久儲存;測試用 xUnit 694 個（所有 PostgreSQL 相依測試現在都跑，採租戶前綴隔離 + IAsyncLifetime 清理，0 個 skipped）、手寫 fake repository（未引入 mocking 套件）。
-- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含三分頁（Skill 管理、工作流節點參數、一般設定），`AGENT_BUILDER_ENABLED` 開啟時提供 ADMIN-only Agents workspace；`WORKFLOW_DESIGNER_ENABLED` 開啟且帳號具 `workflow.manage` 時，另提供 Workflow Designer 與 Orchestrator Registry；再開啟 `MULTI_AGENT_DISPATCH_ENABLED` 後可執行 durable Root Orchestrator 測試並在 Designer 查看唯讀 root/child trace。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint + vite build + Vitest logic tests 42 個 + Playwright UI regression tests 35 個（合計 77 個 unit tests）+ 4 個 evidence tests。
-- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、安全 Skill/Tool catalogs、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 1135 個（3 個 skipped）。
+- **平台閘道**(.NET):.NET SDK 10、ASP.NET Core 10、Microsoft Agent Framework（`Microsoft.Agents.AI`，經 LiteLLM 閘道連 LLM）、AG-UI 協定端點、Skill CRUD/invoke proxy、**Agent Registry proxy**、OpenTelemetry、RabbitMQ.Client 7.2.1（非同步佇列）;測試用 xUnit 744 個（Service 385 + Web 359）+ 手寫 fake（未引入 mocking 套件）。
+- **核心服務**(.NET):.NET SDK 10、ASP.NET Core 10、Dapper 2.x + Npgsql 9.x（直連 PostgreSQL，無 ORM）、pgvector 向量操作、RabbitMQ.Client 7.2.1（消費文件佇列）、Skills 功能、**Agent Registry CRUD/publish/revisions**、appdb 永久儲存;測試用 xUnit 848 個（所有 PostgreSQL 相依測試現在都跑，採租戶前綴隔離 + IAsyncLifetime 清理，0 個 skipped）、手寫 fake repository（未引入 mocking 套件）。
+- **前端**:React 19 + Vite + TypeScript;dev 時 Vite proxy `/api` → `:8080`,瀏覽器同源免 CORS。系統設定視圖內含四分頁（Agent Skills、Business Workflows、工作流節點參數、一般設定），`AGENT_BUILDER_ENABLED` 開啟時提供 ADMIN-only Agents workspace；`WORKFLOW_DESIGNER_ENABLED` 開啟且帳號具 `workflow.manage` 時，另提供 Workflow Designer 與 Orchestrator Registry；再開啟 `MULTI_AGENT_DISPATCH_ENABLED` 後可執行 durable Root Orchestrator 測試並在 Designer 查看唯讀 root/child trace。CopilotKit 副駕（@copilotkit/react-* 1.62.3）經 `@ag-ui/client` 的 HttpAgent **直連** platform 的 `/api/copilot/agui`（`agents__unsafe_dev_only`,POC 接法,無 Node 橋接）;品質門禁：oxlint + vite build + Vitest logic tests 66 個 + Playwright UI regression tests 54 個（合計 120 個 unit tests）+ 4 個 evidence tests。
+- **工作流**:Python 3.12+ + uv、LangGraph（工作流圖）+ FastAPI、Skill 引擎層（P1–P4 節點、@node/@tool 裝飾器、YAML 編譯器）、安全 Skill/Tool catalogs、langchain-openai（經 LiteLLM 閘道連 LLM）、httpx（呼叫 backend 服務）、Langfuse callback（env 開關）;測試用 pytest 1306 個（另有 3 個條件式 skipped）。
 
 > .NET 後端需 .NET SDK 10 以上才能建置（`dotnet --version` 應顯示 `10.x`）。
 
@@ -352,9 +352,11 @@ curl -X POST http://localhost:8080/api/skills/analyze-report/invoke \
   -d '{"input":{"topic":"市場分析"}}'
 ```
 
-## 技能（LangGraph Skill 引擎）
+## 能力成品：Agent Skill 與 Business Workflow
 
-### 內建技能
+名稱必須分開：**Agent Skill** 是可攜的 `SKILL.md` 公規包（可含 `references/`、`assets/`、`scripts/`）；**Business Workflow** 是經 Skill Engine 編譯的宣告式 YAML 業務流程。兩者目前共用物理 `skill`/`skill_revision` 儲存與統一 invoke 端點，但 `kind` 是可信分類欄位，前端與引擎不會從 YAML 或 package 內容猜測類型。Harness 是 `workflow/app/runtime/graph.py` 的固定 LangGraph 骨架，Node Shell 是每個節點的治理執行殼；D4 Graph IR 是 Harness Workflow，並不是 Business Workflow。
+
+### 內建 Business Workflow
 
 | 技能             | 說明                        | 權限  |
 | ---------------- | --------------------------- | ----- |
@@ -364,27 +366,28 @@ curl -X POST http://localhost:8080/api/skills/analyze-report/invoke \
 | `kb-query`       | 向量知識庫檢索              | USER  |
 | `analyze-report` | 生成分析報告                | ADMIN |
 
-> 上述技能透過 `/api/skills/{name}/invoke` 端點執行，平台端一律要求 JWT 認證（見「認證與多租戶」），
+> 上述 Business Workflow 透過統一的 `/api/skills/{name}/invoke` 端點執行，平台端一律要求 JWT 認證（見「認證與多租戶」），
 > 需帶 `Authorization: Bearer <token>`；`summarize`、`triage`、`rag-qa`、`kb-query` 任一登入使用者（USER）
 > 皆可呼叫，`analyze-report` 則限 ADMIN。
 
-### 技能（Skill）管理與執行
+### 管理與執行
 
-前端「Chat」視圖中，聊天會自動根據內容選擇合適的技能；另有「Config」視圖新增三個分頁：
+前端「Chat」視圖中，聊天會依 catalog 選擇可執行能力（路由不因 kind 改變）；「Config」視圖有四個平級分頁：
 
-1. **執行技能** — 手動執行上述內建技能或自訂技能（需登入）。
-2. **技能管理** [ADMIN] — CRUD 自訂技能；上傳 YAML 定義；自動語法驗證（呼叫 LangGraph 引擎）。
-3. **節點目錄** — 瀏覽所有註冊節點的輸入/輸出契約與工具庫。
+1. **業務流程** — 建立、編輯、驗證與匯出 Business Workflow YAML；可手動 invoke。
+2. **技能** — 匯入、匯出與管理 Agent Skill `SKILL.md` packages；可手動 invoke。
+3. **工作流節點參數** — Configuration Set 設定，不是 flow 作者 UI。
+4. **一般設定** — 管理其餘租戶層級的系統設定。
 
-新增 API 端點（皆需 JWT 認證 + `X-Internal-Token`）：
+API（瀏覽器呼叫 Platform 時需 JWT；Platform 到內部服務才使用 `X-Internal-Token`）：
 
-- `GET /api/skills` — 列出所有技能（內建 + 自訂）。
-- `POST /api/skills` — 新增技能（含上傳 YAML）。
-- `PUT /api/skills/{name}` — 更新技能（驗證後存新 revision）。
-- `DELETE /api/skills/{name}` — 軟刪除技能（disabled=false）。
-- `POST /api/skills/{name}/invoke` — 執行技能，回傳 `{skill, output}`。
-- `POST /api/skills/validate` — 驗證 YAML 語法（寫入前檢查）。
-- `GET /api/nodes` — 節點目錄（契約清單）。
+- `GET /api/skills`、`POST /api/skills/import`、`GET /api/skills/{name}/export` — Agent Skill 管理面；revisions/restore 亦留在此面，因歷史可混 kind。
+- `GET|POST /api/business-workflows`、`GET|PUT|DELETE /api/business-workflows/{name}`、`GET /api/business-workflows/{name}/export` — Business Workflow 管理面。
+- `POST /api/business-workflows/validate` — Business Workflow YAML 驗證；workflow 內部的 `/skills/validate` 是同 handler 相容 alias。P5/C8 不移除此 alias；若要退場，須另立 consumer inventory、usage-zero 與 rollback gate。
+- `POST /api/skills/{name}/invoke` — 統一執行任一已儲存 artifact，回傳 `{skill, output}`。
+- `GET /api/nodes` — Business Workflow 節點目錄（契約清單）。
+
+P2–P5 是刻意的雙軌期間：既有 flow 仍可透過 `/api/skills*` 相容讀寫，而新 `/api/business-workflows*` 操作同一列與同一 revision 序列。**P5 尚未因新路由或新 UI 而完成。** 只有 cleanup C8 記錄新面流量承接、舊面 flow 寫入 usage `= 0`、rollback window 結束與人工簽核後，才可把 Skill 面收斂為 Agent-Skill-only。
 
 ```bash
 # 執行 summarize 技能（文本摘要）
@@ -399,11 +402,11 @@ curl -X POST http://localhost:8080/api/skills/triage/invoke \
   -H "Content-Type: application/json" \
   -d '{"input":{"question":"退款要多久？"}}'
 
-# 驗證 Skill YAML 定義
-curl -X POST http://localhost:8080/api/skills/validate \
+# 驗證 Business Workflow YAML 定義
+curl -X POST http://localhost:8080/api/business-workflows/validate \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"yaml":"name: my_skill\ninput_schema: {...}"}'
+  -d '{"definition":"name: my_skill\ninput_schema: {...}"}'
 ```
 
 > 平台收到請求後會轉呼叫 LangGraph 引擎服務（`:8001`）；若要略過平台直接測技能本身，也可以打 `http://localhost:8001/skills/{name}/invoke`

@@ -310,7 +310,7 @@ public sealed class AgentApiTests : IDisposable
     public async Task RuleEndpoints_FlagOff_Return404BeforeAuthOrWorkflow(string method, string path)
     {
         using var flagOff = new TestWebAppFactory(agentBuilderEnabled: false);
-        var calls = FakeWorkflowService.EngineCalls.Count;
+        var calls = FakeWorkflowEngineClient.EngineCalls.Count;
 
         var response = await flagOff.CreateClient().SendAsync(Request(
             method,
@@ -320,7 +320,7 @@ public sealed class AgentApiTests : IDisposable
                 : null));
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        Assert.Equal(calls, FakeWorkflowService.EngineCalls.Count);
+        Assert.Equal(calls, FakeWorkflowEngineClient.EngineCalls.Count);
     }
 
     [Theory]
@@ -336,7 +336,7 @@ public sealed class AgentApiTests : IDisposable
                 : null));
         Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
 
-        var calls = FakeWorkflowService.EngineCalls.Count;
+        var calls = FakeWorkflowEngineClient.EngineCalls.Count;
         var user = _factory.CreateClient().WithToken(_factory.IssueToken("user-a", "USER", "demo-a"));
         var forbidden = await user.SendAsync(Request(
             method,
@@ -345,7 +345,7 @@ public sealed class AgentApiTests : IDisposable
                 ? new { gate = "pre-action", ruleSet = new { version = 1, rules = Array.Empty<object>() } }
                 : null));
         Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
-        Assert.Equal(calls, FakeWorkflowService.EngineCalls.Count);
+        Assert.Equal(calls, FakeWorkflowEngineClient.EngineCalls.Count);
     }
 
     [Fact]
@@ -364,9 +364,9 @@ public sealed class AgentApiTests : IDisposable
         Assert.Equal(
             "deny",
             (await actions.ReadJsonAsync())["actions"]![0]!["name"]!.GetValue<string>());
-        Assert.Equal("demo-a", FakeWorkflowService.LastRuleContext!.TenantCode);
-        Assert.Equal("admin-a", FakeWorkflowService.LastRuleContext.UserId);
-        Assert.Equal("ADMIN", FakeWorkflowService.LastRuleContext.Role);
+        Assert.Equal("demo-a", FakeWorkflowEngineClient.LastRuleContext!.TenantCode);
+        Assert.Equal("admin-a", FakeWorkflowEngineClient.LastRuleContext.UserId);
+        Assert.Equal("ADMIN", FakeWorkflowEngineClient.LastRuleContext.Role);
     }
 
     [Fact]
@@ -389,7 +389,7 @@ public sealed class AgentApiTests : IDisposable
         Assert.Equal(
             "allow",
             (await simulate.ReadJsonAsync())["simulation"]!["decision"]!.GetValue<string>());
-        Assert.Contains("rule-validate:pre-action", FakeWorkflowService.EngineCalls);
-        Assert.Contains("rule-simulate:pre-action", FakeWorkflowService.EngineCalls);
+        Assert.Contains("rule-validate:pre-action", FakeWorkflowEngineClient.EngineCalls);
+        Assert.Contains("rule-simulate:pre-action", FakeWorkflowEngineClient.EngineCalls);
     }
 }

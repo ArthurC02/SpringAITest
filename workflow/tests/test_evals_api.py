@@ -6,16 +6,20 @@
 (不打真實 backend HTTP、write_evidence 工具即使全域旗標開啟仍 fail closed)。
 """
 
+from dataclasses import replace
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app import skills
 from app.engine.tool_registry import ToolContext
 from app.evals.fixtures import build_fixture_deps
 from app.evals.models import EvalSuite
 from app.main import app
 from app.settings import settings
+from app.skills import custom
 from app.tools import WriteEvidenceDenied, write_evidence
 from tests.conftest import auth_headers, install_fake_get
 
@@ -84,6 +88,27 @@ def test_eval_run_unknown_mode_rejected_with_422() -> None:
 def test_eval_run_unsupported_candidate_kind_rejected_with_422() -> None:
     response = _run(_suite([], candidate_kind="agent"))
     assert response.status_code == 422
+
+
+def test_eval_run_agent_skill_candidate_rejected_before_cases(monkeypatch) -> None:
+    """Agent Skill artifact 在載入層 fail closed，不會變成 per-case ERROR。"""
+    builtin = skills.get("triage")
+    loaded = replace(
+        builtin,
+        skill=builtin.skill.model_copy(
+            update={"name": "agent-skill-eval-probe", "kind": "agentic", "flow": []}
+        ),
+    )
+
+    async def load_agent_skill(name, ctx):
+        return loaded
+
+    monkeypatch.setattr(custom, "load", load_agent_skill)
+
+    response = _run(_suite([], skill_name="agent-skill-eval-probe"))
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "workflow_eval_unsupported_candidate"
 
 
 def test_eval_run_unknown_skill_returns_404(monkeypatch) -> None:

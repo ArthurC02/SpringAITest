@@ -6,11 +6,11 @@ using Platform.Service.Options;
 
 namespace Platform.Service.Tests;
 
-public sealed class WorkflowServiceTests
+public sealed class WorkflowEngineClientTests
 {
     private static readonly UserContext Ctx = new("alice", "demo-a", "USER");
 
-    private static WorkflowService Build(StubHttpMessageHandler stub) =>
+    private static WorkflowEngineClient Build(StubHttpMessageHandler stub) =>
         new(new HttpClient(stub), new WorkflowOptions { BaseUrl = "http://downstream", InternalToken = "tok" });
 
     private static Dictionary<string, JsonElement> Input() =>
@@ -143,6 +143,23 @@ public sealed class WorkflowServiceTests
 
         var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.ValidateSkillAsync("x", Ctx));
         Assert.Contains("500", ex.Message);
+    }
+
+    [Fact]
+    public async Task ValidateBusinessWorkflow_UsesRealignedPath_AndPreservesIdentity()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(
+            HttpStatusCode.OK,
+            """{"valid":true,"errors":[],"skill":{"name":"quarterly-flow","kind":"flow"}}"""));
+
+        var result = await Build(stub).ValidateBusinessWorkflowAsync("name: quarterly-flow", Ctx);
+
+        Assert.Equal(
+            "http://downstream/business-workflows/validate",
+            stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("tok", stub.Header("X-Internal-Token"));
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.True(result.GetProperty("valid").GetBoolean());
     }
 
     [Fact]

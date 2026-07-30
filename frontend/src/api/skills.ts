@@ -5,8 +5,6 @@ import type {
   SkillInfo,
   SkillResult,
   SkillRevision,
-  SkillSimpleForm,
-  SkillValidation,
 } from '../types'
 
 /** 可執行的 skill 清單（內建 + 租戶自訂，帶 source/revision）。執行分頁用。 */
@@ -37,29 +35,6 @@ export function getSkill(name: string): Promise<Skill> {
 /** 唯讀歷史（依 revision 遞減）。 */
 export function listSkillRevisions(name: string): Promise<SkillRevision[]> {
   return apiFetch<SkillRevision[]>(`/api/skills/${encodeURIComponent(name)}/revisions`)
-}
-
-// body 是 YAML 原文；name/description/required_role 由後端從 definition 解析（唯一事實來源）。
-// 選填 simpleForm（簡單模式的範本身分＋表單原值）讓建立品日後可重回簡單模式；省略則後端不寫。
-// 回應形狀契約只保證 PUT 回 {revision}（AT4-03），因此存檔後一律重讀，不依賴回應 body。
-// 建立時名稱已存在 → 409。
-export function createSkill(definition: string, simpleForm?: SkillSimpleForm): Promise<void> {
-  return apiFetch<void>('/api/skills', {
-    method: 'POST',
-    body: JSON.stringify(simpleForm ? { definition, simpleForm } : { definition }),
-  })
-}
-
-/** 更新既有 skill → 產生新 revision；路由的 name 即身分，YAML 內 name 不符 → 422。 */
-export function updateSkill(
-  name: string,
-  definition: string,
-  simpleForm?: SkillSimpleForm,
-): Promise<void> {
-  return apiFetch<void>(`/api/skills/${encodeURIComponent(name)}`, {
-    method: 'PUT',
-    body: JSON.stringify(simpleForm ? { definition, simpleForm } : { definition }),
-  })
 }
 
 /**
@@ -110,12 +85,4 @@ export function importSkill(zip: Blob, filename = 'package.zip'): Promise<Skill>
 /** 取回 skill 的 export zip bytes（不觸發下載）——agentic 編輯器載入 package 用。走 apiFetchBlob 保 Bearer/401。 */
 export function getSkillPackage(name: string): Promise<Blob> {
   return apiFetchBlob(`/api/skills/${encodeURIComponent(name)}/export`)
-}
-
-/** 引擎級靜態驗證;無副作用,編輯器即時校驗用。valid=false 也是 HTTP 200。 */
-export function validateSkill(definition: string): Promise<SkillValidation> {
-  return apiFetch<SkillValidation>('/api/skills/validate', {
-    method: 'POST',
-    body: JSON.stringify({ definition }),
-  })
 }

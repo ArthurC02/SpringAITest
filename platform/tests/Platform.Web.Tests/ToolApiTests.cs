@@ -15,12 +15,12 @@ public sealed class ToolApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task List_WithoutToken_Returns401_WithoutCallingWorkflow()
     {
-        var before = FakeWorkflowService.EngineCalls.Count(c => c == "tools");
+        var before = FakeWorkflowEngineClient.EngineCalls.Count(c => c == "tools");
 
         var resp = await _factory.CreateClient().GetAsync("/api/tools");
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
-        Assert.Equal(before, FakeWorkflowService.EngineCalls.Count(c => c == "tools"));
+        Assert.Equal(before, FakeWorkflowEngineClient.EngineCalls.Count(c => c == "tools"));
     }
 
     [Fact]

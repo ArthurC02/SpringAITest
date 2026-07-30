@@ -110,7 +110,7 @@ public sealed class ChatContextProviderAndRecorderTests
         "input_schema": { "query": { "type":"str", "required":true } } } ]
     """;
 
-    private static FakeWorkflowService RoutableWorkflows() => new()
+    private static FakeWorkflowEngineClient RoutableWorkflows() => new()
     {
         Catalog = System.Text.Json.JsonDocument.Parse(RoutableCatalog).RootElement.Clone(),
     };

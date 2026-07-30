@@ -14,7 +14,7 @@ public sealed class ChatServiceTests
 {
     private static (ChatService Service, AIHostAgent HostAgent, InMemoryChatHistoryProvider HistoryProvider) BuildWithAgent(
         FakeLlmAgent agent, FakeMem0Client mem0, FakeConversationStore convos,
-        FakeWorkflowService? workflows = null, FakeChatClient? chatClient = null)
+        FakeWorkflowEngineClient? workflows = null, FakeChatClient? chatClient = null)
     {
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, historyProvider, _) = TestChatAgent.Build(chatClient, mem0, convos, identity, agent, workflows);
@@ -24,7 +24,7 @@ public sealed class ChatServiceTests
 
     private static ChatService Build(
         FakeLlmAgent agent, FakeMem0Client mem0, FakeConversationStore convos,
-        FakeWorkflowService? workflows = null, FakeChatClient? chatClient = null)
+        FakeWorkflowEngineClient? workflows = null, FakeChatClient? chatClient = null)
         => BuildWithAgent(agent, mem0, convos, workflows, chatClient).Service;
 
     /// <summary>
@@ -34,7 +34,7 @@ public sealed class ChatServiceTests
     /// </summary>
     private static (ChatService Service, SkillRoutingAgent Routing) BuildRouting(
         FakeLlmAgent agent, FakeMem0Client mem0, FakeConversationStore convos,
-        FakeWorkflowService? workflows = null, FakeChatClient? chatClient = null)
+        FakeWorkflowEngineClient? workflows = null, FakeChatClient? chatClient = null)
     {
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, _, routing) = TestChatAgent.Build(chatClient, mem0, convos, identity, agent, workflows);
@@ -142,7 +142,7 @@ public sealed class ChatServiceTests
         agent.Responses.Enqueue("摘要回覆");            // 摘要
         var convos = new FakeConversationStore { ThrowOnAdd = true };
         var mem0 = new FakeMem0Client();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"kb-query", "description":"x", "required_role":"USER", "source":"builtin", "input_schema": { "query": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
@@ -208,7 +208,7 @@ public sealed class ChatServiceTests
         agent.Responses.Enqueue("kb-query");           // 路由命中(阻塞)
         var convos = new FakeConversationStore { ThrowOnAdd = true };
         var mem0 = new FakeMem0Client();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"kb-query", "description":"x", "required_role":"USER", "source":"builtin", "input_schema": { "query": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
@@ -339,7 +339,7 @@ public sealed class ChatServiceTests
     public async Task BuiltinSkill_InvokesSkillEndpoint_WithItsInputKey()
     {
         var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService { Catalog = Cat(BuiltinCatalog) };
+        var workflows = new FakeWorkflowEngineClient { Catalog = Cat(BuiltinCatalog) };
         var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
 
         var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
@@ -367,7 +367,7 @@ public sealed class ChatServiceTests
     public async Task KbQuerySkill_Abstains_FallsBackToRagQaSkill_WithHonestLabel()
     {
         var agent = new FakeLlmAgent();
-        var workflows = new FakeWorkflowService
+        var workflows = new FakeWorkflowEngineClient
         {
             Catalog = Cat(BuiltinCatalog),
             SkillOutputByName = new()

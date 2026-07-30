@@ -37,7 +37,7 @@ namespace Platform.Service;
 /// <c>ChatController</c> 產生 <c>event:error</c> 終止幀(T-P4-4/B-P4-13 的姊妹保證)。
 ///
 /// 生命週期:兩顆 hosted agent 是啟動期建立的 Singleton,本類因此不可在建構時捕捉 Scoped 服務
-/// (<see cref="IWorkflowService"/>、<see cref="IChatIdentityAccessor"/>)——改持
+/// (<see cref="IWorkflowEngineClient"/>、<see cref="IChatIdentityAccessor"/>)——改持
 /// <see cref="IServiceScopeFactory"/>,每次呼叫時開一個新 scope、用完即棄(照 <see cref="ChatContextProvider"/>/
 /// <see cref="ChatTurnRecorder"/> 的既有模式)。<see cref="ILlmAgent"/> 與
 /// <see cref="InMemoryChatHistoryProvider"/> 皆為 Singleton,可直接持有。
@@ -75,7 +75,7 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
         using var scope = _scopeFactory.CreateScope();
         var identity = scope.ServiceProvider.GetRequiredService<IChatIdentityAccessor>();
-        var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowService>();
+        var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowEngineClient>();
 
         var summaryMessages = await TryRouteAndExecuteAsync(
             lastUser, identity.CurrentUser, identity, workflows, scope.ServiceProvider, cancellationToken);
@@ -103,7 +103,7 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
         using var scope = _scopeFactory.CreateScope();
         var identity = scope.ServiceProvider.GetRequiredService<IChatIdentityAccessor>();
-        var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowService>();
+        var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowEngineClient>();
 
         var summaryMessages = await TryRouteAndExecuteAsync(
             lastUser, identity.CurrentUser, identity, workflows, scope.ServiceProvider, cancellationToken);
@@ -183,11 +183,11 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// tool.InvokeAsync(...) 斷言(斷言面不變,只搬構造)。生產路徑從不呼叫此 overload——RunCoreAsync/
     /// RunCoreStreamingAsync 內的 TryRouteAndExecuteAsync 用同一個 scope 完成「路由 + 執行」。
     /// ponytail: 刻意不 Dispose 這個 scope,讓回傳的 LlmTool 委派在測試裡稍後呼叫 InvokeAsync 時仍能解析到
-    /// 同一個 IWorkflowService 實例;僅測試進入點如此,天花板是每次呼叫多留一個小 scope(測試行程結束即回收)。
+    /// 同一個 IWorkflowEngineClient 實例;僅測試進入點如此,天花板是每次呼叫多留一個小 scope(測試行程結束即回收)。
     /// </summary>
     internal Task<IReadOnlyList<LlmTool>?> BuildToolsAsync(UserContext? userCtx, CancellationToken ct)
     {
-        var workflows = _scopeFactory.CreateScope().ServiceProvider.GetRequiredService<IWorkflowService>();
+        var workflows = _scopeFactory.CreateScope().ServiceProvider.GetRequiredService<IWorkflowEngineClient>();
         return BuildToolsAsync(userCtx, workflows, ct);
     }
 
@@ -197,7 +197,7 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// 整段以 try/catch 包住:任何例外都吞成 null(退純聊天)並記 warning——一輪聊天絕不可因路由失敗而 500。
     /// </summary>
     private async Task<IReadOnlyList<LlmMessage>?> TryRouteAndExecuteAsync(
-        string message, UserContext? userCtx, IChatIdentityAccessor identity, IWorkflowService workflows,
+        string message, UserContext? userCtx, IChatIdentityAccessor identity, IWorkflowEngineClient workflows,
         IServiceProvider scoped, CancellationToken ct)
     {
         if (userCtx is null)
@@ -344,7 +344,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// 目錄抓取失敗採 best-effort:這輪回空工具清單(類比 mem0 吞錯),聊天照常走純聊天兜底,不炸。
     /// 工具失敗回錯誤文字給模型照實轉述,不讓整輪聊天失敗。
     /// </summary>
-    private async Task<IReadOnlyList<LlmTool>?> BuildToolsAsync(UserContext? userCtx, IWorkflowService workflows, CancellationToken ct)
+    private async Task<IReadOnlyList<LlmTool>?> BuildToolsAsync(
+        UserContext? userCtx, IWorkflowEngineClient workflows, CancellationToken ct)
     {
         if (userCtx is null)
         {
@@ -372,7 +373,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// 過濾:template-* 內建骨架(空殼,不可路由)→ 跳過;角色不符 → 跳過;
     /// 非「恰好一個必填字串輸入」→ 跳過(P1 天花板,多參/非字串待 P3)。
     /// </summary>
-    private IReadOnlyList<LlmTool> SkillCatalogToTools(JsonElement catalog, UserContext userCtx, IWorkflowService workflows)
+    private IReadOnlyList<LlmTool> SkillCatalogToTools(
+        JsonElement catalog, UserContext userCtx, IWorkflowEngineClient workflows)
     {
         var tools = new List<LlmTool>();
         if (catalog.ValueKind != JsonValueKind.Array)
@@ -479,7 +481,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
     /// ponytail: kb-query→rag-qa 是寫死的專屬特判,等有第二顆需要同類兜底的 skill 再抽象成表驅動。
     /// </summary>
     private async Task<string> InvokeSkillToolAsync(
-        string name, string inputKey, string arg, UserContext userCtx, IWorkflowService workflows, CancellationToken ct)
+        string name, string inputKey, string arg, UserContext userCtx,
+        IWorkflowEngineClient workflows, CancellationToken ct)
     {
         try
         {

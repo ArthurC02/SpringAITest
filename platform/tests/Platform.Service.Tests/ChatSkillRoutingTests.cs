@@ -25,7 +25,7 @@ public sealed class ChatSkillRoutingTests
     private static readonly UserContext UserA = new("user-a", "demo-a", "USER");
     private static readonly UserContext AdminA = new("admin-a", "demo-a", "ADMIN");
 
-    private static ChatService Build(FakeLlmAgent agent, FakeWorkflowService workflows, FakeChatClient? chatClient = null)
+    private static ChatService Build(FakeLlmAgent agent, FakeWorkflowEngineClient workflows, FakeChatClient? chatClient = null)
     {
         var mem0 = new FakeMem0Client();
         var convos = new FakeConversationStore();
@@ -40,7 +40,7 @@ public sealed class ChatSkillRoutingTests
     /// 因此需要 SkillRoutingAgent 實例而非只有 ChatService。
     /// </summary>
     private static (ChatService Service, SkillRoutingAgent Routing) BuildRouting(
-        FakeLlmAgent agent, FakeWorkflowService workflows, FakeChatClient? chatClient = null)
+        FakeLlmAgent agent, FakeWorkflowEngineClient workflows, FakeChatClient? chatClient = null)
     {
         var mem0 = new FakeMem0Client();
         var convos = new FakeConversationStore();
@@ -68,7 +68,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task User_GetsUserSkills_NotAdminSkill_AndCatalogCalledOnceWithIdentity()
     {
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
@@ -87,7 +87,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task Admin_GetsUserAndAdminSkills()
     {
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(AdminA, CancellationToken.None);
@@ -111,7 +111,7 @@ public sealed class ChatSkillRoutingTests
     [InlineData("""{ "a": { "type":"str", "required":true }, "n": { "type":"int", "required":true } }""")]   // required str + required int
     public async Task NonSingleRequiredString_IsSkipped(string schema)
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat($$"""
             [ { "name":"weird-skill", "description":"x", "required_role":"USER", "source":"custom", "input_schema": {{schema}} } ]
@@ -128,7 +128,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task SingleRequiredString_WithOptionals_IsRoutable_AndInvokesOnlyRequiredKey()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""
             [ { "name":"has-optionals", "description":"x", "required_role":"USER", "source":"custom",
@@ -159,7 +159,7 @@ public sealed class ChatSkillRoutingTests
     [InlineData("null")]
     public async Task NonArrayCatalog_ProducesNoTools_DoesNotThrow(string catalogJson)
     {
-        var wf = new FakeWorkflowService { Catalog = Cat(catalogJson) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(catalogJson) };
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
@@ -171,7 +171,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task BuiltinTemplateSkeletons_AreNeverRouted_ButRealSkillsAre()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""
             [
@@ -198,7 +198,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task CustomSkill_WithTemplatePrefix_IsNotFiltered()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""
             [ { "name":"template-custom-thing", "description":"x", "required_role":"USER", "source":"custom",
@@ -218,7 +218,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task Agentic_SingleRequiredString_IsRoutable_MultiParam_IsNotRouted_KindIgnored()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""
             [
@@ -238,7 +238,7 @@ public sealed class ChatSkillRoutingTests
         Assert.DoesNotContain("trip-planner", names);  // 多參 agentic → 不路由(kind 未使其成為例外)。
     }
 
-    // (刪除:原「多參 agentic 仍可 explicit invoke」一案直接呼叫 FakeWorkflowService.InvokeSkillAsync,
+    // (刪除:原「多參 agentic 仍可 explicit invoke」一案直接呼叫 FakeWorkflowEngineClient.InvokeSkillAsync,
     //  完全沒有執行到任何 production 程式碼,只驗證 fake 會回傳自己被設定的值——套套邏輯。
     //  「多參 agentic 不被路由」這一半由上一案覆蓋。)
 
@@ -246,7 +246,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task SelectedTool_InvokesCorrectSkill_WithInputKeyAndIdentity()
     {
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
 
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
@@ -270,7 +270,7 @@ public sealed class ChatSkillRoutingTests
     [InlineData("summary", "D")]
     public async Task StandardOutputKey_IsExtracted_NotWholeJson(string key, string value)
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat($$"""{ "skill":"s", "output": { "{{key}}": "{{value}}" } }"""),
@@ -289,7 +289,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task BusinessResult_TakesPriorityOver_FinalAnswer()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"s", "output": { "final_answer":"套規則前", "business_result":"套規則後" } }"""),
@@ -308,7 +308,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task BusinessResultOnly_IsExtracted_NotRawStateJson()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"s", "output": { "business_result":"答案" } }"""),
@@ -327,7 +327,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task NonStandardOutput_ReturnsRawJsonOfOutputObject()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"s", "output": { "rows":[1,2], "count":2 } }"""),
@@ -350,7 +350,7 @@ public sealed class ChatSkillRoutingTests
     [InlineData("""{ "skill":"s", "output": { "trace":["n1"], "errors":["timeout at node n1"] } }""")]
     public async Task FatalRunWithoutAnswerKey_ReturnsFriendlyMessage_NotInternalJson(string skillOutput)
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat(skillOutput),
@@ -373,7 +373,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task NoAnswerKeyNonFatal_StillUsesRawJsonFallback()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "skill":"s", "output": { "rows":[1,2], "errors":[] } }"""),
@@ -392,7 +392,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task OutputWithoutWrapper_FallsBackToRootRawJson()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             SkillOutput = Cat("""{ "foo":"bar" }"""),   // 沒有 output 外層、也無標準 key
@@ -420,7 +420,7 @@ public sealed class ChatSkillRoutingTests
     [MemberData(nameof(SkillInvokeErrors))]
     public async Task SkillInvokeFailure_ReturnsErrorText_DoesNotThrow(Exception error)
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
             ThrowOnSkillInvoke = error,
@@ -448,7 +448,7 @@ public sealed class ChatSkillRoutingTests
     public async Task CatalogFailure_ToolsEmpty_ChatDoesNotThrow(Exception error)
     {
         var agent = new FakeLlmAgent();
-        var wf = new FakeWorkflowService { ThrowOnCatalog = error };
+        var wf = new FakeWorkflowEngineClient { ThrowOnCatalog = error };
         var (svc, routing) = BuildRouting(agent, wf);
 
         // 聊天不炸(路由表為空 → 純聊天兜底,由共用 hosted agent 回覆——FakeChatClient 預設回覆
@@ -469,7 +469,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task ToolDescription_KeepsOriginal_AndAddsInputHint()
     {
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""[ { "name":"tenant-a-private-search", "description":"租戶 A 的專用檢索", "required_role":"USER", "source":"custom", "input_schema": { "question_text": { "type":"str", "required":true } } } ]"""),
         };
@@ -491,7 +491,7 @@ public sealed class ChatSkillRoutingTests
         var agent = new FakeLlmAgent { Response = "最終答案" };
         var chatClient = new FakeChatClient { Response = "最終答案" };
         var mem0 = new FakeMem0Client { RecallResult = "- 使用者是租戶 A\n" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var convos = new FakeConversationStore();
         var identity = new FakeChatIdentityAccessor();
         var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0, convos, identity, agent, wf);
@@ -530,7 +530,7 @@ public sealed class ChatSkillRoutingTests
         agent.Responses.Enqueue("本季毛利率是 32.8%。"); // 第二次 CompleteAsync = 摘要(只潤飾)
         var mem0 = new FakeMem0Client();
         var convos = new FakeConversationStore();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SampleCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"毛利率 32.8%" } }"""),
@@ -568,7 +568,7 @@ public sealed class ChatSkillRoutingTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("NONE");   // 路由 = NONE
         var chatClient = new FakeChatClient { Response = "純聊天回覆" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("你好呀", "u1", "c1", UserA);
@@ -585,7 +585,7 @@ public sealed class ChatSkillRoutingTests
     public async Task RoutingInstruction_SteersNumericIntent_TowardTool_NotNone()
     {
         var agent = new FakeLlmAgent { Response = "NONE" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var svc = Build(agent, wf);
 
         await svc.ChatAsync("晴光科技 2025 相比 2024 的營收 YoY 年增率是多少?", "u1", "c1", UserA);
@@ -603,7 +603,7 @@ public sealed class ChatSkillRoutingTests
     {
         var agent = new FakeLlmAgent();
         var chatClient = new FakeChatClient { Response = "匿名回覆" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("嗨", "u1", "c1");  // userCtx = null
@@ -622,7 +622,7 @@ public sealed class ChatSkillRoutingTests
     {
         var agent = new FakeLlmAgent { ThrowOnFirstComplete = true };
         var chatClient = new FakeChatClient { Response = "兜底純聊天" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
@@ -638,7 +638,7 @@ public sealed class ChatSkillRoutingTests
         var agent = new FakeLlmAgent { Chunks = new[] { "本季", "毛利率", "32.8%" } };
         agent.Responses.Enqueue("kb-query");   // 路由(阻塞)
         var convos = new FakeConversationStore();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SampleCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"毛利率 32.8%" } }"""),
@@ -676,7 +676,7 @@ public sealed class ChatSkillRoutingTests
         agent.Responses.Enqueue("NONE");        // 第一次路由 = NONE
         agent.Responses.Enqueue("kb-query");    // 第二次路由(重試)= 選中
         agent.Responses.Enqueue("摘要輸出");    // 摘要
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SampleCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
@@ -699,7 +699,7 @@ public sealed class ChatSkillRoutingTests
         agent.Responses.Enqueue("NONE");        // 第一次路由
         agent.Responses.Enqueue("NONE");        // 第二次路由(重試)
         var chatClient = new FakeChatClient { Response = "純聊天回覆" };
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
         var svc = Build(agent, wf, chatClient);
 
         var reply = await svc.ChatAsync("你好呀", "u1", "c1", UserA);
@@ -718,7 +718,7 @@ public sealed class ChatSkillRoutingTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("kb-query");    // 第一次路由即命中
         agent.Responses.Enqueue("摘要輸出");    // 摘要
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SampleCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
@@ -737,7 +737,7 @@ public sealed class ChatSkillRoutingTests
     [Fact]
     public async Task BlockingAndStream_SameRoutingCatalog_CatalogFetchedOncePerRound()
     {
-        var wf = new FakeWorkflowService { Catalog = Cat(SampleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
 
         var blockAgent = new FakeLlmAgent();
         await Build(blockAgent, wf).ChatAsync("問題", "u1", "c1", UserA);

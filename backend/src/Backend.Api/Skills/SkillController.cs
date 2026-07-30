@@ -21,20 +21,6 @@ namespace Backend.Api.Skills;
 public sealed class SkillController : ControllerBase
 {
     /// <summary>
-    /// 保留字:(a) code 註冊工作流的名稱 — skill 不得同名(否則執行時路由鍵撞名);
-    /// (b) platform 的字面路由段 catalog/validate/nodes — 字面段永遠勝過 {name},
-    /// 這種名字的 skill 建得起來卻永遠點不進去(GET /api/skills/catalog 回的是引擎目錄)。
-    /// ponytail: 硬寫保留字，等 workflow 名單真的會變再改成打 GET /workflows。
-    /// </summary>
-    // 新增 workflow 內建 skill 時必須同步此清單。
-    private static readonly HashSet<string> ReservedNames = new(StringComparer.Ordinal)
-    {
-        "summarize", "triage", "rag-qa", "analyze-report", "kb-query",
-        "catalog", "validate", "nodes",
-        "template-retrieval", "template-compare", "template-stats", "template-infer", "template-inspire",
-    };
-
-    /// <summary>
     /// 匯入上傳的傳輸層粗略上限(transport-safe pre-check,03-design §2.1)。
     /// 這**不是** archive 結構限制(檔案數/單檔/解壓/壓縮比上限由 workflow parser 單一來源持有,R2);
     /// 只是避免在轉送前緩衝過大 body 的天花板。
@@ -75,10 +61,7 @@ public sealed class SkillController : ControllerBase
     public async Task<IActionResult> Export(string name, CancellationToken ct)
     {
         var skill = await _repo.GetAsync(Request.RequireTenant(), name, ct) ?? throw NotFound(name);
-
-        // 匯入的 flow/agentic 都原封回傳（保留所有 entries）；definition-only flow 才現場組 SKILL.md。
-        var bytes = skill.Package ?? SkillExporter.ToZip(skill);
-        return File(bytes, "application/zip", $"{skill.Name}.zip");
+        return File(skill.Package ?? SkillExporter.ToZip(skill), "application/zip", $"{skill.Name}.zip");
     }
 
     /// <summary>
@@ -161,17 +144,14 @@ public sealed class SkillController : ControllerBase
     public async Task<ActionResult<Skill>> Create([FromBody] SkillUpsert request, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
-
-        // definition-only API 僅處理 flow(R3 / AST-P0-013):`kind: agentic` 定義由引擎 validate 判 invalid → 422。
         var meta = await ValidateAsync(request.Definition!, tenantId, ct);
-
-        if (ReservedNames.Contains(meta.Name))
+        if (SkillNameRules.ReservedBusinessWorkflowNames.Contains(meta.Name))
         {
             throw new ApiException(StatusCodes.Status409Conflict, "名稱與既有工作流同名，無法建立：" + meta.Name);
         }
 
         var created = await _repo.CreateAsync(
-            tenantId, ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+            tenantId, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
             Request.UserIdOrEmpty(), ct);
         if (created is null)
         {
@@ -188,18 +168,15 @@ public sealed class SkillController : ControllerBase
     /// </summary>
     [HttpPut("{name}")]
     [AdminOnly("權限不足，無法存取 Skill")]
-    public async Task<ActionResult<Skill>> Update(string name, [FromBody] SkillUpsert request, CancellationToken ct)
+    public async Task<ActionResult<Skill>> Update(
+        string name, [FromBody] SkillUpsert request, CancellationToken ct)
     {
         var tenantId = Request.RequireTenant();
-
-        // 既有 agentic skill 不得經 definition-only PUT 更新(R3 / AST-P0-013):先查再判,零副作用、不打引擎。
         var existing = await _repo.GetAsync(tenantId, name, ct);
         RejectAgenticDefinitionOnly(
             string.Equals(existing?.Kind, "agentic", StringComparison.Ordinal));
 
-        // 送出的 definition 若本身宣告 agentic,引擎 validate 判 invalid → 422(不得藉 definition-only 把 flow 改成 agentic)。
         var meta = await ValidateAsync(request.Definition!, tenantId, ct);
-
         if (!string.Equals(meta.Name, name, StringComparison.Ordinal))
         {
             throw new ApiException(
@@ -214,7 +191,7 @@ public sealed class SkillController : ControllerBase
         }
 
         var updated = await _repo.UpdateAsync(
-            tenantId, name, ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+            tenantId, name, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
             Request.UserIdOrEmpty(), ct);
         if (updated is null)
         {
@@ -308,7 +285,7 @@ public sealed class SkillController : ControllerBase
                 "Skill 套件驗證服務呼叫失敗：引擎回應違反契約（非法 skill.name）");
         }
 
-        if (ReservedNames.Contains(meta.Name))
+        if (SkillNameRules.ReservedBusinessWorkflowNames.Contains(meta.Name))
         {
             throw new ApiException(
                 StatusCodes.Status409Conflict, "名稱與既有工作流同名，無法建立：" + meta.Name);

@@ -3,7 +3,7 @@ using System.Net.Http.Json;
 
 namespace Platform.Web.Tests;
 
-// /api/skills/catalog 探針呼叫真的會打到 FakeWorkflowService.GetSkillCatalogAsync,累加靜態
+// /api/skills/catalog 探針呼叫真的會打到 FakeWorkflowEngineClient.GetSkillCatalogAsync,累加靜態
 // EngineCalls;需與 ChatApiTests/SkillApiTests 序列化,理由同 EngineCallsCollection 上的說明。
 [Collection("EngineCalls")]
 public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>

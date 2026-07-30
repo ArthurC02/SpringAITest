@@ -62,14 +62,14 @@
 
 - `custom.py:147-201` 的 `load()` 拆成 `load_business_workflow()`（validate_source + parse_source + compile）與 `load_agent_skill()`（`skill_from_agentic_meta` + compile 的 agentic 路徑）；公用 `load()` 依 DB 列的 kind 分派（一行 if，取代 `_is_agentic` YAML 嗅探——嗅探刪除，P1 已先處理 `_entry`）。
 - `compiler.py`：`_build_agentic_graph` **本體**（`:501-565`）移至新模組 `app/engine/agent_skill_graph.py`（依賴不變：`AGENT_RUNNER_NODE`、`harnessed`、audit 附加）；**分派留在 `_build_graph`（`:570-571`）**，改成一行顯式 `return agent_skill_graph.build(skill, deps)`。`compile()` 維持唯一 cached 入口、不 raise、cache key 零改動——審查確認 32-slot 快取只掛在 `compile()`，`custom.load()` 每次 invoke 靠它命中（`custom.py:43-44` 明文 <10ms 預算）；把 agentic 踢出 `compile()` 會讓 agentic 每次 invoke 重建圖或被迫複製快取。呼叫端全數不變：`evals`、`legacy_flow`、`custom`、`app/skills/__init__.py:109`（內建載入）、`main.py:529`（per-config 重編）、`tests/test_agent_skill_runner.py:113`（直接對 agentic 呼叫 compile 的測試**照舊通過**）。
-- `main.py`：`/skills/{name}/invoke` 不動（kind 分派已在 compile 內解決）；`/skills/validate` 加 alias `/business-workflows/validate`（同 handler）。
+- `main.py`：`/skills/{name}/invoke` 不動（kind 分派已在 compile 內解決）；`/skills/validate` 與 `/business-workflows/validate` 維持同 handler alias。**P5/C8 不刪 workflow-internal `/skills/validate`**；它的退場必須另立 consumer inventory、usage=0、rollback window 與驗收 gate。
 - eval：**不改行為**——`evals/api.py:69-79` 已對 `kind != "flow"` 回 422 `workflow_eval_unsupported_candidate`（層次正確：gate 在 API 層）。只補一支 pytest 釘住此既有契約（02-spec §5）。
 - `runtime/graph.py:585-712`：`_load_skill` 抽出 `_invoke_business_workflow(state, runtime, artifact, command)`（現 flow 分支 `:597-652`；需要 `command.arguments` 作 `raw_input`）與 `_enter_skill_scope(state, runtime, artifact)`（現 agentic 分支 `:653-712`；不需 command）兩個模組級函式；`_load_skill` 本體變成 command/pin 解析 + 一行分派。**節點名、command、state 寫入形狀、event_type 字串與 payload 鍵逐鍵不變**（02-spec D-3 紅線，含 `legacy_flow_completed`——backend `AgentRunRepository.cs:16-37` 白名單硬編此字串）；以既有 runtime 測試 + golden state-diff + checkpoint round-trip 測試護行為。
 - `artifacts.py`、`models.py`、`legacy_flow.py`：不動。
 
 ### 3.4 依賴方向規則（引擎內部）
 
-拆分後的 import 界線：`app/engine/compiler.py`（Business Workflow 編譯）不得 import `agent_skill_graph`；`agent_skill_graph` 可 import node_shell/tool_registry/node_registry（它是另一個「圖工廠」，共用治理殼）。`app/runtime/` 對兩者的依賴只允許經 `legacy_flow`（現況）與 artifact 讀取，不新增。
+拆分後的 import 界線：`app/engine/compiler.py` 的宣告式 YAML schema/建圖職責只服務 Business Workflow；它只在顯式 kind 分派點 import/call `agent_skill_graph.build(...)`，以共用既有 `compile()` 快取並維持統一 direct-invoke。`agent_skill_graph` 是 Agent Skill bridge graph factory，可 import node_shell/tool_registry/node_registry，但不得 import Business Workflow schema/compiler internals，也不得讓 Agent Skill 被描述成 Business Workflow。`app/runtime/` 對兩者的依賴只允許經 `legacy_flow`（現況）與 artifact 讀取，不新增。
 
 ## 4. P4 前端資訊架構
 

@@ -259,8 +259,8 @@ export interface SkillInfo {
   updated_at: string
   /** 軟刪後 enabled=false。 */
   enabled: boolean
-  /** 未攜帶時是舊 server，相容視為 flow。 */
-  kind?: SkillKind
+  /** API discriminator；前端以它決定 Agent Skill 與 Business Workflow 的入口。 */
+  kind: SkillKind
   /** 簡單模式建立/更新才有（camelCase）；package 匯入品、純 YAML 手寫品為 null/缺席。 */
   simpleForm?: SkillSimpleForm | null
 }
@@ -307,12 +307,8 @@ export interface SkillCatalogEntry {
   input_schema?: Record<string, SkillInputField> | null
   /** 內建骨架項（template-* / kb-query）的 YAML 原文；compose patch 用。custom 為 undefined。 */
   definition?: string
-  /**
-   * Skill 種類（Platform additive 透傳；缺席 → 視為 flow）。agentic 走 package 編輯器，
-   * flow 走既有 YAML/simple editor。實務上 catalog 尚未帶此欄，故編輯路由以 definition 的
-   * `kind: agentic` 為可靠訊號（skillKind()），此欄為前向相容。
-   */
-  kind?: SkillKind
+  /** API discriminator；catalog 與管理面都由同一個 kind 契約分流。 */
+  kind: SkillKind
 }
 
 /** POST /api/skills/validate 的一條錯誤；line 為 YAML 行號（引擎給得出來時才有）。 */

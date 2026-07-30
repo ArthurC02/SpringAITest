@@ -210,7 +210,7 @@ public sealed class FakeAuthService : IAuthService
 }
 
 /// <summary>Skill 引擎服務 fake:依名稱決定行為(ghost → NotFound),用來測 controller/認證/序列化/例外映射。</summary>
-public sealed class FakeWorkflowService : IWorkflowService
+public sealed class FakeWorkflowEngineClient : IWorkflowEngineClient
 {
     // ---- Skill 引擎(:8001)----
 
@@ -219,7 +219,7 @@ public sealed class FakeWorkflowService : IWorkflowService
     public static UserContext? LastRuleContext { get; private set; }
 
     /// <summary>
-    /// 補 G5(copilot-shared-core 04-acceptance-test.md §4.4):IWorkflowService 在 DI 是 Scoped,
+    /// 補 G5(copilot-shared-core 04-acceptance-test.md §4.4):IWorkflowEngineClient 在 DI 是 Scoped,
     /// SkillRoutingAgent 每次呼叫各自開一個新 scope,跨請求(HTTP request)拿到的是不同實例,無法用實例
     /// 欄位收集 (Name, Input) 供 B-P4-12(ChatView 與副駕的 SkillInvokes 應完全相同)這類跨請求斷言。
     /// 靜態集合擇簡繞過:不必改動 DI 生命週期,天然跨 scope/跨請求可見(與 EngineCalls/Calls 等既有靜態
@@ -258,6 +258,13 @@ public sealed class FakeWorkflowService : IWorkflowService
         return Task.FromResult(definition.Contains("__invalid__", StringComparison.Ordinal)
             ? Json("""{"valid":false,"errors":[{"code":"unbounded_loop","message":"loop 缺少 max_iterations","line":7}]}""")
             : Json("""{"valid":true,"errors":[],"skill":{"name":"quarterly-qa","description":"季報問答","required_role":"USER"}}"""));
+    }
+
+    public Task<JsonElement> ValidateBusinessWorkflowAsync(
+        string definition, UserContext ctx, CancellationToken ct = default)
+    {
+        EngineCalls.Add("business-workflow-validate");
+        return ValidateSkillAsync(definition, ctx, ct);
     }
 
     /// <summary>
@@ -331,6 +338,71 @@ public sealed class FakeWorkflowService : IWorkflowService
     private static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 }
 
+public sealed class FakeBusinessWorkflowService : IBusinessWorkflowService
+{
+    public static readonly List<string> Calls = new();
+
+    public Task<JsonElement> ListAsync(UserContext context, CancellationToken ct = default)
+    {
+        Calls.Add("list");
+        return Task.FromResult(JsonDocument.Parse(
+            """[{"name":"quarterly-flow","description":"flow","required_role":"USER","enabled":true,"current_revision":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","kind":"flow"}]""")
+            .RootElement.Clone());
+    }
+
+    public Task<JsonElement> GetAsync(string name, UserContext context, CancellationToken ct = default)
+    {
+        Calls.Add("get:" + name);
+        return Task.FromResult(JsonSerializer.SerializeToElement(
+            new { name, definition = "name: " + name, kind = "flow" }));
+    }
+
+    public Task<BusinessWorkflowCreated> CreateAsync(
+        SkillUpsert request, UserContext context, CancellationToken ct = default)
+    {
+        Calls.Add("create");
+        RequireAdmin(context);
+        var workflow = new Skill(
+            "quarterly-flow", "flow", request.Definition!, "USER", true, 1,
+            "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "flow",
+            JsonSerializer.SerializeToElement(new { templateId = "template-stats" }));
+        return Task.FromResult(new BusinessWorkflowCreated(
+            workflow, "/api/business-workflows/quarterly-flow"));
+    }
+
+    public Task<Skill> UpdateAsync(
+        string name, SkillUpsert request, UserContext context, CancellationToken ct = default)
+    {
+        Calls.Add("update:" + name);
+        RequireAdmin(context);
+        return Task.FromResult(new Skill(
+            name, "flow", request.Definition!, "USER", true, 2,
+            "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "flow",
+            request.SimpleForm));
+    }
+
+    public Task DeleteAsync(string name, UserContext context, CancellationToken ct = default)
+    {
+        Calls.Add("delete:" + name);
+        RequireAdmin(context);
+        return Task.CompletedTask;
+    }
+
+    public Task<SkillExport> ExportAsync(string name, UserContext context, CancellationToken ct = default)
+    {
+        Calls.Add("export:" + name);
+        return Task.FromResult(new SkillExport(new byte[] { 80, 75 }, "application/zip", $"{name}.zip"));
+    }
+
+    private static void RequireAdmin(UserContext context)
+    {
+        if (context.Role != "ADMIN")
+        {
+            throw new WorkflowForbiddenException("權限不足，無法存取 Business Workflow");
+        }
+    }
+}
+
 /// <summary>文件服務 fake:ghost → NotFound。建立回受理狀態(202 語意)。</summary>
 public sealed class FakeDocumentService : IDocumentService
 {
@@ -377,7 +449,8 @@ public sealed class FakeSkillService : ISkillService
         new() { ["definition"] = "definition 不可為空" };
 
     private static Skill Make(string name, string definition) =>
-        new(name, "季報問答", definition, "USER", true, 1, "2026-07-14T00:00:00Z", "2026-07-14T00:00:00Z");
+        new(name, "季報問答", definition, "USER", true, 1,
+            "2026-07-14T00:00:00Z", "2026-07-14T00:00:00Z", "flow");
 
     /// <summary>fake 版的「引擎解析 YAML」:取 `name:` 那行的值(真實流程由 backend 打引擎取得)。</summary>
     private static string NameOf(string definition) => definition
@@ -399,7 +472,7 @@ public sealed class FakeSkillService : ISkillService
     {
         Calls.Add("list");
         return Task.FromResult(FakeJson.Of(
-            """[{"name":"echo-skill","description":"季報問答","required_role":"USER","enabled":true,"current_revision":1,"created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}]"""));
+            """[{"name":"echo-flow","description":"季報問答","required_role":"USER","enabled":true,"current_revision":1,"created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","kind":"flow"},{"name":"echo-agent","description":"代理技能","required_role":"USER","enabled":true,"current_revision":2,"created_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-15T00:00:00Z","kind":"agentic"}]"""));
     }
 
     public Task<JsonElement> GetAsync(string name, UserContext ctx, CancellationToken ct = default)

@@ -159,7 +159,7 @@ public sealed class FakeLlmAgent : ILlmAgent
 }
 
 /// <summary>Skill 引擎 fake:可注入目錄、可模擬失敗、可覆寫輸出;記下呼叫序供斷言。</summary>
-public sealed class FakeWorkflowService : IWorkflowService
+public sealed class FakeWorkflowEngineClient : IWorkflowEngineClient
 {
     // ---- Skill 引擎(:8001):聊天 → Skill 路由用得到,可注入目錄與 skill invoke 行為並記錄呼叫。----
 
@@ -209,6 +209,10 @@ public sealed class FakeWorkflowService : IWorkflowService
     public Task<System.Text.Json.JsonElement> ValidateSkillAsync(
         string definition, UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(System.Text.Json.JsonSerializer.SerializeToElement(new { valid = true }));
+
+    public Task<System.Text.Json.JsonElement> ValidateBusinessWorkflowAsync(
+        string definition, UserContext ctx, CancellationToken ct = default)
+        => ValidateSkillAsync(definition, ctx, ct);
 
     public Task<System.Text.Json.JsonElement> GetSkillCatalogAsync(UserContext ctx, CancellationToken ct = default)
     {
@@ -450,7 +454,7 @@ public sealed class FakeAgentChatRuntime : IAgentChatRuntime
 /// (掛 ChatContextProvider)——與 production 的兩顆 hosted agent 逐層相同(Program.cs:215-221/237-263);
 /// AgentChatRoutingAgent 是無條件掛載的,旗標關閉只讓 IAgentChatRuntime 回 null 而已,故測試管線也必須有它。
 /// 四者皆需要 IServiceScopeFactory 解析 per-call 的 IMem0Client/IConversationStore/IChatIdentityAccessor/
-/// IWorkflowService(生產環境兩顆 hosted agent 是啟動期 Singleton,不可在建構時捕捉 Scoped 服務);
+/// IWorkflowEngineClient(生產環境兩顆 hosted agent 是啟動期 Singleton,不可在建構時捕捉 Scoped 服務);
 /// 測試以最小 ServiceCollection 組一個真正的 scope factory,讓傳入的 mem0/convos/identity/workflows
 /// fake 實例可被解析到。llmAgent 是 SkillRoutingAgent 路由/摘要用的「裸」<see cref="ILlmAgent"/>
 /// (P4 前由 ChatService 持有,P4 後搬進 SkillRoutingAgent 建構時直接傳入——它是 Singleton,不需經 scope)。
@@ -463,7 +467,7 @@ internal static class TestChatAgent
         FakeConversationStore? convos = null,
         FakeChatIdentityAccessor? identity = null,
         FakeLlmAgent? llmAgent = null,
-        FakeWorkflowService? workflows = null,
+        FakeWorkflowEngineClient? workflows = null,
         FakeAgentChatRuntime? agentChat = null,
         PromptCompositionResolver? prompts = null)
     {
@@ -477,7 +481,7 @@ internal static class TestChatAgent
         services.AddSingleton<IMem0Client>(mem0 ?? new FakeMem0Client());
         services.AddSingleton<IConversationStore>(convos ?? new FakeConversationStore());
         services.AddSingleton<IChatIdentityAccessor>(identity ?? new FakeChatIdentityAccessor());
-        services.AddSingleton<IWorkflowService>(workflows ?? new FakeWorkflowService());
+        services.AddSingleton<IWorkflowEngineClient>(workflows ?? new FakeWorkflowEngineClient());
         services.AddSingleton<IAgentChatRuntime>(agentChat ?? new FakeAgentChatRuntime());
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 

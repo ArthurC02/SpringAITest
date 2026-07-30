@@ -402,12 +402,20 @@ async def list_skills(ctx: RequestContext = Depends(get_context)) -> list[SkillI
     return builtin + [SkillInfo(**entry) for entry in await custom.catalog(ctx)]
 
 
+@app.post(
+    "/business-workflows/validate",
+    response_model=ValidationResult,
+    response_model_exclude_none=True,
+)
 @app.post("/skills/validate", response_model=ValidationResult, response_model_exclude_none=True)
 async def validate_skill(
     req: SkillValidateRequest,
     ctx: RequestContext = Depends(get_context),
 ) -> ValidationResult:
-    """對一份 skill 定義原文跑全部靜態驗證。無副作用：不編譯、不寫入、不改變 GET /skills。
+    """對一份 Business Workflow 定義原文跑全部靜態驗證。
+
+    ``/skills/validate`` 是相容 alias；兩條路徑共用此 handler，且都無副作用：
+    不編譯、不寫入、不改變 GET /skills。
 
     永遠回 200 + {valid, errors[]}（含 YAML 解析失敗），錯誤在 body 裡 ——
     前端編輯器要的是可逐條標紅的錯誤清單，不是一個 HTTP 錯誤碼。

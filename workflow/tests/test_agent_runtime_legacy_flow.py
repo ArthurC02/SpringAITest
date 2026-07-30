@@ -11,13 +11,23 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.engine import tool_registry
 from app.engine.skill import InputField, Skill
+from app.runtime import graph as runtime_graph
 from app.runtime import legacy_flow
 from app.runtime.artifacts import LoadedSkillArtifact
 from app.runtime.checkpoints import checkpoint_config, strict_serializer
 from app.runtime.graph import build_context, compile_runtime_graph, initial_state
-from app.runtime.legacy_flow import LegacyFlowDenied, invoke_pinned_legacy_flow
+from app.runtime.legacy_flow import (
+    LegacyFlowDenied,
+    LegacyFlowResult,
+    invoke_pinned_legacy_flow,
+)
 from app.runtime.models import RuntimeCommand
-from tests.test_agent_runtime import FakeModel, request_context, snapshot
+from tests.test_agent_runtime import (
+    FakeArtifactReader,
+    FakeModel,
+    request_context,
+    snapshot,
+)
 
 
 def flow_artifact(
@@ -159,6 +169,207 @@ async def test_graph_loads_exact_flow_as_opaque_same_run_step() -> None:
     )
     assert event["payload"]["skill_revision"] == 3
     assert event["payload"]["definition_sha256"] == "a" * 64
+
+
+@pytest.mark.asyncio
+async def test_load_skill_preserves_golden_wire_for_both_kinds_and_scope_switch(
+    monkeypatch,
+) -> None:
+    """A3-1: real ``_load_skill`` freezes flow, first scope, and scope-switch wire."""
+
+    flow_calls: list[dict] = []
+
+    async def invoke_flow(**kwargs):
+        flow_calls.append(kwargs)
+        return LegacyFlowResult(
+            status="completed",
+            content='{"answer":"ok"}',
+            tool_calls_bound=2,
+            steps_bound=4,
+        )
+
+    monkeypatch.setattr(runtime_graph, "invoke_pinned_legacy_flow", invoke_flow)
+    flow_snapshot = snapshot(with_skill=True, skill_kind="flow")
+    flow_value = replace(flow_artifact(), definition_sha256="a" * 64)
+
+    class FlowReader:
+        def __init__(self):
+            self.calls = 0
+
+        async def read(self, pin, ctx):
+            self.calls += 1
+            assert (pin.name, pin.revision, pin.kind) == (
+                "research-skill",
+                3,
+                "flow",
+            )
+            return flow_value
+
+    flow_reader = FlowReader()
+    flow_runtime = SimpleNamespace(
+        context=build_context(
+            snapshot=flow_snapshot,
+            request_context=request_context(),
+            model=FakeModel([]),
+            artifact_reader=flow_reader,
+            deps=SimpleNamespace(max_retrieval_attempts=1),
+        )
+    )
+    flow_state = {
+        "pending_command": RuntimeCommand(
+            kind="load_skill", name="research-skill", arguments={"query": "q"}
+        ).model_dump(mode="json"),
+        "messages": [{"role": "user", "content": "q"}],
+        "events": [],
+        "step_count": 5,
+        "tool_rounds": 1,
+    }
+
+    flow_update = await runtime_graph._load_skill(flow_state, flow_runtime)
+
+    assert flow_reader.calls == 1
+    assert flow_calls[0]["artifact"] is flow_value
+    assert flow_calls[0]["raw_input"] == {"query": "q"}
+    assert flow_update == {
+        "pending_command": None,
+        "rule_allowed_tools": None,
+        "step_count": 8,
+        "tool_rounds": 3,
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "tool", "name": "load_skill", "content": '{"answer":"ok"}'},
+        ],
+        "events": [
+            {
+                "event_id": "80b68958-7375-52df-9bdb-f46b35530c83",
+                "event_type": "legacy_flow_completed",
+                "node_id": "load_skill",
+                "snapshot_hash": "442f7964324bb9ef3bea9145c6c514acee6b8e8482a243b23b26a01d818ed1e7",
+                "payload": {
+                    "skill_name": "research-skill",
+                    "skill_revision": 3,
+                    "definition_sha256": "a" * 64,
+                    "status": "completed",
+                    "tool_calls_bound": 2,
+                    "steps_bound": 4,
+                },
+            }
+        ],
+    }
+
+    agent_snapshot = snapshot(with_skill=True)
+    agent_reader = FakeArtifactReader([])
+    agent_runtime = SimpleNamespace(
+        context=build_context(
+            snapshot=agent_snapshot,
+            request_context=request_context(),
+            model=FakeModel([]),
+            artifact_reader=agent_reader,
+        )
+    )
+    load_command = RuntimeCommand(
+        kind="load_skill", name="research-skill"
+    ).model_dump(mode="json")
+    entered = await runtime_graph._load_skill(
+        {
+            "pending_command": load_command,
+            "messages": [],
+            "events": [],
+            "step_count": 0,
+        },
+        agent_runtime,
+    )
+    expected_scope = {
+        "name": "research-skill",
+        "revision": 3,
+        "kind": "agentic",
+        "definition_sha256": "a" * 64,
+        "package_sha256": "b" * 64,
+        "instruction_sha256": "a6d633f1f9a8ae36e6a794619e32d94e0c56fc0dc375c2cf58ee72d1a2c708ff",
+        "effective_tools": [],
+        "resource_paths": ["references/guide.txt"],
+    }
+    entered_payload = {
+        "skill_name": "research-skill",
+        "skill_revision": 3,
+        "definition_sha256": "a" * 64,
+        "package_sha256": "b" * 64,
+        "effective_tool_count": 0,
+        "file_count": 1,
+        "scripts_present": True,
+    }
+    assert agent_reader.calls == 1
+    assert entered == {
+        "active_skill_scope": expected_scope,
+        "pending_command": None,
+        "rule_allowed_tools": None,
+        "messages": [
+            {
+                "role": "tool",
+                "name": "load_skill",
+                "content": (
+                    "Pinned Skill research-skill@3 is active in this run. "
+                    "0 read-only tools and 1 resources are available."
+                ),
+            }
+        ],
+        "events": [
+            {
+                "event_id": "28a11639-46d8-502f-824d-721278c3aee1",
+                "event_type": "skill_scope_entered",
+                "node_id": "load_skill",
+                "snapshot_hash": "6d76c4cb4da4cc17c50db821d3a6d715fe65c80ac31665c8b978d19692741843",
+                "payload": entered_payload,
+            }
+        ],
+    }
+
+    switch_reader = FakeArtifactReader([])
+    switch_runtime = SimpleNamespace(
+        context=build_context(
+            snapshot=agent_snapshot,
+            request_context=request_context(),
+            model=FakeModel([]),
+            artifact_reader=switch_reader,
+        )
+    )
+    switched = await runtime_graph._load_skill(
+        {
+            "pending_command": load_command,
+            "active_skill_scope": {"name": "previous-skill", "revision": 2},
+            "messages": [],
+            "events": [],
+            "step_count": 0,
+        },
+        switch_runtime,
+    )
+    assert switch_reader.calls == 1
+    assert switched == {
+        "active_skill_scope": expected_scope,
+        "pending_command": None,
+        "rule_allowed_tools": None,
+        "messages": entered["messages"],
+        "events": [
+            {
+                "event_id": "b31d2258-f038-574e-86ab-1c2812dc44c9",
+                "event_type": "skill_scope_exited",
+                "node_id": "load_skill",
+                "snapshot_hash": "6d76c4cb4da4cc17c50db821d3a6d715fe65c80ac31665c8b978d19692741843",
+                "payload": {
+                    "skill_name": "previous-skill",
+                    "skill_revision": 2,
+                    "reason": "scope_switch",
+                },
+            },
+            {
+                "event_id": "d64a75a2-e0fb-5f18-aa18-0f09fd632332",
+                "event_type": "skill_scope_entered",
+                "node_id": "load_skill",
+                "snapshot_hash": "6d76c4cb4da4cc17c50db821d3a6d715fe65c80ac31665c8b978d19692741843",
+                "payload": entered_payload,
+            },
+        ],
+    }
 
 
 @pytest.mark.asyncio

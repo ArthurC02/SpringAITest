@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 from app.engine import expressions, node_registry, script_runner, tool_registry
-from app.engine.harness import (
+from app.engine.node_shell import (
     CONFIG_SEED_KEYS,
     IDENTITY_KEYS,
     IMMUTABLE_KEYS,

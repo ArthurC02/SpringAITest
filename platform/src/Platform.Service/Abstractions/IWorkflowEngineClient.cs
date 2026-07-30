@@ -3,21 +3,26 @@ using Platform.Service.Dtos;
 
 namespace Platform.Service.Abstractions;
 
-/// <summary>Skill 引擎服務:代理下游 Python(:8001)。轉發 4 個 X-* header 並轉譯下游狀態碼。
-/// Skill 的 CRUD 不在此介面 — 那是 backend 的職責,見 ISkillService。</summary>
-public interface IWorkflowService
+/// <summary>整個 Workflow Python 引擎的 client：承載 Skill/Business Workflow 執行與驗證、
+/// Business Rules、node/tool catalog；轉發 4 個 X-* header 並轉譯下游狀態碼。
+/// 公開 artifact CRUD 不在此介面 — 那是 backend 的職責。</summary>
+public interface IWorkflowEngineClient
 {
     /// <summary>
-    /// 執行指定 Skill(GET /skills 清單裡的內建或自訂 skill)。錯誤碼與 /workflows/{name}/invoke 一致。
+    /// 執行指定 Skill(GET /skills 清單裡的內建或自訂 skill)。錯誤碼與 /skills/{name}/invoke 一致。
     /// 回應原樣穿透(JsonElement,不映射成 DTO):引擎的輸出鍵(output/trace/…)由引擎定義,
     /// 代理層若套 DTO,引擎新增欄位就會被靜默吃掉。
     /// </summary>
     Task<JsonElement> InvokeSkillAsync(
         string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default);
 
-    /// <summary>對一份 skill 定義跑靜態驗證(無副作用,前端編輯器即時校驗用)。
+    /// <summary>P2–P5/C8 前透過 /skills/validate 保留的 Business Workflow 驗證相容別名；新呼叫端使用 /business-workflows/validate。
     /// 引擎一律回 200,驗證結果({valid, errors, skill})在 body — 原樣穿透。</summary>
     Task<JsonElement> ValidateSkillAsync(string definition, UserContext ctx, CancellationToken ct = default);
+
+    /// <summary>對 Business Workflow YAML 做靜態驗證。</summary>
+    Task<JsonElement> ValidateBusinessWorkflowAsync(
+        string definition, UserContext ctx, CancellationToken ct = default);
 
     /// <summary>可執行 skill 目錄:引擎合併內建(repo 檔案)+ 自訂(來自 backend),每筆帶 source 徽章。</summary>
     Task<JsonElement> GetSkillCatalogAsync(UserContext ctx, CancellationToken ct = default);

@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, get_args, get_origin, get_type_hints
 
-from app.engine import harness
+from app.engine import node_shell
 from app.engine.models import TraceEntry
 from pydantic import computed_field
 
@@ -194,10 +194,10 @@ async def invoke(
         raise UnknownTool(f"未註冊的 tool: {name}")
 
     if as_step:
-        harness.describe(model=ToolTraceEntry, tool=name, args_keys=_args_keys(args))
+        node_shell.describe(model=ToolTraceEntry, tool=name, args_keys=_args_keys(args))
         return await spec.fn(ctx, **args)
 
-    start_time = harness.now()
+    start_time = node_shell.now()
     t0 = time.perf_counter()
     status, error_code = "ok", ""
     try:
@@ -206,13 +206,13 @@ async def invoke(
         status, error_code = "error", type(e).__name__
         raise
     finally:
-        harness.record(
+        node_shell.record(
             ToolTraceEntry(
                 node_name=f"tool:{name}",
                 tool=name,
                 args_keys=_args_keys(args),
                 start_time=start_time,
-                end_time=harness.now(),
+                end_time=node_shell.now(),
                 latency_ms=(time.perf_counter() - t0) * 1000,
                 status=status,
                 error_code=error_code,

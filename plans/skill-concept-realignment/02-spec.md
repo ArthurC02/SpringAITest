@@ -10,8 +10,8 @@
 | **Business Workflow** | 宣告式 YAML（node/sequence/branch/loop/script/tool steps）經引擎編譯成 LangGraph 子圖的業務流程。今天的 `kind='flow'` skill。 | 不得叫 Skill；不得與 D4 Workflow 混用 |
 | **Harness** | 固定執行骨架：`workflow/app/runtime/graph.py` 硬編的 LangGraph。使用者不可見不可調。 | 不得指每節點執行殼 |
 | **Harness Workflow** | D4 `workflow` 表的 Graph IR 宣告（kind `agent-runtime`/`orchestrator`）：Harness 的治理上限（`maxSteps`/`maxIterations`）與形狀斷言來源，**不產生執行圖**。 | 不得當成 Business Workflow |
-| **Node Shell（節點執行殼）** | 現 `workflow/app/engine/harness.py`：計時/trace、fatal 短路、未宣告寫入剝除、身分鍵防寫。包住每個節點（flow 節點與 agentic runner 都經它）。 | 不得叫 Harness |
-| **Skill Engine** | `workflow/app/engine/` 的編譯與治理層。重整後其編譯職責只針對 Business Workflow；名稱過渡期保留。 | — |
+| **Node Shell（節點執行殼）** | `workflow/app/engine/node_shell.py`：計時/trace、fatal 短路、未宣告寫入剝除、身分鍵防寫。包住每個節點（Business Workflow 節點與 Agent Skill direct-invoke runner 都經它）。 | 不得叫 Harness |
+| **Skill Engine** | `workflow/app/engine/` 的編譯與治理層。宣告式 YAML 的 schema/編譯職責只針對 Business Workflow；為維持統一 invoke，`agent_skill_graph.py` 另保留 Agent Skill direct-invoke bridge graph factory。該 factory 不把 Agent Skill 定義成 Business Workflow。 | — |
 
 ## 2. 核心決策
 
@@ -40,6 +40,8 @@
 
 理由：in-flight run 的 checkpoint resume、不可變快照 hash、audit replay 都以這些形狀為準。`_load_skill` 的內部重構（03-design §3.3）必須是行為保持的純程式碼整理。
 
+**執行記錄（P0，審查認可，非改名產物）**：`node_shell.py`（原 `harness.py`，D-7 改名）本輪新增剝除 `RUNTIME_AUTHORITY_KEYS`（`run_id`/`agent_id`/`agent_revision`/`knowledge_sources`/`enforce_data_scope`，`node_shell.py:49-55`）的邏輯——這些鍵正是本節 `AgentRunSnapshotBuilder` skill pin 形狀經 legacy-flow adapter 注入 state 的同一批鍵；舊 `harness.py` 只剝 `IMMUTABLE_KEYS`，從未真正落實其「must never be overwritten」的既有承諾（見 `node_shell.py:45-48` 註解）。此修補堵住「未宣告 writes 契約的 node/匿名節點可偽造 D3 授權鍵」的殘餘路徑（tool 的 `save_as` 在 compile 期已擋、script 在 `script_runner` 的 `FORBIDDEN_WRITE_KEYS` 已擋，此為第三處、也是最後一處缺口），三支測試覆蓋：`test_engine_node_shell.py::test_node_and_tool_shell_outputs_cannot_replace_runtime_authority`、`test_engine_script_steps.py::test_script_cannot_replace_runtime_authority_seen_by_downstream_node`、`test_engine_tool_registry.py::test_tool_step_cannot_save_into_runtime_authority_channel`。這是 P0 執行過程中順手修補的既有安全缺口，屬**計畫外但經審查認可**的行為變更：本節凍結的是「形狀」（鍵存在與意義不變），這裡新增的是「防寫執行」，兩者不衝突。
+
 ### D-4 invoke 面保持統一
 
 `POST /skills/{name}/invoke`（workflow 內部）與 platform 的 invoke 代理**不拆**。理由：
@@ -50,7 +52,7 @@ invoke 是「執行一個已儲存的能力 artifact」的共用面；kind 分�
 
 ### D-5 validate 面拆分
 
-- `POST /skills/validate`（flow-only 文字驗證）→ 正名為 `POST /business-workflows/validate`；舊路徑保留 alias 一個相容窗口。
+- `POST /skills/validate`（flow-only 文字驗證）→ 正名為 `POST /business-workflows/validate`；舊路徑保留為同 handler 的相容 alias。**P5 不移除此 workflow-internal alias**；若要退場，必須另立 usage/consumer inventory/rollback gate 與獨立驗收，不得借 C8 自動刪除。
 - `POST /skills/validate-package`（zip 匯入驗證）保留於 Skill 面；flow 包匯入驗證在過渡期仍可用，P5 後 flow 包歸 Business Workflow 匯入面。
 - backend `WorkflowSkillValidator`（definition-only、flow-only）隨 Business Workflow 路由遷移。
 
@@ -65,7 +67,7 @@ invoke 是「執行一個已儲存的能力 artifact」的共用面；kind 分�
 | 現名 | 新名 | 範圍 |
 | --- | --- | --- |
 | `workflow/app/engine/harness.py` | `workflow/app/engine/node_shell.py` | 5 個 import 點：`compiler.py:30`、`script_runner.py:56`、`tool_registry.py:23`、`skill.py:25`、`runtime/legacy_flow.py:14` |
-| `platform/src/Platform.Service/WorkflowService.cs` | `WorkflowEngineClient.cs`（= 「workflow 引擎服務的 client」） | 介面 `IWorkflowService` 有 9 個方法（含 D2 Business Rules 四支與 node/tool catalog，不只 skill 三支）；呼叫端含 `AgentController`/`NodeController`/`ToolController`/`SkillController`/`SkillRoutingAgent`、兩份手寫 fake（`Platform.Service.Tests/Fakes.cs`、`Platform.Web.Tests/Fakes.cs`）與 `TestWebAppFactory`。純機械但約 9 檔；對外 API 不變。不取名 `SkillEngineClient`——它同時載運 Business Rules/nodes/tools，名字比職責窄就是本計畫要消滅的那種漂移 |
+| `platform/src/Platform.Service/WorkflowService.cs` | `WorkflowEngineClient.cs`（= 「workflow 引擎服務的 client」） | 介面 `IWorkflowService` 有 9 個方法（含 D2 Business Rules 四支與 node/tool catalog，不只 skill 三支）；完整觸及面是 **17 檔**：8 個生產檔、4 個 fake/factory/被測類檔、5 個純引用 fake 型別的測試檔（清單見 03-design §1.2 與帳本 §3.2）。對外 API 不變。不取名 `SkillEngineClient`——它同時載運 Business Rules/nodes/tools，名字比職責窄就是本計畫要消滅的那種漂移 |
 | `_build_agentic_graph` 本體（藏在 compiler） | `app/engine/agent_skill_graph.py`（獨立模組） | **分派留在 `_build_graph`（`compiler.py:570-571`）一行顯式呼叫 `agent_skill_graph.build(...)`**；`compile()` 維持唯一 cached 入口（32-slot 快取掛在 `compile()`，`custom.load()` 每次 invoke 都依賴它命中——把 agentic 踢出 `compile()` 會讓 agentic 每次 invoke 重建圖，或被迫複製快取邏輯，兩者都不可接受） |
 | docs 中「Skill Engine 的 skill」泛稱 | 依 §1 詞彙表分寫 | 根/區域 AGENTS.md、README、coding-standards |
 
@@ -112,14 +114,14 @@ DELETE /api/skills/{name}             # （ADMIN）
 ```
 GET  /skills                         # 統一 catalog（含兩種 kind；D-4 統一 invoke 的前提）
 POST /skills/{name}/invoke           # 統一 invoke（形狀 {skill, output} 不變）
-POST /business-workflows/validate    # flow 文字驗證（原 /skills/validate；alias 保留至 P5）
+POST /business-workflows/validate    # flow 文字驗證（原 /skills/validate；舊路徑同 handler alias）
 POST /skills/validate-package        # zip 驗證（不變）
 GET  /nodes、GET /tools              # 不變（Business Workflow 的節點/工具目錄）
 ```
 
 ### 3.4 相容窗口
 
-P2–P5 之間：`/api/skills*` 全功能雙軌（flow 讀寫照舊），`/api/business-workflows*` 同步可用；兩面對同一列的讀取回應必須逐位元一致（同一 repository）。P5 收斂由 06-cleanup C8 gate 控制：`/api/business-workflows*` 流量承接完成、舊路徑 flow 寫入 usage=0、rollback window 結束。
+P2–P5 之間：`/api/skills*` 全功能雙軌（flow 讀寫照舊），`/api/business-workflows*` 同步可用；兩面對同一列的讀取回應必須逐位元一致（同一 repository）。P5 收斂由 06-cleanup C8 gate 控制：`/api/business-workflows*` 流量承接完成、舊路徑 flow 寫入 usage=0、rollback window 結束。C8 只收斂 Platform/Backend 的 public Skill flow 面；workflow-internal `/skills/validate` alias 不在 P5/C8 刪除清單，退場須另立 gate。
 
 ## 4. Agent 綁定語意（`bindable`）
 

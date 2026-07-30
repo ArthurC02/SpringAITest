@@ -62,7 +62,7 @@ def _compose_candidate_answer(
             a = textutils.parse_number(later.exact_value)
             for keywords, (formula, unit, op) in _FORMULA_RULES:
                 if any(k in query for k in keywords):
-                    # calculator 拋錯不接：交給 Harness（engine/harness.py）走安全路徑
+                    # calculator 拋錯不接：交給 Harness（engine/node_shell.py）走安全路徑
                     trace = calculator.build_trace(
                         formula,
                         {"a": a, "b": b},

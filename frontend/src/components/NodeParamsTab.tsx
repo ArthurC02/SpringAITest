@@ -20,7 +20,8 @@ import { runWithToast, useToast } from './Toast'
 type Editing = { id: string | null; name: string; draft: Record<string, string> }
 
 /**
- * 工作流節點參數（Configuration Set，P4d）：清單（多組 + 唯一 active 徽章）→ 選定/新建 → 表單。
+ * 執行參數／Harness 節點參數（Configuration Set，P4d）：清單（多組 + 唯一 active 徽章）→ 選定/新建 → 表單。
+ * 這是 Harness 節點的執行期設定,不是流程作者頁——D4 Graph IR 才是 Business Workflow 的作者介面。
  * 表單欄位 = 七個開放鍵，依型別出 number/select 並帶範圍限制（設計 §9）。
  * ADMIN-only（側欄已擋 + 後端把關;UI 檢查僅 UX，SSR-P4-019）。
  */

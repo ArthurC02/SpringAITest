@@ -19,16 +19,27 @@
 
 import asyncio
 import hashlib
-import operator
 from collections import OrderedDict
-from typing import Annotated, Any, Iterable, TypedDict
+from typing import Any, Iterable
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.engine import expressions, script_runner, skill as skill_mod, tool_registry
-from app.engine.harness import IDENTITY_KEYS, describe, harnessed
+from app.engine import (
+    agent_skill_graph,
+    expressions,
+    script_runner,
+    skill as skill_mod,
+    tool_registry,
+)
+from app.engine.graph_primitives import (
+    AUDIT_NODE,
+    SkillCompileError,
+    add_contract_node,
+    build_state_schema,
+)
 from app.engine.node_registry import NodeSpec
+from app.engine.node_shell import describe, harnessed
 from app.engine.script_runner import (
     RestrictedInProcessRunner,
     ScriptLimits,
@@ -38,17 +49,9 @@ from app.engine.script_runner import (
 from app.engine.skill import Skill
 from app.engine.tool_registry import ToolBag, ToolContext
 
-# 稽核節點名（治理硬規則 §6.3-3：每條終止路徑強制附加）。是引擎常數不是設定：
-# 「稽核可以被關掉或換掉」本身就是治理漏洞。
-AUDIT_NODE = "audit_feedback"
-
 # 引擎內部鍵前綴：Skill 的條件式讀不到（expressions 直接拒絕 __ 開頭的鍵），
 # 也不會出現在對外回傳的 output（見 public_output）。
 INTERNAL_PREFIX = "__"
-
-
-class SkillCompileError(ValueError):
-    """Skill 無法編譯（未知節點、缺 max_iterations、不支援的步驟型別…）。"""
 
 
 def public_output(state: dict) -> dict:
@@ -196,32 +199,6 @@ def _check_loop_bound(body: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# State schema
-# ---------------------------------------------------------------------------
-
-
-def build_state_schema(skill: Skill, scan: _Scan, audit_spec: NodeSpec) -> type:
-    """依引用節點的契約組出動態 TypedDict（見 module docstring 第 1 點）。"""
-    appends: set[str] = set()
-    keys: set[str] = set(skill_mod.RESERVED_KEYS) | set(skill.input_schema)
-    for spec in [*scan.specs, audit_spec]:
-        keys.update(spec.reads)
-        keys.update(spec.writes)
-        appends.update(spec.appends)
-    keys.update(scan.internal_keys)
-    keys.update(scan.extra_keys)  # script 寫入的鍵 / tool 的 save_as 也要有 state 頻道
-    keys -= skill_mod.ENGINE_KEYS  # 引擎鍵在下面單獨掛 reducer
-
-    annotations: dict[str, Any] = {k: Any for k in sorted(keys)}
-    annotations["trace"] = Annotated[list, operator.add]
-    annotations["errors"] = Annotated[list, operator.add]
-    annotations["fatal_error"] = Any
-    for key in sorted(appends):
-        annotations[key] = Annotated[list, operator.add]
-    return TypedDict("SkillState", annotations, total=False)  # type: ignore[operator]
-
-
-# ---------------------------------------------------------------------------
 # 建圖
 # ---------------------------------------------------------------------------
 
@@ -250,26 +227,6 @@ def _safe_eval(expr: str, state: dict, key: str, *, on_error: bool, where: str) 
                 }
             ],
         }
-
-
-def _node_reads(spec: NodeSpec, params: dict) -> set[str]:
-    """node 步驟餵給 harnessed 的 effective_reads（reads 契約強制化的建置點）。
-
-    = spec.reads ∪ dynamic_reads 經該步驟 params 解析（值為 str 取單鍵、list 取全部 str
-    元素、其他型別忽略）∪（run_on_fatal 節點加 ENGINE_KEYS —— answer_composer/audit_feedback
-    宣告了 trace/errors/fatal_error 為 reads，此處保底重複無害）。
-    """
-    reads: set[str] = set(spec.reads)
-    for param in spec.dynamic_reads:
-        value = params.get(param)
-        if isinstance(value, str):
-            reads.add(value)
-        elif isinstance(value, list):
-            reads.update(v for v in value if isinstance(v, str))
-    if spec.run_on_fatal:
-        reads |= skill_mod.ENGINE_KEYS
-    return reads
-
 
 class _Builder:
     def __init__(self, graph: StateGraph, deps: Any, allowed_tools: set[str]):
@@ -306,21 +263,13 @@ class _Builder:
             raise SkillCompileError(f"unknown node: {ref}")
         self.n += 1
         node_id = f"n{self.n}_{spec.name}"
-        self.g.add_node(
-            node_id,
-            harnessed(
-                spec.name,  # trace 用契約名（Harness 的不可變鍵防護也認這個名字）
-                spec.build(self.deps, **params),
-                run_on_fatal=spec.run_on_fatal,
-                # 呼叫 LLM 的節點（deps 含 llm）才在 trace 記模型版本
-                component_version=self.llm_version if "llm" in spec.deps else "",
-                writes=spec.writes,
-                # 空 effective_reads（節點 reads=() 且無 dynamic_reads 解析、非 run_on_fatal）
-                # → 傳 None（不過濾）。reads 在 @node 是可選、預設 ()（writes 才是必填），故
-                # 空 reads 契約＝「未宣告」，比照 harnessed 的 reads=None 慣例不強制，避免把
-                # 「沒宣告 read 契約」誤當成「宣告讀零鍵」而餓死節點的整個 state 視圖。
-                reads=_node_reads(spec, params) or None,
-            ),
+        add_contract_node(
+            self.g,
+            node_id=node_id,
+            spec=spec,
+            deps=self.deps,
+            params=params,
+            llm_version=self.llm_version,
         )
         return node_id
 
@@ -495,80 +444,12 @@ def _ends_with_audit(flow: list) -> bool:
     )
 
 
-AGENT_RUNNER_NODE = "agent_skill_runner"
-
-
-def _build_agentic_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
-    """agentic 分派（設計 §4.1／§4.3）：單一 agent_skill_runner node + 強制附加的稽核。
-
-    治理與 flow 完全一致：runner 由 harnessed 包裝（fatal 短路、例外安全、immutable 身分、
-    declared-writes 剝除、trace），終端仍由既有規則串 audit_feedback。作者的 flow 不被讀取
-    —— canonical definition 把 flow 視為 internal detail，package 作者無法注入 node contracts。
-    """
-    audit_spec = skill_mod.resolve_node(AUDIT_NODE)
-    if audit_spec is None:
-        raise SkillCompileError(f"稽核節點 {AUDIT_NODE} 未註冊")
-    runner_spec = skill_mod.resolve_node(AGENT_RUNNER_NODE)
-    if runner_spec is None:
-        raise SkillCompileError(f"agentic runner 節點 {AGENT_RUNNER_NODE} 未註冊")
-
-    reader = getattr(deps, "agent_package_reader", None)
-    if reader is None:
-        raise SkillCompileError(
-            "agentic skill 需要 deps.agent_package_reader（package reader port 未注入）"
-        )
-    chat_model_factory = getattr(deps, "agent_chat_model", None)
-    if chat_model_factory is None:
-        raise SkillCompileError(
-            "agentic skill 需要 deps.agent_chat_model（LLM factory 未注入）"
-        )
-
-    # state schema：runner（writes=answer）+ 強制附加的 audit 的 reads/writes 聯集
-    scan = _Scan()
-    scan.specs.append(runner_spec)
-
-    g = StateGraph(build_state_schema(skill, scan, audit_spec))
-    builder = _Builder(g, deps, set(skill.uses_tools))
-
-    runner_fn = runner_spec.build(
-        deps,
-        reader=reader,
-        chat_model_factory=chat_model_factory,
-        container_deps=deps,
-        skill_name=skill.name,
-        uses_tools=list(skill.uses_tools),
-        input_keys=tuple(skill.input_schema),
-        timeout_s=skill.timeout_seconds,
-    )
-    # runner 呼叫 get_llm() → 與 flow LLM 節點一致，trace 記模型版本（觀測性，非行為）
-    llm_version = str(getattr(getattr(deps, "llm", None), "version", "") or "")
-    # runner 不經 add_node_step，effective_reads 必須顯式傳：身分三鍵（建 ToolContext）
-    # ∪ runner 宣告的 reads ∪ input_schema（build_user_message 要讀使用者輸入，漏了就收不到）
-    runner_reads = (
-        set(IDENTITY_KEYS) | set(runner_spec.reads) | set(skill.input_schema)
-    )
-    g.add_node(
-        AGENT_RUNNER_NODE,
-        harnessed(
-            runner_spec.name,
-            runner_fn,
-            run_on_fatal=runner_spec.run_on_fatal,
-            component_version=llm_version,
-            writes=runner_spec.writes,
-            reads=runner_reads,
-        ),
-    )
-    g.add_edge(START, AGENT_RUNNER_NODE)
-    audit_id = builder.add_node_step(f"{AUDIT_NODE}@{audit_spec.version}", {})
-    g.add_edge(AGENT_RUNNER_NODE, audit_id)
-    g.add_edge(audit_id, END)
-    return g.compile()
 
 
 def _build_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
     """實際建圖（快取未命中時才會被呼叫 —— AT2-28 以此為計數點）。"""
     if skill.kind == "agentic":
-        return _build_agentic_graph(skill, deps)
+        return agent_skill_graph.build(skill, deps)
 
     audit_spec = skill_mod.resolve_node(AUDIT_NODE)
     if audit_spec is None:  # 稽核節點必須存在，否則治理硬規則無從落實
@@ -580,7 +461,15 @@ def _build_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
     if not skill.flow:
         raise SkillCompileError("flow 不可為空")
 
-    g = StateGraph(build_state_schema(skill, scan, audit_spec))
+    g = StateGraph(
+        build_state_schema(
+            skill,
+            scan.specs,
+            audit_spec,
+            internal_keys=scan.internal_keys,
+            extra_keys=scan.extra_keys,
+        )
+    )
     builder = _Builder(g, deps, tools)
     entry, exit_ = builder.emit_steps(skill.flow)
     g.add_edge(START, entry)

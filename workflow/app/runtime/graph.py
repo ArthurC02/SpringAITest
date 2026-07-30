@@ -582,74 +582,78 @@ def _after_policy(state: RuntimeState) -> str:
     return kind
 
 
-async def _load_skill(
-    state: RuntimeState, runtime: Runtime[RuntimeGraphContext]
+async def _invoke_business_workflow(
+    state: RuntimeState,
+    runtime: Runtime[RuntimeGraphContext],
+    artifact: LoadedSkillArtifact,
+    command: RuntimeCommand,
 ) -> dict[str, Any]:
+    """在 Harness 內同步執行 revision-pinned Business Workflow 安全子集。"""
     context = runtime.context
-    command = RuntimeCommand.model_validate(state.get("pending_command"))
-    pin = context.snapshot.skill_pin(command.name or "")
-    if pin is None:
-        return _failure(state, context, "load_skill", "skill_not_pinned")
     try:
-        artifact = await _artifact(pin.name, context)
-    except ArtifactError:
-        return _failure(state, context, "load_skill", "skill_artifact_unavailable")
-    if artifact.kind == "flow":
-        try:
-            result = await invoke_pinned_legacy_flow(
-                artifact=artifact,
-                raw_input=command.arguments,
-                snapshot=context.snapshot,
-                rule_tools=_rule_tools(state),
-                deps=context.deps,
-                timeout_seconds=min(
-                    float(context.limits.timeout_seconds),
-                    max(context.tool_timeout_seconds, 1.0),
-                ),
-                recursion_cap=max(
-                    2,
-                    context.limits.step_budget
-                    - int(state.get("step_count") or 0)
-                    + 1,
-                ),
-                remaining_tool_rounds=max(
-                    0,
-                    context.limits.max_tool_rounds
-                    - int(state.get("tool_rounds") or 0),
-                ),
-            )
-        except LegacyFlowDenied:
-            return _failure(state, context, "load_skill", "legacy_flow_not_safe")
-        return {
-            "pending_command": None,
-            "rule_allowed_tools": None,
-            "step_count": int(state.get("step_count") or 0)
-            + max(result.steps_bound - 1, 0),
-            "tool_rounds": int(state.get("tool_rounds") or 0)
-            + result.tool_calls_bound,
-            "messages": [
-                *(state.get("messages") or []),
-                {
-                    "role": "tool",
-                    "name": "load_skill",
-                    "content": result.content,
-                },
-            ],
-            "events": _event_list(
-                state,
-                context,
-                "legacy_flow_completed",
-                "load_skill",
-                {
-                    "skill_name": artifact.name,
-                    "skill_revision": artifact.revision,
-                    "definition_sha256": artifact.definition_sha256,
-                    "status": result.status,
-                    "tool_calls_bound": result.tool_calls_bound,
-                    "steps_bound": result.steps_bound,
-                },
+        result = await invoke_pinned_legacy_flow(
+            artifact=artifact,
+            raw_input=command.arguments,
+            snapshot=context.snapshot,
+            rule_tools=_rule_tools(state),
+            deps=context.deps,
+            timeout_seconds=min(
+                float(context.limits.timeout_seconds),
+                max(context.tool_timeout_seconds, 1.0),
             ),
-        }
+            recursion_cap=max(
+                2,
+                context.limits.step_budget
+                - int(state.get("step_count") or 0)
+                + 1,
+            ),
+            remaining_tool_rounds=max(
+                0,
+                context.limits.max_tool_rounds
+                - int(state.get("tool_rounds") or 0),
+            ),
+        )
+    except LegacyFlowDenied:
+        return _failure(state, context, "load_skill", "legacy_flow_not_safe")
+    return {
+        "pending_command": None,
+        "rule_allowed_tools": None,
+        "step_count": int(state.get("step_count") or 0)
+        + max(result.steps_bound - 1, 0),
+        "tool_rounds": int(state.get("tool_rounds") or 0)
+        + result.tool_calls_bound,
+        "messages": [
+            *(state.get("messages") or []),
+            {
+                "role": "tool",
+                "name": "load_skill",
+                "content": result.content,
+            },
+        ],
+        "events": _event_list(
+            state,
+            context,
+            "legacy_flow_completed",
+            "load_skill",
+            {
+                "skill_name": artifact.name,
+                "skill_revision": artifact.revision,
+                "definition_sha256": artifact.definition_sha256,
+                "status": result.status,
+                "tool_calls_bound": result.tool_calls_bound,
+                "steps_bound": result.steps_bound,
+            },
+        ),
+    }
+
+
+def _enter_skill_scope(
+    state: RuntimeState,
+    runtime: Runtime[RuntimeGraphContext],
+    artifact: LoadedSkillArtifact,
+) -> dict[str, Any]:
+    """將 revision-pinned Agent Skill 以漸進揭露 scope 掛入 Harness。"""
+    context = runtime.context
     rule_tools = _rule_tools(state)
     effective = effective_tool_names(
         context.snapshot,
@@ -710,6 +714,23 @@ async def _load_skill(
         ],
         "events": events,
     }
+
+
+async def _load_skill(
+    state: RuntimeState, runtime: Runtime[RuntimeGraphContext]
+) -> dict[str, Any]:
+    context = runtime.context
+    command = RuntimeCommand.model_validate(state.get("pending_command"))
+    pin = context.snapshot.skill_pin(command.name or "")
+    if pin is None:
+        return _failure(state, context, "load_skill", "skill_not_pinned")
+    try:
+        artifact = await _artifact(pin.name, context)
+    except ArtifactError:
+        return _failure(state, context, "load_skill", "skill_artifact_unavailable")
+    if artifact.kind == "flow":
+        return await _invoke_business_workflow(state, runtime, artifact, command)
+    return _enter_skill_scope(state, runtime, artifact)
 
 
 async def _exit_skill(

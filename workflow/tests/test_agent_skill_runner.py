@@ -5,14 +5,16 @@
 無 mocking library：LLM 是確定性 ScriptedChatModel，tool 是手寫 @tool + recorder。
 """
 
+import ast
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.engine import compiler, tool_registry
-from app.engine.harness import harnessed
+from app.engine.node_shell import harnessed
 from app.engine.package_reader import MemoryPackageReader
 from app.engine.tool_registry import ToolContext
 from app.main import app
@@ -116,6 +118,70 @@ def test_compile_dispatch_flow_vs_agentic():
     assert any("audit_feedback" in n for n in nodes)  # 終端強制附加稽核
 
 
+def test_agent_skill_graph_has_no_compiler_dependency():
+    """Agent Skill bridge may use neutral primitives, never compiler internals."""
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "engine"
+        / "agent_skill_graph.py"
+    )
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    compiler_imports = [
+        node
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and (
+                node.module == "app.engine.compiler"
+                or (
+                    node.module == "app.engine"
+                    and any(alias.name == "compiler" for alias in node.names)
+                )
+            )
+        )
+        or (
+            isinstance(node, ast.Import)
+            and any(alias.name == "app.engine.compiler" for alias in node.names)
+        )
+    ]
+
+    assert compiler_imports == []
+
+
+def test_agent_skill_compile_cache_keys_revision_content_and_deps(monkeypatch):
+    """同 revision/content/deps 命中；任一維度變動都必須重建圖。"""
+    builds: list[tuple[int, str, int]] = []
+    real_build = compiler._build_graph
+
+    def counting_build(skill, deps):
+        builds.append((skill.revision, skill.description, id(deps)))
+        return real_build(skill, deps)
+
+    monkeypatch.setattr(compiler, "_build_graph", counting_build)
+    skill = make_agentic_skill(name="agent-cache-contract")
+    deps, _model, _audit = _deps_for(skill, ("final", "hi"))
+
+    first = compiler.compile(skill, deps)
+    assert compiler.compile(skill, deps) is first
+
+    revision_changed = skill.model_copy(update={"revision": skill.revision + 1})
+    compiler.compile(revision_changed, deps)
+
+    content_changed = skill.model_copy(update={"description": "cache content changed"})
+    compiler.compile(content_changed, deps)
+
+    other_deps, _other_model, _other_audit = _deps_for(skill, ("final", "hi"))
+    compiler.compile(skill, other_deps)
+
+    assert builds == [
+        (skill.revision, skill.description, id(deps)),
+        (revision_changed.revision, revision_changed.description, id(deps)),
+        (content_changed.revision, content_changed.description, id(deps)),
+        (skill.revision, skill.description, id(other_deps)),
+    ]
+
+
 def test_agentic_run_terminates_with_audit():
     """agentic 執行後終端 trace 必為 audit_feedback（治理硬規則對 agentic 一樣成立）。"""
     skill = make_agentic_skill(uses_tools=[])
@@ -167,6 +233,7 @@ def _install_agentic_backend(monkeypatch, *, definition=CANONICAL, tenant="demo-
                     "required_role": "USER",
                     "enabled": True,
                     "current_revision": 2,
+                    "kind": "agentic",
                     "definition": definition,
                 },
             )

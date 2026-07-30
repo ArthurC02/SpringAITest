@@ -66,7 +66,7 @@ function stripSingleRootFolder(files: Record<string, Uint8Array>): Record<string
  * 的比對對象）。取不到或不合 skill 名稱規則 → 空字串（呼叫端退回 root 佈局，讓 server 報更精準的
  * frontmatter 錯誤）。合規名稱不含 `/`、`.`、`\`、drive 字元 → 拿來當前綴沒有路徑注入面。
  */
-function folderName(frontmatter: string): string {
+export function extractName(frontmatter: string): string {
   // 取最後一個 name:：重複鍵時 PyYAML 取最後一個，前綴必須跟 server 認定的 name 同一個，
   // 否則病態的重複 frontmatter 會讓自家寫出的 zip 被 folder_name_mismatch 擋下。
   const m = [...frontmatter.matchAll(/^name:[ \t]*(.*)$/gm)].at(-1)
@@ -108,7 +108,7 @@ export async function readPackage(blob: Blob): Promise<AgentPackage> {
  * 讀進來是舊 root 佈局的 package 存檔後會升級成資料夾佈局（存檔本來就重寫 package bytes）。
  */
 export function writePackage(pkg: AgentPackage): Uint8Array {
-  const name = folderName(pkg.frontmatter)
+  const name = extractName(pkg.frontmatter)
   const prefix = name ? `${name}/` : ''
   const files: Record<string, Uint8Array> = {
     [`${prefix}SKILL.md`]: strToU8(assembleSkillMd(pkg.frontmatter, pkg.body)),
@@ -142,13 +142,4 @@ export function setDescription(frontmatter: string, value: string): string {
     return frontmatter.replace(/^description:.*$/m, line)
   }
   return frontmatter ? `${line}\n${frontmatter}` : line
-}
-
-/**
- * 由儲存的 definition 判斷是否 agentic。標準對齊後 canonical 投影把 `kind` 收進 `metadata`
- * （§3：頂層只有標準欄位），故 `kind: agentic` 現在縮排在 `metadata:` 之下——比對時允許前導空白。
- * catalog 未帶獨立 `kind` 欄，故這是可靠訊號；缺/壞 → 視為 flow（fall back gracefully）。
- */
-export function isAgenticDefinition(definition?: string | null): boolean {
-  return !!definition && /^[ \t]*kind:[ \t]*agentic[ \t]*$/m.test(definition)
 }

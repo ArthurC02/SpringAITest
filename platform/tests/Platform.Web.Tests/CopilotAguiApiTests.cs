@@ -14,7 +14,7 @@ namespace Platform.Web.Tests;
 /// P1 起端點改為 RequireAuthorization():無/壞 JWT 一律 401(相對現行行為唯一的對外變更,02-spec §2.1)。
 ///
 /// P4 起與 <see cref="ChatApiTests"/> 同一個 "EngineCalls" collection(序列化執行):兩者都會改動
-/// <see cref="FakeWorkflowService.CatalogOverride"/>/<see cref="FakeWorkflowService.SkillInvokes"/> 這些
+/// <see cref="FakeWorkflowEngineClient.CatalogOverride"/>/<see cref="FakeWorkflowEngineClient.SkillInvokes"/> 這些
 /// 靜態欄位(跨 TestWebAppFactory 實例共用),平行執行會產生競態。
 /// </summary>
 [Collection("EngineCalls")]
@@ -602,7 +602,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     // ---- P4(copilot-shared-core §11 步驟 14):路由共用 —— 副駕取得同批 skill 能力 ----
 
     // T-P4-1/B-P4-14(補 G2/G3):非空 client tools + 路由 NONE(預設 catalog 無 input_schema,見
-    // FakeWorkflowService 無 CatalogOverride 時的目錄形狀)→ 委派內層,FakeChatClient 腳本化吐出
+    // FakeWorkflowEngineClient 無 CatalogOverride 時的目錄形狀)→ 委派內層,FakeChatClient 腳本化吐出
     // FunctionCallContent,AGUI 編碼層應冒泡成 TOOL_CALL_START(含工具名)→ ARGS(含參數)→ END。
     [Fact]
     public async Task Agui_NonEmptyClientTools_RoutingNone_EmitsToolCallStartArgsEnd()
@@ -708,7 +708,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Agui_RoutingHitWithClientToolsPresent_ClientToolNotInvoked_UserStillGetsSkillAnswer()
     {
-        FakeWorkflowService.CatalogOverride = Cat(SingleSkillCatalog);
+        FakeWorkflowEngineClient.CatalogOverride = Cat(SingleSkillCatalog);
         var routingAgent = (FakeLlmAgent)RoutingAgent;
         var originalResponse = routingAgent.Response;
         routingAgent.Response = "kb-query";
@@ -730,7 +730,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         finally
         {
             routingAgent.Response = originalResponse;
-            FakeWorkflowService.CatalogOverride = null;
+            FakeWorkflowEngineClient.CatalogOverride = null;
         }
     }
 
@@ -743,7 +743,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Agui_HitRound_ThenTwoMissRounds_FullArrayResend_HitUserMessageAppearsExactlyOnce_LinearGrowth()
     {
-        FakeWorkflowService.CatalogOverride = Cat(SingleSkillCatalog);
+        FakeWorkflowEngineClient.CatalogOverride = Cat(SingleSkillCatalog);
         var routingAgent = (FakeLlmAgent)RoutingAgent;
         var originalResponse = routingAgent.Response;
         const string hitQuestion = "這季毛利率多少?";
@@ -801,7 +801,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         finally
         {
             routingAgent.Response = originalResponse;
-            FakeWorkflowService.CatalogOverride = null;
+            FakeWorkflowEngineClient.CatalogOverride = null;
         }
     }
 
@@ -816,7 +816,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Agui_AgenticSkillRouted_NoToolCallEvents_FinalContentFromAnswerKey()
     {
-        FakeWorkflowService.CatalogOverride = Cat(AgenticSkillCatalog);
+        FakeWorkflowEngineClient.CatalogOverride = Cat(AgenticSkillCatalog);
         var routingAgent = (FakeLlmAgent)RoutingAgent;
         var originalResponse = routingAgent.Response;
         routingAgent.Response = "sales-helper";   // 路由命中 agentic skill。
@@ -835,10 +835,10 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
             Assert.DoesNotContain(types, t => t == "TOOL_CALL_START" || t == "TOOL_CALL_ARGS" || t == "TOOL_CALL_END");
 
             // (b) agentic skill 確實被路由並執行(以使用者原訊息為 question 輸入)。
-            var invoke = Assert.Single(FakeWorkflowService.SkillInvokes, i => i.Name == "sales-helper");
+            var invoke = Assert.Single(FakeWorkflowEngineClient.SkillInvokes, i => i.Name == "sales-helper");
             Assert.Equal("這季毛利率多少?", invoke.Input["question"].GetString());
 
-            // (c) 最終內容由 answer 鍵萃取(FakeWorkflowService 預設 output.answer = "42"),摘要如實帶出。
+            // (c) 最終內容由 answer 鍵萃取(FakeWorkflowEngineClient 預設 output.answer = "42"),摘要如實帶出。
             var finalText = string.Concat(frames
                 .Where(f => f.GetProperty("type").GetString() == "TEXT_MESSAGE_CONTENT")
                 .Select(f => f.GetProperty("delta").GetString()));
@@ -847,7 +847,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         finally
         {
             routingAgent.Response = originalResponse;
-            FakeWorkflowService.CatalogOverride = null;
+            FakeWorkflowEngineClient.CatalogOverride = null;
         }
     }
 
@@ -856,14 +856,14 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Agui_And_ChatView_SameCatalog_SameQuestion_SkillInvokes_NameAndInputMatch()
     {
-        FakeWorkflowService.CatalogOverride = Cat(SingleSkillCatalog);
+        FakeWorkflowEngineClient.CatalogOverride = Cat(SingleSkillCatalog);
         var routingAgent = (FakeLlmAgent)RoutingAgent;
         var originalResponse = routingAgent.Response;
         routingAgent.Response = "kb-query";
         const string question = "這季毛利率多少?";
         try
         {
-            var before = FakeWorkflowService.SkillInvokes.Count;
+            var before = FakeWorkflowEngineClient.SkillInvokes.Count;
 
             var chatClient = _factory.CreateClient().WithToken(_factory.IssueToken());
             var chatResp = await chatClient.PostAsJsonAsync("/api/chat", new { message = question });
@@ -874,7 +874,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
             Assert.Equal(HttpStatusCode.OK, aguiResp.StatusCode);
             await aguiResp.Content.ReadAsStringAsync();
 
-            var invokes = FakeWorkflowService.SkillInvokes.Skip(before).ToList();
+            var invokes = FakeWorkflowEngineClient.SkillInvokes.Skip(before).ToList();
             Assert.Equal(2, invokes.Count);
             Assert.Equal(invokes[0].Name, invokes[1].Name);
             Assert.Equal(
@@ -884,7 +884,7 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         finally
         {
             routingAgent.Response = originalResponse;
-            FakeWorkflowService.CatalogOverride = null;
+            FakeWorkflowEngineClient.CatalogOverride = null;
         }
     }
 

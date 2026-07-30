@@ -100,4 +100,119 @@ public sealed class InMemorySkillRepositoryConcurrencyTests
         Assert.Equal(winner.Definition, revision.Definition);
         Assert.Equal(winner.Definition, (await repo.GetAsync(tenant, name, default))!.Definition);
     }
+
+    [Fact]
+    public async Task ExpectedKindUpdate_RacingAgenticImport_CannotOverwriteConvertedRow()
+    {
+        var repo = new InMemorySkillRepository();
+        const string tenant = "atomic-tenant";
+        const string name = "kind-fenced-update";
+        await repo.CreateAsync(tenant, Value(name, "name: seed"), "seed", default);
+
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var update = Task.Run(async () =>
+        {
+            await start.Task;
+            return await repo.UpdateAsync(
+                tenant, name, "flow", Value(name, "name: flow-update"), "flow-writer", default);
+        });
+        var import = Task.Run(async () =>
+        {
+            await start.Task;
+            var package = Encoding.UTF8.GetBytes("agent-package");
+            return await repo.ImportAsync(
+                tenant, Value(name, "name: agent-update", "agentic"), package,
+                SkillHash.Sha256(package), "agent-writer", default);
+        });
+
+        start.SetResult();
+        var writes = await Task.WhenAll(update, import);
+        var updateResult = writes[0];
+        var importResult = writes[1]!;
+
+        var current = await repo.GetAsync(tenant, name, default);
+        Assert.Equal("agentic", current!.Kind);
+        Assert.Equal("name: agent-update", current.Definition);
+        if (updateResult is not null)
+        {
+            Assert.True(updateResult.CurrentRevision < importResult.CurrentRevision);
+        }
+    }
+
+    [Fact]
+    public async Task FlowOnlyRevive_RacingAgenticImport_CannotReplaceDisabledAgentSkill()
+    {
+        var repo = new InMemorySkillRepository();
+        const string tenant = "atomic-tenant";
+        const string name = "kind-fenced-revive";
+        var originalPackage = Encoding.UTF8.GetBytes("original-agent-package");
+        await repo.ImportAsync(
+            tenant, Value(name, "kind: agentic", "agentic"), originalPackage,
+            SkillHash.Sha256(originalPackage), "seed", default);
+        Assert.True(await repo.DeleteAsync(tenant, name, default));
+
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var revive = Task.Run(async () =>
+        {
+            await start.Task;
+            return await repo.CreateAsync(
+                tenant, "flow", Value(name, "name: forbidden-flow"), "flow-writer", default);
+        });
+        var import = Task.Run(async () =>
+        {
+            await start.Task;
+            var package = Encoding.UTF8.GetBytes("replacement-agent-package");
+            return await repo.ImportAsync(
+                tenant, Value(name, "kind: agentic\nversion: 2", "agentic"), package,
+                SkillHash.Sha256(package), "agent-writer", default);
+        });
+
+        start.SetResult();
+        var writes = await Task.WhenAll(revive, import);
+
+        Assert.Null(writes[0]);
+        var current = await repo.GetAsync(tenant, name, default);
+        Assert.Equal("agentic", current!.Kind);
+        Assert.Equal("kind: agentic\nversion: 2", current.Definition);
+        Assert.Equal(2, current.CurrentRevision);
+    }
+
+    [Fact]
+    public async Task CompatibilityUpdate_GetThenImportBeforeWrite_IsStoppedByFlowFence()
+    {
+        var repo = new InMemorySkillRepository();
+        const string tenant = "atomic-tenant";
+        const string name = "compat-update-race";
+        await repo.CreateAsync(tenant, Value(name, "name: flow-v1"), "seed", default);
+
+        var readObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var importFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var compatibilityUpdate = Task.Run(async () =>
+        {
+            var before = await repo.GetAsync(tenant, name, default);
+            Assert.Equal("flow", before!.Kind);
+            readObserved.SetResult();
+            await importFinished.Task;
+            return await repo.UpdateAsync(
+                tenant, name, "flow", Value(name, "name: stale-flow-write"), "flow-writer", default);
+        });
+        var import = Task.Run(async () =>
+        {
+            await readObserved.Task;
+            var package = Encoding.UTF8.GetBytes("agent-race-package");
+            var result = await repo.ImportAsync(
+                tenant, Value(name, "kind: agentic", "agentic"), package,
+                SkillHash.Sha256(package), "agent-writer", default);
+            importFinished.SetResult();
+            return result;
+        });
+
+        var writes = await Task.WhenAll(compatibilityUpdate, import);
+
+        Assert.Null(writes[0]);
+        var current = await repo.GetAsync(tenant, name, default);
+        Assert.Equal("agentic", current!.Kind);
+        Assert.Equal("kind: agentic", current.Definition);
+        Assert.Equal(2, current.CurrentRevision);
+    }
 }

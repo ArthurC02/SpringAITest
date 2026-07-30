@@ -1,6 +1,6 @@
 # Skill 概念重整（Concept Realignment）— 計畫
 
-> 狀態：規劃中（2026-07-30）。本計畫是概念/命名/API 邊界的重整，不是新功能；現況以程式碼為準。
+> 狀態：執行中（2026-07-30）。P0 正名已落地；P1–P4 依各自驗收 gate 推進。P5 **未完成**，且不得在 cleanup C8 的流量、usage、rollback 與簽核證據齊備前宣告完成。本計畫是概念/命名/API 邊界的重整，不是新功能；現況以程式碼為準。
 
 ## 1. 動機：Re-Architecture 後的概念漂移
 
@@ -45,7 +45,7 @@
 
 | 階段 | 內容 | 風險 | Gate |
 | --- | --- | --- | --- |
-| P0 | 正名與文件（零行為變更）：docs/計畫修訂、`engine/harness.py`→`engine/node_shell.py`（5 個 import 點）、platform `WorkflowService`→`WorkflowEngineClient`（約 9 檔含 fakes） | 低（純機械） | 三服務測試全綠 |
+| P0 | 正名與文件（零行為變更）：docs/計畫修訂、`engine/harness.py`→`engine/node_shell.py`（5 個生產 import + 5 個測試 import）、platform `WorkflowService`→`WorkflowEngineClient`（完整觸及面 17 檔，含介面、DI、呼叫端、fakes/factory 與測試檔改名） | 低（純機械，已落地；文件持續同步） | 三服務測試全綠 |
 | P1 | `kind` 貫通：backend/platform 已帶 kind（僅補迴歸測試）；引擎 `custom._entry` 改讀 `info['kind']` 刪 YAML 嗅探；前端 `kindOf` 優先序反轉、刪 `isAgenticDefinition` | 低 | 前端與引擎無任何 definition 嗅探判 kind |
 | P2 | API 拆分：backend `BusinessWorkflowController`（`/api/business-workflows*`，POST/PUT 語意照搬、無 revisions 路由）+ platform 代理 + workflow `/business-workflows/validate` alias；`/api/skills*` 過渡期全功能雙軌 | 中 | 新舊路由回應一致（契約測試） |
 | P3 | 引擎拆分：`custom.load()` 分裂、`_build_agentic_graph` 本體移出（分派/快取/簽章不變）、`_load_skill` helper 抽取、eval 422 契約補測試 | 中 | workflow 全測綠 + invoke 行為位元級不變 |

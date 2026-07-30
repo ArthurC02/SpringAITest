@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | A0-1 | `engine/node_shell.py` 改名後三服務全測綠 | `cd workflow && uv run pytest`；`cd backend && dotnet test`；`cd platform && dotnet test` |
 | A0-2 | repo 內不再有 `from app.engine.harness import` | 符號搜尋為零命中（`app.engine.node_shell` 取代） |
-| A0-3 | platform `SkillEngineClient` 改名後對外 HTTP 契約不變 | platform 既有 SkillRoutingAgent/Skill proxy 測試不改斷言全綠 |
+| A0-3 | platform `WorkflowEngineClient` 改名後對外 HTTP 契約不變 | platform 既有 SkillRoutingAgent/Skill proxy 測試不改斷言全綠 |
 | A0-4 | 文件修訂完成：`coding-standards.md:21`、根 `AGENTS.md` Skill Engine 段、`05-migration-and-rollout.md:193` NodeParamsTab 列、06-cleanup 新增 C8 | 人工審查：文件中「Skill 是宣告式 YAML workflow」無限定語句零殘留 |
 
 ## P1 kind 貫通
@@ -67,6 +67,7 @@
 | A5-4 | 雙軌一致性測試（P2 建的 `SkillsBusinessWorkflowsDualTrackConsistencyTests`）**已刪除**——它斷言的等價關係在收斂後不存在，不得被當契約測試保留 | 符號搜尋 |
 | A5-5 | gate 證據齊備：新面流量承接、舊面 flow 寫入 usage=0、rollback window 結束 | C8 登記的 usage query + 人工簽核 |
 | A5-6 | [05-dead-code-and-test-ledger.md](05-dead-code-and-test-ledger.md) 逐項勾銷；誤判澄清區（帳本 §5）10 項未被誤刪；`legacy_flow.py`/`agent_skill_runner.py` 未被本案觸碰 | code review + 符號搜尋 |
+| A5-7 | workflow-internal `/skills/validate` 與 `/business-workflows/validate` 仍由同一 handler 提供；P5/C8 不移除舊 alias | workflow pytest；任何 alias 退場必須引用另立的 consumer inventory/usage-zero/rollback gate，不得修改本項斷言 |
 
 ## 全程不變式（每階段回歸）
 

@@ -130,7 +130,7 @@ public sealed class ConversationStoreTests
     [Fact]
     public async Task Add_TransportError_ThrowsBackendCall_NotWorkflowInvocation()
     {
-        // 傳輸層錯誤包成 BackendCallException(對外 500),與 WorkflowService 的 502 語意刻意不同。
+        // 傳輸層錯誤包成 BackendCallException(對外 500),與 WorkflowEngineClient 的 502 語意刻意不同。
         var store = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒")));
 
         var ex = await Assert.ThrowsAsync<BackendCallException>(() => store.AddAsync("問", "答", Ctx));

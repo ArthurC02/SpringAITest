@@ -74,24 +74,24 @@ public sealed class AgentController : ProxyControllerBase
 
     [HttpGet("catalog/rule-facts")]
     public async Task<ActionResult<JsonElement>> RuleFacts(
-        [FromServices] IWorkflowService engine, CancellationToken ct)
+        [FromServices] IWorkflowEngineClient engine, CancellationToken ct)
         => Ok(await engine.GetBusinessRuleFactsAsync(User.ToUserContext(), ct));
 
     [HttpGet("catalog/rule-actions")]
     public async Task<ActionResult<JsonElement>> RuleActions(
-        [FromServices] IWorkflowService engine, CancellationToken ct)
+        [FromServices] IWorkflowEngineClient engine, CancellationToken ct)
         => Ok(await engine.GetBusinessRuleActionsAsync(User.ToUserContext(), ct));
 
     [HttpPost("rules/validate")]
     public async Task<ActionResult<JsonElement>> ValidateRules(
-        [FromServices] IWorkflowService engine,
+        [FromServices] IWorkflowEngineClient engine,
         [FromBody] BusinessRuleValidateRequest request,
         CancellationToken ct)
         => Ok(await engine.ValidateBusinessRulesAsync(request, User.ToUserContext(), ct));
 
     [HttpPost("rules/simulate")]
     public async Task<ActionResult<JsonElement>> SimulateRules(
-        [FromServices] IWorkflowService engine,
+        [FromServices] IWorkflowEngineClient engine,
         [FromBody] BusinessRuleSimulateRequest request,
         CancellationToken ct)
         => Ok(await engine.SimulateBusinessRulesAsync(request, User.ToUserContext(), ct));

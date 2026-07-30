@@ -305,8 +305,9 @@ else
 }
 
 // 下游工作流 client:連線逾時 5s;讀取逾時 150s(強制 HTTP/1.1 在 service 內設定)。
-builder.Services.AddHttpClient<IWorkflowService, WorkflowService>(c => c.Timeout = TimeSpan.FromSeconds(150))
+builder.Services.AddHttpClient<IWorkflowEngineClient, WorkflowEngineClient>(c => c.Timeout = TimeSpan.FromSeconds(150))
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+builder.Services.AddScoped<IBusinessWorkflowService, BusinessWorkflowService>();
 
 // ---------------------------------------------------------------------------
 // MVC + 驗證失敗回應(統一 ApiError)

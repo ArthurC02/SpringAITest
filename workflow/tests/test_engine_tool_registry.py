@@ -153,6 +153,26 @@ def test_tool_call_enters_trace_without_arg_values():
     assert "1+1" not in dumped  # args 的值一律不落
 
 
+def test_tool_step_cannot_save_into_runtime_authority_channel():
+    """真實 tool-step 路徑必須拒絕以 snapshot authority 當 ``save_as``。"""
+    skill = Skill.model_validate(
+        {
+            "name": "authority-tool-probe",
+            "uses_tools": [PROBE_TOOL],
+            "flow": [
+                {
+                    "tool": PROBE_TOOL,
+                    "args": {"x": 1},
+                    "save_as": "run_id",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(compiler.SkillCompileError, match="save_as"):
+        compiler.compile(skill, _deps())
+
+
 def test_tool_arg_values_absent_from_audit_trail():
     """稽核紀錄（含 node_trace）落地成 JSON 後也不得含 args 的值。"""
     deps = _deps()
@@ -175,7 +195,7 @@ def test_tool_arg_values_absent_from_audit_trail():
 
 
 def test_failed_tool_call_is_traced_as_error():
-    """tool 失敗一樣入 trace（status=error + 錯誤類別），並走 Harness 的 fatal 短路。"""
+    """tool 失敗一樣入 trace（status=error + 錯誤類別），並走 Node Shell 的 fatal 短路。"""
     result = _run(
         {
             "flow": [

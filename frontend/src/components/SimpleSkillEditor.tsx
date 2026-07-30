@@ -1,6 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/http'
-import { createSkill, listSkillCatalog, updateSkill, validateSkill } from '../api/skills'
+import { listSkillCatalog } from '../api/skills'
+import {
+  createBusinessWorkflow,
+  updateBusinessWorkflow,
+  validateBusinessWorkflow,
+} from '../api/businessWorkflows'
 import type { SkillInputField, SkillValidation } from '../types'
 import { compose } from '../skills/compose'
 import { TEMPLATES, type SkillForm, type SkillTemplate } from '../skills/templates'
@@ -55,16 +60,19 @@ export default function SimpleSkillEditor({ initial, onSaved, onAdvanced, onClos
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [savedName, setSavedName] = useState<string | null>(null) // 存後才啟用試一下
+  const skeletonGenerationRef = useRef(0)
 
   const template = templateId ? TEMPLATES.find((t) => t.id === templateId)! : null
 
   // 從 catalog 取骨架原文（唯一事實來源，取不到就擋存，不 fallback 前端 skeleton）。不動 form/templateId。
   async function loadSkeleton(t: SkillTemplate) {
+    const generation = ++skeletonGenerationRef.current
     setBaseDefinition(null)
     setError(null)
     setValidation(null)
     try {
       const catalog = await listSkillCatalog()
+      if (generation !== skeletonGenerationRef.current) return
       const entry = catalog.find((e) => e.name === t.basedOn)
       if (!entry?.definition) {
         setError('找不到這個範本的骨架設定，暫時無法用它建立。請稍後再試或改用進階編輯。')
@@ -73,7 +81,7 @@ export default function SimpleSkillEditor({ initial, onSaved, onAdvanced, onClos
       setBaseDefinition(entry.definition)
       setStoredSchema(entry.input_schema ?? null)
     } catch (e) {
-      setError((e as Error).message)
+      if (generation === skeletonGenerationRef.current) setError((e as Error).message)
     }
   }
 
@@ -84,12 +92,16 @@ export default function SimpleSkillEditor({ initial, onSaved, onAdvanced, onClos
 
   // 編輯模式掛載：範本查得到就自動載骨架；查不到 → 顯示一句錯誤並引導改用進階編輯，不崩。
   useEffect(() => {
-    if (!initial) return
-    if (!initialTemplate) {
-      setError('找不到這個 Skill 使用的範本，無法用簡單模式編輯。請改用清單的「編輯」（進階編輯器）。')
-      return
+    if (initial) {
+      if (!initialTemplate) {
+        setError('找不到這個 Skill 使用的範本，無法用簡單模式編輯。請改用清單的「編輯」（進階編輯器）。')
+      } else {
+        void loadSkeleton(initialTemplate)
+      }
     }
-    void loadSkeleton(initialTemplate)
+    return () => {
+      skeletonGenerationRef.current += 1
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在掛載跑一次；initial 由呼叫端固定。
   }, [])
 
@@ -126,7 +138,7 @@ export default function SimpleSkillEditor({ initial, onSaved, onAdvanced, onClos
     setValidation(null)
     try {
       const def = compose(form, baseDefinition)
-      const v = await validateSkill(def)
+      const v = await validateBusinessWorkflow(def)
       if (!v.valid && blockingErrors(v).length > 0) {
         setValidation(v)
         return
@@ -134,9 +146,9 @@ export default function SimpleSkillEditor({ initial, onSaved, onAdvanced, onClos
       // 存下範本身分＋表單原值，讓此 skill 日後可重回簡單模式（templateId 用 basedOn）。
       const simpleForm = { templateId: template.basedOn, form }
       if (editing) {
-        await updateSkill(name, def, simpleForm)
+        await updateBusinessWorkflow(name, def, simpleForm)
       } else {
-        await createSkill(def, simpleForm)
+        await createBusinessWorkflow(def, simpleForm)
       }
       // 存檔成功。保留 validation 以便顯示非阻擋的資料流警告（不阻擋存檔，只提醒試跑）。
       setValidation(v)
@@ -170,7 +182,7 @@ export default function SimpleSkillEditor({ initial, onSaved, onAdvanced, onClos
   return (
     <div className="simple-skill">
       <div className="skill-editor__head">
-        <h3 className="skill-editor__title">{editing ? '簡單模式編輯' : '新增 Skill'}</h3>
+        <h3 className="skill-editor__title">{editing ? '簡單模式編輯' : '新增業務流程'}</h3>
         <div className="skill-editor__actions">
           <button
             className="btn"

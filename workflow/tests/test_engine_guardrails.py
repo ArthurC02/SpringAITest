@@ -3,7 +3,7 @@
 為什麼獨立成檔：這兩件事橫跨 script_runner / expressions / compiler / package / API
 四個層面，放進任何單一既有測試檔都會讓「一個缺口的完整證據」被拆散。
 
-- **RUNTIME_AUTHORITY_KEYS**（harness.py:41-51 明文「Skill input、nodes、scripts 都不得
+- **RUNTIME_AUTHORITY_KEYS**（node_shell.py 明文「Skill input、nodes、scripts 都不得
   覆寫」）：tool 步驟的 save_as 走 skill.writable_key() 早就擋住，script 這條路卻沒有。
   寫得進去 = 後續 tool 步驟的 ToolContext 會拿到被竄改的資料範圍授權（權限提升），
   所以這裡不只斷言「鍵被剝除」，還斷言「後面的 tool 拿到的仍是伺服器注入的值」。
@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from app.engine import compiler, expressions, script_runner
 from app.engine import tool_registry
-from app.engine.harness import RUNTIME_AUTHORITY_KEYS
+from app.engine.node_shell import RUNTIME_AUTHORITY_KEYS
 from app.engine.skill import Skill
 from app.engine.tool_registry import ToolContext
 from app.main import app

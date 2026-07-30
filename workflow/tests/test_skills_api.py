@@ -96,6 +96,18 @@ def test_validate_valid_definition():
     assert body["skill"]["kind"] == "flow"
 
 
+def test_business_workflow_validate_alias_matches_legacy_path():
+    payload = {"definition": VALID_YAML}
+
+    legacy = client.post("/skills/validate", json=payload, headers=_headers())
+    named = client.post(
+        "/business-workflows/validate", json=payload, headers=_headers()
+    )
+
+    assert named.status_code == legacy.status_code == 200
+    assert named.json() == legacy.json()
+
+
 def test_validate_reports_error_codes_in_body():
     resp = client.post(
         "/skills/validate",

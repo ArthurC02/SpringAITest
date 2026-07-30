@@ -53,7 +53,7 @@ from types import CodeType
 from typing import Any, Protocol
 
 from app.engine.expressions import MAX_AST_DEPTH, ast_depth
-from app.engine.harness import (
+from app.engine.node_shell import (
     CONFIG_SEED_KEYS,
     IDENTITY_KEYS,
     IMMUTABLE_KEYS,

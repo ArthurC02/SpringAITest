@@ -11,6 +11,7 @@
 | C5    | 移除 raw JSON operations production view 與無 owner 的 log-only alerts              | Structured cockpit/recovery metrics authoritative                                  | Developer diagnostics、OTel/Langfuse exporters      |
 | C6    | 刪除 in-process script execution                                                    | Isolated adapter parity/adversarial/recovery evidence 全綠，production 無 fallback | AST analyzer、script source revision/hash audit     |
 | C7    | 移除 connector duplicate discovery/permission caches                                | Connector catalog/tool-boundary parity 全綠                                        | Native tools、connector revisions、run/effect audit |
+| C8    | Skill 概念重整 P5：收斂 public `/api/skills*` 的 flow 寫入／flow export fallback 與 flow 讀取可見性 | `/api/business-workflows*` 已承接流量、舊 Skill 面 flow 寫入 usage `= 0`、rollback window 結束，且 owner 登記 evidence 與人工簽核 | workflow-internal `/skills/validate` alias（另立退場 gate）、`skill`/`skill_revision` 實體表、所有 immutable revisions/run snapshot pins、統一 invoke、R6 legacy-flow runtime |
 
 ## 執行規則
 
@@ -18,3 +19,4 @@
 2. C1/C2 可連續執行；C3、C4、C6 可在各自 replacement 穩定後平行；C7 只在 MCP 真的交付時存在。
 3. R6 legacy-flow cleanup 仍由 [../agent-platform-redesign/05-migration-and-rollout.md](../agent-platform-redesign/05-migration-and-rollout.md) 擁有，本文件只引用，不另定 threshold。
 4. Immutable revisions、snapshots、approval/effect ledgers、context evidence、eval results 與 security audit records 永不因程式路徑 cleanup 一併刪除。
+5. **C8 是 P5 的阻擋 gate，不是事後清理提醒。** 新 Business Workflow 路由存在、測試通過或前端入口完成，都不足以宣告 P5；usage query、rollback deadline、deletion evidence 與人工簽核必須在同一完成 PR 中可審計。

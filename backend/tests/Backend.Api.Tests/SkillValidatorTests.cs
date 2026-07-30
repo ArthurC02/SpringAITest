@@ -1,4 +1,5 @@
 using System.Net;
+using Backend.Api.BusinessWorkflows;
 using Backend.Api.Common;
 using Backend.Api.Skills;
 using static Backend.Api.Tests.StubHandler; // 共用的 Json(status, body) 回應工廠(Fakes.cs)
@@ -34,7 +35,9 @@ public sealed class SkillValidatorTests
         Assert.Equal("ADMIN", result.Skill.RequiredRole);
 
         // 服務間信任邊界:X-Internal-Token + 三個身分 header 都要如實帶上。
-        Assert.Equal("http://workflow:8001/skills/validate", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(
+            "http://workflow:8001/business-workflows/validate",
+            stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Post, stub.LastRequest.Method);
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));

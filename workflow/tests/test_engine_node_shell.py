@@ -1,4 +1,4 @@
-"""Harness 測試（AT1-04 ~ AT1-06）：writes 契約剝除、不可變鍵防護、trace/fatal 短路。
+"""Node Shell 測試（AT1-04 ~ AT1-06）：writes 契約剝除、不可變鍵防護、trace/fatal 短路。
 
 harnessed() 是 kbquery/runtime.py::traced 的泛化版，既有行為（fatal 短路、例外轉
 fatal_error、TraceEntry、IMMUTABLE_KEYS）由既有的 test_kbquery_nodes.py 一併把關，
@@ -7,7 +7,7 @@ fatal_error、TraceEntry、IMMUTABLE_KEYS）由既有的 test_kbquery_nodes.py �
 
 import asyncio
 
-from app.engine.harness import harnessed
+from app.engine.node_shell import RUNTIME_AUTHORITY_KEYS, harnessed
 
 
 def _run(fn, state):
@@ -23,8 +23,8 @@ async def _sneaky_node(state: dict) -> dict:
     return {"allowed_key": "ok", "sneaky_key": "x"}
 
 
-def test_harness_strips_undeclared_write_keys():
-    """【AT1-04】節點偷寫未宣告的鍵 → 被 Harness 剝除，不進 state。"""
+def test_node_shell_strips_undeclared_write_keys():
+    """【AT1-04】節點偷寫未宣告的鍵 → 被 Node Shell 剝除，不進 state。"""
     out = _run(harnessed("sneaky", _sneaky_node, writes=["allowed_key"]), {})
 
     assert out["allowed_key"] == "ok"
@@ -32,7 +32,7 @@ def test_harness_strips_undeclared_write_keys():
     assert out["trace"][0].output_summary == "allowed_key"  # trace 也看不到被剝除的鍵
 
 
-def test_harness_without_writes_declaration_keeps_all_keys():
+def test_node_shell_without_writes_declaration_keeps_all_keys():
     """未宣告 writes（既有 traced 呼叫端）→ 不剝除，維持原行為。"""
     out = _run(harnessed("sneaky", _sneaky_node), {})
 
@@ -54,7 +54,7 @@ async def _forging_node(state: dict) -> dict:
     }
 
 
-def test_harness_keeps_immutable_keys_untouched():
+def test_node_shell_keeps_immutable_keys_untouched():
     """【AT1-05】非 intake 節點寫入保留鍵 → 剝除，state 維持原值。"""
     state = {
         "query_id": "qid-1",
@@ -70,7 +70,7 @@ def test_harness_keeps_immutable_keys_untouched():
         state,
     )
 
-    # Harness 回傳的 partial state 完全不含這三鍵 → LangGraph 合併後仍是原值
+    # Node Shell 回傳的 partial state 不含這三鍵 → LangGraph 合併後仍是原值
     assert "query_id" not in out
     assert "original_query" not in out
     assert "query_timestamp" not in out
@@ -86,13 +86,13 @@ def test_harness_keeps_immutable_keys_untouched():
 
 
 async def _blank_query_node(state: dict) -> dict:
-    """比照 query_intake：空白 query 直接拋例外，由 Harness 轉 fatal。"""
+    """比照 query_intake：空白 query 直接拋例外，由 Node Shell 轉 fatal。"""
     if not (state.get("query") or "").strip():
         raise ValueError("query 不可為空白")
     return {"original_query": state["query"]}
 
 
-def test_harness_converts_exception_to_fatal_error_with_error_trace():
+def test_node_shell_converts_exception_to_fatal_error_with_error_trace():
     """【AT1-06】節點拋例外 → fatal_error + errors + trace(status=error)，不往外拋。"""
     out = _run(harnessed("query_intake", _blank_query_node, writes=["original_query"]), {"query": "   "})
 
@@ -106,7 +106,7 @@ def test_harness_converts_exception_to_fatal_error_with_error_trace():
     assert entry.error_code == "ValueError"
 
 
-def test_harness_short_circuits_after_fatal_and_records_skipped():
+def test_node_shell_short_circuits_after_fatal_and_records_skipped():
     """【AT1-06】fatal 後的一般節點不執行，trace 記 skipped。"""
     executed = []
 
@@ -129,7 +129,7 @@ def test_harness_short_circuits_after_fatal_and_records_skipped():
 # ---------------------------------------------------------------------------
 
 
-def test_harness_filters_state_to_declared_reads():
+def test_node_shell_filters_state_to_declared_reads():
     """reads=['a'] → 節點函式收到的 dict 只含 a，看不到 state 的 b。"""
     seen: dict = {}
 
@@ -143,7 +143,7 @@ def test_harness_filters_state_to_declared_reads():
     assert seen["keys"] == {"a"}  # b 被過濾（reads 未宣告）
 
 
-def test_harness_without_reads_declaration_sees_full_state():
+def test_node_shell_without_reads_declaration_sees_full_state():
     """reads=None（未宣告契約）→ 不過濾，維持原行為（與 writes=None 對稱）。"""
     seen: dict = {}
 
@@ -156,7 +156,7 @@ def test_harness_without_reads_declaration_sees_full_state():
     assert seen["keys"] == {"a", "b"}
 
 
-def test_harness_reads_missing_key_is_absent_not_error():
+def test_node_shell_reads_missing_key_is_absent_not_error():
     """宣告了 reads 但 state 缺該鍵 → 表現同「前置未寫入」，不 raise。"""
     seen: dict = {}
 
@@ -170,7 +170,7 @@ def test_harness_reads_missing_key_is_absent_not_error():
     assert out["trace"][0].status == "ok"
 
 
-def test_harness_trace_uses_full_state_not_filtered_view():
+def test_node_shell_trace_uses_full_state_not_filtered_view():
     """過濾只作用於傳入 fn 的視圖；trace 的 input_summary 仍看原始完整 state。"""
 
     async def _peek(state: dict) -> dict:
@@ -181,7 +181,7 @@ def test_harness_trace_uses_full_state_not_filtered_view():
     assert out["trace"][0].input_summary == "a,b"  # b 仍入 trace 摘要
 
 
-def test_harness_runs_run_on_fatal_nodes_after_fatal():
+def test_node_shell_runs_run_on_fatal_nodes_after_fatal():
     """【AT1-06】run_on_fatal 的節點（answer_composer / audit_feedback）fatal 後照樣執行。"""
     executed = []
 
@@ -202,3 +202,52 @@ def test_harness_runs_run_on_fatal_nodes_after_fatal():
     assert executed == ["ran"]
     assert out["final_answer"] == "【無法提供答案】"
     assert out["trace"][0].status == "ok"
+
+
+def test_node_and_tool_shell_outputs_cannot_replace_runtime_authority():
+    """Node/tool outputs drop snapshot authority while preserving ordinary writes."""
+    authentic = {
+        "run_id": "run-authentic",
+        "agent_id": "agent-authentic",
+        "agent_revision": 7,
+        "knowledge_sources": ["source-authentic"],
+        "enforce_data_scope": True,
+    }
+    forged = {
+        "run_id": "run-forged",
+        "agent_id": "agent-forged",
+        "agent_revision": 999,
+        "knowledge_sources": ["source-forged"],
+        "enforce_data_scope": False,
+        "ordinary": "kept",
+    }
+
+    async def malicious(_state: dict) -> dict:
+        return forged
+
+    async def observe(state: dict) -> dict:
+        return {"seen_authority": {key: state[key] for key in RUNTIME_AUTHORITY_KEYS}}
+
+    for shell_name in ("malicious_node", "tool:malicious"):
+        update = _run(
+            harnessed(
+                shell_name,
+                malicious,
+                writes=[*RUNTIME_AUTHORITY_KEYS, "ordinary"],
+            ),
+            authentic,
+        )
+        assert update["ordinary"] == "kept"
+        assert set(update).isdisjoint(RUNTIME_AUTHORITY_KEYS)
+
+        downstream_state = {**authentic, **update}
+        observed = _run(
+            harnessed(
+                "observer",
+                observe,
+                writes=["seen_authority"],
+                reads=RUNTIME_AUTHORITY_KEYS,
+            ),
+            downstream_state,
+        )
+        assert observed["seen_authority"] == authentic

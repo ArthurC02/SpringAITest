@@ -328,6 +328,7 @@ class FakeBackend:
             "required_role": "USER",
             "enabled": True,
             "current_revision": row["revision"],
+            "kind": "flow",
         }
 
 

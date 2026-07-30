@@ -6,8 +6,19 @@ public interface ISkillRepository
 {
     Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, CancellationToken ct);
 
+    /// <summary>列出指定 artifact kind；API/domain 分流不得靠 definition 嗅探。</summary>
+    async Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, string kind, CancellationToken ct)
+        => (await ListAsync(tenantId, ct)).Where(item => item.Kind == kind).ToList();
+
     /// <summary>取單筆;不存在(含跨租戶不可見、已軟刪)回 null。</summary>
     Task<Skill?> GetAsync(string tenantId, string name, CancellationToken ct);
+
+    /// <summary>取指定 kind 的啟用 artifact；kind 不符與不存在同樣回 null。</summary>
+    async Task<Skill?> GetAsync(string tenantId, string name, string kind, CancellationToken ct)
+    {
+        var item = await GetAsync(tenantId, name, ct);
+        return item?.Kind == kind ? item : null;
+    }
 
     /// <summary>
     /// 建立(current_revision = 1,同時寫入 revision 1 的稽核列)。
@@ -16,8 +27,20 @@ public interface ISkillRepository
     /// </summary>
     Task<Skill?> CreateAsync(string tenantId, Skill skill, string createdBy, CancellationToken ct);
 
+    /// <summary>
+    /// 建立新列，或只在停用列符合指定 kind 時復活。正式儲存實作必須把 kind fence 與復活原子化。
+    /// </summary>
+    Task<Skill?> CreateAsync(
+        string tenantId, string expectedExistingKind, Skill skill, string createdBy, CancellationToken ct);
+
     /// <summary>更新(name 不變,current_revision +1,同時寫入該版的稽核列);不存在或已軟刪回 null。</summary>
     Task<Skill?> UpdateAsync(string tenantId, string name, Skill skill, string updatedBy, CancellationToken ct);
+
+    /// <summary>
+    /// 只更新指定 kind；kind 不符、已軟刪或不存在皆回 null。正式儲存實作必須把 kind 判斷與更新原子化。
+    /// </summary>
+    Task<Skill?> UpdateAsync(
+        string tenantId, string name, string expectedKind, Skill skill, string updatedBy, CancellationToken ct);
 
     /// <summary>
     /// Agent Skill 匯入(P0):以「建立 / 更新 / 復活」upsert 語意在**單一交易**內寫入
@@ -31,6 +54,12 @@ public interface ISkillRepository
 
     /// <summary>軟刪(enabled=false);不存在(含跨租戶不可見、已軟刪)回 false。revision 保留。</summary>
     Task<bool> DeleteAsync(string tenantId, string name, CancellationToken ct);
+
+    /// <summary>
+    /// 只軟刪指定 kind；kind 不符與不存在同樣回 false。
+    /// 實作必須在單一原子寫入中套用 kind fence，不得以 Get 後 Delete 組合，避免 import 改 kind 的競態。
+    /// </summary>
+    Task<bool> DeleteAsync(string tenantId, string name, string kind, CancellationToken ct);
 
     /// <summary>
     /// 該 skill 的所有 revision,依 revision 遞減。**不過濾 enabled** — 軟刪後歷史仍查得到(稽核紅線)。

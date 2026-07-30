@@ -15,9 +15,9 @@ namespace Platform.Web.Controllers;
 [Authorize]
 public sealed class NodeController : ControllerBase
 {
-    private readonly IWorkflowService _engine;
+    private readonly IWorkflowEngineClient _engine;
 
-    public NodeController(IWorkflowService engine) => _engine = engine;
+    public NodeController(IWorkflowEngineClient engine) => _engine = engine;
 
     /// <summary>節點契約清單:name/version/description/reads/writes/requires_tools。</summary>
     [HttpGet]

@@ -2,11 +2,12 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Backend.Api.Common;
+using Backend.Api.Skills;
 
-namespace Backend.Api.Skills;
+namespace Backend.Api.BusinessWorkflows;
 
 /// <summary>
-/// 呼叫 workflow 引擎(:8001)的 POST /skills/validate。契約:一律回 200,
+/// 呼叫 workflow 引擎(:8001)的 POST /business-workflows/validate。契約:一律回 200,
 /// 驗證結果在 body({valid, errors:[{code, message, line}]})— 錯誤不走 HTTP 狀態碼。
 /// 因此任何非 200(含傳輸失敗)都是「驗證服務本身壞了」,不是「定義不合法」:
 /// 對外回 502(不是 422)— 不得把引擎不可達誤判成使用者的定義有問題,更不得放行未驗證的定義。
@@ -29,7 +30,7 @@ public sealed class WorkflowSkillValidator : ISkillValidator
     public async Task<SkillValidationResult> ValidateAsync(
         string definition, string tenantId, string? userId, string? role, CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, _baseUrl + "/skills/validate")
+        using var req = new HttpRequestMessage(HttpMethod.Post, _baseUrl + "/business-workflows/validate")
         {
             Content = JsonContent.Create(new { definition }, options: JsonOpts),
         };

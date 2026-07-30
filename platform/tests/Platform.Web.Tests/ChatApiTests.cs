@@ -192,7 +192,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Chat_WithBearer_EnablesSkillTools_BuiltinAndCustom_AdminOnlyFiltered()
     {
-        FakeWorkflowService.CatalogOverride = System.Text.Json.JsonDocument.Parse(BuiltinCatalog).RootElement.Clone();
+        FakeWorkflowEngineClient.CatalogOverride = System.Text.Json.JsonDocument.Parse(BuiltinCatalog).RootElement.Clone();
         try
         {
             var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
@@ -210,7 +210,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         }
         finally
         {
-            FakeWorkflowService.CatalogOverride = null;
+            FakeWorkflowEngineClient.CatalogOverride = null;
         }
     }
 

@@ -14,7 +14,7 @@ namespace Platform.Service.Tests;
 /// A 組 — 重構前行為安全網(plans/copilot-shared-core/04-acceptance-test.md §3,A-01~A-14/A-18~A-20)。
 /// 釘住現行 <see cref="ChatService"/> 可觀察行為,斷言面選在「重構不會移動」的位置:
 /// 一律經 <see cref="ChatService.ChatAsync"/> / <see cref="ChatService.StreamChatAsync"/> 驅動,
-/// 只斷言 <see cref="FakeWorkflowService.SkillInvokes"/>、<see cref="FakeMem0Client.Remembered"/>、
+/// 只斷言 <see cref="FakeWorkflowEngineClient.SkillInvokes"/>、<see cref="FakeMem0Client.Remembered"/>、
 /// <see cref="FakeConversationStore.Saved"/>、送進底層 chat client 的 message 清單這些可觀察結果。
 /// 不呼叫 BuildToolsAsync / tool.InvokeAsync(那是會在 P4 被抽掉的接縫),不做 prompt 字串相等斷言
 /// (唯一允許的例外是「送進 chat client 的 message 清單」用 Contains 驗證特定業務資料是否存在,
@@ -35,7 +35,7 @@ public sealed class ChatBehaviorBaselineTests
     private static readonly UserContext AdminA = new("admin-a", "demo-a", "ADMIN");
 
     private static (ChatService Service, AIHostAgent HostAgent, InMemoryChatHistoryProvider HistoryProvider) BuildWithAgent(
-        FakeLlmAgent agent, FakeWorkflowService workflows, FakeMem0Client? mem0 = null,
+        FakeLlmAgent agent, FakeWorkflowEngineClient workflows, FakeMem0Client? mem0 = null,
         FakeConversationStore? convos = null, FakeChatClient? chatClient = null)
     {
         var effectiveMem0 = mem0 ?? new FakeMem0Client();
@@ -47,7 +47,7 @@ public sealed class ChatBehaviorBaselineTests
     }
 
     private static ChatService Build(
-        FakeLlmAgent agent, FakeWorkflowService workflows, FakeMem0Client? mem0 = null,
+        FakeLlmAgent agent, FakeWorkflowEngineClient workflows, FakeMem0Client? mem0 = null,
         FakeConversationStore? convos = null, FakeChatClient? chatClient = null)
         => BuildWithAgent(agent, workflows, mem0, convos, chatClient).Service;
 
@@ -69,7 +69,7 @@ public sealed class ChatBehaviorBaselineTests
         agent.Responses.Enqueue("kb-query");              // 第一次 CompleteAsync = 路由
         agent.Responses.Enqueue("本季毛利率是 32.8%。");   // 第二次 CompleteAsync = 摘要
         var mem0 = new FakeMem0Client();
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"毛利率 32.8%" } }"""),
@@ -112,7 +112,7 @@ public sealed class ChatBehaviorBaselineTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("kb-query");                 // 路由命中
         agent.Responses.Enqueue("已如實轉達錯誤的摘要");       // 摘要(工具失敗文字被轉述,不炸)
-        var wf = new FakeWorkflowService { Catalog = Cat(SingleSkillCatalog), ThrowOnSkillInvoke = error };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SingleSkillCatalog), ThrowOnSkillInvoke = error };
         var svc = Build(agent, wf);
 
         var reply = await svc.ChatAsync("這季毛利率多少?", "u1", "c1", UserA);
@@ -139,7 +139,7 @@ public sealed class ChatBehaviorBaselineTests
         // USER 的路由表裡不存在 admin-only-skill,兩次路由都無法命中,退純聊天兜底(FakeChatClient 接手)。
         agent.Responses.Enqueue("admin-only-skill");
         agent.Responses.Enqueue("admin-only-skill");
-        var wf = new FakeWorkflowService { Catalog = Cat(RoleCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(RoleCatalog) };
         var svc = Build(agent, wf);
 
         await svc.ChatAsync("管理報表", "u1", "c1", UserA);
@@ -153,7 +153,7 @@ public sealed class ChatBehaviorBaselineTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("admin-only-skill");
         agent.Responses.Enqueue("報表摘要");
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(RoleCatalog),
             SkillOutputByName = new()
@@ -176,7 +176,7 @@ public sealed class ChatBehaviorBaselineTests
     {
         var mem0 = new FakeMem0Client();
         var convos = new FakeConversationStore();
-        var wf = new FakeWorkflowService { Catalog = Cat(SingleSkillCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SingleSkillCatalog) };
         var svc = Build(new FakeLlmAgent(), wf, mem0, convos, new FakeChatClient { Response = "匿名回覆" });
 
         await svc.ChatAsync("嗨", "u1", "c1"); // userCtx = null
@@ -193,7 +193,7 @@ public sealed class ChatBehaviorBaselineTests
     {
         var mem0 = new FakeMem0Client();
         var convos = new FakeConversationStore();
-        var wf = new FakeWorkflowService { Catalog = Cat(SingleSkillCatalog) };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SingleSkillCatalog) };
         var svc = Build(new FakeLlmAgent(), wf, mem0, convos, new FakeChatClient { Chunks = new[] { "甲", "乙" } });
 
         await foreach (var _ in svc.StreamChatAsync("嗨", "u1", "c1")) // userCtx = null
@@ -221,7 +221,7 @@ public sealed class ChatBehaviorBaselineTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("weird-skill");
         agent.Responses.Enqueue("摘要輸出");
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""
             [ { "name":"weird-skill", "description":"x", "required_role":"USER", "source":"custom",
@@ -252,7 +252,7 @@ public sealed class ChatBehaviorBaselineTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("我建議使用 kb-query 這個工具"); // 非全等,同時含 kb 與 kb-query 的 token
         agent.Responses.Enqueue("摘要輸出");
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""
             [
@@ -280,7 +280,7 @@ public sealed class ChatBehaviorBaselineTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("依證據不足的誠實回覆");
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat("""
             [
@@ -316,7 +316,7 @@ public sealed class ChatBehaviorBaselineTests
         var agent = new FakeLlmAgent();
         agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("有憑據的答案摘要");
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutputByName = new()
@@ -345,7 +345,7 @@ public sealed class ChatBehaviorBaselineTests
         agent.Responses.Enqueue("kb-query");
         agent.Responses.Enqueue("最終融合摘要");
         var mem0 = new FakeMem0Client { RecallResult = "- 使用者是租戶 A\n" };
-        var wf = new FakeWorkflowService
+        var wf = new FakeWorkflowEngineClient
         {
             Catalog = Cat(SingleSkillCatalog),
             SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中答案" } }"""),
@@ -388,7 +388,7 @@ public sealed class ChatBehaviorBaselineTests
             ThrowOnRecall = throwOnRecall ? new InvalidOperationException("mem0 recall 失敗") : null,
             ThrowOnRemember = throwOnRemember ? new InvalidOperationException("mem0 remember 失敗") : null,
         };
-        var wf = new FakeWorkflowService(); // 空目錄 → 無工具 → 純聊天兜底(才會走到 recall/MISS 路徑)
+        var wf = new FakeWorkflowEngineClient(); // 空目錄 → 無工具 → 純聊天兜底(才會走到 recall/MISS 路徑)
         var svc = Build(new FakeLlmAgent(), wf, mem0, chatClient: new FakeChatClient { Response = "回覆" });
 
         var reply = await svc.ChatAsync("問題", "u1", "c1", UserA);
@@ -405,7 +405,7 @@ public sealed class ChatBehaviorBaselineTests
             ThrowOnRecall = throwOnRecall ? new InvalidOperationException("mem0 recall 失敗") : null,
             ThrowOnRemember = throwOnRemember ? new InvalidOperationException("mem0 remember 失敗") : null,
         };
-        var wf = new FakeWorkflowService();
+        var wf = new FakeWorkflowEngineClient();
         var svc = Build(new FakeLlmAgent(), wf, mem0, chatClient: new FakeChatClient { Chunks = new[] { "甲", "乙" } });
 
         var chunks = new List<string>();
@@ -425,7 +425,7 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A18_TwoRoundsSameConversation_SecondRoundIncludesFirstRoundExchange()
     {
         var chatClient = new FakeChatClient { Response = "第一答" };
-        var wf = new FakeWorkflowService(); // 空目錄 → 純聊天兜底,才會走短期記憶注入
+        var wf = new FakeWorkflowEngineClient(); // 空目錄 → 純聊天兜底,才會走短期記憶注入
         var svc = Build(new FakeLlmAgent(), wf, chatClient: chatClient);
 
         await svc.ChatAsync("第一問", "u1", "c1", UserA);
@@ -447,7 +447,7 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A19a_History20_OnPoint_AllRetained()
     {
         var chatClient = new FakeChatClient { Response = "本輪回覆" };
-        var (svc, hostAgent, historyProvider) = BuildWithAgent(new FakeLlmAgent(), new FakeWorkflowService(), chatClient: chatClient);
+        var (svc, hostAgent, historyProvider) = BuildWithAgent(new FakeLlmAgent(), new FakeWorkflowEngineClient(), chatClient: chatClient);
 
         var session = await hostAgent.GetOrCreateSessionAsync("conv-a19a");
         var seeded = new List<ChatMessage>();
@@ -472,7 +472,7 @@ public sealed class ChatBehaviorBaselineTests
     public async Task A19b_History21_OffPoint_OldestTrimmed_Other20Retained()
     {
         var chatClient = new FakeChatClient { Response = "第一輪回覆" };
-        var (svc, hostAgent, historyProvider) = BuildWithAgent(new FakeLlmAgent(), new FakeWorkflowService(), chatClient: chatClient);
+        var (svc, hostAgent, historyProvider) = BuildWithAgent(new FakeLlmAgent(), new FakeWorkflowEngineClient(), chatClient: chatClient);
 
         var session = await hostAgent.GetOrCreateSessionAsync("conv-a19b");
         var seeded = new List<ChatMessage>();
@@ -515,7 +515,7 @@ public sealed class ChatBehaviorBaselineTests
     {
         var chatClient = new FakeChatClient { Response = "答" };
         var mem0 = new FakeMem0Client();
-        var svc = Build(new FakeLlmAgent(), new FakeWorkflowService(), mem0, chatClient: chatClient);
+        var svc = Build(new FakeLlmAgent(), new FakeWorkflowEngineClient(), mem0, chatClient: chatClient);
 
         var userB = new UserContext("user-b", "demo-a", "USER");
 

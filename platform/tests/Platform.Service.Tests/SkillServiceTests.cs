@@ -18,7 +18,7 @@ public sealed class SkillServiceTests
     private const string Yaml = "name: quarterly-qa\ndescription: 季報問答\nflow:\n  - node: query_intake\n";
 
     private const string SkillJson =
-        """{"name":"quarterly-qa","description":"季報問答","definition":"name: quarterly-qa","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z"}""";
+        """{"name":"quarterly-qa","description":"季報問答","definition":"name: quarterly-qa","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","kind":"flow"}""";
 
     private static SkillService Build(StubHttpMessageHandler stub) => new(TestBackend.Client(stub));
 
@@ -29,18 +29,22 @@ public sealed class SkillServiceTests
     public async Task List_PassesThroughSnakeCase_ForwardsIdentityHeaders()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
-            """[{"name":"quarterly-qa","description":"季報問答","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","extra_new_field":"kept"}]"""));
+            """[{"name":"quarterly-flow","description":"季報問答","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","kind":"flow","extra_new_field":"kept"},{"name":"quarterly-agent","description":"代理技能","required_role":"USER","enabled":true,"current_revision":4,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-15T00:00:00Z","kind":"agentic"}]"""));
 
         var json = await Build(stub).ListAsync(AdminCtx);
 
-        var item = json.EnumerateArray().Single();
-        Assert.Equal("quarterly-qa", item.GetProperty("name").GetString());
-        Assert.Equal("USER", item.GetProperty("required_role").GetString());
-        Assert.True(item.GetProperty("enabled").GetBoolean());
-        Assert.Equal(3, item.GetProperty("current_revision").GetInt32());
-        Assert.Equal("2026-07-14T00:00:00Z", item.GetProperty("updated_at").GetString());
+        var items = json.EnumerateArray().ToArray();
+        Assert.Equal(2, items.Length);
+        var flow = items.Single(item => item.GetProperty("name").GetString() == "quarterly-flow");
+        var agent = items.Single(item => item.GetProperty("name").GetString() == "quarterly-agent");
+        Assert.Equal("USER", flow.GetProperty("required_role").GetString());
+        Assert.True(flow.GetProperty("enabled").GetBoolean());
+        Assert.Equal(3, flow.GetProperty("current_revision").GetInt32());
+        Assert.Equal("2026-07-14T00:00:00Z", flow.GetProperty("updated_at").GetString());
+        Assert.Equal("flow", flow.GetProperty("kind").GetString());
+        Assert.Equal("agentic", agent.GetProperty("kind").GetString());
         // 穿透:backend 之後新增的欄位原樣保留。
-        Assert.Equal("kept", item.GetProperty("extra_new_field").GetString());
+        Assert.Equal("kept", flow.GetProperty("extra_new_field").GetString());
 
         // AT4-12:4 個 header 皆取自 UserContext(由已驗證 JWT claims 組成)。
         Assert.Equal("http://backend/api/skills", stub.LastRequest!.RequestUri!.ToString());
@@ -121,6 +125,20 @@ public sealed class SkillServiceTests
         var property = Assert.Single(doc.RootElement.EnumerateObject().ToList());
         Assert.Equal("definition", property.Name);
         Assert.Equal(Yaml, property.Value.GetString());
+    }
+
+    [Theory]
+    [InlineData("", "missing")]
+    [InlineData(",\"kind\":\"unknown\"", "invalid")]
+    public async Task Create_BackendKindSchemaDrift_ThrowsControlled502(string kindJson, string _)
+    {
+        var body =
+            """{"name":"quarterly-qa","description":"季報問答","definition":"name: quarterly-qa","required_role":"USER","enabled":true,"current_revision":3,"created_at":"2026-07-13T00:00:00Z","updated_at":"2026-07-14T00:00:00Z""" +
+            kindJson + "}";
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created, body));
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(stub).CreateAsync(Upsert(), AdminCtx));
     }
 
     [Fact] // B3:選填 simpleForm 必須穿透強型別 DTO,原樣轉發給 backend(否則簡單模式表單狀態被吃掉)。

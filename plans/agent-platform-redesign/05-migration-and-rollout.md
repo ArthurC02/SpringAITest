@@ -190,9 +190,9 @@ Trace/UI 必須遮罩 secrets、internal token、未授權 Context 與敏感工�
 | ChatAssistant/OperationsAssistant 舊推理路徑(platform 端 ChatClientAgent brain) | `platform/src/Platform.Web/Program.cs` | 改造為 transport adapter，舊 brain 與第 1 列同批移除 | P5 起 side-by-side，R4 gate 後收斂 |
 | ChatMemoryKeyDerivation | `platform/src/Platform.Service/` | 擴充為雙 key 規則(legacy 兩段 + orchestrator 四段)，legacy namespace 退場後收斂回單一規則 | R4 gate 後 |
 | AguiWireDedupAgent、JwtTenantIsolationKeyProvider、ChatTurnRecorder、ChatContextProvider | `platform/src/Platform.Service/` | 保留重用(transport/session/memory 外框)，不刪 | — |
-| flow YAML 作者 UI：SimpleSkillEditor、NodeParamsTab、YamlEditor 與 Advanced flow editor | `frontend/src/components/` | 移入 legacy/管理者區→停建→唯讀 | P5 前後降級；R6 條件成立後移除 |
+| flow YAML 作者 UI：SimpleSkillEditor、YamlEditor 與 Advanced flow editor | `frontend/src/components/` | 移入 legacy/管理者區→停建→唯讀 | P5 前後降級；R6 條件成立後移除。`NodeParamsTab` 不在此列：它是 Harness Configuration Set 的平級設定分頁，非 flow 作者 UI；AgentSkillEditor 亦不隨此列退場。 |
 | flow 模板 | `workflow/app/skills/template-*.yaml` | 隨第 6 列同批處理 | R6 |
 | agent_skill_runner | `workflow/app/nodes/agent_skill_runner.py` | 保留為 explicit legacy invoke executor；R6 盤點時重新決策(吸收或移除)，不再無限期擱置 | R6 |
 | current-only package endpoint(GET /api/skills/{name}/package) | `backend/src/Backend.Api/Skills/SkillController.cs` | 保留供 legacy current invoke；由 revision-aware execution artifact endpoint 全面取代後移除 | R6 |
-| legacy flow compiler/harness | `workflow/app/engine/` | 與新 Graph IR compiler 並存；移除另立計畫(維持 R6 原則) | R6 之後 |
-| TraceView vs Designer trace overlay | `frontend/src/components/TraceView.tsx` | 收斂：TraceView 只保留 skill invoke trace；orchestrator root/child trace 一律用 Designer overlay，不得出現第三套 | P4 |
+| legacy Business Workflow compiler / Node Shell | `workflow/app/engine/` | 與新 Graph IR compiler 並存；Node Shell 是每節點治理殼，Harness 是 `runtime/graph.py` 固定骨架；移除另立計畫(維持 R6 原則) | R6 之後 |
+| TraceView vs Designer trace overlay | `frontend/src/components/TraceView.tsx` | 收斂：TraceView 保留 Agent Skill 與 Business Workflow 的統一 invoke trace；orchestrator root/child trace 一律用 Designer overlay，不得出現第三套 | P4 |

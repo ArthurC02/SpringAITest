@@ -114,8 +114,8 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
             services.RemoveAll<IAuthService>();
             services.AddScoped<IAuthService, FakeAuthService>();
 
-            services.RemoveAll<IWorkflowService>();
-            services.AddScoped<IWorkflowService, FakeWorkflowService>();
+            services.RemoveAll<IWorkflowEngineClient>();
+            services.AddScoped<IWorkflowEngineClient, FakeWorkflowEngineClient>();
 
             services.RemoveAll<IDocumentService>();
             services.AddScoped<IDocumentService, FakeDocumentService>();
@@ -128,6 +128,9 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<ISkillService>();
             services.AddScoped<ISkillService, FakeSkillService>();
+
+            services.RemoveAll<IBusinessWorkflowService>();
+            services.AddScoped<IBusinessWorkflowService, FakeBusinessWorkflowService>();
 
             services.RemoveAll<IConfigurationSetService>();
             services.AddScoped<IConfigurationSetService, FakeConfigurationSetService>();

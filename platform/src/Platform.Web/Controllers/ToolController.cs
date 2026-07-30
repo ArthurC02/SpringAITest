@@ -16,9 +16,9 @@ namespace Platform.Web.Controllers;
 [Authorize]
 public sealed class ToolController : ControllerBase
 {
-    private readonly IWorkflowService _engine;
+    private readonly IWorkflowEngineClient _engine;
 
-    public ToolController(IWorkflowService engine) => _engine = engine;
+    public ToolController(IWorkflowEngineClient engine) => _engine = engine;
 
     [HttpGet]
     public async Task<ActionResult<JsonElement>> List(CancellationToken ct)

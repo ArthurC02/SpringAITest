@@ -26,11 +26,18 @@ public sealed class InMemorySkillRepository : ISkillRepository
     private static DateTime Now() => DateTime.UtcNow;
 
     public Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, CancellationToken ct)
+        => ListCoreAsync(tenantId, kind: null);
+
+    public Task<IReadOnlyList<SkillInfo>> ListAsync(string tenantId, string kind, CancellationToken ct)
+        => ListCoreAsync(tenantId, kind);
+
+    private Task<IReadOnlyList<SkillInfo>> ListCoreAsync(string tenantId, string? kind)
     {
         lock (_gate)
         {
             return Task.FromResult<IReadOnlyList<SkillInfo>>(
-                _store.Where(e => e.Key.Tenant == tenantId).Select(e => e.Value).Where(s => s.Enabled)
+                _store.Where(e => e.Key.Tenant == tenantId).Select(e => e.Value)
+                .Where(s => s.Enabled && (kind is null || s.Kind == kind))
                 .OrderBy(s => s.Name, StringComparer.Ordinal)
                 .Select(s => new SkillInfo(
                     s.Name, s.Description, s.RequiredRole, s.Enabled, s.CurrentRevision,
@@ -40,12 +47,18 @@ public sealed class InMemorySkillRepository : ISkillRepository
     }
 
     public Task<Skill?> GetAsync(string tenantId, string name, CancellationToken ct)
+        => GetCoreAsync(tenantId, name, kind: null);
+
+    public Task<Skill?> GetAsync(string tenantId, string name, string kind, CancellationToken ct)
+        => GetCoreAsync(tenantId, name, kind);
+
+    private Task<Skill?> GetCoreAsync(string tenantId, string name, string? kind)
     {
         lock (_gate)
         {
             var skill = _store.GetValueOrDefault((tenantId, name));
             // 軟刪後不可見(WHERE ... AND enabled)。
-            return Task.FromResult(skill is { Enabled: true } ? skill : null);
+            return Task.FromResult(skill is { Enabled: true } && (kind is null || skill.Kind == kind) ? skill : null);
         }
     }
 
@@ -54,13 +67,22 @@ public sealed class InMemorySkillRepository : ISkillRepository
     /// 同名仍啟用 → 0 列 → null(不寫 revision);同名已軟刪 → 復活並把 revision 接著加。
     /// </summary>
     public Task<Skill?> CreateAsync(string tenantId, Skill skill, string createdBy, CancellationToken ct)
+        => CreateCoreAsync(tenantId, expectedExistingKind: null, skill, createdBy);
+
+    public Task<Skill?> CreateAsync(
+        string tenantId, string expectedExistingKind, Skill skill, string createdBy, CancellationToken ct)
+        => CreateCoreAsync(tenantId, expectedExistingKind, skill, createdBy);
+
+    private Task<Skill?> CreateCoreAsync(
+        string tenantId, string? expectedExistingKind, Skill skill, string createdBy)
     {
         lock (_gate)
         {
             var now = Now();
             if (_store.TryGetValue((tenantId, skill.Name), out var existing))
             {
-                if (existing.Enabled)
+                if (existing.Enabled
+                    || expectedExistingKind is not null && existing.Kind != expectedExistingKind)
                 {
                     return Task.FromResult<Skill?>(null);
                 }
@@ -98,11 +120,21 @@ public sealed class InMemorySkillRepository : ISkillRepository
     }
 
     public Task<Skill?> UpdateAsync(string tenantId, string name, Skill skill, string updatedBy, CancellationToken ct)
+        => UpdateCoreAsync(tenantId, name, expectedKind: null, skill, updatedBy);
+
+    public Task<Skill?> UpdateAsync(
+        string tenantId, string name, string expectedKind, Skill skill, string updatedBy, CancellationToken ct)
+        => UpdateCoreAsync(tenantId, name, expectedKind, skill, updatedBy);
+
+    private Task<Skill?> UpdateCoreAsync(
+        string tenantId, string name, string? expectedKind, Skill skill, string updatedBy)
     {
         lock (_gate)
         {
             // 已軟刪的 skill 不可經 PUT 復活(WHERE ... AND enabled)。
-            if (!_store.TryGetValue((tenantId, name), out var existing) || !existing.Enabled)
+            if (!_store.TryGetValue((tenantId, name), out var existing)
+                || !existing.Enabled
+                || expectedKind is not null && existing.Kind != expectedKind)
             {
                 return Task.FromResult<Skill?>(null);
             }
@@ -172,10 +204,18 @@ public sealed class InMemorySkillRepository : ISkillRepository
 
     /// <summary>軟刪:enabled=false;列與 revision 都留著。已停用/不存在 → false。</summary>
     public Task<bool> DeleteAsync(string tenantId, string name, CancellationToken ct)
+        => DeleteCoreAsync(tenantId, name, kind: null);
+
+    public Task<bool> DeleteAsync(string tenantId, string name, string kind, CancellationToken ct)
+        => DeleteCoreAsync(tenantId, name, kind);
+
+    private Task<bool> DeleteCoreAsync(string tenantId, string name, string? kind)
     {
         lock (_gate)
         {
-            if (!_store.TryGetValue((tenantId, name), out var existing) || !existing.Enabled)
+            if (!_store.TryGetValue((tenantId, name), out var existing)
+                || !existing.Enabled
+                || kind is not null && existing.Kind != kind)
             {
                 return Task.FromResult(false);
             }

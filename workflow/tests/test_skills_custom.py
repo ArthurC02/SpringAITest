@@ -124,6 +124,7 @@ class FakeSkillBackend:
             "required_role": row["required_role"],
             "enabled": row["enabled"],
             "current_revision": row["revision"],
+            "kind": row["kind"],
         }
 
 
@@ -134,6 +135,7 @@ def row(
     required_role="USER",
     revision=3,
     enabled=True,
+    kind="flow",
 ) -> dict:
     return {
         "name": name,
@@ -142,6 +144,7 @@ def row(
         "required_role": required_role,
         "revision": revision,
         "enabled": enabled,
+        "kind": kind,
     }
 
 
@@ -214,6 +217,7 @@ def test_custom_catalog_declares_flow_and_agentic_kind(backend, fake_deps):
                     "sales-helper",
                     AGENTIC_CANONICAL,
                     description="銷售小幫手",
+                    kind="agentic",
                 ),
             ]
         }
@@ -225,6 +229,26 @@ def test_custom_catalog_declares_flow_and_agentic_kind(backend, fake_deps):
     assert body["sales-helper"]["input_schema"] == {
         "query": {"type": "str", "required": True, "min_length": None, "default": None}
     }
+
+
+def test_custom_catalog_kind_does_not_sniff_definition(backend, fake_deps):
+    """Backend kind 是唯一事實來源；即使 definition 外觀像 flow 也不改判。"""
+    backend(
+        {
+            "demo-a": [
+                row(
+                    "trusted-agentic-kind",
+                    QUARTERLY_QA,
+                    kind="agentic",
+                )
+            ]
+        }
+    )
+
+    body = {item["name"]: item for item in client.get("/skills", headers=_headers()).json()}
+
+    assert body["trusted-agentic-kind"]["kind"] == "agentic"
+    assert body["trusted-agentic-kind"]["input_schema"] is None
 
 
 def test_list_skills_is_tenant_scoped(backend, fake_deps):

@@ -7,16 +7,17 @@ import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
-import SkillHome from './SkillHome'
+import AgentSkillHome from './AgentSkillHome'
+import BusinessWorkflowHome from './BusinessWorkflowHome'
 import NodeParamsTab from './NodeParamsTab'
 
-// 系統設定重構（設計 §1）：Skill 功能樹進駐系統設定，工作流唯讀 tab 退場，
-// 頂層導覽的「工作流與 Skill」視圖一併移除。順序 = Skill 優先、一般設定墊底。
-type Tab = 'skill' | 'nodeParams' | 'general'
+// Agent Skill 與 Business Workflow 是兩個平級入口；Harness 節點參數維持獨立設定頁。
+type Tab = 'businessWorkflows' | 'agentSkills' | 'nodeParams' | 'general'
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'skill', label: 'Skill' },
-  { id: 'nodeParams', label: '工作流節點參數' },
+  { id: 'businessWorkflows', label: '業務流程' },
+  { id: 'agentSkills', label: 'Agent Skills' },
+  { id: 'nodeParams', label: '執行參數／Harness 節點參數' },
   { id: 'general', label: '一般設定' },
 ]
 
@@ -146,9 +147,9 @@ function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
   )
 }
 
-/** 系統設定:三分頁容器(Skill/工作流節點參數/一般設定),用 useState 切換,無 router。 */
+/** 系統設定：四個平級分頁，用 useState 切換，無 router。 */
 export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
-  const [tab, setTab] = useState<Tab>('skill')
+  const [tab, setTab] = useState<Tab>('businessWorkflows')
 
   return (
     <div className="view">
@@ -170,7 +171,8 @@ export default function ConfigView({ isAdmin }: { isAdmin: boolean }) {
         ))}
       </div>
 
-      {tab === 'skill' && <SkillHome isAdmin={isAdmin} />}
+      {tab === 'businessWorkflows' && <BusinessWorkflowHome isAdmin={isAdmin} />}
+      {tab === 'agentSkills' && <AgentSkillHome isAdmin={isAdmin} />}
       {tab === 'nodeParams' && <NodeParamsTab isAdmin={isAdmin} />}
       {tab === 'general' && <GeneralConfigTab isAdmin={isAdmin} />}
     </div>

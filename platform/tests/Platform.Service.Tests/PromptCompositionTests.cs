@@ -512,7 +512,7 @@ public sealed class PromptCompositionTests
         var llm = new FakeLlmAgent();
         llm.Responses.Enqueue("kb-query");     // 路由
         llm.Responses.Enqueue("潤飾後回覆");   // 摘要
-        var workflows = new FakeWorkflowService
+        var workflows = new FakeWorkflowEngineClient
         {
             Catalog = JsonDocument.Parse(RoutableCatalog).RootElement.Clone(),
             SkillOutput = JsonSerializer.SerializeToElement(new { output = new { answer = "毛利率 32.8%" } }),
@@ -564,7 +564,7 @@ public sealed class PromptCompositionTests
             ManifestBody = ManifestJson(7, new[] { ("guard", "護欄-manifest"), ("routing", "路由-manifest") }),
         };
         var resolver = Resolver(backend);
-        var workflows = new FakeWorkflowService { Catalog = JsonDocument.Parse(RoutableCatalog).RootElement.Clone() };
+        var workflows = new FakeWorkflowEngineClient { Catalog = JsonDocument.Parse(RoutableCatalog).RootElement.Clone() };
         var chatClient = new FakeChatClient();
         var llm = new FakeLlmAgent { Response = "NONE" };
         var identity = new FakeChatIdentityAccessor();

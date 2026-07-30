@@ -52,7 +52,14 @@ public sealed class BackendClient
         CancellationToken ct)
     {
         using var resp = await SendCheckedAsync(req, wrap, mapError, ct);
-        return await resp.Content.ReadFromJsonAsync<T>(JsonOpts, ct) ?? throw onEmptyBody();
+        try
+        {
+            return await resp.Content.ReadFromJsonAsync<T>(JsonOpts, ct) ?? throw onEmptyBody();
+        }
+        catch (JsonException ex)
+        {
+            throw wrap(ex);
+        }
     }
 
     /// <summary>同 <see cref="SendForJsonAsync{T}"/> 但反序列化為 List;body 為空回空 List(清單端點不視為錯誤)。</summary>
@@ -67,7 +74,7 @@ public sealed class BackendClient
     }
 
     /// <summary>
-    /// 送出→驗狀態碼→原樣穿透 backend JSON(不套 DTO,避免靜默吃掉 backend 新增欄位;比照 <see cref="WorkflowService"/> 的讀取路徑)。
+    /// 送出→驗狀態碼→原樣穿透 backend JSON(不套 DTO,避免靜默吃掉 backend 新增欄位;比照 <see cref="WorkflowEngineClient"/> 的讀取路徑)。
     /// 供純代理 backend 的 GET/list/detail 讀取端點使用;body 解析失敗 → 以 <paramref name="wrap"/> 包成呼叫端的失敗例外(對外 502)。
     /// </summary>
     public async Task<JsonElement> SendForJsonElementAsync(

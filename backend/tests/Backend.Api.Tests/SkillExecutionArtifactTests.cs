@@ -201,8 +201,17 @@ public sealed class SkillExecutionArtifactTests : IClassFixture<TestWebAppFactor
         public Task<Skill?> CreateAsync(string tenantId, Skill skill, string createdBy, CancellationToken ct)
             => throw new NotSupportedException();
 
+        public Task<Skill?> CreateAsync(
+            string tenantId, string expectedExistingKind, Skill skill, string createdBy, CancellationToken ct)
+            => throw new NotSupportedException();
+
         public Task<Skill?> UpdateAsync(
             string tenantId, string name, Skill skill, string updatedBy, CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task<Skill?> UpdateAsync(
+            string tenantId, string name, string expectedKind, Skill skill, string updatedBy,
+            CancellationToken ct)
             => throw new NotSupportedException();
 
         public Task<Skill?> ImportAsync(
@@ -211,6 +220,10 @@ public sealed class SkillExecutionArtifactTests : IClassFixture<TestWebAppFactor
             => throw new NotSupportedException();
 
         public Task<bool> DeleteAsync(string tenantId, string name, CancellationToken ct)
+            => throw new NotSupportedException();
+
+        public Task<bool> DeleteAsync(
+            string tenantId, string name, string kind, CancellationToken ct)
             => throw new NotSupportedException();
 
         public Task<IReadOnlyList<SkillRevisionInfo>> ListRevisionsAsync(

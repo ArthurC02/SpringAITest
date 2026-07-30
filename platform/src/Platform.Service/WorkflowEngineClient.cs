@@ -11,7 +11,7 @@ namespace Platform.Service;
 /// Skill 引擎服務:代理下游 Python。角色把關在 Python 端,本服務只轉發 X-User-Role 並轉譯狀態碼:
 /// 404 → NotFound、403 → Forbidden、422 → BadInput(對外變 400)、其他 → Invocation(對外 502)。
 /// </summary>
-public sealed class WorkflowService : IWorkflowService
+public sealed class WorkflowEngineClient : IWorkflowEngineClient
 {
     private const string FailurePrefix = "工作流服務呼叫失敗：";
 
@@ -21,7 +21,7 @@ public sealed class WorkflowService : IWorkflowService
     private readonly HttpClient _http;
     private readonly WorkflowOptions _options;
 
-    public WorkflowService(HttpClient http, WorkflowOptions options)
+    public WorkflowEngineClient(HttpClient http, WorkflowOptions options)
     {
         _http = http;
         _options = options;
@@ -146,6 +146,20 @@ public sealed class WorkflowService : IWorkflowService
         {
             throw await MapBadInputAsync("Business Rule", resp, ct);
         }
+        if (!resp.IsSuccessStatusCode)
+        {
+            throw new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
+        }
+
+        return await ReadJsonAsync(resp, ct);
+    }
+
+    public async Task<JsonElement> ValidateBusinessWorkflowAsync(
+        string definition, UserContext ctx, CancellationToken ct = default)
+    {
+        using var req = BuildRequest(
+            HttpMethod.Post, $"{BaseUrl}/business-workflows/validate", ctx, new { definition });
+        using var resp = await SendAsync(req, FailurePrefix, ct);
         if (!resp.IsSuccessStatusCode)
         {
             throw new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
