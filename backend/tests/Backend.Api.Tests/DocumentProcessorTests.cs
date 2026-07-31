@@ -144,6 +144,26 @@ public sealed class DocumentProcessorTests
         Assert.Equal("processing", doc.Status); // 未被標記 failed —— 仍等待重試。
     }
 
+    // IsTransient 的另外兩個暫時性等價類(逾時 / 取消)—— 與 HttpRequestException 同類:未達重試上限時
+    // 一樣回 RetryableFailure 且不標 failed。少了這兩列,誤刪任一 switch arm 也不會有測試變紅。
+    [Theory]
+    [InlineData(typeof(TimeoutException))]
+    [InlineData(typeof(TaskCanceledException))]
+    public async Task Process_TransientEmbeddingFailure_TimeoutOrCancellation_BelowRetryLimit_ReturnsRetryable(
+        Type exceptionType)
+    {
+        var repo = new FakeRagRepository();
+        var embeddings = new TransientThrowingEmbeddingProvider((Exception)Activator.CreateInstance(exceptionType)!);
+        var processor = new DocumentProcessor(repo, embeddings, NullLogger<DocumentProcessor>.Instance);
+        var id = Guid.NewGuid().ToString();
+
+        var outcome = await processor.ProcessAsync(Message(id), retryCount: 0, CancellationToken.None);
+
+        Assert.Equal(DocumentProcessingOutcome.RetryableFailure, outcome);
+        var doc = Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None));
+        Assert.Equal("processing", doc.Status); // 未被標記 failed —— 仍等待重試。
+    }
+
     [Fact]
     public async Task Process_TransientEmbeddingFailure_AtRetryLimit_ReturnsTerminal_MarksFailed()
     {
@@ -232,14 +252,21 @@ public sealed class ThrowingEmbeddingProvider : IEmbeddingProvider
         => throw new InvalidOperationException("嵌入服務不可達");
 }
 
-/// <summary>暫時性嵌入例外(逾時),用來驗 DocumentProcessor 的 bounded retry 路徑。</summary>
+/// <summary>
+/// 暫時性嵌入例外,用來驗 DocumentProcessor 的 bounded retry 路徑;預設 HttpRequestException,
+/// 可指定其他暫時性等價類(TimeoutException / TaskCanceledException)。
+/// </summary>
 public sealed class TransientThrowingEmbeddingProvider : IEmbeddingProvider
 {
-    public Task<IReadOnlyList<float[]>> EmbedDocumentsAsync(IReadOnlyList<string> texts, CancellationToken ct)
-        => throw new HttpRequestException("嵌入服務逾時");
+    private readonly Exception _failure;
 
-    public Task<float[]> EmbedQueryAsync(string text, CancellationToken ct)
-        => throw new HttpRequestException("嵌入服務逾時");
+    public TransientThrowingEmbeddingProvider(Exception? failure = null)
+        => _failure = failure ?? new HttpRequestException("嵌入服務逾時");
+
+    public Task<IReadOnlyList<float[]>> EmbedDocumentsAsync(IReadOnlyList<string> texts, CancellationToken ct)
+        => throw _failure;
+
+    public Task<float[]> EmbedQueryAsync(string text, CancellationToken ct) => throw _failure;
 }
 
 /// <summary>計數用嵌入 provider:委派給 FakeEmbeddingProvider,記錄批次嵌入被呼叫次數(驗重投未重跑)。</summary>

@@ -24,15 +24,23 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         Assert.Equal(42, item.Value.UsageUnits); Assert.Equal(9, item.Value.LatencyMs);
     }
 
+    private const string EmptyGuid = "00000000-0000-0000-0000-000000000000";
+
     public static TheoryData<string, object?> RejectedTelemetryFields => new()
     {
+        { "run_id", EmptyGuid },                    // 全零 GUID 不是可歸屬的 run
+        { "event_id", EmptyGuid },                  // idempotency 的另一半,同樣不得為全零
         { "kind", "prompt" },                       // 只收 model|tool|node
         { "usage_units", -1 },
         { "usage_units", 10_000_001L },             // 上限 +1
+        { "cost_units", -0.01m },                   // 下限 0 的 off-point
         { "cost_units", 1_000_001m },               // 上限 +1
+        { "latency_ms", -1L },                      // 下限 0 的 off-point
         { "latency_ms", 86_400_001L },              // 一天 +1 毫秒
         { "agent_revision", 0 },                    // revision 從 1 起算
         { "agent_revision", 1_000_001 },
+        { "skill_revision", 0 },                    // 與 agent_revision 是同一道檢查,不能只守一半
+        { "skill_revision", 1_000_001 },
         { "node_id", "modelstep" },           // 控制字元
         { "node_id", new string('n', 201) },        // 長度上限 +1
     };
@@ -60,9 +68,41 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         body["cost_units"] = 1_000_000m;
         body["latency_ms"] = 86_400_000L;
         body["agent_revision"] = 1_000_000;
+        body["skill_revision"] = 1_000_000;
         body["node_id"] = new string('n', 200);
 
         using var client = _factory.CreateInternalClient().WithTenant("ops-telemetry-bounds").WithUser("workflow");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    // 下限 0 的 on-point:快取命中/免費呼叫的 0 成本、0 延遲是合法計量,不能跟負值一起被丟掉。
+    [Fact]
+    public async Task Telemetry_AcceptsZeroLowerBounds()
+    {
+        var body = ValidTelemetry();
+        body["usage_units"] = 0L;
+        body["cost_units"] = 0m;
+        body["latency_ms"] = 0L;
+
+        using var client = _factory.CreateInternalClient().WithTenant("ops-telemetry-zero").WithUser("workflow");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    // kind 白名單的另外兩個合法值:tool/node 只在 repository 層被直接呼叫過,從沒真的走完 HTTP 驗證。
+    [Theory]
+    [InlineData("tool")]
+    [InlineData("node")]
+    public async Task Telemetry_AcceptsEveryDeclaredKind(string kind)
+    {
+        var body = ValidTelemetry();
+        body["kind"] = kind;
+        body["tool_name"] = "local.calculator";
+
+        using var client = _factory.CreateInternalClient().WithTenant("ops-telemetry-kind").WithUser("workflow");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", body);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -84,6 +124,24 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
             new { suite = "d7-passing", passed = true, evidence_ref = "evidence/pass" })).StatusCode);
         // gate 已通過 → override 沒有必要,必須 409 而不是照單全收。
         Assert.Equal(HttpStatusCode.Conflict, (await OverrideAsync(admin, "documented break-glass", "passing-gate")).StatusCode);
+    }
+
+    // reason 的上界 1000 與「整個欄位沒送」:on-point 必須通過長度檢查(因此才會走到「沒有 gate 可
+    // override」的 409),off-point 與缺席都必須在查 gate 之前就 400。
+    [Fact]
+    public async Task Override_RejectsOversizedOrAbsentReason()
+    {
+        using var admin = Client("ops-override-bounds", "operator", manage: true);
+
+        using var absent = new HttpRequestMessage(HttpMethod.Post, "/api/admin/operations/regression-overrides")
+        {
+            Content = JsonContent.Create(new { }),
+        };
+        absent.Headers.Add("Idempotency-Key", "absent-reason");
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.SendAsync(absent)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await OverrideAsync(admin, new string('r', 1001), "reason-over-limit")).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await OverrideAsync(admin, new string('r', 1000), "reason-at-limit")).StatusCode);
     }
 
     private static async Task<HttpResponseMessage> OverrideAsync(HttpClient client, string reason, string key)
@@ -184,6 +242,75 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         var otherMetrics = await (await otherTenant.GetAsync("/api/admin/operations/metrics")).ReadJsonAsync();
         Assert.True(otherMetrics["release_gate"]!["regression_passed"]!.GetValue<bool>());
         Assert.False(otherMetrics["release_gate"]!["override_active"]!.GetValue<bool>());
+    }
+
+    // suite / evidence_ref 是 release gate 唯一的稽核索引:空白或超長會讓通過與否查不回來源。
+    public static TheoryData<string?, string?, HttpStatusCode> RegressionAuditFields => new()
+    {
+        { null, "evidence/pass", HttpStatusCode.BadRequest },                   // suite 未填
+        { "   ", "evidence/pass", HttpStatusCode.BadRequest },                  // 只有空白,Trim 後等同未填
+        { new string('s', 129), "evidence/pass", HttpStatusCode.BadRequest },   // suite 上限 128 +1
+        { "d7\nrelease", "evidence/pass", HttpStatusCode.BadRequest },          // 控制字元
+        { "d7-release", null, HttpStatusCode.BadRequest },                      // evidence_ref 未填
+        { "d7-release", new string('e', 257), HttpStatusCode.BadRequest },      // evidence_ref 上限 256 +1
+        { new string('s', 128), new string('e', 256), HttpStatusCode.OK },      // on-point:剛好等於上限必須收下
+    };
+
+    [Theory]
+    [MemberData(nameof(RegressionAuditFields))]
+    public async Task Regression_ValidatesSuiteAndEvidenceRefBounds(string? suite, string? evidenceRef, HttpStatusCode expected)
+    {
+        using var admin = Client("ops-regression-fields", "operator", manage: true);
+        var response = await admin.PostAsJsonAsync(
+            "/api/admin/operations/regressions",
+            new { suite, passed = true, evidence_ref = evidenceRef });
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    // enabled 的 binding 必須 pin 住 Orchestrator 修訂號,否則 canary 會跟著 default 浮動;
+    // revision 從 1 起算,停用中送非法值一樣不收。
+    [Theory]
+    [InlineData(true, false, null)]     // 開啟卻完全沒指定 Orchestrator
+    [InlineData(true, true, null)]      // 只給 id、沒給 revision
+    [InlineData(true, true, 0)]         // revision 下限 1 的 off-point
+    [InlineData(false, true, 0)]        // 停用中也不接受非法 revision
+    public async Task Rollout_RejectsUnpinnedOrNonPositiveBinding(bool enabled, bool withOrchestrator, int? revision)
+    {
+        using var admin = Client("ops-rollout-binding", "operator", manage: true);
+        var response = await admin.PutAsJsonAsync("/api/admin/operations/rollout", new
+        {
+            enabled,
+            orchestrator_id = withOrchestrator ? Guid.NewGuid() : (Guid?)null,
+            revision,
+            canary_user_ids = new[] { "user-a" },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // RequireManage() 是每個 handler 自己呼叫的,不是共用 filter:漏掉一行就整條路徑對沒有
+    // workflow.manage 的呼叫者敞開。legacy-inventory 由下面那支釘住,這裡補完其餘路由。
+    public static TheoryData<string, string> ManageProtectedRoutes => new()
+    {
+        { "POST", "/api/admin/operations/regressions" },
+        { "POST", "/api/admin/operations/regression-overrides" },
+        { "PUT", "/api/admin/operations/rollout" },
+        { "GET", "/api/admin/operations/metrics" },
+        { "GET", "/api/admin/operations/version-comparison" },
+        { "GET", "/api/admin/operations/evidence-reconcile" },
+    };
+
+    [Theory]
+    [MemberData(nameof(ManageProtectedRoutes))]
+    public async Task AdminOperations_RejectCallerWithoutWorkflowManage(string method, string path)
+    {
+        using var denied = Client("ops-denied", "ordinary", manage: false);
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        // 連合法 body、Idempotency-Key 都不帶:403 必須發生在任何輸入驗證之前。
+        if (method != "GET") request.Content = JsonContent.Create(new { });
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await denied.SendAsync(request)).StatusCode);
     }
 
     [Fact]

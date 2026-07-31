@@ -148,12 +148,94 @@ public sealed class AgentRunApprovalInMemoryTests
         Assert.Equal(AgentRunStatuses.Failed, (await runs.GetAsync("demo-a", "admin-a", running.Run.Id, default))!.Status);
     }
 
+    // 決策表的另一半:整份測試只走過 approve=true。拒絕必須把 run 終局化成 failed,而且
+    // **不得**留下任何 execute row(被拒絕的寫入永遠不該發生),執行身分也不得外流給 Workflow。
+    [Fact]
+    public async Task Decide_Reject_FailsTheRunAndQueuesNoWrite()
+    {
+        var fixture = await FixtureAsync("d7-reject");
+        var runId = fixture.Running.Run.Id;
+        var approval = (await CreateApprovalAsync(fixture)).Approval!;
+
+        var decided = await fixture.Approvals.DecideAsync(
+            "demo-a", "approver-a", "USER", runId, approval.Id, false, "reject", "not authorised", default);
+
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, decided.Status);
+        Assert.Equal("rejected", decided.Approval!.Status);
+        Assert.Equal("rejected", decided.Approval.Decision);
+        Assert.Equal("approver-a", decided.Approval.DecidedBy);
+        Assert.Equal("not authorised", decided.Approval.Reason);
+        Assert.Equal(AgentRunStatuses.Failed,
+            (await fixture.Runs.GetAsync("demo-a", "admin-a", runId, default))!.Status);
+        Assert.Null(await fixture.Approvals.ClaimExecuteAsync("demo-a", runId, approval.Id, default));
+        Assert.Empty(await fixture.Approvals.ClaimExecuteRecoveryAsync(20, default));
+        Assert.Null(await fixture.Approvals.GetExecutionIdentityAsync("demo-a", "approver-a", runId, approval.Id, default));
+    }
+
+    // 拒絕不是「比較安全所以可以放寬」的決定:過期 / 已取消 / 自我核准 / 角色不符這四道 fence
+    // 對 approve=false 必須給出與 approve=true 完全相同的結果,而且一律不得產生 execute row。
+    [Theory]
+    [InlineData("expired", AgentRunApprovalWriteStatus.Expired, "expired")]
+    [InlineData("cancelled", AgentRunApprovalWriteStatus.InvalidState, "cancelled")]
+    [InlineData("self", AgentRunApprovalWriteStatus.Forbidden, "pending")]
+    [InlineData("role", AgentRunApprovalWriteStatus.Forbidden, "pending")]
+    public async Task Reject_IsFencedByExpiryCancellationAndSeparationOfDuties(
+        string scenario, AgentRunApprovalWriteStatus expected, string expectedApprovalStatus)
+    {
+        var fixture = await FixtureAsync("d7-reject-fences");
+        var runId = fixture.Running.Run.Id;
+        var approval = (await CreateApprovalAsync(fixture)).Approval!;
+        if (scenario == "expired") fixture.Clock.Advance(TimeSpan.FromMinutes(6));
+        if (scenario == "cancelled") await fixture.Runs.CancelAsync("demo-a", "admin-a", runId, "stop", "cancel-reject", default);
+
+        var decided = await fixture.Approvals.DecideAsync("demo-a",
+            scenario == "self" ? "admin-a" : "approver-a",
+            scenario == "role" ? "ADMIN" : "USER",
+            runId, approval.Id, false, "reject-" + scenario, null, default);
+
+        Assert.Equal(expected, decided.Status);
+        Assert.Equal(expectedApprovalStatus, decided.Approval!.Status);
+        Assert.Empty(await fixture.Approvals.ClaimExecuteRecoveryAsync(20, default));
+    }
+
+    // DecideAsync 自己的請求上限(idempotency key 128、reason 500)都是含上界:
+    // on-point 必須放行、off-point 必須擋下,否則數字打錯沒有任何測試會紅。
+    [Theory]
+    [InlineData(0, 0, AgentRunApprovalWriteStatus.InvalidState)]      // 空白 idempotency key
+    [InlineData(129, 0, AgentRunApprovalWriteStatus.InvalidState)]    // key 上限 128,129 即拒
+    [InlineData(1, 501, AgentRunApprovalWriteStatus.InvalidState)]    // reason 上限 500,501 即拒
+    [InlineData(128, 500, AgentRunApprovalWriteStatus.Success)]       // 兩個上界剛好都合法
+    public async Task Decide_IdempotencyKeyAndReasonLengthBoundaries(
+        int keyLength, int reasonLength, AgentRunApprovalWriteStatus expected)
+    {
+        var fixture = await FixtureAsync("d7-decide-limits");
+        var runId = fixture.Running.Run.Id;
+        var approval = (await CreateApprovalAsync(fixture)).Approval!;
+        var reason = reasonLength == 0 ? null : new string('r', reasonLength);
+
+        var decided = await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval.Id,
+            true, new string('k', keyLength), reason, default);
+
+        Assert.Equal(expected, decided.Status);
+        if (expected == AgentRunApprovalWriteStatus.Success)
+        {
+            Assert.Equal(reason, decided.Approval!.Reason);
+            return;
+        }
+        Assert.Equal("invalid decision request", decided.Message);
+        // 壞請求必須擋在狀態機之外:同一個 approval 仍要能被正常決定。
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval.Id,
+                true, "retry", null, default)).Status);
+    }
+
     // 建立 approval 前的 durable gate:錯的 lease token / 舊 generation / 舊 expected_version 都必須擋在
     // 「產生任何 effect 之前」。這是 waiting_approval 這道門的入口 fence,漏掉會讓過期 worker 開出授權。
     [Theory]
     [InlineData("stale-token", 0, 0)]   // 錯 lease token
     [InlineData(null, 1, 0)]            // generation +1(不是目前這把 lease)
     [InlineData(null, 0, -1)]           // expected_version 落後一版
+    [InlineData("stale-token", 1, -1)]  // 三道 fence 同時錯:組合起來也不得互相抵銷成放行
     public async Task CreateApproval_StaleLeaseOrGeneration_IsConflict(
         string? token, long generationDelta, long versionDelta)
     {
@@ -245,6 +327,32 @@ public sealed class AgentRunApprovalInMemoryTests
                 new AgentRunApprovalConsumeRequest(fingerprint, write.Token, write.Generation), default)).Status);
     }
 
+    // 同一道 guard 的另一半:fingerprint 格式合法,但 lease 身分根本沒帶(generation 下界 1、token 空白)。
+    // 這是壞請求(InvalidState)而不是壞 lease(Conflict)—— 對 Workflow 的意義不同:改請求 vs 換 lease。
+    [Theory]
+    [InlineData(null, 0)]   // lease_generation 下界 1,0 即拒
+    [InlineData("  ", 1)]   // lease_token 全空白
+    public async Task Consume_MissingLeaseIdentity_IsInvalidStateNotConflict(string? leaseToken, long leaseGeneration)
+    {
+        var fixture = await FixtureAsync("d7-consume-lease-identity");
+        var runId = fixture.Running.Run.Id;
+        var fingerprint = new string('a', 64);
+        var approval = (await CreateApprovalAsync(fixture, fingerprint)).Approval!;
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval.Id, true, "approve", null, default)).Status);
+
+        var result = await fixture.Approvals.ConsumeAsync("demo-a", runId, approval.Id,
+            new AgentRunApprovalConsumeRequest(fingerprint, leaseToken ?? fixture.Running.Token, leaseGeneration), default);
+
+        Assert.Equal(AgentRunApprovalWriteStatus.InvalidState, result.Status);
+        Assert.Equal("invalid consume request", result.Message);
+        // 壞請求不得保留 effect:換上有效 lease 後同一 approval 仍可正常 consume。
+        var write = await ResumeRunningAsync(fixture);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.ConsumeAsync("demo-a", runId, approval.Id,
+                new AgentRunApprovalConsumeRequest(fingerprint, write.Token, write.Generation), default)).Status);
+    }
+
     // 執行身分只能給「做出這個決定的人」,而且只在 approved/consumed 期間有效;跨租戶一律 null。
     // 它是 Workflow 拿來冒充 approver 執行寫入的唯一憑據,洩漏等同越權。
     [Fact]
@@ -295,6 +403,42 @@ public sealed class AgentRunApprovalInMemoryTests
             await fixture.Approvals.CompleteEffectAsync("demo-a", runId, effectId, false, default));
     }
 
+    public static TheoryData<string, string?> RejectedWriteEvidenceRequests => new()
+    {
+        { "   ", "approved" },                  // record_id 全空白(Trim 後為空)
+        { new string('r', 129), "approved" },   // record_id 上限 128,129 即拒
+        { "refund-1", null },                   // value 必填:null 不合法(空字串才是合法的空值)
+        { "refund-1", new string('v', 4_001) }, // value 上限 4000,4001 即拒
+    };
+
+    // WriteEvidenceAsync 自己的入口驗證:壞的 record_id/value 必須在碰到已保留的 effect 之前就擋下,
+    // 否則一次打錯的寫入會把 once-only 的 effect 燒掉。上界內(128/4000)的寫入則必須放行。
+    [Theory]
+    [MemberData(nameof(RejectedWriteEvidenceRequests))]
+    public async Task WriteEvidence_RejectsRecordIdAndValueOutOfRange_WithoutBurningTheEffect(
+        string recordId, string? value)
+    {
+        var fixture = await FixtureAsync("d7-evidence-validation");
+        var runId = fixture.Running.Run.Id;
+        var fingerprint = new string('a', 64);
+        var approval = (await CreateApprovalAsync(fixture, fingerprint)).Approval!;
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval.Id, true, "approve", null, default)).Status);
+        var write = await ResumeRunningAsync(fixture);
+        var effect = await fixture.Approvals.ConsumeAsync("demo-a", runId, approval.Id,
+            new AgentRunApprovalConsumeRequest(fingerprint, write.Token, write.Generation), default);
+
+        var rejected = await fixture.Approvals.WriteEvidenceAsync("demo-a", runId, effect.Response!.EffectId,
+            new AgentRunWriteEvidenceRequest(recordId, value), default);
+
+        Assert.Equal(AgentRunApprovalWriteStatus.InvalidState, rejected.Status);
+        Assert.Equal("invalid write evidence", rejected.Message);
+        var accepted = await fixture.Approvals.WriteEvidenceAsync("demo-a", runId, effect.Response.EffectId,
+            new AgentRunWriteEvidenceRequest(new string('r', 128), new string('v', 4_000)), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, accepted.Status);
+        Assert.Equal("written", accepted.Response!.Outcome);
+    }
+
     // 被遺棄的 execute claim 必須被回收(否則已核准的寫入永遠不會發生);而一旦 run 被要求取消,
     // 同一個 execution 要轉 dead_letter 且**不再**被任何 recovery 撿起來。
     [Fact]
@@ -322,6 +466,32 @@ public sealed class AgentRunApprovalInMemoryTests
         fixture.Clock.Advance(TimeSpan.FromSeconds(61));
         Assert.Empty(await fixture.Approvals.ClaimExecuteRecoveryAsync(20, default));
         Assert.Null(await fixture.Approvals.ClaimExecuteAsync("demo-a", runId, approval.Id, default));
+    }
+
+    // recovery 掃描的 limit 是 Math.Clamp(limit, 1, 100):上界決定一輪最多回收幾筆,
+    // 下界 1 更關鍵 —— 少了它,limit=0 會讓 Take(0) 永遠掃不到任何待回收的已核准寫入。
+    [Fact]
+    public async Task ExecuteRecovery_ClampsLimitBetweenOneAndOneHundred()
+    {
+        var clock = new ManualTimeProvider(new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero));
+        var (agents, skills, agent) = await PublishedAgentAsync("d7-recovery-limit");
+        var runs = new InMemoryAgentRunRepository(agents, skills, clock);
+        var approvals = new InMemoryAgentRunApprovalRepository(runs, clock);
+        for (var i = 0; i < 101; i++)
+        {
+            var running = await StartRunningAsync(runs, agent.Id, "limit-" + i);
+            var created = await approvals.CreateAsync("demo-a", "admin-a", running.Run.Id,
+                new AgentRunApprovalCreateRequest(running.Run.StateVersion, running.Token, running.Generation,
+                    Checkpoint(running.Generation), 1, "USER", new string('a', 64),
+                    clock.GetUtcNow().UtcDateTime.AddMinutes(5)), default);
+            Assert.Equal(AgentRunApprovalWriteStatus.Success,
+                (await approvals.DecideAsync("demo-a", "approver-a", "USER", running.Run.Id,
+                    created.Approval!.Id, true, "approve-" + i, null, default)).Status);
+        }
+
+        Assert.Equal(100, (await approvals.ClaimExecuteRecoveryAsync(101, default)).Count);
+        // 那 100 筆的 claim 仍在有效期內,剩下的 1 筆必須被 limit=0 撿到(clamp 成 1),而不是 0 筆。
+        Assert.Single(await approvals.ClaimExecuteRecoveryAsync(0, default));
     }
 
     // dead_letter ACK 代表「已核准的寫入無法安全完成」:該 execution 必須終局化,

@@ -88,6 +88,7 @@ public sealed class BusinessRuleValidatorTests
     [InlineData("""{"valid":true,"canonicalRuleSet":{"version":1},"errors":[]}""")]
     [InlineData("""{"valid":true,"canonicalRuleSet":[],"errors":[]}""")]                        // 非 object
     [InlineData("""{"valid":true,"canonicalRuleSet":{"version":"1","rules":[]},"errors":[]}""")] // version 非數字
+    [InlineData("""{"valid":true,"canonicalRuleSet":{"version":99999999999,"rules":[]},"errors":[]}""")] // version 是數字但塞不進 Int32
     [InlineData("""{"valid":true,"canonicalRuleSet":{"version":1,"rules":{}},"errors":[]}""")]   // rules 非陣列
     public async Task ValidWithIncompleteCanonicalEnvelope_IsContractFailure502(string response)
     {
@@ -100,11 +101,14 @@ public sealed class BusinessRuleValidatorTests
         Assert.Contains("version/rules", ex.Message);
     }
 
-    [Fact]
-    public async Task InvalidWithoutErrors_IsContractFailure502()
+    // 空陣列與「連 errors key 都沒有」(Errors 反序列化成 null)是同一個 OR 的兩個等價類:
+    // valid=false 卻拿不出任何錯誤 = 引擎契約被違反,不是可回報給使用者的驗證失敗。
+    [Theory]
+    [InlineData("""{"valid":false,"errors":[]}""")]
+    [InlineData("""{"valid":false}""")]
+    public async Task InvalidWithoutErrors_IsContractFailure502(string response)
     {
-        var ex = await Assert.ThrowsAsync<ApiException>(() => Build(Json(
-                HttpStatusCode.OK, """{"valid":false,"errors":[]}"""))
+        var ex = await Assert.ThrowsAsync<ApiException>(() => Build(Json(HttpStatusCode.OK, response))
             .ValidateAsync("pre-action", Rules, References, "demo-a", "admin-a", "ADMIN", default));
 
         Assert.Equal(502, ex.Status);
@@ -136,4 +140,22 @@ public sealed class BusinessRuleValidatorTests
         Assert.Contains("回應內容為空", empty.Message);
     }
 
+    /// <summary>
+    /// userId/role 是簽章上可空的:null 呼叫者身分必須送出**空字串** header,而不是讓 header 消失
+    /// (下游看不見 header 與看見空值是不同的授權輸入);tenant 則不受影響照送。
+    /// </summary>
+    [Fact]
+    public async Task Validate_NullCallerIdentity_SendsEmptyUserAndRoleHeaders()
+    {
+        var stub = Json(HttpStatusCode.OK,
+            """{"valid":true,"canonicalRuleSet":{"version":1,"rules":[]},"errors":[]}""");
+
+        var result = await Build(stub).ValidateAsync(
+            "pre-action", Rules, References, "demo-a", null, null, default);
+
+        Assert.True(result.Valid);
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.Equal(string.Empty, stub.Header("X-User-Id"));
+        Assert.Equal(string.Empty, stub.Header("X-User-Role"));
+    }
 }

@@ -162,6 +162,25 @@ public sealed class ContextRepositoryTests(PostgresFixture fixture) : IAsyncLife
         Assert.Equal(ContextStatuses.Ready, ReadinessEvaluator.Evaluate(evidence, permissive.RootElement, Measurements(gaps: [new("optional_source", "timeout")]), "backend_documents").Status);
     }
 
+    // ECT:量測值帶來的 source failure 若指向政策未宣告的 source(或 source_id/failure_code 空白),
+    // 是「無法判定」而不是可扣分的 gap —— 在任何評分之前就短路成 BLOCKED_BY_POLICY / 0 分,
+    // 且 unmet 退化成全部 mandatory requirement(有別於 policy_violations 那條 BLOCKED 路徑)。
+    [Theory]
+    [InlineData("unknown_source", "timeout")]
+    [InlineData(null, "timeout")]
+    [InlineData("backend_documents", "  ")]
+    public void Readiness_UnrecognizedOrBlankSourceFailure_ShortCircuitsToBlockedByPolicy(string? sourceId, string failureCode)
+    {
+        using var policy = Policy("0.80", "0.70");
+
+        var decision = ReadinessEvaluator.Evaluate([Evidence()], policy.RootElement,
+            Measurements(gaps: [new(sourceId, failureCode)]), "backend_documents");
+
+        Assert.Equal(ContextStatuses.BlockedByPolicy, decision.Status);
+        Assert.Equal(0m, decision.Readiness);
+        Assert.Equal(new[] { "document" }, decision.Unmet);
+    }
+
     // M6/L4:判定器的兩種「不合法」必須分流 —— 候選量測值是呼叫者的錯(ArgumentException → 400),
     // 政策本身壞掉(缺鍵、未知鍵)是伺服器資產的錯(ContextPolicyInvalidException → 422)。
     [Theory]
@@ -171,6 +190,25 @@ public sealed class ContextRepositoryTests(PostgresFixture fixture) : IAsyncLife
     {
         using var policy = JsonDocument.Parse(policyJson);
         Assert.Throws<ContextPolicyInvalidException>(() => ReadinessEvaluator.Evaluate([Evidence()], policy.RootElement, Measurements()));
+    }
+
+    // BVT:政策數值域的 on-point / off-point。形狀正確、鍵也全對,但門檻越界的政策一樣不是可用政策
+    // ——(0,1] 的 ready_threshold、[0,ready_threshold) 的 assumptions_min,越界即 422。
+    [Theory]
+    [InlineData("0", "0", false)]        // ready_threshold 下界 on-point:0 不合法
+    [InlineData("0.01", "0", true)]      // 剛好越過下界;assumptions_min 下界 0 本身合法
+    [InlineData("1", "0.70", true)]      // ready_threshold 上界 on-point:1 合法
+    [InlineData("1.01", "0.70", false)]  // 剛好越過上界
+    [InlineData("0.80", "0.80", false)]  // assumptions_min 不得等於 ready_threshold
+    [InlineData("0.80", "0.79", true)]   // 剛好小於即合法
+    [InlineData("0.80", "-0.01", false)] // assumptions_min 跌破 0
+    public void Readiness_PolicyThresholdsOutsideTheirRange_IsAPolicyFailure(string ready, string assumptions, bool valid)
+    {
+        using var policy = Policy(ready, assumptions);
+
+        var error = Record.Exception(() => ReadinessEvaluator.ValidatePolicy(policy.RootElement));
+
+        if (valid) Assert.Null(error); else Assert.IsType<ContextPolicyInvalidException>(error);
     }
 
     [Theory]
@@ -277,6 +315,44 @@ public sealed class ContextRepositoryTests(PostgresFixture fixture) : IAsyncLife
         Assert.Throws<InvalidOperationException>(() => ContextCanonicalizer.ReadAuthoritative(bytes, sha, "Context"));
     }
 
+    // ECT:evidence 自身的拒絕條件,在倉儲碰到政策/租戶之前就先擋下 —— 空白識別欄位、非「64 位小寫
+    // hex」形狀的 content_hash、重複的 (snapshot_id, content_ref) 全是候選者的錯(ArgumentException)。
+    [Theory]
+    [InlineData("blank-source", "context evidence is invalid")]
+    [InlineData("short-hash", "context evidence is invalid")]
+    [InlineData("uppercase-hash", "context evidence is invalid")]
+    [InlineData("duplicate-pair", "context evidence is duplicated or too large")]
+    public void ValidateEvidence_MalformedOrDuplicatedCandidate_IsRejected(string mutation, string message)
+    {
+        var item = Evidence();
+        ContextEvidenceInput[] candidate = mutation switch
+        {
+            "blank-source" => [item with { SourceId = "   " }],
+            "short-hash" => [item with { ContentHash = new string('a', 63) }],
+            "uppercase-hash" => [item with { ContentHash = new string('A', 64) }],
+            _ => [item, item],
+        };
+
+        Assert.Equal(message, Assert.Throws<ArgumentException>(() => ContextCanonicalizer.ValidateEvidence(candidate)).Message);
+    }
+
+    // BVT:三個位元組上限各測 on-point 與 off-point —— 剛好等於上限必須收下,多 1 byte 必須擋。
+    [Fact]
+    public void Canonicalizer_SizeCeilings_AcceptTheLimitAndRejectOneByteOver()
+    {
+        Assert.NotEmpty(ContextCanonicalizer.CanonicalizeDefinition(DefinitionOfBytes(ContextCanonicalizer.MaxDefinitionBytes)));
+        Assert.Equal("definition exceeds 256 KB", Assert.Throws<ArgumentException>(
+            () => ContextCanonicalizer.CanonicalizeDefinition(DefinitionOfBytes(ContextCanonicalizer.MaxDefinitionBytes + 1))).Message);
+
+        Assert.NotEmpty(ContextCanonicalizer.CanonicalizeView(DefinitionOfBytes(ContextCanonicalizer.MaxEvidenceBytes)));
+        Assert.Equal("view definition exceeds 64 KB", Assert.Throws<ArgumentException>(
+            () => ContextCanonicalizer.CanonicalizeView(DefinitionOfBytes(ContextCanonicalizer.MaxEvidenceBytes + 1))).Message);
+
+        ContextCanonicalizer.ValidateEvidence([Evidence() with { ContentRef = new string('r', 1_024) }]);
+        Assert.Equal("context evidence is duplicated or too large", Assert.Throws<ArgumentException>(
+            () => ContextCanonicalizer.ValidateEvidence([Evidence() with { ContentRef = new string('r', 1_025) }])).Message);
+    }
+
     [Fact]
     public async Task InMemory_RejectsLowerPrecedenceAdapterLineage_WhenEvidenceTypesMatch()
     {
@@ -337,6 +413,26 @@ public sealed class ContextRepositoryTests(PostgresFixture fixture) : IAsyncLife
         });
         var forged = JsonSerializer.SerializeToElement(new { context_ref = contextRef });
         Assert.Throws<ArgumentException>(() => ContextTaskEnvelopeProjection.ApplyIfAvailable(forged, null, "worker"));
+    }
+
+    // ECT:role-scoped 投影只認 worker/verifier/synthesizer。planner 是伺服器內部視圖,大小寫不同
+    // 或空白也都不是合法角色 —— 一律擋下,不得靜默落回任何預設視圖。
+    [Theory]
+    [InlineData("planner")]
+    [InlineData("Worker")]
+    [InlineData("")]
+    public void TaskEnvelopeProjection_InvalidViewRole_IsRejected(string viewType)
+    {
+        var contextId = Guid.NewGuid(); var viewId = Guid.NewGuid();
+        var revision = new ContextRevisionResponse(contextId, 1, Guid.NewGuid(), ContextStatuses.Ready, 1m, [], Guid.NewGuid(),
+            JsonSerializer.SerializeToElement(new { }), DateTime.UtcNow, DateTime.UtcNow, null, new ContextRef(contextId, 1, viewId));
+        var stored = new ContextStoredRevision(revision, [],
+            [new(viewId, contextId, 1, "planner", JsonSerializer.SerializeToElement(new { facts = 1 }))], "backend.retrieval_search");
+
+        var error = Assert.Throws<ArgumentException>(() => ContextTaskEnvelopeProjection.Apply(
+            JsonSerializer.SerializeToElement(new { objective = "analyze" }), stored, viewType));
+
+        Assert.Equal("Context view role is invalid", error.Message);
     }
 
     // A-CTX-05:跨租戶注入的是**另一租戶真實存在**的文件與 chunk,content_hash 也對得上;
@@ -469,6 +565,11 @@ public sealed class ContextRepositoryTests(PostgresFixture fixture) : IAsyncLife
             Observations: JsonSerializer.SerializeToElement(new { completeness = 0.9m }),
             Lineage: JsonSerializer.SerializeToElement(new { catalog_source_id = "backend_documents", adapter_id = "backend.retrieval_search" }));
     }
+
+    /// <summary>原文剛好 <paramref name="totalBytes"/> 個 UTF-8 byte 的 JSON 物件
+    /// (<c>{"v":"aaa…"}</c> 外框佔 8 byte),用來壓 canonicalizer 的位元組上限邊界。</summary>
+    private static JsonElement DefinitionOfBytes(int totalBytes)
+        => JsonDocument.Parse($"{{\"v\":\"{new string('a', totalBytes - 8)}\"}}").RootElement.Clone();
 
     /// <summary>同一筆 evidence 換上不同 evidence_type,用來覆蓋政策裡的多個 requirement。</summary>
     private static ContextEvidenceInput[] Covering(params string[] evidenceTypes)

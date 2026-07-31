@@ -135,6 +135,56 @@ public sealed class RagRepositoryTests : IAsyncLifetime
         Assert.Empty(empty);
     }
 
+    // ---- 邊界:LIMIT @topK 真的截斷結果(on-point topK = 命中數;off-point topK = 命中數 - 1) ----
+
+    [SkippableFact]
+    public async Task SearchAsync_TopKBelowMatchCount_TruncatesToTopK()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-topk-a";
+        var docId = Guid.NewGuid().ToString();
+
+        await CompleteAsync(tenant, docId, "topk",
+            new[] { "hit", "far-1", "far-2" }, new[] { OneHot(0), OneHot(1), OneHot(2) });
+
+        // on-point:topK 等於命中數 → 全數回傳,LIMIT 不砍。
+        Assert.Equal(3, (await Repo.SearchAsync(tenant, OneHot(0), 3, default)).Count);
+
+        // off-point:topK 少一 → 被 LIMIT 截斷;仍保留距離最近的那筆(OneHot(0) 對自己 cosine distance = 0,
+        // 另兩筆正交 = 1,ORDER BY 下 "hit" 必為第一)。
+        var truncated = await Repo.SearchAsync(tenant, OneHot(0), 2, default);
+        Assert.Equal(2, truncated.Count);
+        Assert.Equal("hit", truncated[0].Content);
+    }
+
+    // ---- 刪除:非法 GUID(不進 DB)與跨租戶(WHERE tenant_id 過濾)都回 false,且不得動到別人的資料 ----
+
+    [SkippableFact]
+    public async Task DeleteDocumentAsync_InvalidGuidOrOtherTenant_ReturnsFalse_KeepsDocument()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenantA = "ragrepo-delete-a";
+        const string tenantB = "ragrepo-delete-b";
+        var docId = Guid.NewGuid().ToString();
+        var gid = Guid.Parse(docId);
+
+        await CompleteAsync(tenantA, docId, "owned-by-a", new[] { "keep" }, new[] { OneHot(0) });
+        Assert.Equal(1, await ChunkCountAsync(gid));
+
+        // 等價類 1:Guid.TryParse 失敗 → 提早回 false,不做 DB 往返。
+        Assert.False(await Repo.DeleteDocumentAsync(tenantA, "not-a-guid", default));
+
+        // 等價類 2:合法 GUID 但屬於別的租戶 → 影響 0 列 → false,A 的文件與切塊完好。
+        Assert.False(await Repo.DeleteDocumentAsync(tenantB, docId, default));
+        Assert.Equal(1, await ChunkCountAsync(gid));
+        Assert.Contains(await Repo.ListDocumentsAsync(tenantA, default), d => d.Id == docId);
+
+        // 正控:同租戶刪得掉 → 證明上面兩個 false 不是「文件本來就刪不掉」。chunks 隨 ON DELETE CASCADE 消失。
+        Assert.True(await Repo.DeleteDocumentAsync(tenantA, docId, default));
+        Assert.Equal(0, await ChunkCountAsync(gid));
+        Assert.DoesNotContain(await Repo.ListDocumentsAsync(tenantA, default), d => d.Id == docId);
+    }
+
     [SkippableFact]
     public async Task CompleteDocumentAsync_Rerun_IsIdempotent_NoChunkAccumulation()
     {
@@ -156,6 +206,31 @@ public sealed class RagRepositoryTests : IAsyncLifetime
         var doc = (await Repo.ListDocumentsAsync(tenant, default)).Single(d => d.Id == docId);
         Assert.Equal(3, doc.ChunkCount);
         Assert.Equal("ready", doc.Status);
+    }
+
+    // ---- (b') 重投遞的**建列**步驟本身的冪等:已 ready 的文件不得被打回 processing / 清空 chunk_count ----
+
+    [SkippableFact]
+    public async Task InsertProcessingDocumentAsync_OnAlreadyReadyDocument_IsNoOp()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-reinsert-a";
+        var docId = Guid.NewGuid().ToString();
+        var gid = Guid.Parse(docId);
+
+        await CompleteAsync(tenant, docId, "original",
+            new[] { "one", "two" }, new[] { OneHot(0), OneHot(1) });
+        Assert.Equal(2, await ChunkCountAsync(gid));
+
+        // platform 重投遞同一份 → ON CONFLICT (id) DO NOTHING:status / chunk_count / title / 切塊全不動,
+        // 不會把已完成的文件重設成 processing + 0 chunk。
+        await Repo.InsertProcessingDocumentAsync(docId, tenant, "redelivered-title", default);
+
+        Assert.Equal(2, await ChunkCountAsync(gid));
+        var doc = (await Repo.ListDocumentsAsync(tenant, default)).Single(d => d.Id == docId);
+        Assert.Equal("ready", doc.Status);
+        Assert.Equal(2, doc.ChunkCount);
+        Assert.Equal("original", doc.Title);
     }
 
     // ---- (b) 交易回滾:批次 INSERT 中途失敗,DELETE 也一併回滾,既有 chunk/狀態不得被破壞 ----

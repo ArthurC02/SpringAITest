@@ -30,6 +30,21 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull(body["fieldErrors"]);
     }
 
+    // FixedTimeEquals 的「長度相同、內容不同」分支:上面的 "nope" 長度就對不上,只走到長度短路那條路。
+    // 近似 token(由真 token 換掉末字元構成,長度必然相同)才會真的逐 byte 比對,同樣必須 401。
+    [Fact]
+    public async Task NearMissInternalToken_SameLengthDifferentContent_Returns401()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add(
+            InternalTokenMiddleware.HeaderName, TestWebAppFactory.InternalToken[..^1] + "X");
+
+        var resp = await client.GetAsync("/api/config");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        Assert.Equal("內部憑證無效", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
     // INTERNAL_API_TOKEN 顯式設為空/空白 → fail-fast(避免信任邊界因 FixedTimeEquals("","")==true 而失效)。
     [Theory]
     [InlineData("")]
@@ -70,10 +85,18 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("UP", (await resp.ReadJsonAsync())["status"]!.GetValue<string>());
     }
 
-    [Fact]
-    public async Task Documents_MissingTenantHeader_Returns400()
+    // 「完全沒帶 header」與「帶了但只有空白」是兩種不同的線上輸入,IdentityHeaders.Value() 把空白折成 null,
+    // 兩者都必須落在同一個 RequireTenant() 400 分支(空白不得被當成合法租戶 code)。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("   ")]
+    public async Task Documents_MissingTenantHeader_Returns400(string? tenantHeader)
     {
         var client = _factory.CreateInternalClient();
+        if (tenantHeader is not null)
+        {
+            client.DefaultRequestHeaders.TryAddWithoutValidation(IdentityHeaders.TenantHeader, tenantHeader);
+        }
 
         var resp = await client.GetAsync("/api/documents");
 

@@ -41,6 +41,41 @@ public sealed class AuthApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("password 長度至少 8 碼", body["fieldErrors"]!["password"]!.GetValue<string>());
     }
 
+    // NotBlank 與 MinLength/RegularExpression 是各自獨立的分支(fieldErrors 每欄只取第一個訊息);
+    // 這裡每列都只讓 NotBlank 失敗:null 不會觸發 MinLength,空字串不會觸發 RegularExpression。
+    [Theory]
+    [InlineData("", "password123", "demo-a", "username", "username 不可為空")]
+    [InlineData("blank-password", null, "demo-a", "password", "password 不可為空")]
+    [InlineData("blank-tenant", "password123", "", "tenantCode", "tenantCode 不可為空")]
+    public async Task Register_Returns400_WhenRequiredFieldBlank(
+        string username, string? password, string tenantCode, string field, string message)
+    {
+        var client = _factory.CreateInternalClient();
+
+        var resp = await client.PostAsJsonAsync("/api/auth/register",
+            new { username, password, tenantCode, inviteCode = "demo-a-invite" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal(message, body["fieldErrors"]![field]!.GetValue<string>());
+    }
+
+    // MinLength(8) 的相鄰邊界:等價類內側的 "abc"(3)/"password123"(11)證明不了門檻沒被打成 7 或 9。
+    [Theory]
+    [InlineData("pw-boundary-7", "1234567", HttpStatusCode.BadRequest)]
+    [InlineData("pw-boundary-8", "12345678", HttpStatusCode.Created)]
+    public async Task Register_EnforcesPasswordMinLengthBoundary(
+        string username, string password, HttpStatusCode expected)
+    {
+        var client = _factory.CreateInternalClient();
+
+        var resp = await client.PostAsJsonAsync("/api/auth/register",
+            new { username, password, tenantCode = "demo-a", inviteCode = "demo-a-invite" });
+
+        Assert.Equal(expected, resp.StatusCode);
+    }
+
     [Fact]
     public async Task Register_Returns400_WhenInviteCodeMissing()
     {
@@ -162,6 +197,30 @@ public sealed class AuthApiTests : IClassFixture<TestWebAppFactory>
                 .ToArray());
     }
 
+    // 一般 USER 這條路徑:groups 要簽進去,而沒有任何 capability 時該欄位必須整個不存在
+    // (JwtService 對空集合不加 claim,舊 token 逐位元不變)。
+    [Fact]
+    public async Task Login_SignsPersistedGroups_AndOmitsCapabilities_ForPlainUser()
+    {
+        var client = _factory.CreateInternalClient();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/auth/login",
+            new { username = "user-a", password = "password123" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var token = (await response.ReadJsonAsync())["token"]!.GetValue<string>();
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+        Assert.Equal("USER", jwt.Claims.Single(claim => claim.Type == "role").Value);
+        Assert.Equal(
+            new[] { "analysts" },
+            jwt.Claims
+                .Where(claim => claim.Type == "groups")
+                .Select(claim => claim.Value)
+                .ToArray());
+        Assert.DoesNotContain(jwt.Claims, claim => claim.Type == "capabilities");
+    }
+
     [Fact]
     public async Task Login_Returns401_WhenPasswordWrong()
     {
@@ -185,6 +244,24 @@ public sealed class AuthApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         Assert.Equal("帳號或密碼錯誤", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // 空白身分是驗證失敗(400),不是「查無此帳號」(401)—— 兩者的等價類不同,不可互相取代。
+    [Theory]
+    [InlineData("", "password123", "username", "username 不可為空")]
+    [InlineData("user-a", "", "password", "password 不可為空")]
+    public async Task Login_Returns400_WhenRequiredFieldBlank(
+        string username, string password, string field, string message)
+    {
+        var client = _factory.CreateInternalClient();
+
+        var resp = await client.PostAsJsonAsync("/api/auth/login",
+            new { username, password });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal(message, body["fieldErrors"]![field]!.GetValue<string>());
     }
 
     // ---- 記憶鍵分隔字元:username / tenantCode 不得含 ':' ----

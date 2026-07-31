@@ -98,6 +98,29 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
             (await Admin("demo-b").PostAsJsonAsync(Path, Body("p4_003"))).StatusCode);
     }
 
+    // 唯一名稱的另一半:Create 撞名有人顧,改名撞既有(Update 的 409)沒人顧 —
+    // 少了這條,UpdateAsync 忘記排除自己以外的同名列也不會被抓到。
+    [Fact]
+    public async Task Update_RenameToExistingName_409_KeepsOriginalName()
+    {
+        var client = Admin();
+        await CreateAsync(client, "p4_rename_a");
+        var b = await CreateAsync(client, "p4_rename_b");
+        var bId = b["id"]!.GetValue<string>();
+
+        var resp = await client.PutAsJsonAsync($"{Path}/{bId}", Body("p4_rename_a"));
+
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+        Assert.Equal("Configuration Set 名稱已存在：p4_rename_a",
+            (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // B 未被改名,A 仍只有一列(衝突 = 零寫入)。
+        Assert.Equal("p4_rename_b",
+            (await (await client.GetAsync($"{Path}/{bId}")).ReadJsonAsync())["name"]!.GetValue<string>());
+        var list = (await (await client.GetAsync(Path)).ReadJsonAsync()).AsArray();
+        Assert.Equal(1, list.Count(n => n!["name"]!.GetValue<string>() == "p4_rename_a"));
+    }
+
     // ---- SSR-P4-005:刪 active 後該租戶變無 active、不自動選另一組 ----
 
     [Fact]
@@ -173,6 +196,31 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
             (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
     }
 
+    // 上面兩條證明「非 ADMIN 不會跑到模型驗證」;這條是決策表的另一半 —— ADMIN 通過授權後,
+    // name 的 [NotBlank] 真的擋下來,且回 400「輸入驗證失敗」(不是 values 的 422)。
+    // null 走 NotBlankAttribute 的 null 分支,"   " 走 IsNullOrWhiteSpace 分支。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("   ")]
+    public async Task Create_BlankName_Returns400_BeforeValuesValidation(string? name)
+    {
+        // values 同時越界:模型驗證早於 ConfigurationValues → 只能報 name,不得混進 422 的欄位錯誤。
+        var body = new JsonObject
+        {
+            ["name"] = name,
+            ["values"] = new JsonObject { ["retrieval.top_k"] = 999 },
+        };
+
+        var resp = await Admin().PostAsJsonAsync(Path, body);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var error = await resp.ReadJsonAsync();
+        Assert.Equal(400, error["status"]!.GetValue<int>());
+        Assert.Equal("輸入驗證失敗", error["message"]!.GetValue<string>());
+        Assert.Equal("name 不可為空", error["fieldErrors"]!["name"]!.GetValue<string>());
+        Assert.Null(error["fieldErrors"]!.AsObject().FirstOrDefault(p => p.Key == "retrieval.top_k").Value);
+    }
+
     // ---- SSR-P4-007:跨租戶 GET/PUT/DELETE/activate 全 404;tenant-b 不受影響;list 只見自己 ----
 
     [Fact]
@@ -212,9 +260,11 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("kb_query.max_retrieval_attempts", 1, HttpStatusCode.Created)]
     [InlineData("kb_query.max_retrieval_attempts", 1000000, HttpStatusCode.Created)] // 與姊妹鍵一致:無上限
     [InlineData("kb_query.max_retrieval_attempts", 0, HttpStatusCode.UnprocessableEntity)]
+    [InlineData("kb_query.max_retrieval_attempts", -5, HttpStatusCode.UnprocessableEntity)] // 負值與 0 同屬 < min
     [InlineData("workflow.timeout_seconds", 1, HttpStatusCode.Created)]
     [InlineData("workflow.timeout_seconds", 3600, HttpStatusCode.Created)]
     [InlineData("workflow.timeout_seconds", 0, HttpStatusCode.UnprocessableEntity)]
+    [InlineData("workflow.timeout_seconds", -5, HttpStatusCode.UnprocessableEntity)]
     public async Task IntKey_OnOffPoint(string key, int value, HttpStatusCode expected)
     {
         var name = $"p4_int_{key.Replace('.', '_')}_{(value < 0 ? "neg" + -value : value.ToString())}";
@@ -333,6 +383,28 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
         var fieldErrors = (await resp.ReadJsonAsync())["fieldErrors"]!.AsObject();
         Assert.NotNull(fieldErrors["bogus.one"]);
         Assert.NotNull(fieldErrors["retrieval.top_k"]);
+    }
+
+    // 上面整組逐鍵驗證都只打 POST;PUT 是同一道 ConfigurationValues.Validate 的第二個呼叫點,
+    // 接線斷了(忘了呼叫)只有這條會紅:越界值不得覆蓋既有 values。
+    [Fact]
+    public async Task Update_InvalidValues_Returns422_KeepsStoredValues()
+    {
+        var client = Admin();
+        var set = await CreateAsync(client, "p4_put_invalid", new JsonObject { ["retrieval.top_k"] = 10 });
+        var id = set["id"]!.GetValue<string>();
+
+        var resp = await client.PutAsJsonAsync($"{Path}/{id}",
+            Body("p4_put_invalid", new JsonObject { ["retrieval.top_k"] = 0 }));
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var error = await resp.ReadJsonAsync();
+        Assert.Equal("Configuration Set 驗證失敗", error["message"]!.GetValue<string>());
+        Assert.NotNull(error["fieldErrors"]!["retrieval.top_k"]);
+
+        // 驗證早於寫入 → 原值原封不動。
+        var detail = await (await client.GetAsync($"{Path}/{id}")).ReadJsonAsync();
+        Assert.Equal(10, detail["values"]!["retrieval.top_k"]!.GetValue<int>());
     }
 
     // ---- active 端點(協調者補列):USER 可讀、無 active 404、跨租戶只見自己 ----

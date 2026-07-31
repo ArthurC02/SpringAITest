@@ -88,6 +88,52 @@ public sealed class InMemoryAgentRunRecoveryTests
             System.Text.Json.Nodes.JsonNode.Parse(input.GetProperty("task_envelope").GetRawText())));
     }
 
+    // 等價類:runKind 只接受 "worker"/"verifier"。上面的測試只走過 worker,這裡補 verifier
+    // (合法類 → execution_kind = orchestrator-verifier)與任意其他字串(非法類 → InvalidState)。
+    [Fact]
+    public async Task OrchestratorChild_PinsVerifierExecutionKind_AndRejectsUnknownRunKind()
+    {
+        var (agents, skills, agent) = await CreatePublishedAgentAsync(
+            "orchestrator-verifier-child", new[] { "worker", "verifier" });
+        var runs = new InMemoryAgentRunRepository(agents, skills);
+        var source = agents.GetPublishedSnapshotUnsafe("demo-a", agent.Id)!;
+        var workflowDefinition = AgentRunSnapshotBuilder.CanonicalizeJson(
+            AgentDefaults.RuntimeWorkflowDefinition);
+        var workflow = new WorkflowSnapshotSource(
+            source.WorkflowId, source.WorkflowRevision, 1, workflowDefinition,
+            SkillHash.Sha256(workflowDefinition), "1");
+        var rootRunId = Guid.Parse("42222222-2222-4222-8222-222222222222");
+        var taskEnvelope = JsonDocument.Parse("""
+            {"objective":"verify","required_capabilities":["research"],"context":{"query":"q"},"context_provenance":[{"context_key":"query","source_type":"caller","source_id":"user","observed_at":"2026-01-01T00:00:00Z","content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"write_intent":false,"delegation_depth":0,"repair_of":null}
+            """).RootElement.Clone();
+
+        var verifier = await ((IOrchestratorChildRunRepository)runs)
+            .CreateOrchestratorChildAsync(
+                "demo-a", "admin-a", "ADMIN", Array.Empty<string>(),
+                Array.Empty<string>(), source, workflow,
+                new OrchestratorChildSnapshotProvenance(rootRunId, "verify-a", 1),
+                "verifier", 10_000, taskEnvelope, "verifier-key", default);
+        var unknownKind = await ((IOrchestratorChildRunRepository)runs)
+            .CreateOrchestratorChildAsync(
+                "demo-a", "admin-a", "ADMIN", Array.Empty<string>(),
+                Array.Empty<string>(), source, workflow,
+                new OrchestratorChildSnapshotProvenance(rootRunId, "verify-a", 1),
+                "observer", 10_000, taskEnvelope, "observer-key", default);
+
+        Assert.Equal(AgentRunWriteStatus.Success, verifier.Status);
+        Assert.Equal("verifier", verifier.Run!.RunKind);
+        var artifact = await runs.GetExecutionArtifactAsync(
+            "demo-a", "admin-a", verifier.Run.Id, default);
+        using var envelope = JsonDocument.Parse(artifact!);
+        var bytes = Convert.FromBase64String(envelope.RootElement
+            .GetProperty("snapshot_canonical_base64").GetString()!);
+        using var snapshot = JsonDocument.Parse(bytes);
+        Assert.Equal("orchestrator-verifier", snapshot.RootElement
+            .GetProperty("execution_kind").GetString());
+        Assert.Equal(AgentRunWriteStatus.InvalidState, unknownKind.Status);
+        Assert.Null(unknownKind.Run);
+    }
+
     [Fact]
     public async Task QueuedRun_AckDefersExecutionRecoveryUntilGraceExpires()
     {
@@ -761,6 +807,82 @@ public sealed class InMemoryAgentRunRecoveryTests
             tamperedResumeRefResult.ErrorCode);
     }
 
+    // 等價類:"run_recovery_counter_exhausted" 有兩個來源——run 自己的計數器
+    // (StateVersion/CheckpointVersion/EventAckCursor/LatestEventSequence)接近 long.MaxValue,
+    // 以及 command.DispatchAttempts 接近 int.MaxValue。兩者都取臨界值(on-point)。
+    [Fact]
+    public async Task Recovery_QuarantinesCounterExhaustedCandidates_WithoutStarvingHealthyRun()
+    {
+        var (agents, skills, agent) =
+            await CreatePublishedAgentAsync("recovery-counter-exhausted");
+        var clock = new ManualTimeProvider(
+            new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero));
+        var runs = new InMemoryAgentRunRepository(agents, skills, clock);
+        var stateVersionExhausted = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "state-version", "state-version", default);
+        var attemptsExhausted = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "attempts", "attempts", default);
+        var healthy = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "healthy", "healthy", default);
+        SetPrivateRunField(
+            runs, stateVersionExhausted.Run!.Id, "StateVersion", long.MaxValue - 2);
+        SetPrivateCommandField(
+            runs, attemptsExhausted.Run!.Id, "DispatchAttempts", int.MaxValue - 1);
+        clock.Advance(TimeSpan.FromSeconds(31));
+
+        var recovery = await runs.ClaimRecoveryAsync(
+            new AgentRunRecoveryClaimRequest("worker", 20, 30),
+            default);
+
+        var recovered = Assert.Single(
+            recovery.Items,
+            item => item.RunId == healthy.Run!.Id);
+        Assert.Equal("healthy", recovered.Input.GetProperty("message").GetString());
+        var stateVersionResult = await runs.GetAsync(
+            "demo-a", "admin-a", stateVersionExhausted.Run.Id, default);
+        var attemptsResult = await runs.GetAsync(
+            "demo-a", "admin-a", attemptsExhausted.Run.Id, default);
+        Assert.Equal(AgentRunStatuses.Failed, stateVersionResult!.Status);
+        Assert.Equal(
+            "run_recovery_counter_exhausted",
+            stateVersionResult.ErrorCode);
+        Assert.Equal(AgentRunStatuses.Failed, attemptsResult!.Status);
+        Assert.Equal(
+            "run_recovery_counter_exhausted",
+            attemptsResult.ErrorCode);
+    }
+
+    // 等價類:checkpoint seed 不一致(CheckpointVersion 還是 0,卻已有 CheckpointGeneration)
+    // 必須以 "run_recovery_seed_invalid" dead-letter,而不是被當成可回收的正常 run。
+    [Fact]
+    public async Task Recovery_DeadLettersInvalidCheckpointSeed_WithoutStarvingHealthyRun()
+    {
+        var (agents, skills, agent) =
+            await CreatePublishedAgentAsync("recovery-seed-invalid");
+        var clock = new ManualTimeProvider(
+            new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero));
+        var runs = new InMemoryAgentRunRepository(agents, skills, clock);
+        var seedInvalid = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "seed", "seed", default);
+        var healthy = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "healthy", "healthy", default);
+        SetPrivateRunField(runs, seedInvalid.Run!.Id, "CheckpointGeneration", 5L);
+        clock.Advance(TimeSpan.FromSeconds(31));
+
+        var recovery = await runs.ClaimRecoveryAsync(
+            new AgentRunRecoveryClaimRequest("worker", 20, 30),
+            default);
+
+        var recovered = Assert.Single(
+            recovery.Items,
+            item => item.RunId == healthy.Run!.Id);
+        Assert.Equal("healthy", recovered.Input.GetProperty("message").GetString());
+        var seedInvalidResult = await runs.GetAsync(
+            "demo-a", "admin-a", seedInvalid.Run.Id, default);
+        Assert.Equal(AgentRunStatuses.Failed, seedInvalidResult!.Status);
+        Assert.Equal("run_recovery_seed_invalid", seedInvalidResult.ErrorCode);
+    }
+
     [Fact]
     public async Task DeadlineRecovery_DeadLettersBlankPinnedIdentity_WithoutStarvingHealthyRun()
     {
@@ -1172,25 +1294,19 @@ public sealed class InMemoryAgentRunRecoveryTests
         InMemoryAgentRunRepository runs,
         Guid runId,
         JsonElement input)
-    {
-        var commandsField = typeof(InMemoryAgentRunRepository).GetField(
-            "_commands",
-            System.Reflection.BindingFlags.Instance
-            | System.Reflection.BindingFlags.NonPublic)!;
-        var commands = (System.Collections.IDictionary)commandsField.GetValue(runs)!;
-        var command = commands.Values.Cast<object>()
-            .Where(value =>
-                (Guid)value.GetType().GetField("RunId")!.GetValue(value)! == runId)
-            .OrderBy(value =>
-                (long)value.GetType().GetField("Sequence")!.GetValue(value)!)
-            .Last();
-        command.GetType().GetField("Input")!.SetValue(command, input);
-    }
+        => SetPrivateCommandField(runs, runId, "Input", input);
 
     private static void SetPrivateCommandHash(
         InMemoryAgentRunRepository runs,
         Guid runId,
         string inputHash)
+        => SetPrivateCommandField(runs, runId, "InputHash", inputHash);
+
+    private static void SetPrivateCommandField(
+        InMemoryAgentRunRepository runs,
+        Guid runId,
+        string fieldName,
+        object value)
     {
         var commandsField = typeof(InMemoryAgentRunRepository).GetField(
             "_commands",
@@ -1198,12 +1314,12 @@ public sealed class InMemoryAgentRunRecoveryTests
             | System.Reflection.BindingFlags.NonPublic)!;
         var commands = (System.Collections.IDictionary)commandsField.GetValue(runs)!;
         var command = commands.Values.Cast<object>()
-            .Where(value =>
-                (Guid)value.GetType().GetField("RunId")!.GetValue(value)! == runId)
-            .OrderBy(value =>
-                (long)value.GetType().GetField("Sequence")!.GetValue(value)!)
+            .Where(item =>
+                (Guid)item.GetType().GetField("RunId")!.GetValue(item)! == runId)
+            .OrderBy(item =>
+                (long)item.GetType().GetField("Sequence")!.GetValue(item)!)
             .Last();
-        command.GetType().GetField("InputHash")!.SetValue(command, inputHash);
+        command.GetType().GetField(fieldName)!.SetValue(command, value);
     }
 
     // has_more 是 `candidates.Length > limit`:limit 剛好等於候選數必須是 false(否則 worker 永遠
@@ -1233,6 +1349,78 @@ public sealed class InMemoryAgentRunRecoveryTests
         Assert.Equal(expectedHasMore, claimed.HasMore);
     }
 
+    // 邊界值:lease duration 合法區間是 `is < 5 or > 900`,兩端各測 on-point(5/900 成立)與
+    // off-point(4/901 被擋)。其他測試一律用區間中央的 300,測不出把 5 寫成 6 之類的錯。
+    [Theory]
+    [InlineData(4, AgentRunWriteStatus.InvalidState)]
+    [InlineData(5, AgentRunWriteStatus.Success)]
+    [InlineData(900, AgentRunWriteStatus.Success)]
+    [InlineData(901, AgentRunWriteStatus.InvalidState)]
+    public async Task ClaimLease_AcceptsOnlyDurationBetweenFiveAndNineHundredSeconds(
+        int durationSeconds, AgentRunWriteStatus expected)
+    {
+        var (agents, skills, agent) = await CreatePublishedAgentAsync("lease-duration-bounds");
+        var runs = new InMemoryAgentRunRepository(agents, skills);
+        var started = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "start", "start-key", default);
+
+        var lease = await runs.ClaimLeaseAsync(
+            "demo-a",
+            "admin-a",
+            started.Run!.Id,
+            new AgentRunLeaseRequest(started.Run.StateVersion, "worker-a", durationSeconds),
+            default);
+
+        Assert.Equal(expected, lease.Status);
+        Assert.Equal(expected == AgentRunWriteStatus.Success, lease.Lease is not null);
+    }
+
+    // 邊界值:單次 append 的 events 數量限制是 `is < 1 or > 100`,所以 100 必須成功、101 與空陣列
+    // 都必須被擋下;被擋下時 event_ack_cursor 不可前進(部分寫入等於帳目破洞)。
+    [Theory]
+    [InlineData(0, AgentRunWriteStatus.InvalidState)]
+    [InlineData(100, AgentRunWriteStatus.Success)]
+    [InlineData(101, AgentRunWriteStatus.InvalidState)]
+    public async Task AppendEvents_AcceptsAtMostOneHundredEventsPerBatch(
+        int eventCount, AgentRunWriteStatus expected)
+    {
+        var (agents, skills, agent) = await CreatePublishedAgentAsync("append-batch-bounds");
+        var runs = new InMemoryAgentRunRepository(agents, skills);
+        var started = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "start", "start-key", default);
+        var lease = await runs.ClaimLeaseAsync(
+            "demo-a",
+            "admin-a",
+            started.Run!.Id,
+            new AgentRunLeaseRequest(started.Run.StateVersion, "worker-a", 300),
+            default);
+        var events = Enumerable.Range(0, eventCount)
+            .Select(index => new AgentRunEventAppend(
+                Guid.NewGuid(),
+                "model_step",
+                "worker",
+                started.Run.SnapshotHash,
+                JsonSerializer.SerializeToElement(new { step = index })))
+            .ToArray();
+
+        var appended = await runs.AppendEventsAsync(
+            "demo-a",
+            "admin-a",
+            started.Run.Id,
+            new AgentRunEventsAppendRequest(
+                lease.Lease!.Run.StateVersion,
+                lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration,
+                lease.Lease.EventAckCursor,
+                events),
+            default);
+
+        Assert.Equal(expected, appended.Status);
+        Assert.Equal(
+            (long)(expected == AgentRunWriteStatus.Success ? eventCount : 0),
+            (await runs.GetAsync("demo-a", "admin-a", started.Run.Id, default))!.EventAckCursor);
+    }
+
     private static string V2CheckpointRef(long generation)
         => $"v2:{generation}:{new string('b', 64)}:{Guid.NewGuid():D}";
 
@@ -1254,7 +1442,9 @@ public sealed class InMemoryAgentRunRecoveryTests
     private static async Task<(
         InMemoryAgentRepository Agents,
         InMemorySkillRepository Skills,
-        Agent Agent)> CreatePublishedAgentAsync(string slug)
+        Agent Agent)> CreatePublishedAgentAsync(
+        string slug,
+        string[]? executionRoles = null)
     {
         var skills = new InMemorySkillRepository();
         var agents = new InMemoryAgentRepository(skills);
@@ -1263,7 +1453,7 @@ public sealed class InMemoryAgentRunRecoveryTests
             Name: null,
             Description: null,
             SystemPrompt: "test",
-            ExecutionRoles: new[] { "worker" },
+            ExecutionRoles: executionRoles ?? new[] { "worker" },
             Capabilities: null,
             OutputContract: null,
             Audience: new[] { "ADMIN" },

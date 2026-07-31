@@ -61,22 +61,26 @@ public sealed class EvalGovernancePostgresApiTests(PostgresFixture fixture) : IA
         Assert.Equal(first.CasesSha256, rev1.CasesSha256);
     }
 
-    [SkippableFact]
-    public async Task CsrEval001Seed_LandsInAppdb_ForEachRealTenant()
+    /// <summary>SeedEvalSuiteAsync 對 `tenants` 表的**每一列**發一次 PublishSuiteRevisionAsync,
+    /// 所以兩個真實種子租戶都要各驗一次 —— 只驗 demo-a 的話,「只種到迴圈第一個租戶」的回歸會漏掉。</summary>
+    [SkippableTheory]
+    [InlineData("demo-a")]
+    [InlineData("demo-b")]
+    public async Task CsrEval001Seed_LandsInAppdb_ForEachRealTenant(string tenantCode)
     {
         fixture.SkipIfUnavailable();
         await using var connection = await fixture.DataSource!.OpenConnectionAsync();
         var suite = await connection.QuerySingleOrDefaultAsync<(string TenantId, int CurrentRevision)>(
             "SELECT tenant_id AS TenantId, current_revision AS CurrentRevision FROM eval_suite"
-            + " WHERE tenant_id = 'demo-a' AND suite_id = @suiteId",
-            new { suiteId = CsrEval001Suite.SuiteId });
-        Assert.Equal("demo-a", suite.TenantId);
+            + " WHERE tenant_id = @tenantCode AND suite_id = @suiteId",
+            new { tenantCode, suiteId = CsrEval001Suite.SuiteId });
+        Assert.Equal(tenantCode, suite.TenantId);
         Assert.Equal(1, suite.CurrentRevision);
 
         var caseCount = await connection.ExecuteScalarAsync<int>(
             "SELECT r.case_count FROM eval_suite_revision r JOIN eval_suite s ON s.id = r.suite_id"
-            + " WHERE s.tenant_id = 'demo-a' AND s.suite_id = @suiteId AND r.revision = 1",
-            new { suiteId = CsrEval001Suite.SuiteId });
+            + " WHERE s.tenant_id = @tenantCode AND s.suite_id = @suiteId AND r.revision = 1",
+            new { tenantCode, suiteId = CsrEval001Suite.SuiteId });
         Assert.True(caseCount > 0);
     }
 

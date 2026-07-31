@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Backend.Api.Common;
 using Backend.Api.Configuration;
 using Backend.Api.Data;
 using Dapper;
@@ -209,6 +210,82 @@ public sealed class ConfigurationSetRepositoryTests
         Assert.True((await _fx.Repo.GetAsync(t, a.Id, default))!.IsActive); // 仍是原本那組
     }
 
+    // ---- UpdateAsync 正常路徑:name/values 整組覆寫、updated_at 上推、is_active 不動 ----
+    // 全檔只在跨租戶案呼叫過 UpdateAsync(且只驗它回 null),成功這一等價類沒人顧。
+
+    [SkippableFact]
+    public async Task Update_ExistingSet_ReplacesNameAndValues_BumpsUpdatedAt_KeepsActive()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "p4repo-upd-a";
+
+        var created = await _fx.Repo.CreateAsync(t, "before", Values(("old.key", 1)), "u", default);
+        Assert.NotNull(created);
+        await _fx.Repo.ActivateAsync(t, created!.Id, default);
+
+        var updated = await _fx.Repo.UpdateAsync(t, created.Id, "renamed", Values(("retrieval.top_k", 2)), default);
+
+        Assert.NotNull(updated);
+        Assert.Equal("renamed", updated!.Name);
+        Assert.Equal(2, ((JsonElement)updated.Values["retrieval.top_k"]).GetInt32());
+        Assert.False(updated.Values.ContainsKey("old.key")); // values 是整組覆寫,不是逐鍵合併
+        Assert.True(updated.IsActive);                       // update 不動 is_active(啟用只走 activate)
+        Assert.True(updated.UpdatedAt > created.UpdatedAt);  // updated_at = now()
+
+        // 再讀一次確認真的落地(不只是 RETURNING 的當下投影);created_at 不被 update 改。
+        var fetched = await _fx.Repo.GetAsync(t, created.Id, default);
+        Assert.NotNull(fetched);
+        Assert.Equal("renamed", fetched!.Name);
+        Assert.Equal(created.CreatedAt, fetched.CreatedAt);
+    }
+
+    // ---- UpdateAsync 改名撞同租戶既有 name:唯一約束 uq_confset_tenant_name → 23505 → ApiException 409 ----
+    // 對應 Create 撞名的 DB 級案(SSR-P4-003);手寫 fake 生不出真的 PostgresException,只有真 DB 背書得了這條 catch。
+
+    [SkippableFact]
+    public async Task Update_RenameToExistingName_SameTenant_Throws409_DbEnforced()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "p4repo-upd-dup-a";
+
+        var a = await _fx.Repo.CreateAsync(t, "A", Values(), "u", default);
+        var b = await _fx.Repo.CreateAsync(t, "B", Values(), "u", default);
+        Assert.NotNull(a);
+        Assert.NotNull(b);
+
+        var ex = await Assert.ThrowsAsync<ApiException>(
+            () => _fx.Repo.UpdateAsync(t, b!.Id, "A", Values(), default));
+
+        Assert.Equal(409, ex.Status);
+        Assert.Equal("Configuration Set 名稱已存在：A", ex.Message);
+
+        // 衝突 = 零寫入:B 仍叫 B。
+        Assert.Equal("B", (await _fx.Repo.GetAsync(t, b!.Id, default))!.Name);
+    }
+
+    // ---- GetActiveAsync 正常路徑:回的是 active 那一組(含 values),不是任一組 ----
+
+    [SkippableFact]
+    public async Task GetActive_TenantHasActive_ReturnsThatSetWithValues()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "p4repo-getactive-a";
+
+        var a = await _fx.Repo.CreateAsync(t, "A", Values(("retrieval.top_k", 3)), "u", default);
+        var b = await _fx.Repo.CreateAsync(t, "B", Values(("retrieval.top_k", 9)), "u", default);
+        Assert.NotNull(a);
+        Assert.NotNull(b);
+
+        await _fx.Repo.ActivateAsync(t, a!.Id, default);
+
+        var active = await _fx.Repo.GetActiveAsync(t, default);
+        Assert.NotNull(active);
+        Assert.Equal(a.Id, active!.Id);
+        Assert.Equal("A", active.Name);
+        Assert.True(active.IsActive);
+        Assert.Equal(3, ((JsonElement)active.Values["retrieval.top_k"]).GetInt32());
+    }
+
     // ---- SSR-P4-005:刪 active 後該租戶變無 active、不自動選另一組 ----
 
     [SkippableFact]
@@ -275,5 +352,23 @@ public sealed class ConfigurationSetRepositoryTests
         Assert.Equal(15, ((JsonElement)fetched!.Values["retrieval.top_k"]).GetInt32());
         Assert.Equal("gpt-4o-mini", ((JsonElement)fetched.Values["llm.model"]).GetString());
         Assert.Equal(0.5, ((JsonElement)fetched.Values["llm.temperature"]).GetDouble());
+    }
+
+    // ---- jsonb 往返的 0 鍵邊界:空 values 取回來是「空且非 null 的字典」,不是 null/反序列化炸掉 ----
+    // 多條測試都拿空 Values() 當輸入,但從沒驗過輸出;呼叫端直接 foreach/index,回 null 會 NRE。
+
+    [SkippableFact]
+    public async Task Values_EmptyDictionary_RoundTripsAsEmptyNotNull()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "p4repo-json-empty-a";
+
+        var created = await _fx.Repo.CreateAsync(t, "empty", Values(), "u", default);
+        Assert.NotNull(created);
+        Assert.Empty(created!.Values);
+
+        var fetched = await _fx.Repo.GetAsync(t, created.Id, default);
+        Assert.NotNull(fetched);
+        Assert.Empty(fetched!.Values);
     }
 }

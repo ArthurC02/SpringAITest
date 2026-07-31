@@ -58,10 +58,10 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     }
 
     [Theory]
-    [InlineData("System.Net.Http.HttpRequestException")] // representative valid token
-    [InlineData("bad class\n")] // control character
-    [InlineData("System.Net.Http.HttpRequestException\n")] // trailing newline: proves \A...\z (not ^...$) is enforced
-    public async Task FlagOn_ErrorClassShape_RejectsControlCharacters_AcceptsTokenForm(string errorClass)
+    [InlineData("System.Net.Http.HttpRequestException", HttpStatusCode.OK)] // representative valid token
+    [InlineData("bad class", HttpStatusCode.BadRequest)] // charset alone: a space is outside [A-Za-z0-9_.:+-], no control character involved
+    [InlineData("System.Net.Http.HttpRequestException\n", HttpStatusCode.BadRequest)] // trailing newline: proves \A...\z (not ^...$) is enforced
+    public async Task FlagOn_ErrorClassShape_AcceptsTokenForm_RejectsNonTokenAndControlCharacters(string errorClass, HttpStatusCode expected)
     {
         using var factory = new RunEvidenceEnabledFactory();
         using var client = factory.CreateInternalClient().WithTenant("e1-error-class").WithUser("workflow").WithRole("SYSTEM");
@@ -71,8 +71,150 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
             usage_units = 1, evidence = new { outcome = "failure", error_class = errorClass },
         });
 
-        var expected = errorClass.Contains('\n') ? HttpStatusCode.BadRequest : HttpStatusCode.OK;
         Assert.Equal(expected, response.StatusCode);
+    }
+
+    [Theory] // ErrorClassPattern is {1,200}: both ends of the length class, not just the charset
+    [InlineData(0, HttpStatusCode.BadRequest)] // empty string is below the 1-char minimum
+    [InlineData(200, HttpStatusCode.OK)] // on-point
+    [InlineData(201, HttpStatusCode.BadRequest)] // off-point
+    public async Task FlagOn_ErrorClassLength_OnOffPointOfTheTwoHundredCharCap(int length, HttpStatusCode expected)
+    {
+        using var factory = new RunEvidenceEnabledFactory();
+        using var client = factory.CreateInternalClient().WithTenant("e1-error-class-length").WithUser("workflow").WithRole("SYSTEM");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
+            usage_units = 1, evidence = new { outcome = "failure", error_class = new string('a', length) },
+        });
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FlagOn_InvalidObservationQuality_Returns400_WithItsOwnMessage()
+    {
+        // The message proves *which* branch rejected: observation_quality has its own enum check,
+        // separate from outcome's -- both are only ever 400 to the caller.
+        using var factory = new RunEvidenceEnabledFactory();
+        using var client = factory.CreateInternalClient().WithTenant("e1-quality-invalid").WithUser("workflow").WithRole("SYSTEM");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
+            usage_units = 2, evidence = new { outcome = "success", observation_quality = "bogus" },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("invalid evidence observation_quality", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    [Theory] // every other evidence string goes through Safe(value, max) -- the caps are per field, not global
+    [InlineData("role_view", 128, "", HttpStatusCode.OK)] // on-point of its 128 cap
+    [InlineData("role_view", 129, "", HttpStatusCode.BadRequest)] // off-point
+    [InlineData("verifier_verdict", 64, "", HttpStatusCode.OK)] // its own cap is 64...
+    [InlineData("verifier_verdict", 65, "", HttpStatusCode.BadRequest)] // ...not the 128 used by its neighbours
+    [InlineData("model_fingerprint", 8, "\n", HttpStatusCode.BadRequest)] // control character, far inside the 256 cap
+    public async Task FlagOn_EvidenceStringFields_EnforceTheirOwnLengthAndControlCharacterLimits(
+        string field, int length, string suffix, HttpStatusCode expected)
+    {
+        using var factory = new RunEvidenceEnabledFactory();
+        using var client = factory.CreateInternalClient().WithTenant("e1-evidence-strings").WithUser("workflow").WithRole("SYSTEM");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
+            usage_units = 1,
+            evidence = new Dictionary<string, object?> { ["outcome"] = "success", [field] = new string('x', length) + suffix },
+        });
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    [Theory] // the four evidence revisions share one bound: [1, 1_000_000]
+    [InlineData("orchestrator_revision", 0, HttpStatusCode.BadRequest)]
+    [InlineData("orchestrator_revision", 1, HttpStatusCode.OK)]
+    [InlineData("context_revision", 1_000_000, HttpStatusCode.OK)]
+    [InlineData("policy_revision", 1_000_001, HttpStatusCode.BadRequest)]
+    [InlineData("tool_revision", 0, HttpStatusCode.BadRequest)]
+    public async Task FlagOn_EvidenceRevisionBounds_OnOffPointOfOneToOneMillion(string field, int revision, HttpStatusCode expected)
+    {
+        using var factory = new RunEvidenceEnabledFactory();
+        using var client = factory.CreateInternalClient().WithTenant("e1-revision-bounds").WithUser("workflow").WithRole("SYSTEM");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
+            usage_units = 1,
+            evidence = new Dictionary<string, object?> { ["outcome"] = "success", [field] = revision },
+        });
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task FlagOn_EvidenceRevisionFields_AreCarriedIntoTheEnvelope()
+    {
+        // Distinct values on purpose: a crossed mapping in BuildEnvelope cannot pass this.
+        using var factory = new RunEvidenceEnabledFactory();
+        using var client = factory.CreateInternalClient().WithTenant("e1-revisions").WithUser("workflow").WithRole("SYSTEM");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
+            usage_units = 1,
+            evidence = new
+            {
+                outcome = "success", orchestrator_revision = 5, context_revision = 6,
+                policy_revision = 7, tool_revision = 8,
+            },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        var envelope = Assert.Single(store.Evidence, x => x.Tenant == "e1-revisions").Value;
+        Assert.Equal(5, envelope.OrchestratorRevision);
+        Assert.Equal(6, envelope.ContextRevision);
+        Assert.Equal(7, envelope.PolicyRevision);
+        Assert.Equal(8, envelope.ToolRevision);
+    }
+
+    [Fact]
+    public async Task FlagOn_EvidenceObjectOmitted_StillWritesAnEnvelope_WithUnknownOutcome()
+    {
+        // The whole nested object is optional: SafeEvidence(null) passes and BuildEnvelope fills in
+        // the defaults -- outcome "unknown", quality "measured" because usage *was* observed.
+        using var factory = new RunEvidenceEnabledFactory();
+        using var client = factory.CreateInternalClient().WithTenant("e1-no-evidence").WithUser("workflow").WithRole("SYSTEM");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
+            usage_units = 4,
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        var envelope = Assert.Single(store.Evidence, x => x.Tenant == "e1-no-evidence").Value;
+        Assert.Equal("unknown", envelope.Outcome);
+        Assert.Equal("measured", envelope.ObservationQuality);
+    }
+
+    [Fact]
+    public async Task FlagOn_NothingObserved_OverridesTheCallerClaimedQualityWithUnknown()
+    {
+        // usage/cost/latency all absent: the caller may claim "measured", the envelope still says
+        // unknown -- and the aggregate must not zero-fill it into the measured sum.
+        using var factory = new RunEvidenceEnabledFactory();
+        using var client = factory.CreateInternalClient().WithTenant("e1-quality").WithUser("workflow").WithRole("SYSTEM");
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
+            evidence = new { outcome = "success", observation_quality = "measured" },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        Assert.Equal("unknown", Assert.Single(store.Evidence, x => x.Tenant == "e1-quality").Value.ObservationQuality);
+
+        var reconcile = await store.GetEvidenceReconcileAsync("e1-quality", default);
+        Assert.Equal(1, reconcile.UnknownObservationCount);
+        Assert.Null(reconcile.MeasuredUsageUnitsSum);
     }
 
     [Fact]

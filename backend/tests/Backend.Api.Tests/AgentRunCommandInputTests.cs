@@ -118,6 +118,32 @@ public sealed class AgentRunCommandInputTests
                 out _);
     }
 
+    // 「整包不是物件」已由上面的 42 覆蓋;這裡補另一個等價類:是物件、message 存在
+    // 但型別錯。IsMessage 只認字串,錯型別若被放行,canonical 編碼會在 GetString()
+    // 上丟例外,而不是乾淨地回一個驗證失敗。
+    [Theory]
+    [InlineData("""{"message":42}""")]
+    [InlineData("""{"message":true}""")]
+    [InlineData("""{"message":null}""")]
+    [InlineData("""{"message":["valid"]}""")]
+    [InlineData("""{"message":{"text":"valid"}}""")]
+    public void Start_RejectsNonStringMessage(string json)
+    {
+        Assert.False(Validate(json, "start", out _));
+    }
+
+    // message 上限 16384(start 與 resume 共用同一個 IsMessage):on-point 放行、
+    // off-point 拒收。長度寫錯會讓合法的長提問在派工前就被判成 invalid input。
+    [Theory]
+    [InlineData(16_384, true)]
+    [InlineData(16_385, false)]
+    public void Start_MessageIsCappedAt16384(int messageLength, bool expected)
+    {
+        var json = $$"""{"message":"{{new string('m', messageLength)}}"}""";
+
+        Assert.Equal(expected, Validate(json, "start", out _));
+    }
+
     // cancel reason 上限 500:on-point 放行、off-point 拒收。這些輸入是 poison-recovery
     // 比對 canonical hash 的實際型別,長度寫錯會讓合法 cancel 被 dead-letter。
     [Theory]
@@ -226,6 +252,74 @@ public sealed class AgentRunCommandInputTests
                 tampered,
                 "resume",
                 expected));
+    }
+
+    // canonical 編碼剩下的三個分支。command_input 存成 jsonb,claim 時重讀再比對
+    // 寫入當下算的 hash,所以每個分支的正規化範圍都是契約:頂層鍵順序不影響 hash、
+    // 值被竄改必須抓到、選填的 task_envelope 不可被整棵砍掉還算出同一個 hash。
+    // 注意 task_envelope 是用 WriteTo 原樣寫出的 —— 巢狀鍵順序「不會」被重新正規化,
+    // 這是實際行為,一併釘住以免無聲改變。
+    [Fact]
+    public void CanonicalHash_CoversStartCancelAndDeadlineCleanupBranches()
+    {
+        var start = Parse(
+            """{"message":"go","task_envelope":{"objective":"research","priority":1}}""");
+        var startTopLevelReordered = Parse(
+            """{"task_envelope":{"objective":"research","priority":1},"message":"go"}""");
+        var startNestedReordered = Parse(
+            """{"message":"go","task_envelope":{"priority":1,"objective":"research"}}""");
+        var startTampered = Parse(
+            """{"message":"go","task_envelope":{"objective":"exfiltrate","priority":1}}""");
+
+        var startHash = AgentRunCommandInput.CanonicalSha256(start, "start");
+        Assert.Equal(
+            startHash,
+            AgentRunCommandInput.CanonicalSha256(startTopLevelReordered, "start"));
+        Assert.NotEqual(
+            startHash,
+            AgentRunCommandInput.CanonicalSha256(startNestedReordered, "start"));
+        Assert.True(AgentRunCommandInput.MatchesCanonicalSha256(
+            startTopLevelReordered,
+            "start",
+            startHash));
+        Assert.False(AgentRunCommandInput.MatchesCanonicalSha256(
+            startTampered,
+            "start",
+            startHash));
+        // 整棵 task_envelope 被拿掉也算竄改,不能與帶 envelope 的 start 撞 hash。
+        Assert.False(AgentRunCommandInput.MatchesCanonicalSha256(
+            Parse("""{"message":"go"}"""),
+            "start",
+            startHash));
+
+        // cancel:reason 的 null 與字串是不同型別的值,不得算出同一個 hash。
+        var cancelNullHash = AgentRunCommandInput.CanonicalSha256(
+            Parse("""{"reason":null}"""),
+            "cancel");
+        Assert.True(AgentRunCommandInput.MatchesCanonicalSha256(
+            Parse("""{"reason":null}"""),
+            "cancel",
+            cancelNullHash));
+        Assert.False(AgentRunCommandInput.MatchesCanonicalSha256(
+            Parse("""{"reason":"stop"}"""),
+            "cancel",
+            cancelNullHash));
+
+        // deadline_cleanup:終局狀態被換掉必須抓到,否則 failed 會被改寫成 cancelled。
+        var failedHash = AgentRunCommandInput.CanonicalSha256(
+            Parse("""{"target_terminal":"failed"}"""),
+            "deadline_cleanup");
+        Assert.True(AgentRunCommandInput.MatchesCanonicalSha256(
+            Parse("""{"target_terminal":"failed"}"""),
+            "deadline_cleanup",
+            failedHash));
+        Assert.False(AgentRunCommandInput.MatchesCanonicalSha256(
+            Parse("""{"target_terminal":"cancelled"}"""),
+            "deadline_cleanup",
+            failedHash));
+
+        static JsonElement Parse(string json)
+            => JsonDocument.Parse(json).RootElement.Clone();
     }
 
     private static string V2CheckpointRef(long generation, char hashCharacter)

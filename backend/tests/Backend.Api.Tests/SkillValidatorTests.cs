@@ -73,6 +73,18 @@ public sealed class SkillValidatorTests
         Assert.Equal(string.Empty, result.Skill.Description);
     }
 
+    // kind 的兩個合法等價類(對照 ValidWithContractViolation_Throws502 的非法類 kind=agentic):
+    // 舊引擎不帶 kind → additive 預設 flow;新引擎明確回 flow → 原值帶過,不被預設值蓋掉。
+    [Theory]
+    [InlineData("""{"valid":true,"errors":[],"skill":{"name":"quarterly_qa"}}""")]
+    [InlineData("""{"valid":true,"errors":[],"skill":{"name":"quarterly_qa","kind":"flow"}}""")]
+    public async Task Valid_KindAbsentOrFlow_ResolvesToFlow(string body)
+    {
+        var result = await Validate(Json(HttpStatusCode.OK, body));
+
+        Assert.Equal("flow", result.Skill!.Kind);
+    }
+
     [Fact] // valid=true 卻沒帶 skill → 引擎違約;backend 無從得知 name → 502,不猜、不寫入。
     public async Task ValidWithoutSkillMetadata_Throws502()
     {

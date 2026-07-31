@@ -187,6 +187,42 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // 整個 AgentRunController 掛 class-level [AdminOnly](AgentRunController:12),而且它是
+    // authorization filter —— 嚴格早於 model validation 與所有業務規則。非 ADMIN 不論請求本身合不合法
+    // (良好請求 / 壞掉的 groups header / 萬用字元 capability,後兩者對 ADMIN 是 400)都必須是同一個
+    // 403 + 同一訊息,不得退化成 400/404 而洩漏 Agent 或規則細節。
+    [Theory]
+    [InlineData("USER", null, null)]
+    [InlineData(null, null, null)]
+    [InlineData("USER", "operations *", null)]
+    [InlineData("USER", null, "tool.use:*")]
+    public async Task Start_NonAdminIsForbiddenBeforeRequestValidation(
+        string? role, string? groups, string? capabilities)
+    {
+        var agentId = await PublishedAgentAsync(Admin(), "admin-only");
+        var client = _factory.CreateInternalClient().WithTenant("demo-a").WithUser("user-a");
+        if (role is not null)
+        {
+            client.WithRole(role);
+        }
+        if (groups is not null)
+        {
+            client.DefaultRequestHeaders.TryAddWithoutValidation("X-User-Groups", groups);
+        }
+        if (capabilities is not null)
+        {
+            client.DefaultRequestHeaders.TryAddWithoutValidation("X-User-Capabilities", capabilities);
+        }
+
+        var response = await client.SendAsync(
+            Start(agentId, $"admin-only-{Guid.NewGuid():N}"));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(
+            "權限不足，無法存取 Agent run",
+            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task Start_Idempotency_ReplaysSameRun_AndRejectsDifferentPayload()
     {
@@ -213,6 +249,86 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
             (await first.ReadJsonAsync())["id"]!.GetValue<string>(),
             (await second.ReadJsonAsync())["id"]!.GetValue<string>());
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+    }
+
+    // Idempotency-Key 是必填(AgentRunController:236-246):完全不送標頭、空值、只有空白同屬
+    // 「沒有冪等鍵」等價類 —— 少了這條,漏送標頭會被誤讀成「每次都是一個新 run」而重複派工。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Start_RequiresIdempotencyKey(string? key)
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "idem-missing");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/agents/{agentId}/runs")
+        {
+            Content = JsonContent.Create(new { message = "請整理重點" }),
+        };
+        if (key is not null)
+        {
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", key);
+        }
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "Idempotency-Key 必須為 1 到 128 個可見字元",
+            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // Idempotency-Key 長度上限 128(AgentRunController:16)。全檔案的 key 都是 "start-snapshot"
+    // 這種安全內部值,把 128 寫成 8 或 1024 都不會有人紅 —— on-point 必須放行,off-point 必須 400。
+    [Theory]
+    [InlineData(128, HttpStatusCode.Accepted)]
+    [InlineData(129, HttpStatusCode.BadRequest)]
+    public async Task Start_IdempotencyKeyLengthBoundaries(int keyLength, HttpStatusCode expected)
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "idem-length");
+
+        var response = await client.SendAsync(Start(agentId, new string('k', keyLength)));
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    // message 必填(AgentRunController:248-254)。空字串與只有空白同屬「空訊息」等價類,但只有後者
+    // 能證明 Trim 還在;兩者都必須是 400,不能是 413,更不能建出一個空訊息的 run。
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Start_RejectsBlankMessage(string message)
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "blank-message");
+
+        var response = await client.SendAsync(
+            Start(agentId, $"blank-message-{Guid.NewGuid():N}", message));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "message 不可為空",
+            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // message 長度上限 16384(AgentRunController:15,255-258),超過對外是 413 而不是 400 ——
+    // 與 Orchestrator 端同一條界線(見 OrchestratorRunApiTests),兩邊都必須釘住同一個狀態碼。
+    [Theory]
+    [InlineData(16_384, HttpStatusCode.Accepted)]
+    [InlineData(16_385, HttpStatusCode.RequestEntityTooLarge)]
+    public async Task Start_MessageLengthBoundaries(int messageLength, HttpStatusCode expected)
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "message-length");
+
+        var response = await client.SendAsync(Start(
+            agentId,
+            $"message-length-{Guid.NewGuid():N}",
+            new string('m', messageLength)));
+
+        Assert.Equal(expected, response.StatusCode);
     }
 
     [Fact]
@@ -338,6 +454,90 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
         }
 
         Assert.Empty(items);
+    }
+
+    // CompleteDispatch 的 claim_token 守門(AgentRunController:147-151)。上面那條測的是「格式合法但
+    // 值不對 → 409」;這裡補另外兩個等價類:空白與超過 256 字元是輸入不合法 → 400。
+    // 剛好 256 是合法上界,只會因為值不對而 409 —— 這樣 400/409 的分界線才被真正釘住。
+    [Fact]
+    public async Task DispatchAck_RejectsBlankOrOversizedClaimToken()
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "ack-token");
+        var start = await client.SendAsync(Start(agentId, "ack-token-start"));
+        var runId = (await start.ReadJsonAsync())["id"]!.GetValue<string>();
+        var commandId = start.Headers.GetValues("X-Agent-Run-Command-Id").Single();
+        var route = $"/api/agent-runs/{runId}/commands/{commandId}/dispatch/complete";
+
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync(route, new { claim_token = "   " })).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync(
+                route, new { claim_token = new string('t', 257) })).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.Conflict,
+            (await client.PostAsJsonAsync(
+                route, new { claim_token = new string('t', 256) })).StatusCode);
+    }
+
+    // POST /api/agent-runs/{run}/commands/{command}/claim(AgentRunController:167-199)整條決策表:
+    // worker_id/lease_seconds 不合法 → 400、未知 command → 404、成功 → 200 並回傳只給 Workflow 的
+    // input/snapshot、被別的 worker 佔住 → 409、ACK 之後重認領 → 204(Replay,不再發第二次 lease)。
+    // 這些狀態碼原本只在 repository 層驗過,HTTP 映射完全沒有測試背書。
+    [Fact]
+    public async Task ClaimCommand_ValidatesInput_AndMapsEveryClaimOutcome()
+    {
+        const string message = "認領測試訊息";
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "claim-command");
+        var start = await client.SendAsync(Start(agentId, "claim-command-start", message));
+        var run = await start.ReadJsonAsync();
+        var runId = run["id"]!.GetValue<string>();
+        var commandId = start.Headers.GetValues("X-Agent-Run-Command-Id").Single();
+        var route = $"/api/agent-runs/{runId}/commands/{commandId}/claim";
+
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync(
+                route, new { worker_id = "   ", lease_seconds = 30 })).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync(
+                route, new { worker_id = "claim-worker-a", lease_seconds = 4 })).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.NotFound,
+            (await client.PostAsJsonAsync(
+                $"/api/agent-runs/{runId}/commands/{Guid.NewGuid():D}/claim",
+                new { worker_id = "claim-worker-a", lease_seconds = 30 })).StatusCode);
+
+        var claimed = await client.PostAsJsonAsync(
+            route, new { worker_id = "claim-worker-a", lease_seconds = 30 });
+        Assert.Equal(HttpStatusCode.OK, claimed.StatusCode);
+        var item = await claimed.ReadJsonAsync();
+        Assert.Equal(commandId, item["command_id"]!.GetValue<string>());
+        Assert.Equal("start", item["command_type"]!.GetValue<string>());
+        // 認領信封是 Workflow-only:私有 input 與快照都在這裡,與公開 start 回應(不得含 message)對照。
+        Assert.Equal(message, item["input"]!["message"]!.GetValue<string>());
+        Assert.Equal(
+            run["snapshot_hash"]!.GetValue<string>(),
+            item["snapshot"]!["snapshot_hash"]!.GetValue<string>());
+
+        Assert.Equal(
+            HttpStatusCode.Conflict,
+            (await client.PostAsJsonAsync(
+                route, new { worker_id = "claim-worker-b", lease_seconds = 30 })).StatusCode);
+
+        Assert.Equal(
+            HttpStatusCode.NoContent,
+            (await client.PostAsJsonAsync(
+                $"/api/agent-runs/{runId}/commands/{commandId}/dispatch/complete",
+                new { claim_token = item["claim_token"]!.GetValue<string>() })).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.NoContent,
+            (await client.PostAsJsonAsync(
+                route, new { worker_id = "claim-worker-a", lease_seconds = 30 })).StatusCode);
     }
 
     [Fact]
@@ -528,6 +728,29 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.Conflict, illegal.StatusCode);
     }
 
+    // cancel reason 長度上限 500(AgentRunController:88-92)。既有兩支 cancel 測試都用短 reason
+    // (「停止測試」/"stop"),把 500 寫成 50 也不會有人紅 —— on-point 放行、off-point 進 400。
+    [Theory]
+    [InlineData(500, HttpStatusCode.Accepted)]
+    [InlineData(501, HttpStatusCode.BadRequest)]
+    public async Task Cancel_ReasonLengthBoundaries(int reasonLength, HttpStatusCode expected)
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "cancel-reason");
+        var run = await (await client.SendAsync(
+            Start(agentId, $"cancel-reason-start-{Guid.NewGuid():N}"))).ReadJsonAsync();
+
+        using var cancel = new HttpRequestMessage(
+            HttpMethod.Post, $"/api/runs/{run["id"]!.GetValue<string>()}/cancel")
+        {
+            Content = JsonContent.Create(new { reason = new string('r', reasonLength) }),
+        };
+        cancel.Headers.TryAddWithoutValidation(
+            "Idempotency-Key", $"cancel-reason-{Guid.NewGuid():N}");
+
+        Assert.Equal(expected, (await client.SendAsync(cancel)).StatusCode);
+    }
+
     [Fact]
     public async Task Events_AreCursorOrdered_Idempotent_AndRejectSensitivePayload()
     {
@@ -687,9 +910,25 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // worker_id 上限 200(AgentRunRecoveryController:25)只被覆蓋了「空字串」與「剛好 200 合法」,
+    // 缺 201 這個 off-point:把 200 寫成 2000 現在不會有人紅。
+    [Fact]
+    public async Task RecoveryClaim_RejectsWorkerIdAboveMaxLength()
+    {
+        var response = await _factory.CreateInternalClient().PostAsJsonAsync(
+            "/api/agent-runs/recovery/claim",
+            new { worker_id = new string('w', 201), limit = 20, lease_seconds = 30 });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // limit 與 lease_seconds 是兩個獨立邊界,同一個 if 用 || 串起來;只測對角線(1,5)與(100,300)
+    // 抓不到把其中一個條件寫成 && 之類的錯,所以交叉配對(1,300)與(100,5)也要放行。
     [Theory]
     [InlineData(1, 5)]
     [InlineData(100, 300)]
+    [InlineData(1, 300)]
+    [InlineData(100, 5)]
     public async Task RecoveryClaim_AcceptsInclusiveBoundaries(int limit, int leaseSeconds)
     {
         var response = await _factory.CreateInternalClient().PostAsJsonAsync(

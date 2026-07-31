@@ -175,6 +175,27 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.Equal(Sha(expected), revision.DefinitionSha256);
     }
 
+    /// <summary>
+    /// MarkValidatedAsync 的 false 分支:FOR UPDATE 沒鎖到 (tenant, id, draft_version) 對應列
+    /// (此處為 stale version)→ 回 false 且 draft_validated_version 保持未設定。
+    /// </summary>
+    [SkippableFact]
+    public async Task MarkValidated_StaleVersion_ReturnsFalse_AndLeavesDraftUnvalidated()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-markvalidated-stale";
+        var def = Def();
+        var agent = await Repo.CreateAsync(
+            tenant, "stale-validate", "研究助手", "說明", def, Sha(def), "author", default);
+
+        Assert.False(await Repo.MarkValidatedAsync(
+            tenant, agent!.Id, agent.DraftVersion + 1, def, Sha(def), default));
+
+        var stored = await Repo.GetAsync(tenant, agent.Id, default);
+        Assert.Null(stored!.DraftValidatedVersion);
+        Assert.Equal(agent.DraftVersion, stored.DraftVersion);
+    }
+
     [SkippableFact]
     public async Task Create_DuplicateSlug_ReturnsNull_ButOtherTenantSucceeds()
     {
@@ -234,6 +255,36 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.Equal(3, binding.SkillRevision);
     }
 
+    /// <summary>
+    /// 兩個以上 binding:InsertBindingsAsync 的 position 依 canonical 陣列順序遞增(非字典序),
+    /// 每筆各自 pin 到自己 Skill 的 current_revision。單筆 binding 的測試看不出這兩件事。
+    /// </summary>
+    [SkippableFact]
+    public async Task Publish_MultipleSkillBindings_PinEachRevisionAtDeclaredPosition()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-multi-binding";
+        await InsertSkillAsync(tenant, "skill-a", currentRevision: 4);
+        await InsertSkillAsync(tenant, "skill-b", currentRevision: 7);
+
+        var def = Def(bindings: new[] { "skill-b", "skill-a" }); // 宣告順序刻意非字典序
+        var agent = await CreateValidatedAsync(tenant, "multi-binding", def);
+
+        var result = await Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "publisher", default);
+        Assert.Equal(AgentWriteStatus.Success, result.Status);
+
+        var revision = Assert.Single(await Repo.ListRevisionsAsync(tenant, agent.Id, default));
+        var bindings = revision.SkillBindings;
+        Assert.Equal(2, bindings.Count);
+        Assert.Equal("skill-b", bindings[0].Skill);
+        Assert.Equal(7, bindings[0].SkillRevision);
+        Assert.Equal(0, bindings[0].Position);
+        Assert.Equal("skill-a", bindings[1].Skill);
+        Assert.Equal(4, bindings[1].SkillRevision);
+        Assert.Equal(1, bindings[1].Position);
+    }
+
     [SkippableFact]
     public async Task Publish_Unvalidated_ReturnsVersionConflict()
     {
@@ -286,6 +337,29 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.False(await conn.ExecuteScalarAsync<bool>(
             "SELECT EXISTS(SELECT 1 FROM agent_revision WHERE agent_id = @id)",
             new { id = agent.Id }));
+    }
+
+    /// <summary>
+    /// ResolveReferencesAsync 的「格式就不合法」分支(id 不是 GUID / revision ≤ 0),與既有的
+    /// 「格式合法但查不到」分支不同類。publish 到不了這裡(AgentCanonicalizer.Validate 先擋),
+    /// validate 路徑(ValidateReferencesAsync)是唯一入口。
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("not-a-guid", AgentDefaults.RuntimeWorkflowRevision)]
+    [InlineData(AgentDefaults.RuntimeWorkflowId, 0)]
+    public async Task ValidateReferences_MalformedWorkflowRef_RejectedOnFormat(
+        string workflowId, int revision)
+    {
+        _fx.SkipIfUnavailable();
+        var definition = JsonNode.Parse(Def(workflowId: workflowId))!.AsObject();
+        definition["runtime_workflow"]!["revision"] = revision;
+        var malformed = AgentCanonicalizer.CanonicalizeDefinition(definition.ToJsonString());
+
+        var errors = await Repo.ValidateReferencesAsync(
+            "agentrepo-malformed-workflow", malformed, default);
+
+        var error = Assert.Single(errors, e => e.Field == "runtime_workflow");
+        Assert.Equal("runtime_workflow 必須引用合法的 published revision", error.Message);
     }
 
     [SkippableFact]
@@ -517,6 +591,32 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.Equal(2, pin.SkillRevision);
     }
 
+    /// <summary>
+    /// restore 一個從未發布過的 revision 編號:agent 本身找得到(state 非 null),但 target 列不存在
+    /// → NotFound,且在 supersede 之前就回滾(既有 revision 1 仍是 published)。
+    /// </summary>
+    [SkippableFact]
+    public async Task Restore_UnknownRevision_ReturnsNotFound_WithoutSupersedingExisting()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-restore-missing";
+        var def = Def();
+        var agent = await CreateValidatedAsync(tenant, "restore-missing", def);
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await Repo.PublishAsync(
+                tenant, agent.Id, agent.DraftVersion, def, Sha(def), "p", default)).Status);
+
+        var restore = await Repo.RestoreAsync(
+            tenant, agent.Id, 999, def, Sha(def), "p", default);
+
+        Assert.Equal(AgentWriteStatus.NotFound, restore.Status);
+        Assert.Equal(0, restore.Revision);
+        var revision = Assert.Single(await Repo.ListRevisionsAsync(tenant, agent.Id, default));
+        Assert.Equal(1, revision.Revision);
+        Assert.Equal("published", revision.Status);
+    }
+
     // ---- 軟停用保留 revision;跨租戶不可見 ----
 
     [SkippableFact]
@@ -532,6 +632,20 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.True(await Repo.SetEnabledAsync(tenant, agent.Id, false, default));
         Assert.False((await Repo.GetAsync(tenant, agent.Id, default))!.Enabled);
         Assert.Single(await Repo.ListRevisionsAsync(tenant, agent.Id, default)); // revision 保留
+    }
+
+    [SkippableFact]
+    public async Task ReEnable_AfterSoftDisable_RestoresEnabledFlag()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-reenable";
+        var def = Def();
+        var agent = await Repo.CreateAsync(
+            tenant, "reenable-slug", "n", "d", def, Sha(def), "a", default);
+        Assert.True(await Repo.SetEnabledAsync(tenant, agent!.Id, false, default));
+
+        Assert.True(await Repo.SetEnabledAsync(tenant, agent.Id, true, default));
+        Assert.True((await Repo.GetAsync(tenant, agent.Id, default))!.Enabled);
     }
 
     [SkippableFact]
@@ -551,6 +665,40 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         var publish = await Repo.PublishAsync(
             "agentrepo-iso-b", agent.Id, 1, def, Sha(def), "p", default);
         Assert.Equal(AgentWriteStatus.NotFound, publish.Status);
+    }
+
+    /// <summary>
+    /// 跨租戶隔離的另一半:validate、restore 與 revision 讀取(既有測試只覆蓋 Get/SetEnabled/
+    /// UpdateDraft/Publish)。刻意用**已發布**的 agent,讓「查不到」不是因為本來就沒資料。
+    /// </summary>
+    [SkippableFact]
+    public async Task CrossTenant_ValidateRestoreAndRevisionReads_FailClosed()
+    {
+        _fx.SkipIfUnavailable();
+        const string owner = "agentrepo-iso-rev-a";
+        const string intruder = "agentrepo-iso-rev-b";
+        var def = Def();
+        var agent = await CreateValidatedAsync(owner, "iso-revisions", def);
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await Repo.PublishAsync(
+                owner, agent.Id, agent.DraftVersion, def, Sha(def), "p", default)).Status);
+        Assert.Single(await Repo.ListRevisionsAsync(owner, agent.Id, default));
+
+        Assert.False(await Repo.MarkValidatedAsync(
+            intruder, agent.Id, agent.DraftVersion, def, Sha(def), default));
+        Assert.Equal(
+            AgentWriteStatus.NotFound,
+            (await Repo.RestoreAsync(
+                intruder, agent.Id, 1, def, Sha(def), "p", default)).Status);
+        Assert.Empty(await Repo.ListRevisionsAsync(intruder, agent.Id, default));
+        Assert.Null(await Repo.GetRevisionDefinitionAsync(intruder, agent.Id, 1, default));
+
+        // owner 側完全沒被上述跨租戶呼叫動到。
+        var revision = Assert.Single(await Repo.ListRevisionsAsync(owner, agent.Id, default));
+        Assert.Equal(1, revision.Revision);
+        Assert.Equal("published", revision.Status);
+        Assert.Null((await Repo.GetAsync(owner, agent.Id, default))!.DraftValidatedVersion);
     }
 
     // ---- draft optimistic concurrency(A-DATA-08 的 SQL 面)----

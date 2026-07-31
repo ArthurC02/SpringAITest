@@ -182,12 +182,7 @@ public sealed class PromptArtifactsPostgresTests(PostgresFixture fixture) : IAsy
         await Repo.PublishComponentAsync(tenant, "persona", "PERSONA-V1", "tester", default);
         var manifest = await Repo.CreateManifestAsync(tenant, Canonical(("persona", 1)), "tester", default);
 
-        var definition = AgentCanonicalizer.Canonicalize(new AgentUpsert(
-            null, null, null, "你是研究助手", ["worker"], null, null, null, null, null, null, null, null,
-            new AgentWorkflowRef(AgentDefaults.RuntimeWorkflowId, AgentDefaults.RuntimeWorkflowRevision)));
-        var sha = SkillHash.Sha256(definition);
-        var agent = await agents.CreateAsync(tenant, "pinned", "n", "d", definition, sha, "author", default);
-        Assert.True(await agents.MarkValidatedAsync(tenant, agent!.Id, agent.DraftVersion, definition, sha, default));
+        var (agent, definition, sha) = await CreateValidatedAgentAsync(agents, tenant, "pinned");
 
         var published = await agents.PublishAsync(
             tenant, agent.Id, agent.DraftVersion, definition, sha, "publisher", default,
@@ -204,6 +199,43 @@ public sealed class PromptArtifactsPostgresTests(PostgresFixture fixture) : IAsy
         var reread = Assert.Single(await agents.ListRevisionsAsync(tenant, agent.Id, default));
         Assert.Equal(1, reread.PromptManifestRevision);
         Assert.Equal(manifest.ManifestSha256, reread.PromptManifestSha256);
+    }
+
+    /// <summary>
+    /// 另一半等價類:<c>promptManifestPin: null</c>(預設、也是最常見的 publish 呼叫)。null 是綁進
+    /// publish 那條 <c>INSERT ... SELECT @promptManifestRevision, @promptManifestSha256 FROM agent</c>
+    /// 的,參數型別由目標欄位推導而非 VALUES 字面值 — 這條 Npgsql/Postgres 路徑只有 InMemory fake 背書
+    /// 過(PromptArtifactsApiTests),真 DB 上必須確認落的是 NULL 而不是 0/空字串。
+    /// </summary>
+    [SkippableFact]
+    public async Task AgentPublish_WithoutPin_PersistsNullManifestColumns()
+    {
+        fixture.SkipIfUnavailable();
+        var tenant = TenantPrefix + "unpinned";
+        var agents = new AgentRepository(fixture.DataSource!);
+        var (agent, definition, sha) = await CreateValidatedAgentAsync(agents, tenant, "unpinned");
+
+        var published = await agents.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, definition, sha, "publisher", default);
+        Assert.Equal(AgentWriteStatus.Success, published.Status);
+
+        var revision = Assert.Single(await agents.ListRevisionsAsync(tenant, agent.Id, default));
+        Assert.Null(revision.PromptManifestRevision);
+        Assert.Null(revision.PromptManifestSha256);
+    }
+
+    /// <summary>可直接 publish 的已驗證 draft;definition 內容與 manifest pin 無關,兩個 pin 測試共用。</summary>
+    private static async Task<(Agent Agent, string Definition, string Sha)> CreateValidatedAgentAsync(
+        AgentRepository agents, string tenant, string slug)
+    {
+        var definition = AgentCanonicalizer.Canonicalize(new AgentUpsert(
+            null, null, null, "你是研究助手", ["worker"], null, null, null, null, null, null, null, null,
+            new AgentWorkflowRef(AgentDefaults.RuntimeWorkflowId, AgentDefaults.RuntimeWorkflowRevision)));
+        var sha = SkillHash.Sha256(definition);
+        var agent = await agents.CreateAsync(tenant, slug, "n", "d", definition, sha, "author", default);
+        Assert.NotNull(agent);
+        Assert.True(await agents.MarkValidatedAsync(tenant, agent!.Id, agent.DraftVersion, definition, sha, default));
+        return (agent!, definition, sha);
     }
 
     private static string Canonical(params (string Kind, int Revision)[] components)

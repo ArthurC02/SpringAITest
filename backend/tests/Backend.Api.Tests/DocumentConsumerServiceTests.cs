@@ -1,3 +1,4 @@
+using System.Text;
 using Backend.Api.Files;
 using RabbitMQ.Client;
 
@@ -26,6 +27,49 @@ public sealed class DocumentConsumerServiceTests
         };
 
         Assert.Equal(2, DocumentConsumerService.GetRetryCount(props));
+    }
+
+    [Fact]
+    public void GetRetryCount_LongHeader_ReturnsStoredValue()
+    {
+        // An AMQP table can hand the same integer back as long instead of the int we write on requeue.
+        var props = new BasicProperties
+        {
+            Headers = new Dictionary<string, object?> { [DocumentConsumerService.RetryCountHeader] = 2L },
+        };
+
+        Assert.Equal(2, DocumentConsumerService.GetRetryCount(props));
+    }
+
+    [Fact]
+    public void GetRetryCount_ByteArrayHeader_ParsesUtf8IntegerText()
+    {
+        // RabbitMQ.Client commonly surfaces AMQP table string values as byte[] on redelivery.
+        var props = new BasicProperties
+        {
+            Headers = new Dictionary<string, object?>
+            {
+                [DocumentConsumerService.RetryCountHeader] = Encoding.UTF8.GetBytes("2"),
+            },
+        };
+
+        Assert.Equal(2, DocumentConsumerService.GetRetryCount(props));
+    }
+
+    [Fact]
+    public void GetRetryCount_UnparseableByteArrayHeader_FailsClosedToMaxRetries()
+    {
+        // byte[] that is not integer text falls through the TryParse guard into the same fail-closed
+        // default as an unrecognized CLR type -- still DLQ, never "first delivery".
+        var props = new BasicProperties
+        {
+            Headers = new Dictionary<string, object?>
+            {
+                [DocumentConsumerService.RetryCountHeader] = Encoding.UTF8.GetBytes("not-a-number"),
+            },
+        };
+
+        Assert.Equal(DocumentProcessor.MaxRetries, DocumentConsumerService.GetRetryCount(props));
     }
 
     [Fact]

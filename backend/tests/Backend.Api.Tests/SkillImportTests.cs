@@ -450,6 +450,42 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.NotFound, (await Admin().GetAsync($"/api/skills/{name}")).StatusCode);
     }
 
+    // 第三格等價類:valid=true 卻沒有中繼資料 / canonical(null 或全空白)—— 引擎(或替代實作)違約。
+    // 放行會造出 kind 未知、definition 空白的壞資料列,所以 ImportCoreAsync 自己守這條 trust boundary → 502。
+    // 決策表收尾:valid=false → 422 由 Import_Invalid_* 蓋,連不上 → 502 由 Import_Unreachable_* 蓋,這裡補「連得上但回答違約」。
+    [Theory]
+    [InlineData("no-skill")]
+    [InlineData("null-canonical")]
+    [InlineData("blank-canonical")]
+    public async Task Import_ValidButEngineViolatesContract_Returns502_AndWritesNothing(string mode)
+    {
+        var name = $"imp-contract-{mode}";
+        var meta = new SkillMetadata(name, "d", "USER", "agentic");
+        SkillPackageValidationResult result = mode switch
+        {
+            "no-skill" => new SkillPackageValidationResult(
+                true, Array.Empty<SkillValidationError>(),
+                Skill: null, CanonicalDefinition: "kind: agentic\n"),
+            "null-canonical" => new SkillPackageValidationResult(
+                true, Array.Empty<SkillValidationError>(), meta, CanonicalDefinition: null),
+            _ => new SkillPackageValidationResult(
+                true, Array.Empty<SkillValidationError>(), meta, CanonicalDefinition: " \t\n"),
+        };
+        Pkg.Setup(name, _ => result);
+
+        var resp = await ImportAsync(Admin(), name, Zip(("SKILL.md", new byte[] { 7 })));
+
+        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("Skill 套件驗證服務呼叫失敗：引擎回應違反契約", body["message"]!.GetValue<string>());
+        Assert.Empty(body["fieldErrors"]!.AsObject());
+
+        // 零副作用:單筆 / revisions / package 全 404。
+        Assert.Null(await Repo.GetAsync("demo-a", name, default));
+        Assert.Equal(HttpStatusCode.NotFound, (await Admin().GetAsync($"/api/skills/{name}/revisions")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Admin().GetAsync($"/api/skills/{name}/package")).StatusCode);
+    }
+
     [Fact] // 匯入失敗不得替換既有 package / 不得新增 revision(R1)。
     public async Task ImportFailure_OverExisting_KeepsPreviousPackageAndRevision()
     {
@@ -860,6 +896,61 @@ public sealed class SkillImportTests : IClassFixture<TestWebAppFactory>
         Assert.Contains("Skill 驗證服務呼叫失敗",
             (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
         await AssertCurrentUnchangedAsync(name, current);
+    }
+
+    // 同一張決策表的 agentic 半邊:restore 的 agentic 分支走 _packageValidator(與 flow 的 _validator 是不同程式路徑)。
+    // 套件被打回 → 422「Skill revision 套件驗證失敗」;引擎不可達 → 502。兩者都不得動到 current / package / revision 數。
+    [Theory]
+    [InlineData("invalid", HttpStatusCode.UnprocessableEntity, "Skill revision 套件驗證失敗")]
+    [InlineData("unreachable", HttpStatusCode.BadGateway, "Skill 套件驗證服務呼叫失敗")]
+    public async Task Restore_AgenticRevisionRevalidationFails_KeepsCurrent(
+        string mode, HttpStatusCode expected, string message)
+    {
+        var name = $"restore-agentic-{mode}";
+        var zip1 = Zip(("SKILL.md", Encoding.UTF8.GetBytes("agentic-v1")));
+        var zip2 = Zip(("SKILL.md", Encoding.UTF8.GetBytes("agentic-v2")));
+        Pkg.Setup(name, bytes =>
+        {
+            var version = ReadZip(bytes)["SKILL.md"].SequenceEqual(
+                Encoding.UTF8.GetBytes("agentic-v1")) ? "v1" : "v2";
+            return new SkillPackageValidationResult(
+                true, Array.Empty<SkillValidationError>(),
+                new SkillMetadata(name, version, "USER", "agentic"),
+                $"name: {name}\ndescription: {version}\nmetadata:\n  kind: agentic\n");
+        });
+        Assert.Equal(HttpStatusCode.OK, (await ImportAsync(Admin(), name, zip1)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await ImportAsync(Admin(), name, zip2)).StatusCode);
+        var current = $"name: {name}\ndescription: v2\nmetadata:\n  kind: agentic\n";
+
+        // 匯入之後才換腳本 → restore 打到的是「規則變嚴 / 引擎掛掉」之後的引擎。
+        if (mode == "unreachable")
+        {
+            Pkg.SetupUnreachable(name);
+        }
+        else
+        {
+            Pkg.Setup(name, _ => new SkillPackageValidationResult(
+                false,
+                new[] { new SkillValidationError("path_traversal", "非法路徑：../x", null) },
+                Skill: null,
+                CanonicalDefinition: null));
+        }
+
+        var resp = await Admin().PostAsync($"/api/skills/{name}/revisions/1/restore", content: null);
+
+        Assert.Equal(expected, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Contains(message, body["message"]!.GetValue<string>());
+        if (expected == HttpStatusCode.UnprocessableEntity)
+        {
+            Assert.NotNull(body["fieldErrors"]!["path_traversal"]);
+        }
+
+        // current definition / current_revision / revision 筆數皆停在 v2,且 package 仍是 v2 的 bytes。
+        await AssertCurrentUnchangedAsync(name, current);
+        Assert.Equal(
+            zip2,
+            await (await Admin().GetAsync($"/api/skills/{name}/package")).Content.ReadAsByteArrayAsync());
     }
 
     [Fact] // revision 的 definition name 與路由不符 → 422(否則會「回復 A 卻蓋到 B」)。

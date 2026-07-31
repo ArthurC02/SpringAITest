@@ -76,6 +76,103 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
             new { tenant, snapshotMismatchEvent }));
     }
 
+    /// <summary>
+    /// The other half of the snapshot decision table: a caller that asserts the run's *own* pinned
+    /// snapshot_sha256 passes the WHERE fence and the row is written. Omitting the field only proves
+    /// the `IS NULL` short circuit, and the mismatch case above only proves rejection -- neither
+    /// shows that a correct non-null assertion is actually honoured rather than always failing closed.
+    /// </summary>
+    [SkippableFact]
+    public async Task SnapshotSha256_AssertedEqualToTheRunsOwnPinnedSnapshot_IsAcceptedAndWritten()
+    {
+        fixture.SkipIfUnavailable();
+
+        var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
+        var runId = await CreateRunAsync(tenant);
+
+        await using var connection = await fixture.DataSource!.OpenConnectionAsync();
+        var pinnedSha = await connection.ExecuteScalarAsync<string?>(
+            "SELECT snapshot_sha256 FROM agent_run WHERE id=@runId", new { runId });
+        Assert.NotNull(pinnedSha); // otherwise the caller assertion below would be the IS NULL branch
+
+        using var factory = new DapperEvidenceFactory();
+        using var client = factory.CreateInternalClient().WithTenant(tenant).WithUser("workflow").WithRole("SYSTEM");
+        var eventId = Guid.NewGuid();
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = runId, event_id = eventId, kind = "model", node_id = "model_step",
+            usage_units = 5, evidence = new { outcome = "success", snapshot_sha256 = pinnedSha },
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        Assert.Equal(pinnedSha, await connection.ExecuteScalarAsync<string?>(
+            "SELECT snapshot_sha256 FROM operations_run_evidence WHERE tenant_id=@tenant AND run_id=@runId AND event_id=@eventId",
+            new { tenant, runId, eventId }));
+    }
+
+    /// <summary>
+    /// Lineage for a run that IS an orchestrator child: root_run_id/child_id must resolve from the
+    /// run's own <c>orchestrator_run_child</c> row. Every other run in this class is a plain
+    /// direct-agent run (root_run_id = its own id, so the COALESCE falls through to NULL), which
+    /// never takes this branch.
+    /// </summary>
+    [SkippableFact]
+    public async Task OrchestratorChildRun_ResolvesRootAndChildLineage_FromItsOwnChildLinkage()
+    {
+        fixture.SkipIfUnavailable();
+
+        var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
+        var runId = await CreateRunAsync(tenant);
+        var rootRunId = Guid.NewGuid();
+        var childId = Guid.NewGuid();
+
+        await using var connection = await fixture.DataSource!.OpenConnectionAsync();
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO orchestrator_run
+              (id,tenant_id,user_id,caller_role,orchestrator_id,orchestrator_revision,conversation_id,
+               workflow_id,workflow_revision,execution_snapshot,execution_snapshot_canonical,snapshot_sha256,
+               request_sha256,idempotency_key_sha256,status,deadline_at)
+            VALUES
+              (@rootRunId,@tenant,'owner','ADMIN',@orchestrator,1,'e1-evidence-root',@workflow,1,
+               '{}'::jsonb,decode('7b7d','hex'),@hash,@hash,@hash,'running',now()+interval '1 hour');
+            INSERT INTO orchestrator_run_child
+              (id,orchestrator_root_run_id,task_id,attempt,run_kind,agent_id,agent_revision,
+               workflow_id,workflow_revision,agent_snapshot_sha256,agent_run_id,dispatch_artifact,status)
+              SELECT @childId,@rootRunId,'task-1',1,'worker',agent_id,agent_revision,
+                     workflow_id,workflow_revision,snapshot_sha256,id,'{}'::jsonb,'running'
+              FROM agent_run WHERE id=@runId;
+            UPDATE agent_run SET orchestrator_root_run_id=@rootRunId WHERE id=@runId;
+            """,
+            new
+            {
+                rootRunId,
+                childId,
+                tenant,
+                runId,
+                orchestrator = Guid.NewGuid(),
+                workflow = Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+                hash = new string('a', 64),
+            });
+
+        using var factory = new DapperEvidenceFactory();
+        using var client = factory.CreateInternalClient().WithTenant(tenant).WithUser("workflow").WithRole("SYSTEM");
+        var eventId = Guid.NewGuid();
+        var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
+        {
+            run_id = runId, event_id = eventId, kind = "node", node_id = "worker_step",
+            usage_units = 3, evidence = new { outcome = "success" },
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        Assert.Equal(rootRunId, await connection.ExecuteScalarAsync<Guid?>(
+            "SELECT root_run_id FROM operations_run_evidence WHERE tenant_id=@tenant AND run_id=@runId AND event_id=@eventId",
+            new { tenant, runId, eventId }));
+        Assert.Equal(childId, await connection.ExecuteScalarAsync<Guid?>(
+            "SELECT child_id FROM operations_run_evidence WHERE tenant_id=@tenant AND run_id=@runId AND event_id=@eventId",
+            new { tenant, runId, eventId }));
+    }
+
     [SkippableFact]
     public async Task DualWrite_IsIdempotent_AndReconcilesWithoutASecondUsageCostAuthority()
     {
@@ -175,7 +272,9 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
             DELETE FROM agent_run_event WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE @prefix);
             DELETE FROM agent_run_command WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE @prefix);
             DELETE FROM agent_run_skill WHERE run_id IN (SELECT id FROM agent_run WHERE tenant_id LIKE @prefix);
+            DELETE FROM orchestrator_run_child WHERE orchestrator_root_run_id IN (SELECT id FROM orchestrator_run WHERE tenant_id LIKE @prefix);
             DELETE FROM agent_run WHERE tenant_id LIKE @prefix;
+            DELETE FROM orchestrator_run WHERE tenant_id LIKE @prefix;
             DELETE FROM agent_revision_skill WHERE agent_id IN (SELECT id FROM agent WHERE tenant_id LIKE @prefix);
             DELETE FROM agent_revision WHERE agent_id IN (SELECT id FROM agent WHERE tenant_id LIKE @prefix);
             DELETE FROM agent WHERE tenant_id LIKE @prefix;

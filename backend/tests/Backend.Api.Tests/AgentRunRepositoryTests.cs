@@ -1784,6 +1784,148 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
         Assert.Single(finalEvents!.Events, item => item.EventType == "run_cancelled");
     }
 
+    /// <summary>
+    /// 終態 cancelled 走 Replay(見上方測試),但 completed/failed 這個等價類必須是
+    /// InvalidState:已結束的 run 不可被改寫成取消,也不得留下任何 cancel command。
+    /// </summary>
+    [SkippableFact]
+    public async Task Cancel_CompletedTerminalRun_IsInvalidStateAndQueuesNoCommand()
+    {
+        _fixture.SkipIfUnavailable();
+        const string tenant = "agentrunrepo-cancel-completed";
+        var agent = await PublishedAgentAsync(tenant, "cancel-completed");
+        var created = await Runs.CreateDirectAsync(
+            tenant, "admin-a", "ADMIN", agent.Id, "finish first", "completed-start", default);
+        var lease = await Runs.ClaimLeaseAsync(
+            tenant,
+            "admin-a",
+            created.Run!.Id,
+            new AgentRunLeaseRequest(created.Run.StateVersion, "worker-a", 300),
+            default);
+        var running = await Runs.TransitionAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunTransitionRequest(
+                lease.Lease!.Run.StateVersion,
+                AgentRunStatuses.Running,
+                lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration,
+                lease.Lease.EventAckCursor),
+            default);
+        var completed = await Runs.TransitionAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunTransitionRequest(
+                running.Run!.StateVersion,
+                AgentRunStatuses.Completed,
+                lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration,
+                lease.Lease.EventAckCursor,
+                V2CheckpointRef(lease.Lease.LeaseGeneration),
+                1),
+            default);
+        Assert.Equal(AgentRunWriteStatus.Success, completed.Status);
+        Assert.Equal(AgentRunStatuses.Completed, completed.Run!.Status);
+
+        var tooLate = await Runs.CancelAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            "too late",
+            "cancel-after-completed",
+            default);
+
+        Assert.Equal(AgentRunWriteStatus.InvalidState, tooLate.Status);
+        Assert.Equal("terminal run 不可取消", tooLate.Message);
+        Assert.Null(tooLate.Dispatch);
+        var unchanged = await Runs.GetAsync(tenant, "admin-a", created.Run.Id, default);
+        Assert.Equal(AgentRunStatuses.Completed, unchanged!.Status);
+        Assert.False(unchanged.CancelRequested);
+        Assert.Equal(completed.Run.StateVersion, unchanged.StateVersion);
+        await using var connection = await _fixture.DataSource!.OpenConnectionAsync();
+        Assert.Equal(
+            0,
+            await connection.ExecuteScalarAsync<int>(
+                "SELECT count(*) FROM agent_run_command"
+                + " WHERE run_id=@runId AND command_type='cancel'",
+                new { runId = created.Run.Id }));
+    }
+
+    /// <summary>
+    /// 已要求取消的 run 只剩 cancelled 一條出路。純 checkpoint 的 running→running 推進
+    /// 也要被同一個守衛擋下 —— 守衛必須排在 checkpointOnlyPromotion 例外之前。
+    /// </summary>
+    [SkippableFact]
+    public async Task Transition_CancelRequestedRun_RejectsEveryNonCancelledTarget()
+    {
+        _fixture.SkipIfUnavailable();
+        const string tenant = "agentrunrepo-cancel-requested-guard";
+        var agent = await PublishedAgentAsync(tenant, "cancel-requested-guard");
+        var created = await Runs.CreateDirectAsync(
+            tenant, "admin-a", "ADMIN", agent.Id, "guard", "guard-start", default);
+        var lease = await Runs.ClaimLeaseAsync(
+            tenant,
+            "admin-a",
+            created.Run!.Id,
+            new AgentRunLeaseRequest(created.Run.StateVersion, "worker-a", 300),
+            default);
+        var running = await Runs.TransitionAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunTransitionRequest(
+                lease.Lease!.Run.StateVersion,
+                AgentRunStatuses.Running,
+                lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration,
+                lease.Lease.EventAckCursor),
+            default);
+        Assert.Equal(AgentRunWriteStatus.Success, running.Status);
+        var cancelRequested = await Runs.CancelAsync(
+            tenant, "admin-a", created.Run.Id, "stop", "guard-cancel", default);
+        Assert.Equal(AgentRunWriteStatus.Success, cancelRequested.Status);
+        Assert.True(cancelRequested.Run!.CancelRequested);
+
+        var completed = await Runs.TransitionAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunTransitionRequest(
+                cancelRequested.Run.StateVersion,
+                AgentRunStatuses.Completed,
+                lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration,
+                cancelRequested.Run.EventAckCursor,
+                V2CheckpointRef(lease.Lease.LeaseGeneration),
+                1),
+            default);
+        var checkpointOnly = await Runs.TransitionAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunTransitionRequest(
+                cancelRequested.Run.StateVersion,
+                AgentRunStatuses.Running,
+                lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration,
+                cancelRequested.Run.EventAckCursor,
+                V2CheckpointRef(lease.Lease.LeaseGeneration),
+                1),
+            default);
+
+        Assert.Equal(AgentRunWriteStatus.InvalidState, completed.Status);
+        Assert.Equal("已要求取消的 run 只能轉為 cancelled", completed.Message);
+        Assert.Equal(AgentRunWriteStatus.InvalidState, checkpointOnly.Status);
+        Assert.Equal("已要求取消的 run 只能轉為 cancelled", checkpointOnly.Message);
+        var unchanged = await Runs.GetAsync(tenant, "admin-a", created.Run.Id, default);
+        Assert.Equal(AgentRunStatuses.Running, unchanged!.Status);
+        Assert.Equal(cancelRequested.Run.StateVersion, unchanged.StateVersion);
+        Assert.Equal(0, unchanged.CheckpointVersion);
+        Assert.Null(unchanged.CheckpointRef);
+    }
+
     [SkippableFact]
     public async Task LeaseGeneration_RenewalAndConcurrentTakeoverFenceOldOwner()
     {
@@ -1903,6 +2045,53 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
         Assert.Equal(
             takeover.Lease.LeaseGeneration,
             takeoverRenewal.Lease!.LeaseGeneration);
+    }
+
+    /// <summary>
+    /// lease 期間視窗是 [5,900] 秒。兩側都要有 on-point/off-point,否則把比對寫成
+    /// `&lt;=5` 或 `&gt;=900` 仍然全綠;被拒的請求也不得動到 fencing 狀態。
+    /// </summary>
+    [SkippableFact]
+    public async Task ClaimLease_DurationSeconds_AcceptsOnlyTheFiveToNineHundredSecondWindow()
+    {
+        _fixture.SkipIfUnavailable();
+        const string tenant = "agentrunrepo-lease-duration";
+        var agent = await PublishedAgentAsync(tenant, "lease-duration");
+        var created = await Runs.CreateDirectAsync(
+            tenant, "admin-a", "ADMIN", agent.Id, "lease window", "lease-window-start", default);
+        var queuedVersion = created.Run!.StateVersion;
+
+        foreach (var rejected in new[] { 4, 901 })
+        {
+            var outside = await Runs.ClaimLeaseAsync(
+                tenant,
+                "admin-a",
+                created.Run.Id,
+                new AgentRunLeaseRequest(queuedVersion, "worker-a", rejected),
+                default);
+            Assert.Equal(AgentRunWriteStatus.InvalidState, outside.Status);
+            Assert.Equal("run 無法取得 lease", outside.Message);
+            Assert.Null(outside.Lease);
+        }
+        Assert.Equal(
+            queuedVersion,
+            (await Runs.GetAsync(tenant, "admin-a", created.Run.Id, default))!.StateVersion);
+
+        var lowerBound = await Runs.ClaimLeaseAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunLeaseRequest(queuedVersion, "worker-a", 5),
+            default);
+        Assert.Equal(AgentRunWriteStatus.Success, lowerBound.Status);
+        var upperBound = await Runs.ClaimLeaseAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunLeaseRequest(lowerBound.Lease!.Run.StateVersion, "worker-a", 900),
+            default);
+        Assert.Equal(AgentRunWriteStatus.Success, upperBound.Status);
+        Assert.NotEqual(lowerBound.Lease.LeaseToken, upperBound.Lease!.LeaseToken);
     }
 
     [SkippableFact]
@@ -2232,6 +2421,65 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
                 Assert.Equal(2, item.EventCursor);
                 Assert.Equal(secondLease.Lease.LeaseGeneration, item.LeaseGeneration);
             });
+    }
+
+    /// <summary>
+    /// 單批 events 數量的邊界是 [1,100]:空批次(與已另行覆蓋的 null 是不同等價類)、
+    /// 101 都要被拒且不留痕跡,剛好 100 必須成功並把 ack cursor 推到 100。
+    /// </summary>
+    [SkippableFact]
+    public async Task AppendEvents_BatchSize_RejectsEmptyAndOverOneHundred()
+    {
+        _fixture.SkipIfUnavailable();
+        const string tenant = "agentrunrepo-event-batch-bounds";
+        var agent = await PublishedAgentAsync(tenant, "event-batch-bounds");
+        var created = await Runs.CreateDirectAsync(
+            tenant, "admin-a", "ADMIN", agent.Id, "batch", "batch-start", default);
+        var lease = await Runs.ClaimLeaseAsync(
+            tenant,
+            "admin-a",
+            created.Run!.Id,
+            new AgentRunLeaseRequest(created.Run.StateVersion, "worker-a", 300),
+            default);
+        var running = await Runs.TransitionAsync(
+            tenant,
+            "admin-a",
+            created.Run.Id,
+            new AgentRunTransitionRequest(
+                lease.Lease!.Run.StateVersion,
+                AgentRunStatuses.Running,
+                lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration,
+                lease.Lease.EventAckCursor),
+            default);
+        Assert.Equal(AgentRunWriteStatus.Success, running.Status);
+
+        AgentRunEventsAppendRequest Batch(int count) => new(
+            running.Run!.StateVersion,
+            lease.Lease!.LeaseToken,
+            lease.Lease!.LeaseGeneration,
+            0,
+            Enumerable.Range(0, count)
+                .Select(step => NewRunEvent(
+                    "model_step", running.Run!.SnapshotHash, new { step }))
+                .ToArray());
+
+        var empty = await Runs.AppendEventsAsync(
+            tenant, "admin-a", created.Run.Id, Batch(0), default);
+        var overflow = await Runs.AppendEventsAsync(
+            tenant, "admin-a", created.Run.Id, Batch(101), default);
+        Assert.Equal(AgentRunWriteStatus.InvalidState, empty.Status);
+        Assert.Equal("單次最多追加 100 個 events", empty.Message);
+        Assert.Equal(AgentRunWriteStatus.InvalidState, overflow.Status);
+        Assert.Equal("單次最多追加 100 個 events", overflow.Message);
+        var beforeAccepted = await Runs.GetAsync(
+            tenant, "admin-a", created.Run.Id, default);
+        Assert.Equal(0, beforeAccepted!.EventAckCursor);
+
+        var full = await Runs.AppendEventsAsync(
+            tenant, "admin-a", created.Run.Id, Batch(100), default);
+        Assert.Equal(AgentRunWriteStatus.Success, full.Status);
+        Assert.Equal(100, full.Run!.EventAckCursor);
     }
 
     [SkippableFact]

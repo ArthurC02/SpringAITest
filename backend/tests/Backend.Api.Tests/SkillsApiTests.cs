@@ -495,6 +495,27 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(before, Validator.Calls.Count);
     }
 
+    // 同一道 NotBlank 閘門的另一半:PUT 與 POST 共用同一個 SkillUpsert 模型,ADMIN 送空白 definition
+    // 一樣是 400(模型驗證在 authorization filter 之後、action 之前 → 早於「skill 存不存在」的 404,
+    // 也早於引擎 validate)。少了這半邊,「換個 method 就漏掉必填檢查」不會被任何測試抓到。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Put_BlankDefinition_Returns400_AndNeverReachesEngine(string? definition)
+    {
+        var before = Validator.Calls.Count;
+
+        var resp = await Admin().PutAsJsonAsync("/api/skills/at4_put_blank", Body(definition));
+
+        // 400 而非 404:即使路由的 skill 根本不存在,模型驗證仍先出手。
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("definition 不可為空", body["fieldErrors"]!["definition"]!.GetValue<string>());
+        Assert.Equal(before, Validator.Calls.Count);
+    }
+
     // L-2:引擎不可達 → 對外 502(不是 422、不是 500),且零寫入。
     // 「驗證服務故障」與「定義不合法」是兩件事:前者不得放行未驗證的定義,也不得誣賴使用者。
     [Fact]
@@ -590,6 +611,30 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
 
         var single = (await (await client.GetAsync("/api/skills/at_sf_preserve")).ReadJsonAsync()).AsObject();
         Assert.Equal("進階手改", single["description"]!.GetValue<string>()); // definition 有更新
+        Assert.Equal("template-stats", single["simpleForm"]!["templateId"]!.GetValue<string>()); // 表單狀態保留
+        Assert.Equal("50", single["simpleForm"]!["form"]!["topK"]!.GetValue<string>());
+    }
+
+    // 「顯式 JSON null」與「缺欄位」是兩個不同的 wire 等價類,SimpleFormText 刻意對
+    // Null / Undefined 一視同仁 → 都是「不帶新表單狀態」,保留既有值,不是「清空」。
+    [Fact]
+    public async Task Put_WithExplicitNullSimpleForm_PreservesExisting()
+    {
+        var client = Admin();
+        await client.PostAsJsonAsync(
+            "/api/skills", BodyWithForm(Yaml("at_sf_explicit_null"), SimpleForm("template-stats", "50")));
+
+        var put = await client.PutAsJsonAsync(
+            "/api/skills/at_sf_explicit_null",
+            new JsonObject
+            {
+                ["definition"] = Yaml("at_sf_explicit_null", description: "顯式 null"),
+                ["simpleForm"] = null,
+            });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var single = (await (await client.GetAsync("/api/skills/at_sf_explicit_null")).ReadJsonAsync()).AsObject();
+        Assert.Equal("顯式 null", single["description"]!.GetValue<string>()); // definition 有更新
         Assert.Equal("template-stats", single["simpleForm"]!["templateId"]!.GetValue<string>()); // 表單狀態保留
         Assert.Equal("50", single["simpleForm"]!["form"]!["topK"]!.GetValue<string>());
     }

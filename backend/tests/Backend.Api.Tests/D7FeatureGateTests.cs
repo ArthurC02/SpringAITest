@@ -10,6 +10,11 @@ public sealed class D7FeatureGateTests
     public static TheoryData<HttpMethod, string> HiddenRoutes => new()
     {
         { HttpMethod.Get, $"/api/runs/{Guid.NewGuid():D}/approvals" },
+        // The two state-mutating decision routes: the gate must win over the mandatory
+        // Idempotency-Key 400 inside Decide(), which never runs because the middleware
+        // short-circuits before MVC — these requests carry no Idempotency-Key header.
+        { HttpMethod.Post, $"/api/runs/{Guid.NewGuid():D}/approvals/{Guid.NewGuid():D}/approve" },
+        { HttpMethod.Post, $"/api/runs/{Guid.NewGuid():D}/approvals/{Guid.NewGuid():D}/reject" },
         { HttpMethod.Post, $"/api/agent-runs/{Guid.NewGuid():D}/approvals" },
         { HttpMethod.Post, $"/api/agent-runs/{Guid.NewGuid():D}/approvals/{Guid.NewGuid():D}/consume" },
         { HttpMethod.Get, $"/api/agent-runs/{Guid.NewGuid():D}/approvals/{Guid.NewGuid():D}/execution-identity" },

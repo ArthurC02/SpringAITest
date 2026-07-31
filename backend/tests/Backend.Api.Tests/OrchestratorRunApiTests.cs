@@ -20,6 +20,8 @@ namespace Backend.Api.Tests;
 public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTests.Factory>
 {
     private static readonly Guid UnknownRun = Guid.Parse("55555555-5555-4555-8555-555555555555");
+    /// <summary>控制字元等價類的代表值(U+0001);Conversation() 與 Key() 都用 Any(char.IsControl) 擋。</summary>
+    private const char ControlChar = (char)1;
     private readonly Factory _factory;
 
     public OrchestratorRunApiTests(Factory factory) => _factory = factory;
@@ -38,17 +40,22 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
         Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(request)).StatusCode);
     }
 
-    // Idempotency-Key / conversation_id / message 的長度與空白邊界。上限剛好通過(會走到倉儲、
+    // Idempotency-Key / conversation_id / message 的長度、空白與控制字元邊界。上限剛好通過(會走到倉儲、
     // 因為 orchestrator 不存在而 404),上限 +1 必須在 controller 就被擋成 400 或 413。
     // message 過長對外是 413(與 AgentRunController.RequireMessage 的行為一致),空/空白仍是 400。
+    // Conversation() 與 Key() 除了長度還各自擋 Trim 後為空與 Any(char.IsControl) —— 兩個等價類都要有代表值。
     public static TheoryData<string, object, HttpStatusCode> StartInputs => new()
     {
         { "start-key", new { conversation_id = "c-1", message = "" }, HttpStatusCode.BadRequest },
         { "start-key", new { conversation_id = "c-1", message = "   " }, HttpStatusCode.BadRequest },
         { "start-key", new { conversation_id = "c-1", message = new string('m', 16_385) }, HttpStatusCode.RequestEntityTooLarge },
         { "start-key", new { conversation_id = "", message = "plan" }, HttpStatusCode.BadRequest },
+        { "start-key", new { conversation_id = "   ", message = "plan" }, HttpStatusCode.BadRequest },
+        { "start-key", new { conversation_id = "c" + ControlChar, message = "plan" }, HttpStatusCode.BadRequest },
         { "start-key", new { conversation_id = new string('c', 129), message = "plan" }, HttpStatusCode.BadRequest },
         { "", new { conversation_id = "c-1", message = "plan" }, HttpStatusCode.BadRequest },
+        { "   ", new { conversation_id = "c-1", message = "plan" }, HttpStatusCode.BadRequest },
+        { "k" + ControlChar, new { conversation_id = "c-1", message = "plan" }, HttpStatusCode.BadRequest },
         { "start-key", new { conversation_id = "c-1", message = new string('m', 16_384) }, HttpStatusCode.NotFound },
         { "start-key", new { conversation_id = new string('c', 128), message = "plan" }, HttpStatusCode.NotFound },
     };
@@ -232,6 +239,34 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
         var stale = await Assert.ThrowsAsync<ApiException>(() => controller.AppendContextDelta(E3OnlyRepository.Root, E3OnlyRepository.Child, request.Id, delta, default));
         Assert.Equal(409, stale.Status);
         Assert.Equal("Context request version is stale", stale.FieldErrors!["If-Match"]);
+    }
+
+    // 上面所有 404 用的都是「從沒被建立過」的 id,只證明了「不存在 → 404」這一半。
+    // 這裡拿同一份真的存在、擁有者讀得到的 context-request,只換掉 tenant 或 user 再讀一次:
+    // 「存在但不屬於你」必須回一模一樣的 404 訊息,否則狀態碼本身就洩漏了資源存在。
+    [Theory]
+    [InlineData("other-tenant", "root-operator")]
+    [InlineData("d5-api", "other-operator")]
+    public async Task RunReads_ExistingResourceUnderAnotherOwner_AreIndistinguishableFromMissing(string tenant, string user)
+    {
+        var repository = new E3OnlyRepository();
+        var owner = E3Controller(repository, out _);
+        var created = Assert.IsType<OkObjectResult>(
+            await owner.CreateContextRequest(E3OnlyRepository.Root, E3OnlyRepository.Child, default));
+        var existing = Assert.IsType<OrchestratorContextRequestResponse>(created.Value);
+        Assert.IsType<OkObjectResult>(
+            await owner.GetContextRequest(E3OnlyRepository.Root, E3OnlyRepository.Child, existing.Id, default));
+
+        var intruder = E3Controller(repository, out var http);
+        http.Request.Headers[IdentityHeaders.TenantHeader] = tenant;
+        http.Request.Headers[IdentityHeaders.UserHeader] = user;
+
+        var thrown = await Assert.ThrowsAsync<ApiException>(
+            () => intruder.GetContextRequest(E3OnlyRepository.Root, E3OnlyRepository.Child, existing.Id, default));
+
+        Assert.Equal(404, thrown.Status);
+        Assert.Equal("Orchestrator run not found", thrown.Message);
+        Assert.Equal("", http.Response.Headers.ETag.ToString());
     }
 
     [Fact]

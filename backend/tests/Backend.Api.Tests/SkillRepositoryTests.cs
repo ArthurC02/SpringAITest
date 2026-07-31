@@ -206,6 +206,36 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         Assert.Equal(package, await DbPackageAsync(tenant, name));
     }
 
+    // kind fence 的另半邊(決策表收尾):軟刪列的 kind **相符** → ON CONFLICT DO UPDATE 的
+    // WHERE NOT skill.enabled AND kind = @expectedExistingKind 兩條都成立 → 真的復活、號碼接續。
+
+    [SkippableFact]
+    public async Task FlowOnlyCreate_RevivesDisabledFlowRow_AndContinuesRevisionChain()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "skillrepo-kind-fenced-revive-ok";
+        const string name = "kind-fenced-revive-ok";
+        const string v2 = "name: kind-fenced-revive-ok\nflow: v2\n";
+        await Repo.CreateAsync(
+            tenant, Meta(name, "name: kind-fenced-revive-ok\nflow: v1\n"), "admin-a", default); // r1,kind 預設 flow
+        Assert.True(await Repo.DeleteAsync(tenant, name, default));
+
+        var revived = await Repo.CreateAsync(tenant, "flow", Meta(name, v2), "admin-a", default);
+
+        Assert.NotNull(revived);
+        Assert.Equal(2, revived!.CurrentRevision); // 接續,不是重頭
+        Assert.Equal("flow", revived.Kind);
+        Assert.Equal(v2, revived.Definition);
+        Assert.NotNull(await Repo.GetAsync(tenant, name, default)); // enabled 回 true
+        Assert.Equal(
+            new[] { 2, 1 },
+            (await Repo.ListRevisionsAsync(tenant, name, default)).Select(r => r.Revision).ToArray());
+        var snapshot = await Repo.GetRevisionAsync(tenant, name, 2, default);
+        Assert.NotNull(snapshot);
+        Assert.Equal(v2, snapshot!.Definition);
+        Assert.Equal(SkillHash.Sha256(v2), snapshot.DefinitionSha256);
+    }
+
     // ---- Dapper kind 過濾直測:ListAsync/GetAsync/DeleteAsync/UpdateAsync 帶 kind 參數的 WHERE fence,
     // 直接對 SkillRepository(真 Postgres)測,不走 API 層(controller 層已有等價 HTTP 案例,這裡驗 SQL 本身)。----
 
@@ -283,6 +313,31 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         Assert.Equal("agentic", current!.Kind);
         Assert.Equal(1, current.CurrentRevision);
         Assert.Equal(package, current.Package);
+    }
+
+    // 同一個 kind fence 的成立半邊(controller 唯一實際用法:expectedKind = "flow" 對 flow 列)。
+
+    [SkippableFact]
+    public async Task UpdateAsync_WithMatchingExpectedKind_Updates_AndBumpsRevision()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-kindupdate-ok";
+        const string name = "kindupdate-ok-item";
+        const string v2 = "name: kindupdate-ok-item\nflow: v2\n";
+        await Repo.CreateAsync(
+            t, Meta(name, "name: kindupdate-ok-item\nflow: v1\n"), "admin-a", default);
+
+        var updated = await Repo.UpdateAsync(t, name, "flow", Meta(name, v2), "u", default);
+
+        Assert.NotNull(updated);
+        Assert.Equal(2, updated!.CurrentRevision);
+        Assert.Equal("flow", updated.Kind);
+        Assert.Equal(v2, updated.Definition);
+        Assert.Equal(SkillHash.Sha256(v2), updated.DefinitionSha256);
+        var snapshot = await Repo.GetRevisionAsync(t, name, 2, default);
+        Assert.NotNull(snapshot);
+        Assert.Equal(v2, snapshot!.Definition);
+        Assert.Equal("flow", snapshot.Kind);
     }
 
     // ---- A1-4:遷移前 kind 為 NULL 的舊資料列(尚未跑過分類 UPDATE),DbBootstrap 一次性歸類為
@@ -425,6 +480,48 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
 
         Assert.Equal(17, (await Repo.GetAsync(t, name, default))!.CurrentRevision);
         Assert.Equal(17, (await Repo.ListRevisionsAsync(t, name, default)).Count);
+    }
+
+    // ---- 上一條守的是 N→N+1(列已存在,一律走 ON CONFLICT 的 UPDATE 臂);這條守 0→1 邊界:
+    // 兩個併發寫入搶同一個從未存在的名字 —— 一個是純 INSERT(revision 1)、另一個才被 arbiter
+    // 擋下改走 DO UPDATE 臂(revision 2)。誰都不該以 uq_skill_tenant_name(23505)炸出去。----
+
+    [SkippableFact]
+    public async Task Concurrent_ImportOfBrandNewName_ProducesRevisionsOneAndTwo()
+    {
+        _fx.SkipIfUnavailable();
+        const string t = "skillrepo-concurrent-new";
+        const string name = "brand_new_skill";
+
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tasks = Enumerable.Range(0, 2).Select(index => Task.Run(async () =>
+        {
+            await start.Task;
+            var definition = $"kind: agentic\nname: {name}\nv: {index}\n";
+            var package = Encoding.UTF8.GetBytes($"zip-{index}");
+            var imported = await Repo.ImportAsync(
+                t, Meta(name, definition, kind: "agentic"), package, SkillHash.Sha256(package),
+                $"i-{index}", default);
+            return (Definition: definition, Stored: imported!);
+        })).ToArray();
+
+        start.SetResult();
+        var writes = await Task.WhenAll(tasks);
+
+        // 兩者都成功,號碼是 1 與 2(先到者建立、後到者接續),與交錯順序無關。
+        Assert.Equal(new[] { 1, 2 }, writes.Select(w => w.Stored.CurrentRevision).OrderBy(r => r).ToArray());
+
+        // 各自的 snapshot 屬於自己那次寫入(建立臂與衝突臂各寫各的稽核列)。
+        foreach (var write in writes)
+        {
+            var snapshot = await Repo.GetRevisionAsync(t, name, write.Stored.CurrentRevision, default);
+            Assert.NotNull(snapshot);
+            Assert.Equal(write.Definition, snapshot!.Definition);
+            Assert.Equal(SkillHash.Sha256(write.Definition), snapshot.DefinitionSha256);
+        }
+
+        Assert.Equal(2, (await Repo.GetAsync(t, name, default))!.CurrentRevision);
+        Assert.Equal(2, (await Repo.ListRevisionsAsync(t, name, default)).Count);
     }
 
     // ---- B3:simple_form 的真 SQL 語意(手寫 fake 背書不了 jsonb::text/COALESCE/DO UPDATE 保留) ----

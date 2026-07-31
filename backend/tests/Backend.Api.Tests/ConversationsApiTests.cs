@@ -50,9 +50,46 @@ public sealed class ConversationsApiTests : IClassFixture<TestWebAppFactory>
         Assert.True(replies.IndexOf("較晚") < replies.IndexOf("較早"));
     }
 
+    // 零筆邊界:全新的 (tenant,user) 沒有任何紀錄時是 200 + 空陣列,不是 null、不是 404。
+    [Fact]
+    public async Task List_NoRecords_ReturnsEmptyArray()
+    {
+        var client = Client("demo-a", "empty-history-user");
+
+        var resp = await client.GetAsync("/api/conversations");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Empty((await resp.ReadJsonAsync()).AsArray());
+    }
+
+    // created_at 平手邊界:id DESC 是唯一的平手判準,所以連續快速寫入後清單必須是
+    // 「建立順序的完全倒序」。時間戳是否真的落在同一刻取決於時鐘解析度,但正確實作在
+    // 兩種情況下結果一致;若拿掉 id DESC,撞時的穩定排序會退化成建立順序(id 遞增),
+    // 這個斷言就會紅 —— 這是不動生產碼(注入時鐘)所能逼近平手路徑的最大程度。
+    [Fact]
+    public async Task List_RapidBurst_IsExactReverseOfCreationOrder()
+    {
+        var client = Client("demo-a", "tie-break-user");
+        var createdIds = new List<long>();
+        for (var i = 0; i < 5; i++)
+        {
+            var created = await client.PostAsJsonAsync("/api/conversations", new { prompt = $"P{i}", reply = $"R{i}" });
+            createdIds.Add((await created.ReadJsonAsync())["id"]!.GetValue<long>());
+        }
+
+        var arr = (await (await client.GetAsync("/api/conversations")).ReadJsonAsync()).AsArray();
+
+        Assert.Equal(
+            createdIds.AsEnumerable().Reverse(),
+            arr.Select(n => n!["id"]!.GetValue<long>()));
+    }
+
+    // 第三格「全是空白」是 NotBlank 之所以存在的理由(內建 [Required] 只擋 null),走的是
+    // IsNullOrWhiteSpace 分支而非 null 分支,和空字串不是同一條路。
     [Theory]
     [InlineData("", "答", "prompt", "prompt 不可為空")]
     [InlineData("問", "", "reply", "reply 不可為空")]
+    [InlineData("   ", "答", "prompt", "prompt 不可為空")]
     public async Task Create_BlankField_Returns400(string prompt, string reply, string field, string message)
     {
         var client = Client();
@@ -72,6 +109,22 @@ public sealed class ConversationsApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         Assert.Equal("缺少租戶識別標頭：X-Tenant-Id", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // 兩個維度同時無效(缺租戶標頭 + 欄位空白):[ApiController] 的 ModelState 驗證在
+    // action body 之前跑,所以贏的是欄位驗證 400,RequireTenant() 根本沒被呼叫到 ——
+    // 對外看到的是「輸入驗證失敗」而不是缺租戶訊息。
+    [Fact]
+    public async Task Create_MissingTenantHeaderAndBlankField_ValidationWins()
+    {
+        var client = _factory.CreateInternalClient().WithUser("user-a");
+
+        var resp = await client.PostAsJsonAsync("/api/conversations", new { prompt = "", reply = "答句" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("prompt 不可為空", body["fieldErrors"]!["prompt"]!.GetValue<string>());
     }
 
     // 「只有空白的 X-Tenant-Id」與「完全缺 header」是同一等價類 —— IdentityHeaders.Value() 把空白

@@ -89,6 +89,24 @@ public sealed class JwtTests
         Assert.Equal("ADMIN", jwt.Claims.Single(c => c.Type == "role").Value);
     }
 
+    [Fact] // capabilities 與 groups 共用同一套正規化:去空白項、Trim、Ordinal 去重、Ordinal 排序。
+    public void Issue_CapabilitiesAreTrimmedDedupedSortedAndBlanksDropped()
+    {
+        var token = Service().Issue(
+            "sysadmin",
+            "ADMIN",
+            "demo-a",
+            capabilities: new[] { " tool.use:y ", "tool.use:x", "tool.use:x", "   " });
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+        Assert.Equal(
+            new[] { "tool.use:x", "tool.use:y" },
+            jwt.Claims
+                .Where(claim => claim.Type == "capabilities")
+                .Select(claim => claim.Value)
+                .ToArray());
+    }
+
     [Theory] // A-DATA-14:單純 tenant ADMIN 與 USER 均**不**自動取得 capability(fail closed)。
     [InlineData("ADMIN")]
     [InlineData("USER")]
@@ -161,6 +179,26 @@ public sealed class JwtTests
             groups: new[] { "operations", malformed }));
     }
 
+    // 上界 on-point:恰好 MaxCallerGroups 個 canonical group 必須被接受(不是 off-by-one 拒絕),
+    // 用 4 字元短 id 讓 wire byte 上限(2048)不會先擋下來,單純驗證數量邊界。
+    [Fact]
+    public void Issue_ExactMaxCallerGroupSetIsAccepted()
+    {
+        var groups = Enumerable.Range(0, AgentAudience.MaxCallerGroups)
+            .Select(index => $"g{index:D3}")
+            .ToArray();
+
+        var token = Service().Issue("alice", "ADMIN", "demo-a", groups: groups);
+
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
+        Assert.Equal(
+            groups,
+            jwt.Claims
+                .Where(claim => claim.Type == "groups")
+                .Select(claim => claim.Value)
+                .ToArray());
+    }
+
     [Fact]
     public void Issue_OverBoundGroupSetRejectsWholeSet()
     {
@@ -202,6 +240,25 @@ public sealed class JwtTests
             "ADMIN",
             "demo-a",
             groups: plusOne));
+    }
+
+    // Authorization header 預算守門的另一半:token 真的爆掉時必須擲出,而不是簽出一顆下游會被截斷的 token。
+    // capabilities 沒有長度/數量上限,是唯一能越過 group wire 上限、單獨頂爆 7KB 預算的入口。
+    [Fact]
+    public void Issue_TokenOverAuthorizationHeaderBudgetIsRejected()
+    {
+        var oversized = Enumerable.Range(0, 80)
+            .Select(index => $"tool.use:t{index:D3}{new string('a', 120)}")
+            .ToArray();
+
+        var error = Assert.Throws<InvalidOperationException>(() => Service().Issue(
+            "alice",
+            "ADMIN",
+            "demo-a",
+            capabilities: oversized));
+        Assert.Equal(
+            "Issued JWT exceeds the deployed Authorization header budget",
+            error.Message);
     }
 
     private static string[] GroupSet(bool exceedByOneByte)

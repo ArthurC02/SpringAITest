@@ -21,6 +21,39 @@ public sealed class AgentAudienceTests
         Assert.False(AgentAudience.IsCanonicalEntry(legacyFreeString));
     }
 
+    [Theory]
+    [InlineData("role:admin", "role:ADMIN")]   // 已帶前綴但大小寫不正 → 修正為正規值
+    [InlineData("role:bogus", "role:bogus")]   // 前綴後不是已知角色 → 原樣放行,不憑空造 role
+    public void AuthoringNormalization_RolePrefixedEntryUppercasesOnlyKnownRoles(
+        string raw,
+        string expected)
+        => Assert.Equal(expected, AgentAudience.NormalizeAuthoringEntry(raw));
+
+    [Theory]
+    [InlineData("role:ADMIN", true)]
+    [InlineData("group:finance-reviewers", true)]
+    [InlineData("role:BOGUS", false)]
+    [InlineData(null, false)]
+    public void CanonicalEntry_AcceptsOnlyKnownRolesAndCanonicalGroupIds(
+        string? value,
+        bool expected)
+        => Assert.Equal(expected, AgentAudience.IsCanonicalEntry(value));
+
+    // 決策表另一半:sibling 測 allowLegacyPublishedRoles=true,這裡補 false 的兩個組合。
+    [Theory]
+    [InlineData("role:ADMIN", true)]  // 正規 role 條目走主分支,不受相容旗標影響
+    [InlineData("ADMIN", false)]      // 舊式裸角色只有相容旗標開著才算數
+    public void Eligibility_WithoutLegacyCompatibility_OnlyCanonicalRoleEntryMatches(
+        string audienceEntry,
+        bool expected)
+        => Assert.Equal(
+            expected,
+            AgentAudience.Matches(
+                new[] { audienceEntry },
+                "ADMIN",
+                Array.Empty<string>(),
+                allowLegacyPublishedRoles: false));
+
     [Fact]
     public void Eligibility_AllowsExplicitGroupAndLegacyBareRoleOnly()
     {
@@ -85,6 +118,29 @@ public sealed class AgentAudienceTests
             () => rejected.Request.UserGroups());
         Assert.Equal(StatusCodes.Status400BadRequest, error.Status);
     }
+
+    [Fact]
+    public void CanonicalGroupSet_ExactCallerGroupCountAccepted_PlusOneRejected()
+    {
+        // 兩組的 wire 位元組數都遠低於 2048,只有數量跨過 MaxCallerGroups → 單獨驗數量邊界。
+        Assert.True(AgentAudience.IsCanonicalGroupSet(
+            CountedGroupSet(AgentAudience.MaxCallerGroups)));
+        Assert.False(AgentAudience.IsCanonicalGroupSet(
+            CountedGroupSet(AgentAudience.MaxCallerGroups + 1)));
+    }
+
+    [Fact]
+    public void CanonicalGroupSet_RejectsDuplicateGroupIds()
+    {
+        Assert.True(AgentAudience.IsCanonicalGroupId("finance-reviewers"));
+        Assert.False(AgentAudience.IsCanonicalGroupSet(
+            new[] { "finance-reviewers", "finance-reviewers" }));
+    }
+
+    private static string[] CountedGroupSet(int count)
+        => Enumerable.Range(0, count)
+            .Select(index => $"g{index:D3}")
+            .ToArray();
 
     private static string[] GroupSet(bool exceedByOneByte)
         => Enumerable.Range(0, 16)

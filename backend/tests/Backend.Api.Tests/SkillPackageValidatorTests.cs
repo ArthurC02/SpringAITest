@@ -158,6 +158,23 @@ public sealed class SkillPackageValidatorTests
         Assert.Equal("USER", result.Skill.RequiredRole);
     }
 
+    // required_role 的另一個合法等價類:ADMIN 必須原樣帶過(不被 USER 預設值蓋掉),
+    // 否則 ADMIN-only 的 skill 匯入後會變成全員可執行 —— 授權降級不會有第二次機會被發現。
+    [Fact]
+    public async Task Valid_AdminRequiredRole_IsPassedThrough()
+    {
+        var body =
+            """
+            {"valid":true,"errors":[],
+             "skill":{"name":"sales-helper","description":"d","required_role":"ADMIN","kind":"flow"},
+             "canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
+            """;
+
+        var result = await Validate(Json(HttpStatusCode.OK, body));
+
+        Assert.Equal("ADMIN", result.Skill!.RequiredRole);
+    }
+
     // ---- valid=false:回錯誤碼,無可寫入的 metadata/definition ----
 
     [Fact]
@@ -221,12 +238,47 @@ public sealed class SkillPackageValidatorTests
         Assert.Contains("canonical_definition", ex.Message);
     }
 
+    [Fact] // 同一格檢查的另一半:valid=true 卻整個 skill 鍵缺席 → backend 無從得知 name → 502。
+    public async Task ValidWithoutSkillMetadata_Throws502()
+    {
+        var ex = await Assert.ThrowsAsync<ApiException>(
+            () => Validate(Json(HttpStatusCode.OK, """{"valid":true,"errors":[]}""")));
+
+        Assert.Equal(502, ex.Status);
+        Assert.Contains("缺少 skill 中繼資料", ex.Message);
+    }
+
+    // canonical_definition 是引擎產出、backend 要原封存進 DB 的權威文字:語法就壞的 YAML
+    // 必須在寫入前擋掉(不是「當成空定義放行」)。訊息含 YAML parser 的原文,故只比對前綴。
+    [Fact]
+    public async Task ValidWithMalformedCanonicalYaml_Throws502()
+    {
+        var body =
+            """
+            {"valid":true,"errors":[],
+             "skill":{"name":"sales-helper","description":"d","required_role":"USER","kind":"flow"},
+             "canonical_definition":"name: [unterminated"}
+            """;
+
+        var ex = await Assert.ThrowsAsync<ApiException>(() => Validate(Json(HttpStatusCode.OK, body)));
+
+        Assert.Equal(502, ex.Status);
+        Assert.Contains("canonical_definition 不是合法 YAML", ex.Message);
+    }
+
     // 每格帶自己的 detail 片段:只斷言「引擎回應違反契約」的話,任何一項檢查被短路掉
     // (或檢查順序被改成先撞別項)測試照樣綠 —— 那等於沒測到「哪一格」在守。
     // 具名路徑(expected_name="sales-helper")下 :144-148 的 name 檢查先拋,
     // 因此 canonical.name 不一致那格在此不可達,由 DerivedNameResponse_CanonicalIdentityMismatch_Throws502 覆蓋。
     public static TheoryData<string, string> InvalidSuccessContracts => new()
     {
+        {
+            // blank name(在 expected_name 比對之前先擋:空白名字會寫成無名 skill)
+            """
+            {"valid":true,"errors":[],"skill":{"name":"   ","description":"d","required_role":"USER","kind":"flow"},"canonical_definition":"name: sales-helper\ndescription: d\nflow: []\n"}
+            """,
+            "skill.name 必須是非空字串"
+        },
         {
             // route name mismatch
             """

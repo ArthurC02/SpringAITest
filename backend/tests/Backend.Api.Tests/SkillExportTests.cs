@@ -332,4 +332,49 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
             new[] { "name: at220_escape", "description: \"營收: 100 \\\"高\\\"\"" },
             frontmatter);
     }
+
+    // ---- IsPlainSafe 的「開頭/結尾」守衛:上面那條把 `:` 放在字串**中間**,走的是逐字元的 foreach 分支,
+    // 碰不到開頭指示字元(`-?:,[]{}#&*!|>'"%@` 等)、數值起手式(`.`/`+`)與前後空白這三條先行守衛。
+    // 前導/尾端空白是同一個 if 的兩個子句(s[0] / s[^1]),各留一個代表值 —— 少寫一半照樣會產出
+    // 匯入端會 strip 掉空白的裸 scalar。----
+    [Theory]
+    [InlineData("at222-lead-dash", "-100 成長")]  // 開頭指示字元
+    [InlineData("at222-lead-dot", ".5 倍營收")]   // 數值起手式(`.`/`+`/數字同一條)
+    [InlineData("at222-lead-space", " 前導空白")] // 前導空白
+    [InlineData("at222-trail-space", "尾端空白 ")] // 尾端空白
+    public async Task Export_SkillMd_QuotesDescriptionWithLeadingIndicatorOrEdgeWhitespace(
+        string name, string description)
+    {
+        Seed("demo-a", name, Yaml(name), description);
+
+        var entries = await ExportZipAsync(Admin(), name);
+        var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
+
+        var lines = md.Split('\n');
+        var end = Array.IndexOf(lines, "---", 1);
+        Assert.Equal(new[] { $"name: {name}", $"description: \"{description}\"" }, lines[1..end]);
+    }
+
+    // ---- 逃脫表的其餘分支:反斜線/換行/CR/tab 必須寫成**兩字元**逃脫序列 —— 若換行原樣輸出,
+    // frontmatter 會被從中間切成多行而不再是 name+description 兩個欄位(zip 匯不回去)。
+    // 控制字元(\x01)沒有對應 case,走 `_ => c.ToString()` 原樣落在雙引號 scalar 內 —— 這裡是釘住現狀。----
+    [Fact]
+    public async Task Export_SkillMd_EscapesBackslashNewlineTabInDescription()
+    {
+        const string name = "at222-escape-ctrl";
+        Seed("demo-a", name, Yaml(name), "第一行\n第二行\ttab\\slash\r尾\u0001");
+
+        var entries = await ExportZipAsync(Admin(), name);
+        var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
+
+        var lines = md.Split('\n');
+        var end = Array.IndexOf(lines, "---", 1);
+        Assert.Equal(
+            new[]
+            {
+                $"name: {name}",
+                "description: \"第一行\\n第二行\\ttab\\\\slash\\r尾\u0001\"",
+            },
+            lines[1..end]);
+    }
 }

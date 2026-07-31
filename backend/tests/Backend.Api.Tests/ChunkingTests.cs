@@ -46,6 +46,20 @@ public sealed class ChunkingTests
         Assert.Equal(8, chunks[2].Length);  // 12..20
     }
 
+    // 同一次呼叫同時走兩條分支:短段落直接入列、長段落走滑動視窗,且輸出順序須維持原文順序。
+    [Fact]
+    public void SplitText_ShortAndLongParagraphsInOneCall_AppliesBothBranches()
+    {
+        // maxChars=10, overlap=4 → step=6。中段 20 字切成 10/10/8 三塊,前後短段各自原樣一塊。
+        var text = "短段落\n\n" + new string('a', 20) + "\n\n尾段";
+
+        var chunks = Chunking.SplitText(text, maxChars: 10, overlap: 4);
+
+        Assert.Equal(
+            new[] { "短段落", new string('a', 10), new string('a', 10), new string('a', 8), "尾段" },
+            chunks);
+    }
+
     // 段落長度剛好等於 maxChars → 不切(1 塊);多 1 字 → 進滑動視窗(2 塊)。off-by-one 邊界。
     [Theory]
     [InlineData(10, 1)]

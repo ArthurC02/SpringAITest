@@ -60,6 +60,8 @@ public sealed class InMemoryRepositoriesTests
         await repo.AddAsync("demo-a", "user-a", "Q1", "A1", default);
         await repo.AddAsync("demo-b", "user-b", "Q2", "A2", default);
         await repo.AddAsync("demo-a", "other-user", "Q3", "A3", default);
+        // 只變租戶、user id 相同:少了這列,掉光 tenant 過濾器(只剩 user 過濾)也測得過。
+        await repo.AddAsync("demo-b", "user-a", "Q4", "A4", default);
 
         var mine = await repo.ListDescAsync("demo-a", "user-a", default);
 
@@ -110,6 +112,40 @@ public sealed class InMemoryRepositoriesTests
         Assert.Equal(1.0, results[0].Score, 5);
         Assert.Equal("orthogonal", results[1].Content);
         Assert.Equal(0.0, results[1].Score, 5);
+    }
+
+    [Fact]
+    public async Task Rag_Search_ZeroMagnitudeChunk_ScoresZero_NotNaN()
+    {
+        var repo = new InMemoryRagRepository();
+        await SeedReadyAsync(repo, "demo-a", Guid.NewGuid().ToString(), "doc", new[]
+        {
+            ("zero", Vec(0f, 0f)),   // 退化向量:|b|=0 → 走特例回 0(不是 0/0 = NaN)
+            ("same", Vec(1f, 0f)),
+        });
+
+        var results = await repo.SearchAsync("demo-a", Vec(1f, 0f), 10, default);
+
+        Assert.Equal(new[] { "same", "zero" }, results.Select(r => r.Content).ToArray());
+        Assert.Equal(0.0, results[1].Score, 5);
+    }
+
+    [Fact]
+    public async Task Rag_Search_OppositeVector_ScoresMinusOne_AndSortsLast()
+    {
+        var repo = new InMemoryRagRepository();
+        await SeedReadyAsync(repo, "demo-a", Guid.NewGuid().ToString(), "doc", new[]
+        {
+            ("opposite", Vec(-1f, 0f)),      // cosine 值域下界 -1 — 排序最後
+            ("orthogonal", Vec(0f, 1f)),
+            ("same", Vec(1f, 0f)),
+        });
+
+        var results = await repo.SearchAsync("demo-a", Vec(1f, 0f), 10, default);
+
+        Assert.Equal(
+            new[] { "same", "orthogonal", "opposite" }, results.Select(r => r.Content).ToArray());
+        Assert.Equal(-1.0, results[2].Score, 5);
     }
 
     [Fact]
@@ -225,6 +261,24 @@ public sealed class InMemoryRepositoriesTests
         Assert.Equal(active.Id, (await repo.GetActiveAsync("demo-a", default))!.Id);
     }
 
+    // 同一個 OR 守衛的另一個無效等價類:id 存在,但屬於別的租戶 — 一樣回 null,
+    // 且既不得啟用別租戶的 set,也不得動到自己租戶既有的 active。
+    [Fact]
+    public async Task ConfigurationSet_Activate_OtherTenantsId_ReturnsNull_AndTouchesNothing()
+    {
+        var repo = new InMemoryConfigurationSetRepository();
+        var empty = new Dictionary<string, object>();
+        var mine = (await repo.CreateAsync("demo-a", "set-mine", empty, "admin-a", default))!;
+        var theirs = (await repo.CreateAsync("demo-b", "set-theirs", empty, "admin-b", default))!;
+        await repo.ActivateAsync("demo-a", mine.Id, default);
+
+        Assert.Null(await repo.ActivateAsync("demo-a", theirs.Id, default));
+
+        Assert.Equal(mine.Id, (await repo.GetActiveAsync("demo-a", default))!.Id);
+        Assert.False((await repo.GetAsync("demo-b", theirs.Id, default))!.IsActive);
+        Assert.Null(await repo.GetActiveAsync("demo-b", default));
+    }
+
     // ---- Agent:repo 層對「已標 validated 但定義/內容不合法」的縱深防禦(不走 HTTP)----
 
     private static string AgentDefinition(
@@ -288,6 +342,38 @@ public sealed class InMemoryRepositoriesTests
             invalidDefinition, SkillHash.Sha256(invalidDefinition), "admin-a", default);
         Assert.Equal(AgentWriteStatus.InvalidReference, rejectedRestore.Status);
         Assert.Single(await repo.ListRevisionsAsync("demo-a", valid.Id, default));
+    }
+
+    /// <summary>
+    /// 契約上限的 on-point / off-point:剛好等於上限必須發得出去(擋住 &gt; 誤寫成 &gt;=),
+    /// 上限 +1 必須被擋(既有測試只測到 timeout 的下界 -1,沒測過上界)。
+    /// </summary>
+    [Fact]
+    public async Task Publish_AcceptsExactContractMaximums_RejectsOneOverTimeout()
+    {
+        var repo = new InMemoryAgentRepository(new InMemorySkillRepository());
+        var atMax = AgentDefinition(
+            systemPrompt: new string('p', AgentExecutionContract.MaxSystemPromptLength),
+            timeoutSeconds: AgentExecutionContract.MaxTimeoutSeconds);
+        var boundary = await ValidatedAgentAsync(repo, "contract-at-max", atMax);
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await repo.PublishAsync(
+                "demo-a", boundary.Id, boundary.DraftVersion,
+                atMax, SkillHash.Sha256(atMax), "admin-a", default)).Status);
+
+        var overMax = AgentDefinition(
+            timeoutSeconds: AgentExecutionContract.MaxTimeoutSeconds + 1);
+        var rejectedAgent = await ValidatedAgentAsync(repo, "contract-over-max", overMax);
+
+        var rejected = await repo.PublishAsync(
+            "demo-a", rejectedAgent.Id, rejectedAgent.DraftVersion,
+            overMax, SkillHash.Sha256(overMax), "admin-a", default);
+
+        Assert.Equal(AgentWriteStatus.InvalidReference, rejected.Status);
+        Assert.Contains(
+            rejected.Errors!, error => error.Field == "runtime_limits.timeout_seconds");
+        Assert.Empty(await repo.ListRevisionsAsync("demo-a", rejectedAgent.Id, default));
     }
 
     /// <summary>

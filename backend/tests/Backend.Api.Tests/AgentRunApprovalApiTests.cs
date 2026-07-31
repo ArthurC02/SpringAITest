@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.Agents;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace Backend.Api.Tests;
 
@@ -91,17 +93,106 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
             (await crossTenant.GetAsync($"/api/runs/{runId}/approvals")).StatusCode);
     }
 
+    /// <summary>
+    /// 決策表的另一半:上面兩個測試只走 approve=true,`reject` 路由與 approve=false 分支
+    /// 從未被驗證過。拒絕必須 200 + decision:"rejected",而且 run 被終局化為 failed
+    /// (不是回到 queued 等寫入執行)—— 這是「拒絕真的擋下寫入」的唯一憑據。
+    /// </summary>
+    [Fact]
+    public async Task Reject_RecordsRejectedDecision_AndFailsTheRun()
+    {
+        using var admin = Client("demo-a", "admin-a", "ADMIN");
+        var agent = await PublishedUserAgentAsync(admin);
+        using var owner = Client("demo-a", "admin-a", "ADMIN");
+        var running = await StartRunningAsync(owner, agent);
+        var runId = running.Run["id"]!.GetValue<string>();
+        var approvalId = (await CreateApprovalAsync(owner, running, new string('b', 64), "USER"))["id"]!.GetValue<string>();
+
+        using var approver = Client("demo-a", "user-b", "USER");
+        var rejected = await DecideAsync(approver, runId, approvalId, false, "business-reject");
+
+        Assert.Equal(HttpStatusCode.OK, rejected.StatusCode);
+        Assert.Equal("rejected", (await rejected.ReadJsonAsync())["decision"]!.GetValue<string>());
+        var listed = Assert.Single((await (await owner.GetAsync($"/api/runs/{runId}/approvals")).ReadJsonAsync()).AsArray())!.AsObject();
+        Assert.Equal("rejected", listed["status"]!.GetValue<string>());
+        Assert.Equal("rejected", listed["decision"]!.GetValue<string>());
+        Assert.Equal("failed", (await (await owner.GetAsync($"/api/runs/{runId}")).ReadJsonAsync())["status"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// fail-closed 等價類:AGENT_WRITE_TOOLS_ENABLED 非 "true" 時,公開的決定路由必須在
+    /// 內部憑證、身分與 body 解析之前就 404。D7FeatureGateTests 蓋了其餘 D7 路由,
+    /// 唯獨 approve/reject 這兩條(唯一給人按的)不在它的清單裡。
+    /// </summary>
+    [Fact]
+    public async Task Decide_WhenWriteToolsDisabled_Is404BeforeAnyIdentityCheck()
+    {
+        using var disabled = new WriteToolsDisabledFactory();
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post, $"/api/runs/{Guid.NewGuid():D}/approvals/{Guid.NewGuid():D}/approve");
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "disabled");
+
+        var response = await disabled.CreateClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("Feature is unavailable", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// 決定信封的兩個規格數字:Idempotency-Key 上限 128(缺席/空白也不行),reason 上限 500。
+    /// 兩個上限分屬不同守門人 —— key 由 controller 擋(400),reason 由儲存庫擋(InvalidState → 409),
+    /// 所以 on-point 那一列必須同時帶 128 + 500 才能證明兩道門都在正確的一側。
+    /// </summary>
+    public static TheoryData<string?, int, HttpStatusCode, string?> DecisionEnvelopes => new()
+    {
+        { null, 0, HttpStatusCode.BadRequest, "Idempotency-Key is required" },              // header 缺席
+        { new string('k', 129), 0, HttpStatusCode.BadRequest, "Idempotency-Key is required" }, // 128 + 1
+        { new string('k', 128), 501, HttpStatusCode.Conflict, "invalid decision request" },    // reason 500 + 1
+        { new string('k', 128), 500, HttpStatusCode.OK, null },                                // 兩個 on-point
+    };
+
+    [Theory]
+    [MemberData(nameof(DecisionEnvelopes))]
+    public async Task Decide_ValidatesIdempotencyKeyAndReasonAtTheirLimits(
+        string? idempotencyKey, int reasonLength, HttpStatusCode expected, string? expectedMessage)
+    {
+        using var admin = Client("demo-a", "admin-a", "ADMIN");
+        var agent = await PublishedUserAgentAsync(admin);
+        using var owner = Client("demo-a", "admin-a", "ADMIN");
+        var running = await StartRunningAsync(owner, agent);
+        var runId = running.Run["id"]!.GetValue<string>();
+        var approvalId = (await CreateApprovalAsync(owner, running, new string('c', 64), "USER"))["id"]!.GetValue<string>();
+
+        using var approver = Client("demo-a", "user-b", "USER");
+        var response = await DecideAsync(approver, runId, approvalId, true, idempotencyKey, new string('r', reasonLength));
+
+        Assert.Equal(expected, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        if (expectedMessage is null) Assert.Equal("approved", body["decision"]!.GetValue<string>());
+        else Assert.Equal(expectedMessage, body["message"]!.GetValue<string>());
+    }
+
     private HttpClient Client(string tenant, string user, string role)
         => _factory.CreateInternalClient().WithTenant(tenant).WithUser(user).WithRole(role);
 
-    private static async Task<HttpResponseMessage> DecideAsync(HttpClient client, string runId, string approvalId, bool approve, string key)
+    private static async Task<HttpResponseMessage> DecideAsync(HttpClient client, string runId, string approvalId, bool approve, string? key, string reason = "D7 test")
     {
         var request = new HttpRequestMessage(HttpMethod.Post, $"/api/runs/{runId}/approvals/{approvalId}/{(approve ? "approve" : "reject")}")
         {
-            Content = JsonContent.Create(new { reason = "D7 test" }),
+            Content = JsonContent.Create(new { reason }),
         };
-        request.Headers.TryAddWithoutValidation("Idempotency-Key", key);
+        if (key is not null) request.Headers.TryAddWithoutValidation("Idempotency-Key", key);
         return await client.SendAsync(request);
+    }
+
+    /// <summary>D7 旗標關閉的最小宿主:路由在觸及任何倉儲之前就被擋下,不需要換 fake。</summary>
+    private sealed class WriteToolsDisabledFactory : WebApplicationFactory<Program>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", "false");
+        }
     }
 
     private async Task<JsonNode> PublishedUserAgentAsync(HttpClient admin)

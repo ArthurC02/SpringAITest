@@ -96,6 +96,24 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(expected, response.StatusCode);
     }
 
+    // The other half of RequireContent's guard: string.IsNullOrWhiteSpace. Content is hashed
+    // verbatim, so "blank" can never become a stored artifact identity -- omitted, empty (the
+    // length-0 on-point boundary) and whitespace-only all 400, while 1 char is the shortest
+    // publishable content (off-point).
+    [Theory]
+    [InlineData(null, HttpStatusCode.BadRequest)]
+    [InlineData("", HttpStatusCode.BadRequest)]
+    [InlineData("   ", HttpStatusCode.BadRequest)]
+    [InlineData("x", HttpStatusCode.OK)]
+    public async Task Component_BlankContentBoundary(string? content, HttpStatusCode expected)
+    {
+        using var factory = new PromptArtifactsEnabledFactory();
+        var response = await Admin(factory).PostAsJsonAsync(
+            "/api/prompt-components",
+            new JsonObject { ["kind"] = "summary", ["content"] = content });
+        Assert.Equal(expected, response.StatusCode);
+    }
+
     [Fact]
     public async Task RawComponentContent_NeverAppearsInAnyResponse()
     {
@@ -213,6 +231,44 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Single((await (await owner.GetAsync("/api/prompt-manifests")).ReadJsonAsync()).AsArray());
     }
 
+    // Catalog hashes are part of the manifest's canonical identity, so a blank value or one
+    // smuggling a control character would poison the hash. RequireCatalogHash rejects that whole
+    // invalid class with 400 -- and both fields are guarded identically (last row = sibling field).
+    [Theory]
+    [InlineData(null, "skill-hash")]
+    [InlineData("", "skill-hash")]
+    [InlineData("   ", "skill-hash")]
+    [InlineData("tool\u0001hash", "skill-hash")]
+    [InlineData("tool-hash", "")]
+    public async Task Manifest_RejectsInvalidCatalogHash(string? toolCatalogHash, string? skillCatalogHash)
+    {
+        using var factory = new PromptArtifactsEnabledFactory();
+        var client = Admin(factory);
+        await PublishComponentAsync(client, "guard", "GUARD");
+
+        var response = await PostManifestAsync(
+            client, new JsonObject { ["guard"] = 1 },
+            toolCatalogHash: toolCatalogHash, skillCatalogHash: skillCatalogHash);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        // The guard runs before the repository write, so no revision was created.
+        Assert.Empty((await (await client.GetAsync("/api/prompt-manifests")).ReadJsonAsync()).AsArray());
+    }
+
+    [Theory]
+    [InlineData(PromptArtifactContract.MaxCatalogHashLength, HttpStatusCode.OK)]
+    [InlineData(PromptArtifactContract.MaxCatalogHashLength + 1, HttpStatusCode.BadRequest)]
+    public async Task Manifest_CatalogHashLengthBoundary(int length, HttpStatusCode expected)
+    {
+        using var factory = new PromptArtifactsEnabledFactory();
+        var client = Admin(factory);
+        await PublishComponentAsync(client, "guard", "GUARD");
+
+        var response = await PostManifestAsync(
+            client, new JsonObject { ["guard"] = 1 }, toolCatalogHash: new string('x', length));
+        Assert.Equal(expected, response.StatusCode);
+    }
+
     [Fact]
     public async Task Manifest_Rollback_CreatesNewRevisionReferencingOldComponents_WithoutRewritingHistory()
     {
@@ -317,6 +373,32 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(
             HttpStatusCode.Forbidden,
             (await nonAdmin.GetAsync("/api/prompt-manifests/1")).StatusCode);
+    }
+
+    // The other half of that divergence: the resolved GET route is the ONLY route a non-ADMIN may
+    // reach. With the flag ON, both POST write routes still 403 for a USER on a valid tenant, with
+    // the resource-specific message -- and because [AdminOnly] is an authorization filter, an
+    // invalid body cannot short-circuit into a 400 that leaks the field rules.
+    [Theory]
+    [InlineData("/api/prompt-components")]
+    [InlineData("/api/prompt-manifests")]
+    public async Task WriteRoutes_RejectNonAdmin_AndWriteNothing(string path)
+    {
+        using var factory = new PromptArtifactsEnabledFactory();
+        var nonAdmin = factory.CreateInternalClient()
+            .WithTenant("write-nonadmin")
+            .WithRole("USER")
+            .WithUser("caller");
+
+        var response = await nonAdmin.PostAsJsonAsync(path, new JsonObject { ["kind"] = "not-a-kind" });
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(
+            "權限不足，無法存取 prompt artifacts",
+            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        // Nothing reached the tenant's store (read back as the ADMIN of that same tenant).
+        Assert.Empty(
+            (await (await Admin(factory, "write-nonadmin").GetAsync(path)).ReadJsonAsync()).AsArray());
     }
 
     [Fact]
@@ -442,13 +524,17 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
     }
 
     private static Task<HttpResponseMessage> PostManifestAsync(
-        HttpClient client, JsonObject components, int? schemaVersion = PromptArtifactContract.SchemaVersion)
+        HttpClient client,
+        JsonObject components,
+        int? schemaVersion = PromptArtifactContract.SchemaVersion,
+        string? toolCatalogHash = "tool-hash",
+        string? skillCatalogHash = "skill-hash")
         => client.PostAsJsonAsync("/api/prompt-manifests", new JsonObject
         {
             ["schema_version"] = schemaVersion,
             ["components"] = components,
-            ["tool_catalog_hash"] = "tool-hash",
-            ["skill_catalog_hash"] = "skill-hash",
+            ["tool_catalog_hash"] = toolCatalogHash,
+            ["skill_catalog_hash"] = skillCatalogHash,
         });
 
     private static async Task<JsonNode> CreateManifestAsync(HttpClient client, JsonObject components)

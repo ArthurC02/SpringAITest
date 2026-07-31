@@ -63,6 +63,30 @@ public sealed class ConfigRepositoryTests
         Assert.Equal("dark", Assert.Single(await Repo.ListAsync(b, default)).Value);
     }
 
+    // GET /api/config/runtime/{key} 背後的單鍵點查:只看得到自己租戶那一列;別的租戶寫的 key
+    // 與根本不存在的 key 都是 null。WHERE 少了 tenant_id 時,同名 key 的兩列會讓 QuerySingle 直接炸。
+    [SkippableFact]
+    public async Task Get_ReadsOwnTenantRow_OtherTenantKeyOrUnknownKey_IsNull()
+    {
+        _fx.SkipIfUnavailable();
+        const string a = "cfgrepo-get-a";
+        const string b = "cfgrepo-get-b";
+        const string shared = "prompt.manifest_revision";
+
+        await Repo.UpsertAsync(a, shared, "rev-a", default);
+        await Repo.UpsertAsync(a, "only-a", "a-value", default);
+        await Repo.UpsertAsync(b, shared, "rev-b", default);
+
+        var mine = await Repo.GetAsync(a, shared, default);
+        Assert.NotNull(mine);
+        Assert.Equal(shared, mine!.Key);
+        Assert.Equal("rev-a", mine.Value);
+        Assert.Equal("rev-b", (await Repo.GetAsync(b, shared, default))!.Value);
+
+        Assert.Null(await Repo.GetAsync(b, "only-a", default));      // A 的 key 對 B 不可見
+        Assert.Null(await Repo.GetAsync(a, "no-such-key", default)); // 不存在 → null,不是丟例外
+    }
+
     // in-memory 實作(Lite 模式 = 測試的 fake)必須與 Dapper 同行為。tuple 複合鍵 vs
     // 字串串接的差別只有在 key 含分隔符時才看得出來 — 這裡就用含 ':' 的 key 釘住。
     [Fact]
@@ -76,6 +100,11 @@ public sealed class ConfigRepositoryTests
         Assert.Equal("one", Assert.Single(await repo.ListAsync("t", default)).Value);
         Assert.Equal("two", Assert.Single(await repo.ListAsync("t:a", default)).Value);
         Assert.Empty(await repo.ListAsync("other", default));
+
+        // 單鍵點查(runtime read 的路徑)同樣走 tuple 鍵:("t","a:b") 不能撈到 ("t:a","b") 那列。
+        Assert.Equal("one", (await repo.GetAsync("t", "a:b", default))!.Value);
+        Assert.Equal("two", (await repo.GetAsync("t:a", "b", default))!.Value);
+        Assert.Null(await repo.GetAsync("other", "a:b", default));
     }
 }
 

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using Backend.Api.OperationsGovernance;
 using Microsoft.AspNetCore.Hosting;
 
@@ -23,6 +24,9 @@ public sealed class EvalGovernanceApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("GET", "/api/admin/operations/eval-suites/csr-eval-001/revisions/1")]
     [InlineData("GET", "/api/admin/operations/eval-runs")]
     [InlineData("GET", "/api/admin/operations/eval-runs/00000000-0000-0000-0000-000000000001")]
+    // The gate matches on path prefix only, so the write verb must be hidden too -- a POST that
+    // still reached the controller while off would create a real run behind a "disabled" feature.
+    [InlineData("POST", "/api/admin/operations/eval-runs")]
     public async Task FlagOff_HidesEveryEvalRouteBeforeAuth(string method, string path)
     {
         // RUN_EVAL_ENABLED is unset on the shared factory (defaults false), while
@@ -246,6 +250,317 @@ public sealed class EvalGovernanceApiTests : IClassFixture<TestWebAppFactory>
         Assert.False((await falsy.ReadJsonAsync())["regression_passed"]!.GetValue<bool>());
     }
 
+    [Theory]
+    // suite_id: blank / control character (the 128-char cap is a boundary, see the length theory).
+    [InlineData("""{"suite_id":"   ","revision":1,"candidate":{"kind":"skill","ref":{"name":"c"}}}""", "suite_id is required")]
+    [InlineData("""{"suite_id":"eval\u0007suite","revision":1,"candidate":{"kind":"skill","ref":{"name":"c"}}}""", "suite_id is required")]
+    // revision: omitted / zero / negative -- the valid class starts at 1.
+    [InlineData("""{"suite_id":"eval-test-suite","candidate":{"kind":"skill","ref":{"name":"c"}}}""", "revision is required")]
+    [InlineData("""{"suite_id":"eval-test-suite","revision":0,"candidate":{"kind":"skill","ref":{"name":"c"}}}""", "revision is required")]
+    [InlineData("""{"suite_id":"eval-test-suite","revision":-1,"candidate":{"kind":"skill","ref":{"name":"c"}}}""", "revision is required")]
+    // candidate: omitted entirely / a kind outside {skill, agent}.
+    [InlineData("""{"suite_id":"eval-test-suite","revision":1}""", "candidate.kind must be skill or agent")]
+    [InlineData("""{"suite_id":"eval-test-suite","revision":1,"candidate":{"kind":"workflow","ref":{"name":"c"}}}""", "candidate.kind must be skill or agent")]
+    // candidate.ref: omitted / present but not a JSON object.
+    [InlineData("""{"suite_id":"eval-test-suite","revision":1,"candidate":{"kind":"skill"}}""", "candidate.ref must be a JSON object")]
+    [InlineData("""{"suite_id":"eval-test-suite","revision":1,"candidate":{"kind":"skill","ref":"not-an-object"}}""", "candidate.ref must be a JSON object")]
+    // candidate.pins: optional, but when present it must be an object.
+    [InlineData("""{"suite_id":"eval-test-suite","revision":1,"candidate":{"kind":"skill","ref":{"name":"c"},"pins":["a"]}}""", "candidate.pins must be a JSON object")]
+    public async Task CreateRun_RejectsEveryInvalidRequestBodyClass_BeforeCallingWorkflow(string body, string expectedMessage)
+    {
+        using var factory = new EvalEnabledFactory();
+        using var admin = Client(factory, "eval-invalid-body", "operator", manage: true);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var response = await PostRunAsync(
+            admin, new StringContent(body, Encoding.UTF8, "application/json"), "invalid-body-key");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(expectedMessage, await ErrorMessageAsync(response));
+        // Validation is pure request shape: an invalid body never reaches (or costs) Workflow.
+        Assert.Empty(fakeRunner.Calls);
+    }
+
+    [Theory]
+    [InlineData(128, HttpStatusCode.NotFound)] // at the cap: passes validation, then fails to resolve
+    [InlineData(129, HttpStatusCode.BadRequest)] // one over: rejected before any lookup
+    public async Task CreateRun_SuiteId_IsAcceptedAtTheLengthCap_AndRejectedOneCharOver(
+        int length, HttpStatusCode expected)
+    {
+        using var factory = new EvalEnabledFactory();
+        using var admin = Client(factory, "eval-suite-length", "operator", manage: true);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var response = await PostRunAsync(admin, JsonContent.Create(new
+        {
+            suite_id = new string('s', length),
+            revision = 1,
+            candidate = new { kind = "skill", @ref = new { name = "candidate-under-test" } },
+        }), "suite-length-key");
+
+        Assert.Equal(expected, response.StatusCode);
+        if (expected == HttpStatusCode.BadRequest)
+        {
+            Assert.Equal("suite_id is required", await ErrorMessageAsync(response));
+        }
+        // Neither row names a published suite, so neither may reach Workflow.
+        Assert.Empty(fakeRunner.Calls);
+    }
+
+    [Theory]
+    [InlineData(1, HttpStatusCode.OK)]
+    [InlineData(300_000, HttpStatusCode.OK)]
+    [InlineData(0, HttpStatusCode.BadRequest)]
+    [InlineData(300_001, HttpStatusCode.BadRequest)]
+    public async Task CreateRun_BudgetMs_AcceptsTheInclusiveRange_AndRejectsEitherSideOfIt(
+        int budgetMs, HttpStatusCode expected)
+    {
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-budget-range", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var admin = Client(factory, "eval-budget-range", "operator", manage: true);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var response = await PostRunAsync(admin, JsonContent.Create(new
+        {
+            suite_id = SuiteId,
+            revision = 1,
+            candidate = new { kind = "skill", @ref = new { name = "candidate-under-test" } },
+            budget_ms = budgetMs,
+        }), "budget-range-key");
+
+        Assert.Equal(expected, response.StatusCode);
+        if (expected == HttpStatusCode.OK)
+        {
+            // An accepted budget is forwarded verbatim, never clamped.
+            Assert.Equal(budgetMs, Assert.Single(fakeRunner.Calls).BudgetMs);
+        }
+        else
+        {
+            Assert.Equal("budget_ms must be between 1 and 300000", await ErrorMessageAsync(response));
+            Assert.Empty(fakeRunner.Calls);
+        }
+    }
+
+    [Theory]
+    // candidate.ref serializes compactly as {"pad":"<padding>"} -- a 10-byte envelope -- so these
+    // padding lengths put the ref exactly at the 16384-byte cap and exactly one byte over it.
+    [InlineData(16_374, HttpStatusCode.OK)]
+    [InlineData(16_375, HttpStatusCode.BadRequest)]
+    public async Task CreateRun_CandidateRef_IsAcceptedAtTheByteCap_AndRejectedOneByteOver(
+        int padLength, HttpStatusCode expected)
+    {
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-ref-bytes", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var admin = Client(factory, "eval-ref-bytes", "operator", manage: true);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var response = await PostRunAsync(admin, JsonContent.Create(new
+        {
+            suite_id = SuiteId,
+            revision = 1,
+            candidate = new { kind = "skill", @ref = new { pad = new string('x', padLength) } },
+        }), "ref-bytes-key");
+
+        Assert.Equal(expected, response.StatusCode);
+        if (expected == HttpStatusCode.OK)
+        {
+            Assert.Single(fakeRunner.Calls);
+        }
+        else
+        {
+            // Over-cap reuses the shape message rather than a size-specific one.
+            Assert.Equal("candidate.ref must be a JSON object", await ErrorMessageAsync(response));
+            Assert.Empty(fakeRunner.Calls);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)] // header absent
+    [InlineData("")] // present but empty
+    [InlineData("   ")] // whitespace only
+    public async Task CreateRun_RejectsMissingOrBlankIdempotencyKey(string? key)
+    {
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-no-key", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var admin = Client(factory, "eval-no-key", "operator", manage: true);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var response = await PostRunAsync(admin, JsonContent.Create(new
+        {
+            suite_id = SuiteId,
+            revision = 1,
+            candidate = new { kind = "skill", @ref = new { name = "candidate-under-test" } },
+        }), key);
+
+        // Without a usable key there is no replay identity at all, so the write must never start.
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("Idempotency-Key is required", await ErrorMessageAsync(response));
+        Assert.Empty(fakeRunner.Calls);
+        Assert.Empty(await evals.ListRunsAsync("eval-no-key", default));
+    }
+
+    [Fact]
+    public async Task EvalRoutes_Require_WorkflowManage_EvenWhileTheFlagIsOn()
+    {
+        // flag=on x capability=missing: the combination the flag-off 404 theory can never observe,
+        // because that gate short-circuits before authorization is ever consulted. SYSTEM_ADMIN on
+        // its own is deliberately not workflow.manage.
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-capability", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var noManage = Client(factory, "eval-capability", "operator", manage: false);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var readRoutes = new[]
+        {
+            "/api/admin/operations/eval-suites",
+            $"/api/admin/operations/eval-suites/{SuiteId}",
+            $"/api/admin/operations/eval-suites/{SuiteId}/revisions/1",
+            "/api/admin/operations/eval-runs",
+            "/api/admin/operations/eval-runs/00000000-0000-0000-0000-000000000001",
+        };
+        foreach (var route in readRoutes)
+        {
+            var response = await noManage.GetAsync(route);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Equal("workflow.manage capability is required", await ErrorMessageAsync(response));
+        }
+
+        var created = await CreateRunAsync(noManage, SuiteId, 1, "skill", key: "no-manage-key");
+        Assert.Equal(HttpStatusCode.Forbidden, created.StatusCode);
+        Assert.Empty(fakeRunner.Calls);
+        Assert.Empty(await evals.ListRunsAsync("eval-capability", default));
+    }
+
+    [Fact]
+    public async Task CreateRun_502sAndPersistsNothing_WhenTheRunnerViolatesTheResponseContract()
+    {
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-contract", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var admin = Client(factory, "eval-contract", "operator", manage: true);
+        var fake = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+        var now = DateTimeOffset.UtcNow;
+        var onePass = new[] { new EvalCaseResultWire("case-a", "id-a", "PASS", null, null) };
+
+        // A runner answering about a *different* suite must never be attributed to this request.
+        fake.Setup((suite, revision, cases) => new EvalRunResponseWire(
+            "fake-runner-1", "a-different-suite", revision, now, now, onePass));
+        var wrongSuite = await CreateRunAsync(admin, SuiteId, 1, "skill", key: "contract-suite");
+        Assert.Equal(HttpStatusCode.BadGateway, wrongSuite.StatusCode);
+        Assert.Equal("Eval runner 回應違反契約（suite_id/revision 與請求不符）", await ErrorMessageAsync(wrongSuite));
+
+        // Same for a result about a different revision of the right suite.
+        fake.Setup((suite, revision, cases) => new EvalRunResponseWire(
+            "fake-runner-1", suite, revision + 1, now, now, onePass));
+        var wrongRevision = await CreateRunAsync(admin, SuiteId, 1, "skill", key: "contract-revision");
+        Assert.Equal(HttpStatusCode.BadGateway, wrongRevision.StatusCode);
+        Assert.Equal("Eval runner 回應違反契約（suite_id/revision 與請求不符）", await ErrorMessageAsync(wrongRevision));
+
+        // A case without an identity cannot be gated on later, so it is rejected, not stored blank.
+        fake.Setup((suite, revision, cases) => new EvalRunResponseWire(
+            "fake-runner-1", suite, revision, now, now,
+            new[] { new EvalCaseResultWire("   ", "id-a", "PASS", null, null) }));
+        var blankCaseId = await CreateRunAsync(admin, SuiteId, 1, "skill", key: "contract-case-id");
+        Assert.Equal(HttpStatusCode.BadGateway, blankCaseId.StatusCode);
+        Assert.Equal("Eval runner 回應違反契約（case 結果形狀不合法）", await ErrorMessageAsync(blankCaseId));
+
+        // Verdict is a closed set -- an unknown one would silently count as neither pass nor fail.
+        fake.Setup((suite, revision, cases) => new EvalRunResponseWire(
+            "fake-runner-1", suite, revision, now, now,
+            new[] { new EvalCaseResultWire("case-a", "id-a", "SKIPPED", null, null) }));
+        var badVerdict = await CreateRunAsync(admin, SuiteId, 1, "skill", key: "contract-verdict");
+        Assert.Equal(HttpStatusCode.BadGateway, badVerdict.StatusCode);
+        Assert.Equal("Eval runner 回應違反契約（case 結果形狀不合法）", await ErrorMessageAsync(badVerdict));
+
+        // Every rejection above happens before the write: no half-run is observable.
+        Assert.Empty(await evals.ListRunsAsync("eval-contract", default));
+    }
+
+    [Fact]
+    public async Task CreateRun_AgentCandidate_IsAcceptedAsAKindOnItsOwn()
+    {
+        // "agent" otherwise only appears as the *conflicting* second candidate of the idempotency
+        // test, where its 409 would be identical for any rejected kind.
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-agent-kind", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var admin = Client(factory, "eval-agent-kind", "operator", manage: true);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var response = await CreateRunAsync(admin, SuiteId, 1, "agent", key: "agent-kind-key");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("agent", (await response.ReadJsonAsync())["candidate"]!["kind"]!.GetValue<string>());
+        Assert.Equal("agent", Assert.Single(fakeRunner.Calls).CandidateKind);
+        Assert.Equal("agent", Assert.Single(await evals.ListRunsAsync("eval-agent-kind", default)).CandidateKind);
+    }
+
+    [Fact]
+    public async Task OwningTenant_SuiteDetail_RevisionDetail_AndRunDetail_ReturnTheStoredShape()
+    {
+        // The read side is only ever asserted from the *denied* (cross-tenant 404) direction
+        // elsewhere; this is the owning-tenant half of that pair.
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-read", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var admin = Client(factory, "eval-read", "operator", manage: true);
+        var created = await CreateRunAsync(admin, SuiteId, 1, "skill", key: "read-key");
+        var runId = (await created.ReadJsonAsync())["id"]!.GetValue<Guid>();
+
+        var suite = await (await admin.GetAsync($"/api/admin/operations/eval-suites/{SuiteId}")).ReadJsonAsync();
+        Assert.Equal(SuiteId, suite["suite_id"]!.GetValue<string>());
+        Assert.Equal(1, suite["current_revision"]!.GetValue<int>());
+        var revisionSummary = Assert.Single(suite["revisions"]!.AsArray())!;
+        Assert.Equal(1, revisionSummary["revision"]!.GetValue<int>());
+        Assert.Equal(1, revisionSummary["case_count"]!.GetValue<int>());
+        Assert.Equal("system", revisionSummary["created_by"]!.GetValue<string>());
+
+        var revision = await (await admin.GetAsync($"/api/admin/operations/eval-suites/{SuiteId}/revisions/1")).ReadJsonAsync();
+        Assert.Equal(revisionSummary["cases_sha256"]!.GetValue<string>(), revision["cases_sha256"]!.GetValue<string>());
+        // policy/cases come back as real JSON, parsed out of the immutable canonical bytes.
+        Assert.Equal("case-a", revision["policy"]!["required_case_ids"]![0]!.GetValue<string>());
+        Assert.Equal("case-a", revision["cases"]![0]!["case_id"]!.GetValue<string>());
+
+        var run = await (await admin.GetAsync($"/api/admin/operations/eval-runs/{runId:D}")).ReadJsonAsync();
+        Assert.Equal(runId, run["id"]!.GetValue<Guid>());
+        Assert.Equal(SuiteId, run["suite_id"]!.GetValue<string>());
+        Assert.Equal(1, run["suite_revision"]!.GetValue<int>());
+        Assert.Equal("fake-runner-1", run["runner_version"]!.GetValue<string>());
+        Assert.Equal(1, run["pass_count"]!.GetValue<int>());
+        Assert.Equal(0, run["fail_count"]!.GetValue<int>());
+        Assert.Equal(0, run["error_count"]!.GetValue<int>());
+        Assert.Equal(64, run["candidate"]!["identity_sha256"]!.GetValue<string>().Length);
+        var caseResult = Assert.Single(run["cases"]!.AsArray())!;
+        Assert.Equal("case-a", caseResult["case_id"]!.GetValue<string>());
+        Assert.Equal("PASS", caseResult["verdict"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SameTenant_ExistingSuite_ButMissingRevision_Is404()
+    {
+        // The other half of the tenant x existence matrix: SuitesAndRuns_AreTenantIsolated covers
+        // "wrong tenant, suite absent"; this is "right tenant, suite present, revision absent".
+        using var factory = new EvalEnabledFactory();
+        var evals = factory.Fake<IEvalRepository>();
+        await evals.PublishSuiteRevisionAsync("eval-missing-rev", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
+        using var admin = Client(factory, "eval-missing-rev", "operator", manage: true);
+        var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
+
+        var run = await CreateRunAsync(admin, SuiteId, 2, "skill", key: "missing-revision-key");
+        Assert.Equal(HttpStatusCode.NotFound, run.StatusCode);
+        Assert.Equal($"找不到 Eval Suite revision：{SuiteId}@2", await ErrorMessageAsync(run));
+        Assert.Empty(fakeRunner.Calls);
+        Assert.Empty(await evals.ListRunsAsync("eval-missing-rev", default));
+
+        Assert.Equal(
+            HttpStatusCode.NotFound,
+            (await admin.GetAsync($"/api/admin/operations/eval-suites/{SuiteId}/revisions/2")).StatusCode);
+    }
+
     private static async Task<HttpResponseMessage> CreateRunAsync(
         HttpClient client, string suiteId, int revision, string candidateKind, string key)
     {
@@ -260,6 +575,33 @@ public sealed class EvalGovernanceApiTests : IClassFixture<TestWebAppFactory>
         };
         request.Headers.Add("Idempotency-Key", key);
         return await client.SendAsync(request);
+    }
+
+    /// <summary>POST eval-runs with a caller-controlled body/header pair (malformed bodies, boundary
+    /// values, absent or blank Idempotency-Key) -- <see cref="CreateRunAsync"/> can only send valid ones.</summary>
+    private static async Task<HttpResponseMessage> PostRunAsync(HttpClient client, HttpContent content, string? key)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/operations/eval-runs")
+        {
+            Content = content,
+        };
+        if (key is not null)
+        {
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", key);
+        }
+        return await client.SendAsync(request);
+    }
+
+    /// <summary>Asserts the outward ApiError shape of a rejection (status mirrored into the body, a
+    /// fieldErrors map always present) and returns its message, so every negative case closes both
+    /// halves of the decision -- the status code and what the caller is actually told.</summary>
+    private static async Task<string> ErrorMessageAsync(HttpResponseMessage response)
+    {
+        var body = await response.ReadJsonAsync();
+        Assert.Equal((int)response.StatusCode, body["status"]!.GetValue<int>());
+        Assert.NotNull(body["timestamp"]);
+        Assert.Empty(body["fieldErrors"]!.AsObject());
+        return body["message"]!.GetValue<string>();
     }
 
     private static async Task<(bool regressionPassed, int auditEntries)> RecordRegressionAsync(

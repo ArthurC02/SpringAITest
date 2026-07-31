@@ -955,6 +955,47 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
             new string('n', AgentExecutionContract.MaxAgentNameLength)));
     }
 
+    // 型別錯誤等價類:Canonicalize 只在缺席/null 時才補預設物件,呼叫端送什麼 JSON 型別就原樣保留,
+    // 所以非 object 的 output_contract / business_rules 會一路帶到 Validate 的這兩個 branch。
+    [Theory]
+    [InlineData("output_contract", "\"not-an-object\"", "output_contract 必須是 JSON object")]
+    [InlineData("business_rules", "[]", "business_rules 必須是 JSON object")]
+    public void Validate_NonObjectOutputContractOrBusinessRules_ReportsTypeError(
+        string field, string rawJson, string expectedMessage)
+    {
+        var body = ValidBody($"non-object-{field}");
+        body[field] = JsonNode.Parse(rawJson);
+
+        var definition = AgentCanonicalizer.Canonicalize(body.Deserialize<AgentUpsert>()!);
+
+        var error = Assert.Single(AgentCanonicalizer.Validate(definition));
+        Assert.Equal(field, error.Field);
+        Assert.Equal(expectedMessage, error.Message);
+    }
+
+    // 筆數上限的兩側(16 通過 / 17 拒絕)。斷言鎖在 ValidateList 的計數訊息:只斷言「有沒有
+    // execution_roles 錯誤」抓不到上限被改掉 —— 這些名稱本來就各自會觸發「不支援的 execution role」。
+    [Theory]
+    [InlineData(AgentExecutionContract.MaxExecutionRoles, false)]
+    [InlineData(AgentExecutionContract.MaxExecutionRoles + 1, true)]
+    public void Validate_ExecutionRolesCountBoundary_RejectsOnlyAboveMax(
+        int roleCount, bool expectTooMany)
+    {
+        var body = ValidBody($"roles-{roleCount}");
+        body["execution_roles"] = new JsonArray(
+            Enumerable.Range(0, roleCount)
+                .Select(index => JsonValue.Create($"role-{index}"))
+                .ToArray());
+
+        var errors = AgentCanonicalizer.Validate(
+            AgentCanonicalizer.Canonicalize(body.Deserialize<AgentUpsert>()!));
+
+        Assert.Equal(
+            expectTooMany,
+            errors.Any(error => error.Message
+                == $"execution_roles 最多 {AgentExecutionContract.MaxExecutionRoles} 筆"));
+    }
+
     [Theory]
     [InlineData("system_prompt", "")]      // 空 system_prompt
     [InlineData("execution_roles", "[]")]  // 空 roles
@@ -1016,6 +1057,26 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
 
         // Invalid validation result is never marked; publish fails closed as unvalidated.
         Assert.Equal(HttpStatusCode.Conflict, (await PublishAsync(client, id, 1)).StatusCode);
+    }
+
+    // 「id 格式就不合法」等價類(上一條測的是格式合法但查無此 workflow,由 repo 的 reference 解析擋下):
+    // ToWorkflow 原樣放行任何非空字串 → create 仍是 201,由 canonicalizer 自己的 Guid.TryParse branch 擋。
+    [Fact]
+    public async Task Validate_MalformedRuntimeWorkflowId_ReportsCanonicalIdError()
+    {
+        var client = Admin();
+        var body = ValidBody("wf-malformed-id");
+        body["runtime_workflow"] = new JsonObject { ["id"] = "not-a-guid", ["revision"] = 1 };
+        var (id, _) = await CreateAsync(client, body);
+
+        var result = await (await ValidateAsync(client, id)).ReadJsonAsync();
+
+        Assert.False(result["valid"]!.GetValue<bool>());
+        Assert.Contains(
+            result["errors"]!.AsArray(),
+            e => e!["field"]!.GetValue<string>() == "runtime_workflow"
+                 && e!["message"]!.GetValue<string>()
+                     == "runtime_workflow.id 必須是已發布 agent-runtime Workflow 的合法 id");
     }
 
     [Fact]

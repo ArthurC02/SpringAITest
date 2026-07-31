@@ -1,3 +1,6 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Text;
+using Backend.Api.Agents;
 using Backend.Api.Auth;
 using Backend.Api.Common;
 using Dapper;
@@ -160,6 +163,82 @@ public sealed class AuthRepositoryTests
                 result.TenantCode,
                 result.Capabilities,
                 result.Groups));
+        }
+        finally
+        {
+            await using var connection = await _fx.DataSource!.OpenConnectionAsync();
+            await connection.ExecuteAsync(
+                "DELETE FROM users WHERE username=@username",
+                new { username });
+        }
+    }
+
+    /// <summary>
+    /// 上一個測試的 on-point 另一半:持久化的群組集**剛好**等於
+    /// AgentAudience.MaxGroupsWireUtf8Bytes(2048 bytes)時,DB 聚合 → login → 簽 JWT 這條路必須成功,
+    /// 而且 16 個 group 一個不漏地進到 token(否則「多一位元組就擋」只證明了會擋,沒證明擋在正確的位置)。
+    /// </summary>
+    [SkippableFact]
+    public async Task Login_ExactBoundPersistedGroupSetIssuesJwtCarryingEveryGroup()
+    {
+        _fx.SkipIfUnavailable();
+        var repo = new AuthRepository(_fx.DataSource!);
+        var tenant = await repo.FindTenantByCodeAsync("demo-a", default);
+        var username = $"authrepo-groups-atbound-{Guid.NewGuid():N}";
+        var groups = GroupSet(exceedByOneByte: false);
+        Assert.Equal(
+            AgentAudience.MaxGroupsWireUtf8Bytes,
+            Encoding.UTF8.GetByteCount(string.Join(' ', groups)));
+        try
+        {
+            await repo.AddUserAsync(
+                username,
+                BCrypt.Net.BCrypt.HashPassword("password123"),
+                "ADMIN",
+                tenant!.Id,
+                default);
+            await using (var connection = await _fx.DataSource!.OpenConnectionAsync())
+            {
+                await connection.ExecuteAsync(
+                    "INSERT INTO user_group_membership (tenant_id,user_id,group_id)"
+                    + " SELECT @tenantId,u.id,membership.group_id"
+                    + " FROM users u CROSS JOIN unnest(@groups::text[])"
+                    + " AS membership(group_id)"
+                    + " WHERE u.username=@username",
+                    new
+                    {
+                        tenantId = tenant.Id,
+                        username,
+                        groups,
+                    });
+            }
+
+            var expected = groups.OrderBy(group => group, StringComparer.Ordinal).ToArray();
+            var auth = new AuthService(repo);
+            var result = await auth.LoginAsync(
+                new LoginRequest(username, "password123"),
+                default);
+            Assert.Equal(expected, result.Groups!);
+
+            var jwt = new JwtService(
+                "dev-jwt-secret-change-me-0123456789abcdef",
+                TimeSpan.FromHours(24));
+            var token = jwt.Issue(
+                result.Username,
+                result.Role,
+                result.TenantCode,
+                result.Capabilities,
+                result.Groups);
+
+            Assert.Equal(
+                expected,
+                new JwtSecurityTokenHandler().ReadJwtToken(token).Claims
+                    .Where(claim => claim.Type == "groups")
+                    .Select(claim => claim.Value)
+                    .ToArray());
+            Assert.True(
+                Encoding.ASCII.GetByteCount("Bearer " + token)
+                < JwtService.MaxAuthorizationValueBytes);
         }
         finally
         {

@@ -6,6 +6,7 @@ using Backend.Api.AgentRuns;
 using Backend.Api.OperationsGovernance;
 using Backend.Api.Skills;
 using Dapper;
+using Npgsql;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -160,6 +161,135 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
         Assert.Equal(0, otherMetrics["multi_agent"]!["root_runs"]!.GetValue<int>());
 
         Assert.Equal(2, roots.Length);
+    }
+
+    /// <summary>
+    /// active_runs_keep_immutable_snapshot 的 false 等價類:GetVersionComparisonAsync 只在有
+    /// execution_snapshot_canonical IS NULL 的 root 時回 false,而 orchestrator_run 的該欄是
+    /// bytea NOT NULL —— 那種列根本插不進去。這支把「為什麼永遠是 true」釘成可執行證據:
+    /// 少了不可變快照的 root 被 23502 擋在門外,快照完整旗標仍是 true。日後若有人放寬 NOT NULL,
+    /// 這支會轉紅,提醒 false 分支重新變得可達、必須真的驗一次。
+    /// </summary>
+    [SkippableFact]
+    public async Task D7_DapperHttp_VersionComparisonSnapshotIntegrityIsSchemaEnforced()
+    {
+        fixture.SkipIfUnavailable();
+
+        var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            await connection.ExecuteAsync(
+                """
+                INSERT INTO orchestrator_run
+                  (id,tenant_id,user_id,caller_role,orchestrator_id,orchestrator_revision,conversation_id,
+                   workflow_id,workflow_revision,execution_snapshot,execution_snapshot_canonical,snapshot_sha256,
+                   request_sha256,idempotency_key_sha256,status,deadline_at)
+                VALUES
+                  (@id,@tenant,'owner','ADMIN',@orchestrator,1,'d7-snapshot-intact',@workflow,1,
+                   '{}'::jsonb,decode('7b7d','hex'),@hash,@hash,@key,'running',now()+interval '1 hour');
+                """,
+                new
+                {
+                    id = Guid.NewGuid(),
+                    tenant,
+                    orchestrator = Guid.NewGuid(),
+                    workflow = Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+                    hash = new string('a', 64),
+                    key = new string('b', 64),
+                });
+
+            var violation = await Assert.ThrowsAsync<PostgresException>(async () => await connection.ExecuteAsync(
+                """
+                INSERT INTO orchestrator_run
+                  (id,tenant_id,user_id,caller_role,orchestrator_id,orchestrator_revision,conversation_id,
+                   workflow_id,workflow_revision,execution_snapshot,execution_snapshot_canonical,snapshot_sha256,
+                   request_sha256,idempotency_key_sha256,status,deadline_at)
+                VALUES
+                  (@id,@tenant,'owner','ADMIN',@orchestrator,1,'d7-snapshot-missing',@workflow,1,
+                   '{}'::jsonb,NULL,@hash,@hash,@key,'running',now()+interval '1 hour');
+                """,
+                new
+                {
+                    id = Guid.NewGuid(),
+                    tenant,
+                    orchestrator = Guid.NewGuid(),
+                    workflow = Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+                    hash = new string('a', 64),
+                    key = new string('c', 64),
+                }));
+            Assert.Equal(PostgresErrorCodes.NotNullViolation, violation.SqlState);
+        }
+
+        using var factory = new DapperOperationsFactory();
+        using var admin = Client(factory, tenant, "operator", manage: true);
+        var comparison = await (await admin.GetAsync(
+            "/api/admin/operations/version-comparison")).ReadJsonAsync();
+        Assert.True(comparison["active_runs_keep_immutable_snapshot"]!.GetValue<bool>());
+        Assert.Single(comparison["revisions"]!.AsArray());
+    }
+
+    /// <summary>
+    /// Agent 指標的 Failed 等價類:SQL 把 'failed' 與 'cancelled' 都算成 Failed,而既有大案只把
+    /// run 推到 completed,失敗那一半從沒被填過。取 'cancelled' 當代表值(它是兩者中比較不直覺的
+    /// 那個:被取消也計為失敗)。
+    /// </summary>
+    [SkippableFact]
+    public async Task D7_DapperHttp_AgentMetricsCountCancelledRunAsFailed()
+    {
+        fixture.SkipIfUnavailable();
+
+        var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
+        var run = await CreateRunAsync(tenant);
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            Assert.Equal(1, await connection.ExecuteAsync(
+                "UPDATE agent_run SET status='cancelled',completed_at=now() WHERE id=@id",
+                new { id = run.Run!.Id }));
+        }
+
+        using var factory = new DapperOperationsFactory();
+        using var admin = Client(factory, tenant, "operator", manage: true);
+        var metrics = await (await admin.GetAsync("/api/admin/operations/metrics")).ReadJsonAsync();
+
+        var agent = Assert.Single(metrics["multi_agent"]!["agents"]!.AsArray())!;
+        Assert.Equal(run.Run.AgentId.ToString("D"), agent["agentId"]!.GetValue<string>());
+        Assert.Equal(1, agent["runs"]!.GetValue<int>());
+        Assert.Equal(0, agent["completed"]!.GetValue<int>());
+        Assert.Equal(1, agent["failed"]!.GetValue<int>());
+    }
+
+    /// <summary>
+    /// 少了 workflow.manage 的呼叫者:Dapper 這側的拒絕路徑(既有大案一律帶 capability,等於沒驗過)。
+    /// 決策表兩半都要:403 + ApiError 形狀,以及被擋下的寫入請求在真 DB 一列都不能留。
+    /// </summary>
+    [SkippableFact]
+    public async Task D7_DapperHttp_MissingManageCapabilityIsForbiddenAndWritesNothing()
+    {
+        fixture.SkipIfUnavailable();
+
+        var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
+        using var factory = new DapperOperationsFactory();
+        using var denied = Client(factory, tenant, "ordinary", manage: false);
+
+        var read = await denied.GetAsync("/api/admin/operations/metrics");
+        Assert.Equal(HttpStatusCode.Forbidden, read.StatusCode);
+        var error = await read.ReadJsonAsync();
+        Assert.Equal(403, error["status"]!.GetValue<int>());
+        Assert.Equal("workflow.manage capability is required", error["message"]!.GetValue<string>());
+        Assert.Empty(error["fieldErrors"]!.AsObject());
+
+        var write = await denied.PostAsJsonAsync(
+            "/api/admin/operations/regressions",
+            new { suite = "d7-denied", passed = false, evidence_ref = "private/evidence/denied" });
+        Assert.Equal(HttpStatusCode.Forbidden, write.StatusCode);
+
+        await using var connection = await fixture.DataSource!.OpenConnectionAsync();
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>(
+            "SELECT count(*)::int FROM operations_regression_result WHERE tenant_id=@tenant",
+            new { tenant }));
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>(
+            "SELECT count(*)::int FROM operations_release_audit WHERE tenant_id=@tenant",
+            new { tenant }));
     }
 
     /// <summary>租戶前綴清理:依外鍵相依由葉往根刪,讓共用的 springaitest 不留 D7 殘列。</summary>
