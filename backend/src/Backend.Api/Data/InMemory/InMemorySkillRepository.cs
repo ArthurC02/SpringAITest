@@ -58,7 +58,19 @@ public sealed class InMemorySkillRepository : ISkillRepository
         {
             var skill = _store.GetValueOrDefault((tenantId, name));
             // 軟刪後不可見(WHERE ... AND enabled)。
-            return Task.FromResult(skill is { Enabled: true } && (kind is null || skill.Kind == kind) ? skill : null);
+            if (skill is not { Enabled: true } || kind is not null && skill.Kind != kind)
+            {
+                return Task.FromResult<Skill?>(null);
+            }
+
+            var revision = _revisions.Single(r =>
+                r.Tenant == tenantId
+                && r.Name == name
+                && r.Row.Revision == skill.CurrentRevision);
+            return Task.FromResult<Skill?>(skill with
+            {
+                DefinitionSha256 = revision.Row.DefinitionSha256,
+            });
         }
     }
 
@@ -98,6 +110,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                     CreatedAt = existing.CreatedAt,
                     UpdatedAt = now,
                     SimpleForm = skill.SimpleForm ?? existing.SimpleForm,
+                    DefinitionSha256 = SkillHash.Sha256(skill.Definition),
                 };
                 _store[(tenantId, skill.Name)] = revived;
                 AddRevisionUnsafe(tenantId, revived, createdBy);
@@ -112,6 +125,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                 Enabled = true,
                 CreatedAt = now,
                 UpdatedAt = now,
+                DefinitionSha256 = SkillHash.Sha256(skill.Definition),
             };
             _store[(tenantId, skill.Name)] = stored;
             AddRevisionUnsafe(tenantId, stored, createdBy);
@@ -151,6 +165,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                 UpdatedAt = Now(),
                 Package = null,
                 SimpleForm = skill.SimpleForm ?? existing.SimpleForm,
+                DefinitionSha256 = SkillHash.Sha256(skill.Definition),
             };
             _store[(tenantId, name)] = stored;
             AddRevisionUnsafe(tenantId, stored, updatedBy);
@@ -181,6 +196,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                     CreatedAt = existing.CreatedAt,
                     UpdatedAt = now,
                     SimpleForm = existing.SimpleForm,
+                    DefinitionSha256 = SkillHash.Sha256(skill.Definition),
                 };
                 _store[(tenantId, skill.Name)] = updated;
                 AddRevisionUnsafe(tenantId, updated, createdBy, packageSha256);
@@ -195,6 +211,7 @@ public sealed class InMemorySkillRepository : ISkillRepository
                 CreatedAt = now,
                 UpdatedAt = now,
                 SimpleForm = null,
+                DefinitionSha256 = SkillHash.Sha256(skill.Definition),
             };
             _store[(tenantId, skill.Name)] = stored;
             AddRevisionUnsafe(tenantId, stored, createdBy, packageSha256);

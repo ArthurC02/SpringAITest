@@ -9,6 +9,8 @@
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
 from typing import Any
 
@@ -116,6 +118,13 @@ async def _entry(ctx: RequestContext, info: dict) -> dict:
 
 def _compile_loaded(skill: skill_mod.Skill, data: dict, deps: Any) -> LoadedSkill:
     """共用編譯與 LoadedSkill 組裝；kind 解析由各載入管線自己負責。"""
+    definition = data.get("definition") or ""
+    expected_hash = data.get("definition_sha256")
+    actual_hash = hashlib.sha256(definition.encode("utf-8")).hexdigest()
+    if not isinstance(expected_hash, str) or not expected_hash.strip():
+        raise InvalidCustomSkill(f"custom skill '{skill.name}' has no authoritative definition hash")
+    if not hmac.compare_digest(actual_hash, expected_hash):
+        raise InvalidCustomSkill(f"custom skill '{skill.name}' definition hash mismatch")
     try:
         skill = skill.model_copy(
             update={"revision": int(data.get("current_revision") or 1)}
@@ -131,6 +140,8 @@ def _compile_loaded(skill: skill_mod.Skill, data: dict, deps: Any) -> LoadedSkil
         deps=container,
         recursion_limit=compiler.recursion_limit(skill),
         source="custom",
+        definition=definition,
+        definition_sha256=expected_hash,
     )
 
 

@@ -20,6 +20,7 @@
 import asyncio
 import hashlib
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from langgraph.graph import END, START, StateGraph
@@ -57,6 +58,52 @@ INTERNAL_PREFIX = "__"
 def public_output(state: dict) -> dict:
     """剝除引擎內部鍵（__loop_<id>_count）後的對外 state。"""
     return {k: v for k, v in state.items() if not k.startswith(INTERNAL_PREFIX)}
+
+
+@dataclass(frozen=True)
+class StepAnalysis:
+    step_bound: int
+    tool_call_bound: int
+    recursion_limit: int
+
+
+def step_analysis(skill: Skill) -> StepAnalysis:
+    """Return the conservative bounds shared by compilation and governance."""
+    def bound(steps: list) -> tuple[int, int]:
+        step_total = tool_total = 0
+        for step in steps or []:
+            parsed = skill_mod.parse_step(step)
+            if parsed is None:
+                continue
+            kind, body = parsed
+            if kind == "node":
+                step_total += 1
+                spec = skill_mod.resolve_node(body)
+                tool_total += len(spec.requires_tools) if spec is not None else 0
+            elif kind == "script":
+                step_total += 1
+                tool_total += len(_script_contract(body).tools)
+            elif kind == "tool":
+                step_total += 1
+                tool_total += 1
+            elif kind == "sequence":
+                child_steps, child_tools = bound(body)
+                step_total += child_steps
+                tool_total += child_tools
+            elif kind == "branch":
+                then = bound(body.get("then") or [])
+                otherwise = bound(body.get("else") or [])
+                step_total += 2 + max(then[0], otherwise[0])
+                tool_total += max(then[1], otherwise[1])
+            elif kind == "loop":
+                child_steps, child_tools = bound(body.get("body") or [])
+                iterations = int(body.get("max_iterations") or 0)
+                step_total += 2 + iterations * (child_steps + 1)
+                tool_total += iterations * child_tools
+        return step_total, tool_total
+
+    steps, tools = bound(skill.flow)
+    return StepAnalysis(steps, tools, steps + 10)
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +491,11 @@ def _ends_with_audit(flow: list) -> bool:
     )
 
 
+def appends_audit(skill: Skill) -> bool:
+    """Whether compilation adds its system-owned audit node."""
+    return not _ends_with_audit(skill.flow)
+
+
 
 
 def _build_graph(skill: Skill, deps: Any) -> CompiledStateGraph:
@@ -493,22 +545,7 @@ def recursion_limit(skill: Skill) -> int:
     有問題（而不是某個輸入特別慢）。
     """
 
-    def bound(steps: list) -> int:
-        total = 0
-        for step in steps or []:
-            kind, body = skill_mod.parse_step(step)  # type: ignore[misc]
-            if kind in ("node", "script", "tool"):
-                total += 1
-            elif kind == "sequence":
-                total += bound(body)
-            elif kind == "branch":
-                total += 2 + max(bound(body["then"]), bound(body.get("else") or []))
-            elif kind == "loop":
-                total += 2 + body["max_iterations"] * (bound(body["body"]) + 1)
-        return total
-
-    return bound(skill.flow) + 10  # +10：START/END、強制附加的稽核節點與寬裕量
-
+    return step_analysis(skill).recursion_limit
 
 # ---------------------------------------------------------------------------
 # 編譯快取（規格 §4：同一 skill revision 只編譯一次）

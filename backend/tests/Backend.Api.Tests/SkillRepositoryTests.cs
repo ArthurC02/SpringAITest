@@ -118,6 +118,7 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
         Assert.Equal("銷售小幫手", stored.Description);
         Assert.Equal(1, stored.CurrentRevision);
         Assert.Equal(package, stored.Package);
+        Assert.Equal(SkillHash.Sha256(canonical), stored.DefinitionSha256);
 
         // DB 級:package bytea 逐 byte 落地。
         Assert.Equal(package, await DbPackageAsync(t, name));
@@ -149,6 +150,7 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
             pkg2, SkillHash.Sha256(pkg2), "admin-a", default);
 
         Assert.Equal(2, v2!.CurrentRevision);
+        Assert.Equal(SkillHash.Sha256("kind: agentic\nv: 2\n"), v2.DefinitionSha256);
         Assert.Equal(pkg2, await DbPackageAsync(t, name));
         var (_, revPkgSha) = await DbRevisionShaAsync(t, name, 2);
         Assert.Equal(SkillHash.Sha256(pkg2), revPkgSha);
@@ -239,7 +241,9 @@ public sealed class SkillRepositoryTests : IAsyncLifetime
             package, SkillHash.Sha256(package), "admin-a", default);
 
         Assert.Null(await Repo.GetAsync(t, name, "flow", default));
-        Assert.NotNull(await Repo.GetAsync(t, name, "agentic", default));
+        var current = await Repo.GetAsync(t, name, "agentic", default);
+        Assert.NotNull(current);
+        Assert.Equal(SkillHash.Sha256(current.Definition), current.DefinitionSha256);
     }
 
     [SkippableFact]

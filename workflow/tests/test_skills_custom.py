@@ -5,6 +5,7 @@ backend 一律用手寫 fake（monkeypatch httpx.AsyncClient.get）——不打�
 真的回 404。
 """
 
+import hashlib
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -114,7 +115,11 @@ class FakeSkillBackend:
         row = next((r for r in rows if r["name"] == name), None)
         if row is None:  # 跨租戶／不存在一律 404（backend 的租戶隔離慣例）
             return _FakeResponse(404, None)
-        return _FakeResponse(200, {**self._info(row), "definition": row["definition"]})
+        return _FakeResponse(200, {
+            **self._info(row),
+            "definition": row["definition"],
+            "definition_sha256": row.get("definition_sha256"),
+        })
 
     @staticmethod
     def _info(row: dict) -> dict:
@@ -140,6 +145,7 @@ def row(
     return {
         "name": name,
         "definition": definition,
+        "definition_sha256": hashlib.sha256(definition.encode("utf-8")).hexdigest(),
         "description": description,
         "required_role": required_role,
         "revision": revision,
@@ -316,9 +322,35 @@ def test_invoke_custom_skill_happy_path(backend, fake_deps):
     assert body["skill"] == "quarterly-qa"
     assert body["output"]["final_answer"] == "echo: 2025Q3 稅後淨利？"
     # 治理硬規則對自訂 skill 一樣成立：稽核節點強制附加、audit trail 落地
-    assert [t["node_name"] for t in body["output"]["trace"]][-1] == "audit_feedback"
+    assert "trace" not in body["output"]
     assert len(fake_deps.audit_repo.saved) == 1
     assert not any(k.startswith("__") for k in body["output"])
+
+
+@pytest.mark.parametrize("digest", [None, "0" * 64], ids=["missing", "mismatch"])
+def test_invoke_custom_flow_fails_closed_before_compile_on_bad_definition_hash(
+    backend, fake_deps, monkeypatch, digest
+):
+    artifact = row("quarterly-qa", QUARTERLY_QA)
+    artifact["definition_sha256"] = digest
+    backend({"demo-a": [artifact]})
+    compile_calls = 0
+    original_compile = compiler.compile
+
+    def counting_compile(*args, **kwargs):
+        nonlocal compile_calls
+        compile_calls += 1
+        return original_compile(*args, **kwargs)
+
+    monkeypatch.setattr(compiler, "compile", counting_compile)
+    resp = client.post(
+        "/skills/quarterly-qa/invoke",
+        json={"input": {"query": "q"}},
+        headers=_headers(),
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["error"] == "workflow_execution_failed"
+    assert compile_calls == 0
 
 
 def test_invoke_unknown_custom_skill_returns_404(backend, fake_deps):

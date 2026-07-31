@@ -198,10 +198,17 @@ def test_nl_logic_end_to_end_trace_has_component_version():
         assert resp.status_code == 200
         output = resp.json()["output"]
         assert output["business_result"] == "最終"
-        nl_entries = [t for t in output["trace"] if t["node_name"] == "nl_logic"]
+        assert "trace" not in output
+        internal = asyncio.run(
+            skills._SKILLS["__nl_e2e__"].graph.ainvoke(
+                {"tenant_id": "t", "user_id": "u", "role": "USER", "query": "問題"},
+                config={"recursion_limit": compiler.recursion_limit(skill)},
+            )
+        )
+        nl_entries = [t for t in internal["trace"] if t.node_name == "nl_logic"]
         assert len(nl_entries) == 1
-        assert nl_entries[0]["status"] == "ok"
+        assert nl_entries[0].status == "ok"
         # deps 含 llm → compiler 在 trace 記 LLM 版本(非空)
-        assert nl_entries[0]["component_version"] == "fake-llm-v1"
+        assert nl_entries[0].component_version == "fake-llm-v1"
     finally:
         skills._SKILLS.pop("__nl_e2e__", None)

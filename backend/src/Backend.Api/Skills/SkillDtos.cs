@@ -45,7 +45,10 @@ public sealed record Skill(
     [property: JsonPropertyName("simpleForm")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     [property: JsonConverter(typeof(RawJsonConverter))]
-    string? SimpleForm = null);
+    string? SimpleForm = null,
+    [property: JsonPropertyName("definition_sha256")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? DefinitionSha256 = null);
 
 /// <summary>
 /// 建立/更新 Skill 的請求 body — **只有 definition 一個欄位**(YAML 原文)。

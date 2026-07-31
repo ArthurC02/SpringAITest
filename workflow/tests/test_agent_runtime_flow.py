@@ -9,17 +9,17 @@ from types import SimpleNamespace
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.engine import tool_registry
+from app.engine import node_registry, tool_registry
 from app.engine.skill import InputField, Skill
 from app.runtime import graph as runtime_graph
-from app.runtime import legacy_flow
+from app.runtime import flow_harness
 from app.runtime.artifacts import LoadedSkillArtifact
 from app.runtime.checkpoints import checkpoint_config, strict_serializer
 from app.runtime.graph import build_context, compile_runtime_graph, initial_state
-from app.runtime.legacy_flow import (
-    LegacyFlowDenied,
-    LegacyFlowResult,
-    invoke_pinned_legacy_flow,
+from app.runtime.flow_harness import (
+    FlowDenied,
+    FlowResult,
+    invoke_pinned_flow,
 )
 from app.runtime.models import RuntimeCommand
 from tests.test_agent_runtime import (
@@ -94,12 +94,12 @@ FORBIDDEN_OUTPUT_KEYS = (
 
 
 @pytest.mark.asyncio
-async def test_pinned_flow_executes_and_returns_only_public_state() -> None:
+async def test_pinned_flow_public_output_regression() -> None:
     run_snapshot = snapshot(
         tools=["local.calculator"], with_skill=True, skill_kind="flow"
     )
 
-    result = await invoke_pinned_legacy_flow(
+    result = await invoke_pinned_flow(
         artifact=flow_artifact(revision=3, expression="1+1"),
         raw_input={"query": "hello"},
         snapshot=run_snapshot,
@@ -165,7 +165,7 @@ async def test_graph_loads_exact_flow_as_opaque_same_run_step() -> None:
     event = next(
         item
         for item in result["events"]
-        if item["event_type"] == "legacy_flow_completed"
+        if item["event_type"] == "workflow_completed"
     )
     assert event["payload"]["skill_revision"] == 3
     assert event["payload"]["definition_sha256"] == "a" * 64
@@ -181,14 +181,14 @@ async def test_load_skill_preserves_golden_wire_for_both_kinds_and_scope_switch(
 
     async def invoke_flow(**kwargs):
         flow_calls.append(kwargs)
-        return LegacyFlowResult(
+        return FlowResult(
             status="completed",
             content='{"answer":"ok"}',
             tool_calls_bound=2,
             steps_bound=4,
         )
 
-    monkeypatch.setattr(runtime_graph, "invoke_pinned_legacy_flow", invoke_flow)
+    monkeypatch.setattr(runtime_graph, "invoke_pinned_flow", invoke_flow)
     flow_snapshot = snapshot(with_skill=True, skill_kind="flow")
     flow_value = replace(flow_artifact(), definition_sha256="a" * 64)
 
@@ -241,8 +241,8 @@ async def test_load_skill_preserves_golden_wire_for_both_kinds_and_scope_switch(
         ],
         "events": [
             {
-                "event_id": "80b68958-7375-52df-9bdb-f46b35530c83",
-                "event_type": "legacy_flow_completed",
+                "event_id": "09c71df3-b1e8-59ab-b4e1-683ca3cfa830",
+                "event_type": "workflow_completed",
                 "node_id": "load_skill",
                 "snapshot_hash": "442f7964324bb9ef3bea9145c6c514acee6b8e8482a243b23b26a01d818ed1e7",
                 "payload": {
@@ -373,26 +373,35 @@ async def test_load_skill_preserves_golden_wire_for_both_kinds_and_scope_switch(
 
 
 @pytest.mark.asyncio
-async def test_pinned_flow_rejects_scripts_before_execution() -> None:
-    with pytest.raises(LegacyFlowDenied, match="external code"):
-        await invoke_pinned_legacy_flow(
-            artifact=flow_artifact(scripts_present=True),
-            raw_input={},
+async def test_pinned_flow_allows_pinned_script_packages() -> None:
+    artifact = replace(
+        flow_artifact(scripts_present=True),
+        skill=Skill(
+            name="research-skill",
+            revision=3,
+            kind="flow",
+            flow=[{"script": "state['script_result'] = 'ok'"}],
+        ),
+    )
+    result = await invoke_pinned_flow(
+            artifact=artifact,
+            raw_input={"query": "hello"},
             snapshot=snapshot(
                 tools=["local.calculator"], with_skill=True, skill_kind="flow"
             ),
             rule_tools=None,
-            deps=None,
+            deps=SimpleNamespace(max_retrieval_attempts=1),
             timeout_seconds=2,
             recursion_cap=20,
             remaining_tool_rounds=4,
         )
+    assert result.status == "completed"
+    assert json.loads(result.content)["script_result"] == "ok"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("risk", ["read", "write"])
-async def test_pinned_flow_rejects_any_tool_step_regardless_of_risk(risk: str) -> None:
-    """`legacy_flow.py` 無條件拒絕所有 tool step——放寬成「只擋 write」必須是明示決定。"""
+async def test_pinned_flow_governs_tool_step_by_effective_set(risk: str) -> None:
     calls: list[str] = []
     name = f"test.runtime-{risk}"
 
@@ -408,8 +417,7 @@ async def test_pinned_flow_rejects_any_tool_step_regardless_of_risk(risk: str) -
         calls.append(expression)
 
     try:
-        with pytest.raises(LegacyFlowDenied, match="tool actions are not safe"):
-            await invoke_pinned_legacy_flow(
+        invocation = invoke_pinned_flow(
                 artifact=flow_artifact(tool=name),
                 raw_input={},
                 snapshot=snapshot(tools=[name], with_skill=True, skill_kind="flow"),
@@ -419,7 +427,14 @@ async def test_pinned_flow_rejects_any_tool_step_regardless_of_risk(risk: str) -
                 recursion_cap=20,
                 remaining_tool_rounds=4,
             )
-        assert calls == []
+        if risk == "write":
+            with pytest.raises(FlowDenied, match="not in effective set"):
+                await invocation
+            assert calls == []
+        else:
+            result = await invocation
+            assert result.status == "completed"
+            assert calls == ["1+1"]
     finally:
         tool_registry._REGISTRY.pop(name, None)
 
@@ -437,12 +452,12 @@ class _StubGraph:
 
 def _stub_compile(monkeypatch: pytest.MonkeyPatch, graph: _StubGraph) -> None:
     monkeypatch.setattr(
-        legacy_flow.compiler, "compile", lambda skill, deps: graph
+        flow_harness.compiler, "compile", lambda skill, deps: graph
     )
 
 
 @pytest.mark.asyncio
-async def test_legacy_flow_output_excludes_authority_and_audit_keys(
+async def test_flow_output_excludes_authority_and_audit_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """節點若把 authority/稽核鍵寫回 state,`public` 過濾必須全部剝掉,只留公開結果。"""
@@ -450,7 +465,7 @@ async def test_legacy_flow_output_excludes_authority_and_audit_keys(
     hostile.update({"__internal": "leaked", "answer": "public result"})
     _stub_compile(monkeypatch, _StubGraph(hostile))
 
-    result = await invoke_pinned_legacy_flow(
+    result = await invoke_pinned_flow(
         artifact=flow_artifact(),
         raw_input={"query": "hello"},
         snapshot=snapshot(
@@ -474,20 +489,7 @@ async def test_legacy_flow_output_excludes_authority_and_audit_keys(
         (
             replace(flow_artifact(), kind="agentic"),
             {},
-            "not a legacy flow",
-        ),
-        (
-            replace(
-                flow_artifact(),
-                skill=Skill(
-                    name="research-skill",
-                    revision=3,
-                    kind="flow",
-                    flow=[{"node": "retrieve"}],
-                ),
-            ),
-            {},
-            "not deterministically safe",
+            "not a flow skill",
         ),
         (
             replace(
@@ -517,13 +519,13 @@ async def test_legacy_flow_output_excludes_authority_and_audit_keys(
             "failed its pinned schema",
         ),
     ],
-    ids=["not-a-flow", "unsafe-node", "unbounded-loop", "input-schema"],
+    ids=["not-a-flow", "unbounded-loop", "input-schema"],
 )
 async def test_pinned_flow_denials_before_execution(
     artifact: LoadedSkillArtifact, raw_input: dict, match: str
 ) -> None:
-    with pytest.raises(LegacyFlowDenied, match=match):
-        await invoke_pinned_legacy_flow(
+    with pytest.raises(FlowDenied, match=match):
+        await invoke_pinned_flow(
             artifact=artifact,
             raw_input=raw_input,
             snapshot=snapshot(
@@ -539,31 +541,143 @@ async def test_pinned_flow_denials_before_execution(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("graph", "timeout_seconds", "match"),
+    ("graph", "timeout_seconds"),
     [
-        (_StubGraph({"fatal_error": {"code": "boom"}}), 2, "controlled failure"),
-        (_StubGraph({"answer": "late"}, delay=1.0), 0.01, "bounded timeout"),
+        (_StubGraph({"answer": "late"}, delay=1.0), 0.01),
     ],
-    ids=["fatal-error", "timeout"],
+    ids=["timeout"],
 )
-async def test_pinned_flow_denials_during_execution(
+async def test_flow_timeout_is_denied_safely(
     monkeypatch: pytest.MonkeyPatch,
     graph: _StubGraph,
     timeout_seconds: float,
-    match: str,
 ) -> None:
     _stub_compile(monkeypatch, graph)
 
-    with pytest.raises(LegacyFlowDenied, match=match):
-        await invoke_pinned_legacy_flow(
-            artifact=flow_artifact(),
-            raw_input={"query": "hello"},
-            snapshot=snapshot(
-                tools=["local.calculator"], with_skill=True, skill_kind="flow"
-            ),
+    result = await invoke_pinned_flow(
+        artifact=flow_artifact(),
+        raw_input={"query": "hello"},
+        snapshot=snapshot(
+            tools=["local.calculator"], with_skill=True, skill_kind="flow"
+        ),
+        rule_tools=None,
+        deps=SimpleNamespace(max_retrieval_attempts=1),
+        timeout_seconds=timeout_seconds,
+        recursion_cap=20,
+        remaining_tool_rounds=4,
+    )
+
+    assert result.status == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_pinned_flow_reports_actual_step_consumption() -> None:
+    result = await invoke_pinned_flow(
+        artifact=flow_artifact(),
+        raw_input={"query": "hello"},
+        snapshot=snapshot(with_skill=True, skill_kind="flow"),
+        rule_tools=None,
+        deps=SimpleNamespace(max_retrieval_attempts=1),
+        timeout_seconds=2,
+        recursion_cap=20,
+        remaining_tool_rounds=4,
+        remaining_steps=10,
+    )
+
+    assert result.steps_consumed == 2  # authored node + compiler-owned audit
+    assert result.tool_rounds_consumed == 0
+
+
+@pytest.mark.asyncio
+async def test_pinned_flow_executes_any_registered_node() -> None:
+    name = "test_phase2_registered_node"
+
+    @node_registry.node(name=name, writes=["custom_result"])
+    def make_node():
+        async def run(state):
+            return {"custom_result": "ok"}
+
+        return run
+
+    artifact = replace(
+        flow_artifact(),
+        skill=Skill(name="research-skill", revision=3, kind="flow", flow=[{"node": name}]),
+    )
+    try:
+        result = await invoke_pinned_flow(
+            artifact=artifact,
+            raw_input={},
+            snapshot=snapshot(with_skill=True, skill_kind="flow"),
             rule_tools=None,
-            deps=SimpleNamespace(max_retrieval_attempts=1),
-            timeout_seconds=timeout_seconds,
+            deps=None,
+            timeout_seconds=2,
             recursion_cap=20,
             remaining_tool_rounds=4,
         )
+        assert result.status == "completed"
+        assert json.loads(result.content)["custom_result"] == "ok"
+    finally:
+        node_registry._REGISTRY.pop((name, "1.0"), None)
+
+
+@pytest.mark.asyncio
+async def test_pinned_flow_budget_exhaustion_is_controlled() -> None:
+    result = await invoke_pinned_flow(
+        artifact=flow_artifact(),
+        raw_input={"query": "hello"},
+        snapshot=snapshot(with_skill=True, skill_kind="flow"),
+        rule_tools=None,
+        deps=SimpleNamespace(max_retrieval_attempts=1),
+        timeout_seconds=2,
+        recursion_cap=20,
+        remaining_tool_rounds=4,
+        remaining_steps=1,
+    )
+
+    assert result.status == "budget_exhausted"
+    assert result.steps_consumed == 0  # conservative preflight prevents side effects
+
+
+@pytest.mark.asyncio
+async def test_pinned_script_tool_must_be_in_effective_set() -> None:
+    artifact = replace(
+        flow_artifact(),
+        skill=Skill(
+            name="research-skill", revision=3, kind="flow",
+            uses_tools=["blocked.tool"],
+            flow=[{"script": "state['x'] = tools.call('blocked.tool')"}],
+        ),
+    )
+    with pytest.raises(FlowDenied, match="blocked.tool not in effective set"):
+        await invoke_pinned_flow(
+            artifact=artifact, raw_input={},
+            snapshot=snapshot(with_skill=True, skill_kind="flow"),
+            rule_tools=None, deps=None, timeout_seconds=2,
+            recursion_cap=20, remaining_tool_rounds=4,
+        )
+
+
+@pytest.mark.asyncio
+async def test_pinned_registered_node_tools_must_be_in_effective_set() -> None:
+    name = "test_phase4_governed_node"
+
+    @node_registry.node(name=name, writes=["x"], requires_tools=["blocked.tool"])
+    def make_node():
+        async def run(state):
+            return {"x": True}
+        return run
+
+    artifact = replace(
+        flow_artifact(),
+        skill=Skill(name="research-skill", revision=3, kind="flow", flow=[{"node": name}]),
+    )
+    try:
+        with pytest.raises(FlowDenied, match="blocked.tool not in effective set"):
+            await invoke_pinned_flow(
+                artifact=artifact, raw_input={},
+                snapshot=snapshot(with_skill=True, skill_kind="flow"),
+                rule_tools=None, deps=None, timeout_seconds=2,
+                recursion_cap=20, remaining_tool_rounds=4,
+            )
+    finally:
+        node_registry._REGISTRY.pop((name, "1.0"), None)

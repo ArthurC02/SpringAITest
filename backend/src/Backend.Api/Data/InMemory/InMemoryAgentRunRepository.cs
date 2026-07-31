@@ -15,7 +15,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             "checkpoint_budget",
             "context_acquisition_planned",
             "input_requested",
-            "legacy_flow_completed",
+            "workflow_completed",
             "model_step",
             "output_validated",
             "response_proposed",

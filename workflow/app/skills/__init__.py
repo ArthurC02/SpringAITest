@@ -11,6 +11,7 @@ P2 只有 kb_query 一個內建 skill，直接沿用 deps.py 已經組好的正�
 """
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,7 @@ class LoadedSkill:
     # 骨架原文:前端 compose 要拿內建 template_* 的 YAML 原文做定點 patch,而 parse 後的
     # Skill model 丟了原文。內建項在載入時就把 path.read_text 帶進來（縫②）;custom 不需要。
     definition: str = ""
+    definition_sha256: str | None = None
 
 
 _SKILLS: dict[str, LoadedSkill] = {}
@@ -111,6 +113,7 @@ def _load_builtin() -> None:
             deps=deps,
             recursion_limit=compiler.recursion_limit(skill),
             definition=raw,
+            definition_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         )
 
 

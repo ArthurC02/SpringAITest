@@ -237,6 +237,24 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
         var body = await resp.ReadJsonAsync();
         Assert.Equal("at405_skill", body["name"]!.GetValue<string>());
         Assert.Equal(Yaml("at405_skill"), body["definition"]!.GetValue<string>());
+        Assert.Equal(
+            SkillHash.Sha256(Yaml("at405_skill")),
+            body["definition_sha256"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Get_ByName_ReturnsCurrentRevisionDefinitionHash()
+    {
+        var client = Admin();
+        await CreateAsync(client, "at405_hash");
+        var updated = Yaml("at405_hash", description: "current");
+        await client.PutAsJsonAsync("/api/skills/at405_hash", Body(updated));
+
+        var body = await (await client.GetAsync("/api/skills/at405_hash")).ReadJsonAsync();
+
+        Assert.Equal(2, body["current_revision"]!.GetValue<int>());
+        Assert.Equal(SkillHash.Sha256(updated), body["definition_sha256"]!.GetValue<string>());
+        Assert.Null(body["definitionSha256"]);
     }
 
     [Fact]
@@ -262,7 +280,7 @@ public sealed class SkillsApiTests : IClassFixture<TestWebAppFactory>
 
         var single = (await (await client.GetAsync("/api/skills/at406_skill")).ReadJsonAsync()).AsObject();
         Assert.Equal(
-            new[] { "created_at", "current_revision", "definition", "description", "enabled", "kind", "name", "required_role", "updated_at" },
+            new[] { "created_at", "current_revision", "definition", "definition_sha256", "description", "enabled", "kind", "name", "required_role", "updated_at" },
             single.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
 
         var item = (await (await client.GetAsync("/api/skills")).ReadJsonAsync()).AsArray()

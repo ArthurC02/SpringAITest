@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.engine import compiler, node_registry, skill as skill_mod
+from app.engine.node_shell import set_budget_callback
 from app.engine.skill import Skill
 from app.nodes.kbquery.adapters import StaticGlossary
 
@@ -698,6 +699,37 @@ def test_compile_caches_by_revision(monkeypatch):
     assert len(calls) == 3
 
 
+def test_compiled_graph_reusable_across_budget_callbacks():
+    import asyncio
+
+    deps = _deps()
+    skill = Skill.model_validate(
+        {"name": "callback-cache-probe", "revision": 1, "flow": [{"node": "t_a"}]}
+    )
+    graph = compiler.compile(skill, deps)
+    cache_size = len(compiler._CACHE)
+    captured = {"a": [], "b": []}
+
+    async def invoke(label: str) -> None:
+        async def callback(node_name: str, _elapsed_ms: float) -> None:
+            captured[label].append(node_name)
+
+        set_budget_callback(callback)
+        await graph.ainvoke({})
+
+    try:
+        asyncio.run(invoke("a"))
+        asyncio.run(invoke("b"))
+        set_budget_callback(None)
+        asyncio.run(graph.ainvoke({}))
+    finally:
+        set_budget_callback(None)
+
+    assert captured["a"]
+    assert captured["b"]
+    assert len(compiler._CACHE) == cache_size
+
+
 def _counting_build(monkeypatch) -> list[str]:
     """把 _build_graph 換成會計數的版本；回傳的 list 即「實際建圖次數」。"""
     calls: list[str] = []
@@ -800,3 +832,11 @@ def test_compile_rejects_empty_flow():
         compiler.compile(skill, _deps())
 
     assert "flow" in str(exc.value)
+
+
+def test_step_analysis_is_the_recursion_limit_source():
+    skill = Skill(name="analysis", flow=[{"loop": {"max_iterations": 2, "body": [{"script": "state['x'] = 1"}]}}])
+    analysis = compiler.step_analysis(skill)
+    assert analysis.step_bound == 6
+    assert analysis.tool_call_bound == 0
+    assert analysis.recursion_limit == compiler.recursion_limit(skill)

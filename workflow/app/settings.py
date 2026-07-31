@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # 工作流執行的逾時保護（秒），可由個別工作流的 timeout_seconds 覆蓋。
     workflow_timeout_seconds: int = 120
-
+    workflow_step_budget: int = Field(default=100, ge=1, le=500)
     # Skill script 的 execution boundary（Phase S1）。false（預設）＝既有 in-process
     # path；true ＝短生命週期子行程 + OS 級 CPU/記憶體上限 + 空環境。平台若給不出可信
     # 的 OS 上限，開旗標後 script 步驟直接 fail closed，不會退回 in-process。

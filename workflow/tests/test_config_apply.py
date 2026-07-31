@@ -13,6 +13,7 @@ per-config LLM 為 LangChainStructuredLLM（惰性建 client、測試不觸發�
 
 import dataclasses
 
+import hashlib
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -292,8 +293,14 @@ class FakeBackend:
         }
 
     def add_skill(self, tenant, name, revision=1):
+        definition = SCRIPT_SKILL.format(name=name)
         self.skills_by_tenant.setdefault(tenant, []).append(
-            {"name": name, "definition": SCRIPT_SKILL.format(name=name), "revision": revision}
+            {
+                "name": name,
+                "definition": definition,
+                "definition_sha256": hashlib.sha256(definition.encode("utf-8")).hexdigest(),
+                "revision": revision,
+            }
         )
 
     def handle(self, url: str, headers: dict):
@@ -318,7 +325,11 @@ class FakeBackend:
         row = next((r for r in rows if r["name"] == name), None)
         if row is None:
             return _FakeResponse(404, None)
-        return _FakeResponse(200, {**self._info(row), "definition": row["definition"]})
+        return _FakeResponse(200, {
+            **self._info(row),
+            "definition": row["definition"],
+            "definition_sha256": row["definition_sha256"],
+        })
 
     @staticmethod
     def _info(row):

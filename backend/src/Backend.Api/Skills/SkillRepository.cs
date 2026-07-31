@@ -66,8 +66,15 @@ public sealed class SkillRepository : ISkillRepository
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<Skill>(new CommandDefinition(
-            $"SELECT {Cols} FROM skill WHERE tenant_id = @tenantId AND name = @name AND enabled"
-            + " AND (@kind IS NULL OR kind = @kind)",
+            "SELECT s.name AS Name, s.description AS Description, s.definition AS Definition,"
+            + " s.required_role AS RequiredRole, s.enabled AS Enabled,"
+            + " s.current_revision AS CurrentRevision, s.created_at AS CreatedAt,"
+            + " s.updated_at AS UpdatedAt, s.kind AS Kind, s.package AS Package,"
+            + " s.simple_form::text AS SimpleForm, sr.definition_sha256 AS DefinitionSha256"
+            + " FROM skill s JOIN skill_revision sr ON sr.skill_id = s.id"
+            + " AND sr.revision = s.current_revision"
+            + " WHERE s.tenant_id = @tenantId AND s.name = @name AND s.enabled"
+            + " AND (@kind IS NULL OR s.kind = @kind)",
             new { tenantId, name, kind }, cancellationToken: ct));
     }
 
@@ -173,7 +180,7 @@ public sealed class SkillRepository : ISkillRepository
     {
         var sql = $"WITH {cteName} AS (" + mainCteBody + " RETURNING *"
             + string.Format(RevisionCte, cteName, writerParam)
-            + $" SELECT {Cols} FROM {cteName}";
+            + $" SELECT {Cols}, @sha AS DefinitionSha256 FROM {cteName}";
         return conn.QuerySingleOrDefaultAsync<Skill>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 

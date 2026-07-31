@@ -7,6 +7,7 @@
 
 import ast
 import asyncio
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -235,6 +236,7 @@ def _install_agentic_backend(monkeypatch, *, definition=CANONICAL, tenant="demo-
                     "current_revision": 2,
                     "kind": "agentic",
                     "definition": definition,
+                    "definition_sha256": hashlib.sha256(definition.encode("utf-8")).hexdigest(),
                 },
             )
         return _FakeResp(404, None)

@@ -193,6 +193,11 @@ async def invoke(
     if spec is None:
         raise UnknownTool(f"未註冊的 tool: {name}")
 
+    # The flow budget is invocation-scoped via ContextVar. Charge at the
+    # common boundary so explicit steps, scripts, and registered nodes cannot
+    # perform an over-budget side effect.
+    await node_shell.charge_tool(name)
+
     if as_step:
         node_shell.describe(model=ToolTraceEntry, tool=name, args_keys=_args_keys(args))
         return await spec.fn(ctx, **args)

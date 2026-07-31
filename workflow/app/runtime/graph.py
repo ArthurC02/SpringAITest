@@ -27,7 +27,7 @@ from app.runtime.checkpoints import ensure_checkpointer
 from app.runtime.events import runtime_event
 from app.runtime.facts import ProposedAction, caller_envelopes, verified_tool_fact
 from app.runtime.model import ModelContextTooLarge, ModelProtocolError, RuntimeModel
-from app.runtime.legacy_flow import LegacyFlowDenied, invoke_pinned_legacy_flow
+from app.runtime.flow_harness import FlowDenied, invoke_pinned_flow
 from app.runtime.models import (
     MAX_BACKEND_RESULT_JSON_BYTES,
     ActiveSkillScope,
@@ -591,7 +591,7 @@ async def _invoke_business_workflow(
     """在 Harness 內同步執行 revision-pinned Business Workflow 安全子集。"""
     context = runtime.context
     try:
-        result = await invoke_pinned_legacy_flow(
+        result = await invoke_pinned_flow(
             artifact=artifact,
             raw_input=command.arguments,
             snapshot=context.snapshot,
@@ -612,16 +612,71 @@ async def _invoke_business_workflow(
                 context.limits.max_tool_rounds
                 - int(state.get("tool_rounds") or 0),
             ),
+            remaining_steps=max(
+                0,
+                context.limits.step_budget - int(state.get("step_count") or 0),
+            ),
         )
-    except LegacyFlowDenied:
-        return _failure(state, context, "load_skill", "legacy_flow_not_safe")
+    except FlowDenied:
+        failure = _failure(state, context, "load_skill", "workflow_not_safe")
+        return {
+            **failure,
+            "events": _event_list(
+                {**state, "events": failure.get("events", state.get("events") or [])},
+                context,
+                "workflow_completed",
+                "load_skill",
+                {
+                    "skill_name": artifact.name,
+                    "skill_revision": artifact.revision,
+                    "definition_sha256": artifact.definition_sha256,
+                    "status": "denied",
+                },
+            ),
+        }
+    if result.status != "completed":
+        error_code = (
+            "budget_exhausted"
+            if result.status == "budget_exhausted"
+            else "workflow_execution_failed"
+        )
+        failure = _failure(state, context, "load_skill", error_code)
+        return {
+            **failure,
+            "step_count": int(state.get("step_count") or 0)
+            + int(result.steps_consumed or 0),
+            "tool_rounds": int(state.get("tool_rounds") or 0)
+            + int(result.tool_rounds_consumed or 0),
+            "events": _event_list(
+                {**state, "events": failure.get("events", state.get("events") or [])},
+                context,
+                "workflow_completed",
+                "load_skill",
+                {
+                    "skill_name": artifact.name,
+                    "skill_revision": artifact.revision,
+                    "definition_sha256": artifact.definition_sha256,
+                    "status": result.status,
+                    "tool_calls_bound": result.tool_calls_bound,
+                    "steps_bound": result.steps_bound,
+                },
+            ),
+        }
     return {
         "pending_command": None,
         "rule_allowed_tools": None,
         "step_count": int(state.get("step_count") or 0)
-        + max(result.steps_bound - 1, 0),
+        + (
+            result.steps_consumed
+            if result.steps_consumed is not None
+            else max(result.steps_bound - 1, 0)
+        ),
         "tool_rounds": int(state.get("tool_rounds") or 0)
-        + result.tool_calls_bound,
+        + (
+            result.tool_rounds_consumed
+            if result.tool_rounds_consumed is not None
+            else result.tool_calls_bound
+        ),
         "messages": [
             *(state.get("messages") or []),
             {
@@ -633,7 +688,7 @@ async def _invoke_business_workflow(
         "events": _event_list(
             state,
             context,
-            "legacy_flow_completed",
+            "workflow_completed",
             "load_skill",
             {
                 "skill_name": artifact.name,

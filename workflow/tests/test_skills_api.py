@@ -260,7 +260,7 @@ def test_invoke_admin_skill_forbidden_for_user_role():
         skills._SKILLS.pop("__admin-probe__", None)
 
 
-def test_invoke_timeout_returns_504(monkeypatch):
+def test_agentic_invoke_timeout_returns_504(monkeypatch):
     """執行超過逾時上限 → 504 workflow_timeout（與 /workflows/{name}/invoke 同碼）。"""
     original = skills.get("kb-query")
 
@@ -286,7 +286,7 @@ def test_invoke_timeout_returns_504(monkeypatch):
         skills._SKILLS.pop("__slow-probe__", None)
 
 
-def test_invoke_unexpected_exception_returns_500():
+def test_agentic_invoke_unexpected_exception_returns_500():
     original = skills.get("kb-query")
 
     class _BoomGraph:
@@ -428,7 +428,7 @@ def test_invoke_kb_query_definition_happy_path_returns_output():
         assert body["skill"] == "__kb_probe__"
         assert body["output"]["answer_mode"] == "ANSWER"
         assert "1,234" in body["output"]["final_answer"]
-        assert [t["node_name"] for t in body["output"]["trace"]][-1] == "audit_feedback"
+        assert "trace" not in body["output"]
         assert len(deps.audit_repo.saved) == 1
         assert not any(k.startswith("__") for k in body["output"])
     finally:

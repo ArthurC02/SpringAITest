@@ -29,6 +29,36 @@ from typing import Any, Awaitable, Callable, Iterable
 
 from app.engine.models import TraceEntry
 
+BudgetCallback = Callable[[str, float], Awaitable[None]]
+StepGuard = Callable[[str], Awaitable[None]]
+
+
+class BudgetExhausted(RuntimeError):
+    """Raised by a runtime budget callback when no more steps are available."""
+
+
+_BUDGET_CALLBACK: ContextVar[BudgetCallback | None] = ContextVar(
+    "node_shell_budget_callback", default=None
+)
+_STEP_GUARD: ContextVar[StepGuard | None] = ContextVar("node_shell_step_guard", default=None)
+
+
+def set_budget_callback(callback: BudgetCallback | None) -> None:
+    """Set the budget callback for the current async context."""
+    _BUDGET_CALLBACK.set(callback)
+
+
+def set_step_guard(guard: StepGuard | None) -> None:
+    """Set an invocation-local guard called before a node can run."""
+    _STEP_GUARD.set(guard)
+
+
+async def charge_tool(name: str) -> None:
+    """Charge one actual tool call before its implementation can run."""
+    callback = _BUDGET_CALLBACK.get()
+    if callback is not None:
+        await callback(f"__tool__:{name}", 0.0)
+
 # Query Intake 建立後不可被任何後續節點覆寫的鍵
 IMMUTABLE_KEYS = {"query_id", "original_query", "query_timestamp"}
 
@@ -138,6 +168,18 @@ def harnessed(
                 ]
             }
 
+        guard = _STEP_GUARD.get()
+        if guard is not None:
+            try:
+                await guard(node_name)
+            except Exception as e:
+                ts = now()
+                return {
+                    "fatal_error": f"budget_exhausted:{node_name}" if isinstance(e, BudgetExhausted) else f"{node_name}: {e}",
+                    "errors": [{"node": node_name, "error": str(e), "error_type": type(e).__name__}],
+                    "trace": [TraceEntry(node_name=node_name, start_time=ts, end_time=ts, latency_ms=0, status="error", error_code=type(e).__name__)],
+                }
+
         start_time = now()
         t0 = time.perf_counter()
         step = _Step()
@@ -150,6 +192,9 @@ def harnessed(
         )
         try:
             out = await fn(fn_state) or {}
+            callback = _BUDGET_CALLBACK.get()
+            if callback is not None:
+                await callback(node_name, (time.perf_counter() - t0) * 1000)
         except Exception as e:
             # 不可恢復錯誤 → 設 fatal_error，走安全 ABSTAIN + 稽核路徑
             entry = _build_entry(
@@ -164,7 +209,11 @@ def harnessed(
                 component_version=component_version,
             )
             return {
-                "fatal_error": f"{node_name}: {e}",
+                "fatal_error": (
+                    f"budget_exhausted:{node_name}"
+                    if isinstance(e, BudgetExhausted)
+                    else f"{node_name}: {e}"
+                ),
                 "errors": [
                     {"node": node_name, "error": str(e), "error_type": type(e).__name__}
                 ],

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.engine import compiler, tool_registry
+from app.engine.node_shell import BudgetExhausted, set_budget_callback
 from app.engine.script_runner import (
     MAX_TIMEOUT_MS,
     RestrictedInProcessRunner,
@@ -77,6 +78,32 @@ def _tool_entries(result: dict) -> list[ToolTraceEntry]:
 
 def _codes(result) -> list[str]:
     return [e.code for e in result.errors]
+
+
+def test_actual_tool_calls_are_charged_before_side_effect(probe_calls):
+    calls = 0
+
+    async def charge(node_name: str, _elapsed_ms: float) -> None:
+        nonlocal calls
+        if node_name.startswith("__tool__:"):
+            if calls >= 1:
+                raise BudgetExhausted("tool limit")
+            calls += 1
+
+    async def invoke_twice() -> None:
+        set_budget_callback(charge)
+        try:
+            ctx = ToolContext(tenant_id="t")
+            await tool_registry.invoke(PROBE_TOOL, ctx, {PROBE_TOOL}, {"x": 1})
+            with pytest.raises(BudgetExhausted, match="tool limit"):
+                await tool_registry.invoke(PROBE_TOOL, ctx, {PROBE_TOOL}, {"x": 2})
+        finally:
+            set_budget_callback(None)
+
+    asyncio.run(invoke_twice())
+
+    assert calls == 1
+    assert probe_calls == [{"x": 1}]
 
 
 def test_tool_risk_defaults_to_privileged_and_rejects_unknown_value():

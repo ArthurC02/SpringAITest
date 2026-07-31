@@ -64,6 +64,7 @@ from app.runtime.orchestrator_backend import OrchestratorBackendClient
 from app.runtime.orchestrator_supervisor import RootRuntimeSupervisor
 from app.orchestration.api import router as workflow_designer_router
 from app.runtime.service import RuntimeService
+from app.runtime.flow_harness import invoke_flow_with_governance
 from app.settings import settings
 
 
@@ -560,8 +561,39 @@ async def invoke_skill(
     # recursion_limit：規格 §6.3-2 的全圖護欄（langgraph 預設 10007 形同沒有護欄）
     config = {**tracing.runnable_config(), "recursion_limit": loaded.recursion_limit}
 
-    output = await _run_with_timeout(
-        graph.ainvoke(state, config=config), timeout_seconds, name
-    )
+    if loaded.skill.kind == "flow":
+        result = await invoke_flow_with_governance(
+            skill=loaded.skill,
+            raw_input=state,
+            deps=loaded.deps,
+            timeout_seconds=timeout_seconds,
+            step_budget=settings.workflow_step_budget,
+            tool_round_budget=max(1, len(loaded.skill.uses_tools) * 10 or 50),
+            graph=graph,
+            recursion_limit=loaded.recursion_limit,
+            definition=loaded.definition,
+            definition_sha256=loaded.definition_sha256,
+        )
+        if result.status == "timeout":
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "error": "workflow_timeout",
+                    "message": f"skill '{name}' 執行超過 {timeout_seconds} 秒",
+                },
+            )
+        if result.status in {"error", "budget_exhausted"}:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "workflow_execution_failed",
+                    "message": result.governance.get("error", result.status),
+                },
+            )
+        output = result.output
+    else:
+        output = await _run_with_timeout(
+            graph.ainvoke(state, config=config), timeout_seconds, name
+        )
 
     return SkillInvokeResponse(skill=name, output=compiler.public_output(output))

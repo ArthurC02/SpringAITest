@@ -7,11 +7,150 @@ fatal_error、TraceEntry、IMMUTABLE_KEYS）由既有的 test_kbquery_nodes.py �
 
 import asyncio
 
-from app.engine.node_shell import RUNTIME_AUTHORITY_KEYS, harnessed
+from app.engine.node_shell import (
+    RUNTIME_AUTHORITY_KEYS,
+    BudgetExhausted,
+    harnessed,
+    set_budget_callback,
+    set_step_guard,
+)
 
 
 def _run(fn, state):
     return asyncio.run(fn(state))
+
+
+def test_budget_callback_invoked_with_node_name_and_elapsed():
+    captured = []
+
+    async def callback(node_name: str, elapsed_ms: float) -> None:
+        captured.append((node_name, elapsed_ms))
+
+    set_budget_callback(callback)
+    try:
+        out = _run(harnessed("budgeted", _sneaky_node), {})
+    finally:
+        set_budget_callback(None)
+
+    assert captured[0][0] == "budgeted"
+    assert captured[0][1] > 0
+    assert out["allowed_key"] == "ok"
+
+
+def test_budget_exhausted_converts_to_fatal_error():
+    async def callback(_node_name: str, _elapsed_ms: float) -> None:
+        raise BudgetExhausted("step limit")
+
+    set_budget_callback(callback)
+    try:
+        out = _run(harnessed("budgeted", _sneaky_node), {})
+    finally:
+        set_budget_callback(None)
+
+    assert out["fatal_error"] == "budget_exhausted:budgeted"
+    assert out["trace"][0].status == "error"
+    assert out["errors"][0]["error"] == "step limit"
+
+
+def test_fatal_from_budget_skips_subsequent_nodes():
+    executed = []
+
+    async def first(_state: dict) -> dict:
+        return {}
+
+    async def second(_state: dict) -> dict:
+        executed.append(True)
+        return {}
+
+    async def callback(_node_name: str, _elapsed_ms: float) -> None:
+        raise BudgetExhausted("step limit")
+
+    set_budget_callback(callback)
+    try:
+        first_out = _run(harnessed("first", first), {})
+        second_out = _run(harnessed("second", second), first_out)
+    finally:
+        set_budget_callback(None)
+
+    assert executed == []
+    assert second_out["trace"][0].status == "skipped"
+
+
+def test_callback_non_budget_exception_becomes_fatal():
+    async def callback(_node_name: str, _elapsed_ms: float) -> None:
+        raise ValueError("oops")
+
+    set_budget_callback(callback)
+    try:
+        out = _run(harnessed("budgeted", _sneaky_node), {})
+    finally:
+        set_budget_callback(None)
+
+    assert "oops" in out["fatal_error"]
+    assert out["trace"][0].status == "error"
+
+
+def test_budget_callback_is_isolated_between_async_contexts():
+    captured = {"a": [], "b": []}
+
+    async def invoke(label: str) -> None:
+        async def callback(node_name: str, _elapsed_ms: float) -> None:
+            captured[label].append(node_name)
+
+        set_budget_callback(callback)
+        await harnessed(label, _sneaky_node)({})
+
+    async def run_both() -> None:
+        await asyncio.gather(invoke("a"), invoke("b"))
+
+    asyncio.run(run_both())
+
+    assert captured == {"a": ["a"], "b": ["b"]}
+
+
+def test_callback_fires_on_run_on_fatal_node():
+    captured = []
+
+    async def callback(node_name: str, _elapsed_ms: float) -> None:
+        captured.append(node_name)
+
+    set_budget_callback(callback)
+    try:
+        _run(
+            harnessed("cleanup", _sneaky_node, run_on_fatal=True),
+            {"fatal_error": "earlier"},
+        )
+    finally:
+        set_budget_callback(None)
+
+    assert captured == ["cleanup"]
+
+
+def test_step_guard_denies_before_node_side_effect_and_allows_exact_one():
+    calls = []
+    reserved = 0
+
+    async def node(_state: dict) -> dict:
+        calls.append(True)
+        return {"ok": True}
+
+    async def guard(_node_name: str) -> None:
+        nonlocal reserved
+        if reserved + 1 > 1:
+            raise BudgetExhausted("step limit")
+        reserved += 1
+
+    set_step_guard(guard)
+    try:
+        first = _run(harnessed("first", node), {})
+        second = _run(harnessed("second", node), {})
+    finally:
+        set_step_guard(None)
+
+    assert first["ok"] is True
+    assert calls == [True]
+    assert second["fatal_error"] == "budget_exhausted:second"
+    assert second["trace"][0].status == "error"
 
 
 # ---------------------------------------------------------------------------
