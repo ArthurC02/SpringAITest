@@ -462,6 +462,33 @@ var app = builder.Build();
 
 // 使用者/租戶/聊天歷史/文件/組態皆改存 backend(postgres),platform 不再自帶 DB,啟動時無建表/種子。
 
+// Disabled feature families must remain hidden before authentication. Keep every route predicate
+// at its call site so each rollout's deliberately distinct scope and response stay reviewable.
+void UseDisabledFeatureGate(
+    bool enabled,
+    Func<HttpContext, bool> matchesRoute,
+    string unavailableMessage)
+{
+    if (enabled)
+    {
+        return;
+    }
+
+    app.Use(async (context, next) =>
+    {
+        if (matchesRoute(context))
+        {
+            await ApiErrorWriter.WriteAsync(
+                context.Response,
+                StatusCodes.Status404NotFound,
+                unavailableMessage);
+            return;
+        }
+
+        await next();
+    });
+}
+
 app.UseExceptionHandler();
 
 // 只讓 frontend-platform 專用 compose network 的 proxy forwarding headers 改寫 RemoteIpAddress；
@@ -477,25 +504,16 @@ if (rateLimitingEnabled)
 // Agent Builder feature flag(D1):關閉時整個 /api/agents* fail-closed 回 404,且置於認證之前 ——
 // 匿名或已登入一律看不到端點存在(不洩漏「這裡有個需要授權的功能」)。開啟時直接放行,交由 controller 的
 // [Authorize]/backend 角色把關。回應維持 ApiError 形狀。
-if (!agentBuilderEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/agents"))
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "找不到資源");
-            return;
-        }
-
-        await next();
-    });
-}
+UseDisabledFeatureGate(
+    agentBuilderEnabled,
+    context => context.Request.Path.StartsWithSegments("/api/agents"),
+    "找不到資源");
 
 // Direct Agent test execution has its own rollout gate and also depends on Builder being enabled.
 // Fail closed before authentication for both the start route and the /api/runs family.
-if (!agentTestRunEnabled)
-{
-    app.Use(async (context, next) =>
+UseDisabledFeatureGate(
+    agentTestRunEnabled,
+    context =>
     {
         var path = context.Request.Path.Value ?? string.Empty;
         // D7 approvals are a separate runtime feature.  A business approver must not lose
@@ -509,87 +527,52 @@ if (!agentTestRunEnabled)
                 "/api/agents/",
                 StringComparison.OrdinalIgnoreCase)
             && normalizedPath.EndsWith("/runs", StringComparison.OrdinalIgnoreCase);
-        if (isRunRoute || isAgentRunStart)
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "找不到資源");
-            return;
-        }
-
-        await next();
-    });
-}
+        return isRunRoute || isAgentRunStart;
+    },
+    "找不到資源");
 
 // D7 write actions/approvals are independently fail-closed before authentication.  Do not
 // fold this into Builder or workflow.manage: approvers are ordinary authenticated users and
 // Backend owns the role/tenant/SoD decision.
-if (!agentWriteToolsEnabled)
-{
-    app.Use(async (context, next) =>
+UseDisabledFeatureGate(
+    agentWriteToolsEnabled,
+    context =>
     {
         var path = context.Request.Path.Value ?? string.Empty;
-        if (path.StartsWith("/api/runs/", StringComparison.OrdinalIgnoreCase)
-            && path.Contains("/approvals", StringComparison.OrdinalIgnoreCase)
-            || path.StartsWith("/api/admin/operations", StringComparison.OrdinalIgnoreCase))
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
-            return;
-        }
+        return path.StartsWith("/api/runs/", StringComparison.OrdinalIgnoreCase)
+               && path.Contains("/approvals", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/api/admin/operations", StringComparison.OrdinalIgnoreCase);
+    },
+    "Feature is unavailable");
 
-        await next();
-    });
-}
-
-if (!multiAgentDispatchEnabled)
-{
-    app.Use(async (context, next) =>
+UseDisabledFeatureGate(
+    multiAgentDispatchEnabled,
+    context =>
     {
         var path = context.Request.Path.Value ?? string.Empty;
-        if (context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
+        return context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
             || path.StartsWith("/api/admin/orchestrators/", StringComparison.OrdinalIgnoreCase)
-               && path.TrimEnd('/').EndsWith("/runs", StringComparison.OrdinalIgnoreCase))
-        { await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable"); return; }
-        await next();
-    });
-}
+               && path.TrimEnd('/').EndsWith("/runs", StringComparison.OrdinalIgnoreCase);
+    },
+    "Feature is unavailable");
 
 // Context Enrichment 沒有 Platform controller；這個前置 gate 仍保護 Context API
 // 路徑，避免日後新增 proxy 時在未啟用的 rollout 狀態意外暴露端點。D5 的既有
 // orchestrator-run API 不在此 gate 的範圍內，關閉 enrichment 不會改變其行為。
-if (!contextEnrichmentEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/contexts")
-            || context.Request.Path.StartsWithSegments("/api/context-views")
-            || context.Request.Path.StartsWithSegments("/api/context-policies"))
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
-            return;
-        }
-
-        await next();
-    });
-}
+UseDisabledFeatureGate(
+    contextEnrichmentEnabled,
+    context => context.Request.Path.StartsWithSegments("/api/contexts")
+        || context.Request.Path.StartsWithSegments("/api/context-views")
+        || context.Request.Path.StartsWithSegments("/api/context-policies"),
+    "Feature is unavailable");
 
 // D4 authoring surfaces are independently fail-closed before authentication. This keeps
 // capability-bearing principals from discovering disabled management endpoints.
-if (!workflowDesignerEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/admin/workflows")
-            || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"))
-        {
-            await ApiErrorWriter.WriteAsync(
-                context.Response,
-                StatusCodes.Status404NotFound,
-                "功能尚未啟用");
-            return;
-        }
-
-        await next();
-    });
-}
+UseDisabledFeatureGate(
+    workflowDesignerEnabled,
+    context => context.Request.Path.StartsWithSegments("/api/admin/workflows")
+        || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"),
+    "功能尚未啟用");
 
 // 刻意不用 UseHttpsRedirection:容器內對外是 http(:8080)。
 app.UseAuthentication();

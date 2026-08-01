@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Backend.Api.AgentRuns;
+using Backend.Api.Common;
 using Backend.Api.Orchestrators;
 using Backend.Api.Workflows;
 using Backend.Api.Contexts;
@@ -110,8 +111,8 @@ public sealed class InMemoryOrchestratorRunRepository(
         lock (_gate)
         {
             if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || root.Status is not ("queued" or "running")) return null;
-            using var doc = JsonDocument.Parse(root.Snapshot); var pin = Pin(doc.RootElement, runKind, request.AgentId, request.AgentRevision);
-            if (pin is null || request.TokenCap != pin.Value.TokenCap || (source is not null && (!string.Equals(source.Value.Agent.DefinitionSha256, pin.Value.Hash, StringComparison.Ordinal) || source.Value.Workflow.WorkflowId != pin.Value.Workflow || source.Value.Workflow.Revision != pin.Value.Revision))) return null;
+            using var doc = JsonDocument.Parse(root.Snapshot); var pin = OrchestratorRunSnapshotProjection.FindPin(doc.RootElement, runKind, request.AgentId, request.AgentRevision);
+            if (pin is null || request.TokenCap != pin.Value.TokenCap || (source is not null && (!string.Equals(source.Value.Agent.DefinitionSha256, pin.Value.Hash, StringComparison.Ordinal) || source.Value.Workflow.WorkflowId != pin.Value.WorkflowId || source.Value.Workflow.Revision != pin.Value.WorkflowRevision))) return null;
             var limits = doc.RootElement.GetProperty("limits");
             if (root.Children.Count >= limits.GetProperty("max_child_runs").GetInt32() || root.Children.Count(x => x.Status is "queued" or "running") >= limits.GetProperty("max_concurrency").GetInt32() || root.Children.Any(x => x.Task == taskId && x.Attempt == request.Attempt)) return null;
             var agentRunId = Guid.NewGuid(); var commandId = Guid.NewGuid();
@@ -126,7 +127,7 @@ public sealed class InMemoryOrchestratorRunRepository(
             }
             var commandInput = JsonSerializer.SerializeToElement(new { message = envelope.Objective, task_envelope = canonicalEnvelope });
             var artifact = JsonSerializer.SerializeToElement(new { orchestrator_root_run_id = rootRunId, task_id = taskId, attempt = request.Attempt, run_kind = runKind, root_snapshot_hash = root.Hash, agent_snapshot_hash = pin.Value.Hash, agent_run_id = agentRunId, command_id = commandId, command_input = commandInput });
-            var child = new Child(Guid.NewGuid(), taskId, request.Attempt, runKind, request.AgentId, request.AgentRevision, pin.Value.Workflow, pin.Value.Revision, pin.Value.Hash, agentRunId, commandId, canonicalEnvelope, artifact); root.Children.Add(child); root.Events.Add(new(root.Events.Count + 1, "child_created", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildCreated(child.Id, agentRunId, child.Task, child.Attempt, child.Kind)).RootElement.Clone(), DateTime.UtcNow)); return new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.Status, child.AgentRunId, child.CommandId);
+            var child = new Child(Guid.NewGuid(), taskId, request.Attempt, runKind, request.AgentId, request.AgentRevision, pin.Value.WorkflowId, pin.Value.WorkflowRevision, pin.Value.Hash, agentRunId, commandId, canonicalEnvelope, artifact); root.Children.Add(child); root.Events.Add(new(root.Events.Count + 1, "child_created", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildCreated(child.Id, agentRunId, child.Task, child.Attempt, child.Kind)).RootElement.Clone(), DateTime.UtcNow)); return new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.Status, child.AgentRunId, child.CommandId);
         }
     }
     public Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
@@ -175,13 +176,56 @@ public sealed class InMemoryOrchestratorRunRepository(
     public Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
     { lock (_gate) { if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult<OrchestratorChildStatusResponse?>(null); var child = root.Children.SingleOrDefault(x => x.Id == childId); if (child is null) return Task.FromResult<OrchestratorChildStatusResponse?>(null); AgentRunResponse? run = agentRuns?.GetAsync(tenant, user, child.AgentRunId, ct).GetAwaiter().GetResult(); if (run is not null) { var prior = child.Status; child.Status = run.Status; if (prior != child.Status && child.Status is "completed" or "failed" or "cancelled") root.Events.Add(new(root.Events.Count + 1, "child_terminal", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildTerminal(child.Id, child.AgentRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.Hash, child.Status, run.Result, run.ErrorCode)).RootElement.Clone(), DateTime.UtcNow)); } var output = run?.Result ?? JsonDocument.Parse("{}").RootElement.Clone(); var citations = output.ValueKind == JsonValueKind.Object && output.TryGetProperty("citations", out var cits) && cits.ValueKind == JsonValueKind.Array ? cits.Clone() : JsonDocument.Parse("[]").RootElement.Clone(); return Task.FromResult<OrchestratorChildStatusResponse?>(new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.AgentRunId, child.Status, output, citations, run?.ErrorCode, run?.ErrorMessage)); } }
     public Task<OrchestratorRunWriteResult> TransitionAsync(string tenant, string user, Guid rootRunId, OrchestratorRootTransitionRequest request, CancellationToken ct)
-    { lock (_gate) { if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound)); if (root.Status is "completed" or "failed" or "cancelled" || root.Version != request.ExpectedStateVersion || request.ToStatus is not ("waiting_input" or "completed" or "failed" or "cancelled") || (request.ToStatus == "waiting_input" && (string.IsNullOrWhiteSpace(request.CheckpointRef) || request.CheckpointVersion is null || request.CheckpointVersion < 1)) || root.LeaseGeneration != request.LeaseGeneration || !string.Equals(root.ClaimTokenHash, Skills.SkillHash.Sha256(request.ClaimToken ?? ""), StringComparison.Ordinal) || root.ClaimExpiresAt <= DateTime.UtcNow) return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Conflict, ToResponse(root), "Root command lease changed")); root.Status = request.ToStatus!; if (root.Status == "waiting_input") { root.CheckpointRef = request.CheckpointRef; root.CheckpointVersion = request.CheckpointVersion!.Value; } root.CommandCompleted = true; root.ClaimTokenHash = null; root.ClaimExpiresAt = DateTime.MinValue; root.Version++; root.Updated = DateTime.UtcNow; foreach (var e in request.Events ?? Array.Empty<OrchestratorRootEventAppend>()) root.Events.Add(new(root.Events.Count + 1, e.EventType ?? "root_event", root.Hash, e.Payload?.Clone() ?? JsonDocument.Parse("{}").RootElement.Clone(), root.Updated)); root.Events.Add(new(root.Events.Count + 1, root.Status == "waiting_input" ? "root_waiting_input" : "root_terminal", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.RootTerminal(root.Status)).RootElement.Clone(), root.Updated)); return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Success, ToResponse(root))); } }
+    {
+        if (!OrchestratorRootTransitionPolicy.IsValid(request))
+            return Task.FromResult(new OrchestratorRunWriteResult(
+                OrchestratorRunWriteStatus.InvalidState,
+                Message: "Invalid root transition"));
+
+        lock (_gate)
+        {
+            if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user)
+                return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound));
+            if (root.Status is "completed" or "failed" or "cancelled"
+                || root.Version != request.ExpectedStateVersion
+                || root.LeaseGeneration != request.LeaseGeneration
+                || !string.Equals(root.ClaimTokenHash, Skills.SkillHash.Sha256(request.ClaimToken!), StringComparison.Ordinal)
+                || root.ClaimExpiresAt <= DateTime.UtcNow)
+                return Task.FromResult(new OrchestratorRunWriteResult(
+                    OrchestratorRunWriteStatus.Conflict,
+                    ToResponse(root),
+                    "Root command lease changed"));
+
+            root.Status = request.ToStatus!;
+            if (root.Status == "waiting_input")
+            {
+                root.CheckpointRef = request.CheckpointRef;
+                root.CheckpointVersion = request.CheckpointVersion!.Value;
+            }
+            root.CommandCompleted = true;
+            root.ClaimTokenHash = null;
+            root.ClaimExpiresAt = DateTime.MinValue;
+            root.Version++;
+            root.Updated = DateTime.UtcNow;
+            foreach (var eventItem in request.Events ?? Array.Empty<OrchestratorRootEventAppend>())
+                root.Events.Add(new(root.Events.Count + 1, eventItem.EventType!, root.Hash,
+                    eventItem.Payload?.Clone() ?? JsonDocument.Parse("{}").RootElement.Clone(), root.Updated));
+            root.Events.Add(new(root.Events.Count + 1,
+                root.Status == "waiting_input" ? "root_waiting_input" : "root_terminal",
+                root.Hash,
+                JsonDocument.Parse(OrchestratorRunEvents.RootTerminal(root.Status)).RootElement.Clone(),
+                root.Updated));
+            return Task.FromResult(new OrchestratorRunWriteResult(
+                OrchestratorRunWriteStatus.Success,
+                ToResponse(root)));
+        }
+    }
     public Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenant, string user, Guid rootRunId, OrchestratorContextAcquireRequest request, CancellationToken ct)
     {
         lock (_gate)
         {
             if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || request.ContextRound < 1
-                || request.CurrentContext is not { ValueKind: JsonValueKind.Object } || request.CurrentContext.Value.GetRawText().Length > 65_536)
+                || request.CurrentContext is not { ValueKind: JsonValueKind.Object } || JsonUtf8.ByteCount(request.CurrentContext.Value) > 65_536)
                 return Task.FromResult<OrchestratorContextAcquireResponse?>(null);
             using var snapshot = JsonDocument.Parse(root.Snapshot); var authority = snapshot.RootElement.GetProperty("authority");
             var tools = authority.GetProperty("context_tools").EnumerateArray().Select(x => x.GetString()!).OrderBy(x => x, StringComparer.Ordinal);
@@ -235,10 +279,7 @@ public sealed class InMemoryOrchestratorRunRepository(
             return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Success, response));
         }
     }
-    private static OrchestratorRunResponse ToResponse(Entry x) { using var d = JsonDocument.Parse(x.Snapshot); return new(x.Id, x.OrchestratorId, x.OrchestratorRevision, x.Conversation, x.WorkflowId, x.WorkflowRevision, x.Hash, x.Status, x.CancelRequested, x.Version, x.Deadline, Budgets(d.RootElement), x.Created, x.Updated, ErrorCode: x.ErrorCode, ErrorMessage: x.ErrorMessage); }
-    private static JsonElement Budgets(JsonElement snapshot)
-    { var limits = snapshot.GetProperty("limits"); var value = new System.Text.Json.Nodes.JsonObject { { "maxContextRounds", limits.GetProperty("max_context_rounds").GetInt32() }, { "maxTasks", limits.GetProperty("max_tasks").GetInt32() }, { "maxChildRuns", limits.GetProperty("max_child_runs").GetInt32() }, { "maxConcurrency", limits.GetProperty("max_concurrency").GetInt32() }, { "maxRepairRounds", limits.GetProperty("max_repair_rounds").GetInt32() }, { "timeoutSeconds", limits.GetProperty("timeout_seconds").GetDouble() }, { "tokenBudget", snapshot.GetProperty("token_budget").GetInt32() } }; return JsonDocument.Parse(value.ToJsonString()).RootElement.Clone(); }
-    private static (Guid Workflow, int Revision, string Hash, int TokenCap)? Pin(JsonElement root, string kind, Guid agent, int revision) { IEnumerable<JsonElement> pins = kind == "verifier" ? [root.GetProperty("verifier")] : root.GetProperty("workers").EnumerateArray(); foreach (var pin in pins) if (Guid.TryParse(pin.GetProperty("agent_id").GetString(), out var id) && id == agent && pin.GetProperty("agent_revision").GetInt32() == revision && Guid.TryParse(pin.GetProperty("workflow_id").GetString(), out var workflow) && pin.TryGetProperty("token_cap", out var cap) && cap.TryGetInt32(out var tokenCap) && tokenCap > 0) return (workflow, pin.GetProperty("workflow_revision").GetInt32(), pin.GetProperty("snapshot_hash").GetString()!, tokenCap); return null; }
+    private static OrchestratorRunResponse ToResponse(Entry x) { using var d = JsonDocument.Parse(x.Snapshot); return new(x.Id, x.OrchestratorId, x.OrchestratorRevision, x.Conversation, x.WorkflowId, x.WorkflowRevision, x.Hash, x.Status, x.CancelRequested, x.Version, x.Deadline, OrchestratorRunSnapshotProjection.Budgets(d.RootElement), x.Created, x.Updated, ErrorCode: x.ErrorCode, ErrorMessage: x.ErrorMessage); }
     private async Task<(PublishedAgentSnapshotSource Agent, WorkflowSnapshotSource Workflow)?> ResolveChildSourceAsync(string tenant, Guid agentId, int revision, CancellationToken ct)
     { var agent = await agents.GetAsync(tenant, agentId, ct); var definition = await agents.GetRevisionDefinitionAsync(tenant, agentId, revision, ct); var info = (await agents.ListRevisionsAsync(tenant, agentId, ct)).SingleOrDefault(x => x.Revision == revision); if (agent is null || definition is null || info is null || !agent.Enabled || agent.PublishedRevision != revision || info.RuntimeWorkflowId is not Guid workflowId || info.RuntimeWorkflowRevision is not int workflowRevision) return null; var workflow = await workflows.GetRevisionAsync(tenant, workflowId, workflowRevision, ct); if (workflow is null) return null; return (new(agentId, agent.Name, revision, definition, info.DefinitionSha256, workflowId, workflowRevision, info.SkillBindings, info.PromptManifestRevision, info.PromptManifestSha256), new(workflowId, workflowRevision, 1, workflow.Value.Definition, WorkflowCanonicalizer.Hash(workflow.Value.Definition), WorkflowCompilerContracts.Current)); }
     private static IReadOnlyCollection<string> Strings(JsonElement value) => value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray() : Array.Empty<string>();

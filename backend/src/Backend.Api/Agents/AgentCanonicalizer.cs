@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Backend.Api.Common;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Agents;
@@ -62,12 +63,12 @@ public static class AgentCanonicalizer
             ["system_prompt"] = req.SystemPrompt ?? string.Empty,
             ["execution_roles"] = ToSetArray(req.ExecutionRoles),
             ["capabilities"] = ToSetArray(req.Capabilities),
-            ["output_contract"] = CanonicalizeNode(ToNode(req.OutputContract)) ?? new JsonObject(),
+            ["output_contract"] = CanonicalJsonTree.Normalize(ToNode(req.OutputContract)) ?? new JsonObject(),
             ["audience"] = ToAudienceArray(req.Audience),
             ["allowed_tools"] = ToSetArray(req.AllowedTools),
             ["skill_bindings"] = ToBindings(req.SkillBindings),
             ["knowledge_sources"] = ToKnowledgeSourceArray(req.KnowledgeSources),
-            ["business_rules"] = CanonicalizeNode(ToNode(req.BusinessRules))
+            ["business_rules"] = CanonicalJsonTree.Normalize(ToNode(req.BusinessRules))
                                  ?? JsonNode.Parse(AgentDefaults.EmptyBusinessRules),
             ["runtime_limits"] = ToLimits(req.RuntimeLimits),
             ["runtime_workflow"] = ToWorkflow(req.RuntimeWorkflow),
@@ -129,7 +130,7 @@ public static class AgentCanonicalizer
     public static string WithBusinessRules(string canonicalDefinition, JsonElement canonicalRuleSet)
     {
         var definition = JsonNode.Parse(canonicalDefinition)!.AsObject();
-        definition["business_rules"] = CanonicalizeNode(ToNode(canonicalRuleSet))
+        definition["business_rules"] = CanonicalJsonTree.Normalize(ToNode(canonicalRuleSet))
                                        ?? JsonNode.Parse(AgentDefaults.EmptyBusinessRules);
         return CanonicalizeDefinition(definition.ToJsonString());
     }
@@ -165,7 +166,7 @@ public static class AgentCanonicalizer
     /// Array 順序保留，因為 rules、bindings 等陣列順序具有語意。
     /// </summary>
     public static string CanonicalizeDefinition(string definition)
-        => CanonicalizeNode(JsonNode.Parse(definition))!.ToJsonString();
+        => CanonicalJsonTree.Normalize(JsonNode.Parse(definition))!.ToJsonString();
 
     /// <summary>
     /// Read an authoritative persisted definition. JSONB is never a fallback: the exact
@@ -548,20 +549,6 @@ public static class AgentCanonicalizer
         => element is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } e
             ? JsonNode.Parse(e.GetRawText())
             : null;
-
-    /// <summary>遞迴依 ordinal key 排序 JSON object；array 順序保留（JSON array 具語意）。</summary>
-    private static JsonNode? CanonicalizeNode(JsonNode? node)
-    {
-        return node switch
-        {
-            null => null,
-            JsonObject obj => new JsonObject(
-                obj.OrderBy(p => p.Key, StringComparer.Ordinal)
-                    .Select(p => KeyValuePair.Create(p.Key, CanonicalizeNode(p.Value)))),
-            JsonArray arr => new JsonArray(arr.Select(CanonicalizeNode).ToArray()),
-            _ => node.DeepClone(),
-        };
-    }
 
     private static bool HasDefinitionShape(JsonElement root)
         => root.ValueKind == JsonValueKind.Object

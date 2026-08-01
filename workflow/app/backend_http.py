@@ -79,9 +79,13 @@ def internal_headers(ctx: Identity) -> dict[str, str]:
 
 async def search_chunks(query: str, top_k: int, tenant_id: str) -> list[dict]:
     """呼叫 backend POST /api/retrieval/search，回傳原始 chunks（list[dict]）。"""
+    return await _search_chunks({"query": query, "top_k": top_k}, tenant_id)
+
+
+async def _search_chunks(payload: dict, tenant_id: str) -> list[dict]:
     resp = await get_client().post(
         "/api/retrieval/search",
-        json={"query": query, "top_k": top_k},
+        json=payload,
         headers={
             "X-Internal-Token": settings.internal_api_token,
             "X-Tenant-Id": tenant_id,
@@ -98,18 +102,12 @@ async def search_chunks_scoped(
     knowledge_sources: list[str],
 ) -> list[dict]:
     """D3 retrieval contract: scope is server-built and version-pinned."""
-    resp = await get_client().post(
-        "/api/retrieval/search",
-        json={
+    return await _search_chunks(
+        {
             "query": query,
             "top_k": top_k,
             "knowledge_sources": knowledge_sources,
             "scope_contract_version": 1,
         },
-        headers={
-            "X-Internal-Token": settings.internal_api_token,
-            "X-Tenant-Id": tenant_id,
-        },
+        tenant_id,
     )
-    resp.raise_for_status()
-    return resp.json()["chunks"]

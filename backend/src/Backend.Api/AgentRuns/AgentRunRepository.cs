@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -403,7 +402,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
             // Mint the claim only after the potentially lengthy snapshot transaction work. Use
             // clock_timestamp(), not PostgreSQL now(), because now() is fixed at transaction start.
             var commandId = Guid.NewGuid();
-            var claimToken = NewToken();
+            var claimToken = AgentRunLeasePolicy.NewToken();
             var commandInputHash = CanonicalCommandInputSha256(
                 commandInput,
                 "start",
@@ -678,8 +677,10 @@ public sealed class AgentRunRepository : IAgentRunRepository
             return InvalidState(
                 "run state version has insufficient lifecycle headroom");
         }
-        if (!LeaseMatches(
-                row,
+        if (!AgentRunLeasePolicy.Matches(
+                row.LeaseTokenHash,
+                row.LeaseGeneration,
+                row.LeaseExpiresAt,
                 request.LeaseToken,
                 request.LeaseGeneration,
                 databaseNow))
@@ -805,8 +806,8 @@ public sealed class AgentRunRepository : IAgentRunRepository
             await tx.RollbackAsync(ct);
             return InvalidState("checkpoint_version 不可倒退");
         }
-        if (!WithinJsonLimit(request.PendingInput, 64 * 1024)
-            || !WithinJsonLimit(request.Result, 1024 * 1024))
+        if (!AgentRunEventPolicy.WithinJsonLimit(request.PendingInput, 64 * 1024)
+            || !AgentRunEventPolicy.WithinJsonLimit(request.Result, 1024 * 1024))
         {
             await tx.RollbackAsync(ct);
             return InvalidState("pending_input 或 result 超過上限");
@@ -887,10 +888,10 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 checkpointRef,
                 request.CheckpointVersion,
                 promotesCheckpoint,
-                pendingInput = JsonText(request.PendingInput),
-                result = JsonText(request.Result),
-                errorCode = Normalize(request.ErrorCode, 100),
-                errorMessage = Normalize(request.ErrorMessage, 500),
+                pendingInput = AgentRunEventPolicy.JsonText(request.PendingInput),
+                result = AgentRunEventPolicy.JsonText(request.Result),
+                errorCode = AgentRunEventPolicy.Normalize(request.ErrorCode, 100),
+                errorMessage = AgentRunEventPolicy.Normalize(request.ErrorMessage, 500),
                 terminal,
                 releaseLease = terminal
                     || request.ToStatus == AgentRunStatuses.WaitingInput,
@@ -962,8 +963,10 @@ public sealed class AgentRunRepository : IAgentRunRepository
             await tx.RollbackAsync(ct);
             return InvalidState("terminal run 不接受 events");
         }
-        if (!LeaseMatches(
-                row,
+        if (!AgentRunLeasePolicy.Matches(
+                row.LeaseTokenHash,
+                row.LeaseGeneration,
+                row.LeaseExpiresAt,
                 request.LeaseToken,
                 request.LeaseGeneration,
                 databaseNow))
@@ -1027,7 +1030,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 || string.IsNullOrWhiteSpace(item.EventType)
                 || item.EventType.Trim().Length > 100
                 || !string.Equals(item.SnapshotHash, row.SnapshotHash, StringComparison.Ordinal)
-                || !IsSafePayload(item.Payload))
+                || !AgentRunEventPolicy.IsSafePayload(item.Payload))
             {
                 await tx.RollbackAsync(ct);
                 return InvalidState("event id/type/snapshot_hash/payload 無效");
@@ -1055,7 +1058,9 @@ public sealed class AgentRunRepository : IAgentRunRepository
                         cancellationToken: ct));
                 if (prior is null
                     || prior.EventId != item.EventId
-                    || !EventReplayMatches(prior, item, row.SnapshotHash))
+                    || !AgentRunEventPolicy.ReplayMatches(
+                        prior.EventType, prior.NodeId, prior.SnapshotHash, prior.Payload,
+                        item, row.SnapshotHash))
                 {
                     await tx.RollbackAsync(ct);
                     return new AgentRunWriteResult(
@@ -1085,7 +1090,9 @@ public sealed class AgentRunRepository : IAgentRunRepository
             if (prior is not null)
             {
                 if (prior.EventCursor != eventCursor
-                    || !EventReplayMatches(prior, item, row.SnapshotHash))
+                    || !AgentRunEventPolicy.ReplayMatches(
+                        prior.EventType, prior.NodeId, prior.SnapshotHash, prior.Payload,
+                        item, row.SnapshotHash))
                 {
                     await tx.RollbackAsync(ct);
                     return new AgentRunWriteResult(
@@ -1108,11 +1115,11 @@ public sealed class AgentRunRepository : IAgentRunRepository
                     sequence,
                     item.EventId,
                     eventType = item.EventType!.Trim(),
-                    nodeId = Normalize(item.NodeId, 200),
+                    nodeId = AgentRunEventPolicy.Normalize(item.NodeId, 200),
                     request.LeaseGeneration,
                     eventCursor,
                     snapshotHash = row.SnapshotHash,
-                    payload = JsonText(item.Payload) ?? "{}",
+                    payload = AgentRunEventPolicy.JsonText(item.Payload) ?? "{}",
                 },
                 tx,
                 cancellationToken: ct));
@@ -1207,7 +1214,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
         var leaseGeneration = activeSameOwner
             ? row.LeaseGeneration
             : checked(row.LeaseGeneration + 1);
-        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        var token = AgentRunLeasePolicy.NewToken();
         var expiresAt = await conn.ExecuteScalarAsync<DateTime?>(new CommandDefinition(
             "UPDATE agent_run SET lease_owner=@owner,lease_token_sha256=@tokenHash,"
              + " lease_generation=@leaseGeneration,"
@@ -1333,7 +1340,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
         JsonElement snapshotEnvelope = default;
         if (metadataOnly)
         {
-            if (!HasValidPinnedIdentity(tenantId, userId, role))
+            if (!AgentRunRecoveryPolicy.HasValidPinnedIdentity(tenantId, userId, role))
             {
                 await tx.RollbackAsync(ct);
                 return new AgentRunCommandClaimResult(
@@ -1351,7 +1358,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
             var snapshotTenantId = caller.GetProperty("tenant_id").GetString();
             var snapshotUserId = caller.GetProperty("user_id").GetString();
             role = caller.GetProperty("role").GetString();
-            if (!HasValidPinnedIdentity(snapshotTenantId, snapshotUserId, role)
+            if (!AgentRunRecoveryPolicy.HasValidPinnedIdentity(snapshotTenantId, snapshotUserId, role)
                 || !string.Equals(snapshotTenantId, tenantId, StringComparison.Ordinal)
                 || !string.Equals(snapshotUserId, userId, StringComparison.Ordinal)
                 || !string.Equals(
@@ -1437,8 +1444,8 @@ public sealed class AgentRunRepository : IAgentRunRepository
         var leaseGeneration = reuseGeneration
             ? row.LeaseGeneration
             : row.LeaseGeneration + 1;
-        var leaseToken = NewToken();
-        var claimToken = NewToken();
+        var leaseToken = AgentRunLeasePolicy.NewToken();
+        var claimToken = AgentRunLeasePolicy.NewToken();
         var leaseExpiresAt = await conn.ExecuteScalarAsync<DateTime?>(new CommandDefinition(
             "UPDATE agent_run SET lease_owner=@workerId,"
              + " lease_token_sha256=@leaseTokenHash,"
@@ -1673,7 +1680,9 @@ public sealed class AgentRunRepository : IAgentRunRepository
             }
 
             var row = candidate;
-            var runCounterError = RecoveryRunCounterError(row);
+            var runCounterError = AgentRunRecoveryPolicy.CounterError(
+                row.LeaseGeneration, row.StateVersion, row.CheckpointVersion,
+                row.EventAckCursor, row.LatestEventSequence);
             if (runCounterError is not null)
             {
                 await QuarantineExhaustedRecoveryCandidateAsync(
@@ -1728,7 +1737,8 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 continue;
             }
 
-            if (!HasValidCheckpointSeed(row))
+            if (!AgentRunRecoveryPolicy.HasValidCheckpointSeed(
+                    row.CheckpointGeneration, row.CheckpointRef, row.CheckpointVersion))
             {
                 await DeadLetterRecoveryCandidateAsync(
                     conn,
@@ -1738,7 +1748,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
                     ct);
                 continue;
             }
-            if (!HasValidPinnedIdentity(
+            if (!AgentRunRecoveryPolicy.HasValidPinnedIdentity(
                     row.TenantId,
                     row.UserId,
                     row.CallerRole))
@@ -1801,8 +1811,8 @@ public sealed class AgentRunRepository : IAgentRunRepository
                 continue;
             }
 
-            var token = NewToken();
-            var leaseToken = NewToken();
+            var token = AgentRunLeasePolicy.NewToken();
+            var leaseToken = AgentRunLeasePolicy.NewToken();
             var attempt = checked(row.DispatchAttempts + 1);
             var executionRecovery = row.DispatchCompletedAt is not null;
             var forceTakeover =
@@ -2012,14 +2022,6 @@ public sealed class AgentRunRepository : IAgentRunRepository
                       StringComparison.Ordinal)
                   || row.DispatchCompletedAt <= recoveryBefore);
 
-    private static bool HasValidCheckpointSeed(RecoveryCandidateRow row)
-        => row.CheckpointVersion == 0
-            ? row.CheckpointGeneration == 0 && row.CheckpointRef is null
-            : row.CheckpointVersion > 0
-              && AgentRunCheckpointRef.IsValidPromotion(
-                  row.CheckpointRef,
-                  row.CheckpointGeneration);
-
     private static bool TryBuildRecoverySnapshot(
         RecoveryCandidateRow row,
         out string? role,
@@ -2037,7 +2039,7 @@ public sealed class AgentRunRepository : IAgentRunRepository
             var snapshotTenantId = caller.GetProperty("tenant_id").GetString();
             var snapshotUserId = caller.GetProperty("user_id").GetString();
             role = caller.GetProperty("role").GetString();
-            if (!HasValidPinnedIdentity(snapshotTenantId, snapshotUserId, role)
+            if (!AgentRunRecoveryPolicy.HasValidPinnedIdentity(snapshotTenantId, snapshotUserId, role)
                 || !string.Equals(
                     snapshotTenantId,
                     row.TenantId,
@@ -2066,38 +2068,6 @@ public sealed class AgentRunRepository : IAgentRunRepository
             snapshotEnvelope = default;
             return false;
         }
-    }
-
-    private static bool HasValidPinnedIdentity(
-        string? tenantId,
-        string? userId,
-        string? role)
-        => HasValidIdentityValue(
-               tenantId,
-               AgentExecutionContract.MaxCallerIdentityLength)
-           && HasValidIdentityValue(
-               userId,
-               AgentExecutionContract.MaxCallerIdentityLength)
-           && HasValidIdentityValue(
-               role,
-               AgentExecutionContract.MaxCallerRoleLength);
-
-    private static bool HasValidIdentityValue(string? value, int maxLength)
-        => !string.IsNullOrWhiteSpace(value) && value.Length <= maxLength;
-
-    private static string? RecoveryRunCounterError(RecoveryCandidateRow row)
-    {
-        if (row.LeaseGeneration is < 0 or >= long.MaxValue - 1)
-        {
-            return "run_recovery_generation_exhausted";
-        }
-
-        return row.StateVersion is < 0 or >= long.MaxValue - 2
-               || row.CheckpointVersion is < 0 or >= long.MaxValue - 1
-               || row.EventAckCursor is < 0 or >= long.MaxValue - 1
-               || row.LatestEventSequence is < 0 or >= long.MaxValue - 1
-            ? "run_recovery_counter_exhausted"
-            : null;
     }
 
     private async Task QuarantineExhaustedRecoveryCandidateAsync(
@@ -2468,23 +2438,6 @@ public sealed class AgentRunRepository : IAgentRunRepository
         => array.Any(item => string.Equals(
                item?.GetValue<string>(), expected, StringComparison.Ordinal));
 
-    private static bool LeaseMatches(
-        RunRow row,
-        string? token,
-        long leaseGeneration,
-        DateTime databaseNow)
-    {
-        return row.LeaseTokenHash is not null
-               && leaseGeneration > 0
-               && row.LeaseGeneration == leaseGeneration
-               && row.LeaseExpiresAt > databaseNow
-               && !string.IsNullOrWhiteSpace(token)
-               && string.Equals(
-                   row.LeaseTokenHash,
-                   SkillHash.Sha256(token),
-                   StringComparison.Ordinal);
-    }
-
     private static async Task<string?> DeadlineCleanupTargetAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
@@ -2507,16 +2460,13 @@ public sealed class AgentRunRepository : IAgentRunRepository
 
     private static AgentRunCommandDispatch NewDispatchClaim()
     {
-        var token = NewToken();
+        var token = AgentRunLeasePolicy.NewToken();
         return new AgentRunCommandDispatch(
             Guid.NewGuid(),
             token,
             DateTime.UtcNow.AddSeconds(30),
             1);
     }
-
-    private static string NewToken()
-        => Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
 
     private static string CanonicalCommandInputSha256(
         string json,
@@ -2542,84 +2492,6 @@ public sealed class AgentRunRepository : IAgentRunRepository
         return AgentRunCommandInput.CanonicalSha256(
             validatedInput,
             commandType);
-    }
-
-    private static bool WithinJsonLimit(JsonElement? value, int max)
-        => value is null or { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined }
-           || value.Value.GetRawText().Length <= max;
-
-    private static string? JsonText(JsonElement? value)
-        => value is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } v
-            ? v.GetRawText()
-            : null;
-
-    private static string? Normalize(string? value, int max)
-    {
-        var normalized = value?.Trim();
-        return string.IsNullOrEmpty(normalized)
-            ? null
-            : normalized[..Math.Min(normalized.Length, max)];
-    }
-
-    private static bool IsSafePayload(JsonElement? payload)
-    {
-        if (payload is null or { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined })
-        {
-            return true;
-        }
-        return payload.Value.GetRawText().Length <= 32_768 && SafeNode(payload.Value, 0);
-    }
-
-    private static bool SafeNode(JsonElement node, int depth)
-    {
-        if (depth > 8)
-        {
-            return false;
-        }
-        if (node.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var property in node.EnumerateObject())
-            {
-                var key = property.Name.ToLowerInvariant();
-                if (key is "prompt" or "message" or "content" or "args" or "arguments"
-                    or "value" or "token" or "secret" or "resource"
-                    || !SafeNode(property.Value, depth + 1))
-                {
-                    return false;
-                }
-            }
-        }
-        else if (node.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in node.EnumerateArray())
-            {
-                if (!SafeNode(item, depth + 1))
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    private static bool EventReplayMatches(
-        EventIdentityRow prior,
-        AgentRunEventAppend candidate,
-        string snapshotHash)
-    {
-        var candidatePayload = JsonText(candidate.Payload) ?? "{}";
-        return string.Equals(
-                   prior.EventType,
-                   candidate.EventType?.Trim(),
-                   StringComparison.Ordinal)
-               && string.Equals(
-                   prior.NodeId,
-                   Normalize(candidate.NodeId, 200),
-                   StringComparison.Ordinal)
-               && string.Equals(prior.SnapshotHash, snapshotHash, StringComparison.Ordinal)
-               && JsonNode.DeepEquals(
-                   JsonNode.Parse(prior.Payload),
-                   JsonNode.Parse(candidatePayload));
     }
 
     /// <summary>

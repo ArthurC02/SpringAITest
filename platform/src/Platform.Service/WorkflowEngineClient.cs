@@ -54,19 +54,9 @@ public sealed class WorkflowEngineClient : IWorkflowEngineClient
     }
 
     /// <summary>驗證 skill 定義:引擎一律回 200(結果在 body);非 200 才是呼叫失敗 → 502。</summary>
-    public async Task<JsonElement> ValidateSkillAsync(
+    public Task<JsonElement> ValidateSkillAsync(
         string definition, UserContext ctx, CancellationToken ct = default)
-    {
-        using var req = BuildRequest(HttpMethod.Post, $"{BaseUrl}/skills/validate", ctx, new { definition });
-        using var resp = await SendAsync(req, FailurePrefix, ct);
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode);
-        }
-
-        return await ReadJsonAsync(resp, ct);
-    }
+        => ValidateDefinitionAsync("/skills/validate", definition, ctx, ct);
 
     public Task<JsonElement> GetSkillCatalogAsync(UserContext ctx, CancellationToken ct = default)
         => GetCatalogAsync("/skills", ctx, ct);
@@ -154,11 +144,18 @@ public sealed class WorkflowEngineClient : IWorkflowEngineClient
         return await ReadJsonAsync(resp, ct);
     }
 
-    public async Task<JsonElement> ValidateBusinessWorkflowAsync(
+    public Task<JsonElement> ValidateBusinessWorkflowAsync(
         string definition, UserContext ctx, CancellationToken ct = default)
+        => ValidateDefinitionAsync("/business-workflows/validate", definition, ctx, ct);
+
+    /// <summary>
+    /// Flow validation routes share the same transport contract: a 200 body contains both
+    /// valid and invalid validation results; any non-2xx response is an invocation failure.
+    /// </summary>
+    private async Task<JsonElement> ValidateDefinitionAsync(
+        string path, string definition, UserContext ctx, CancellationToken ct)
     {
-        using var req = BuildRequest(
-            HttpMethod.Post, $"{BaseUrl}/business-workflows/validate", ctx, new { definition });
+        using var req = BuildRequest(HttpMethod.Post, BaseUrl + path, ctx, new { definition });
         using var resp = await SendAsync(req, FailurePrefix, ct);
         if (!resp.IsSuccessStatusCode)
         {

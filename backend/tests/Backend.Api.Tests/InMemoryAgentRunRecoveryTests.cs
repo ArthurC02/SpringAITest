@@ -1377,6 +1377,47 @@ public sealed class InMemoryAgentRunRecoveryTests
 
     // 邊界值:單次 append 的 events 數量限制是 `is < 1 or > 100`,所以 100 必須成功、101 與空陣列
     // 都必須被擋下;被擋下時 event_ack_cursor 不可前進(部分寫入等於帳目破洞)。
+    [Fact]
+    public async Task UnicodeNodeId_ExactReplayMatchesDapperContract()
+    {
+        var (agents, skills, agent) = await CreatePublishedAgentAsync("unicode-node");
+        var runs = new InMemoryAgentRunRepository(agents, skills);
+        var created = await runs.CreateDirectAsync(
+            "demo-a", "admin-a", "ADMIN", agent.Id, "start", "unicode-node-start", default);
+        var lease = await runs.ClaimLeaseAsync(
+            "demo-a",
+            "admin-a",
+            created.Run!.Id,
+            new AgentRunLeaseRequest(created.Run.StateVersion, "worker-a", 300),
+            default);
+        var nodeId = new string('n', 199) + "😀";
+        var appendedEvent = new AgentRunEventAppend(
+            Guid.NewGuid(),
+            "model_step",
+            nodeId,
+            created.Run.SnapshotHash,
+            JsonSerializer.SerializeToElement(new { step = 1 }));
+        var request = new AgentRunEventsAppendRequest(
+            lease.Lease!.Run.StateVersion,
+            lease.Lease.LeaseToken,
+            lease.Lease.LeaseGeneration,
+            lease.Lease.EventAckCursor,
+            new[] { appendedEvent });
+
+        var appended = await runs.AppendEventsAsync(
+            "demo-a", "admin-a", created.Run.Id, request, default);
+        var replay = await runs.AppendEventsAsync(
+            "demo-a", "admin-a", created.Run.Id, request, default);
+        var events = await runs.GetEventsAsync(
+            "demo-a", "admin-a", created.Run.Id, 0, 10, default);
+
+        Assert.Equal(AgentRunWriteStatus.Success, appended.Status);
+        Assert.Equal(AgentRunWriteStatus.Replay, replay.Status);
+        Assert.Equal(
+            new string('n', 199),
+            Assert.Single(events!.Events, item => item.EventId == appendedEvent.EventId).NodeId);
+    }
+
     [Theory]
     [InlineData(0, AgentRunWriteStatus.InvalidState)]
     [InlineData(100, AgentRunWriteStatus.Success)]

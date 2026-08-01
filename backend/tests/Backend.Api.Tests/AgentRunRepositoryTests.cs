@@ -2238,6 +2238,48 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
     }
 
     [SkippableFact]
+    public async Task UnicodeNodeId_ExactReplayMatchesInMemoryContract()
+    {
+        _fixture.SkipIfUnavailable();
+        const string tenant = "agentrunrepo-unicode-node";
+        var agent = await PublishedAgentAsync(tenant, "unicode-node");
+        var created = await Runs.CreateDirectAsync(
+            tenant, "admin-a", "ADMIN", agent.Id, "start", "unicode-node-start", default);
+        var lease = await Runs.ClaimLeaseAsync(
+            tenant,
+            "admin-a",
+            created.Run!.Id,
+            new AgentRunLeaseRequest(created.Run.StateVersion, "worker-a", 300),
+            default);
+        var nodeId = new string('n', 199) + "😀";
+        var appendedEvent = new AgentRunEventAppend(
+            Guid.NewGuid(),
+            "model_step",
+            nodeId,
+            created.Run.SnapshotHash,
+            JsonSerializer.SerializeToElement(new { step = 1 }));
+        var request = new AgentRunEventsAppendRequest(
+            lease.Lease!.Run.StateVersion,
+            lease.Lease.LeaseToken,
+            lease.Lease.LeaseGeneration,
+            lease.Lease.EventAckCursor,
+            new[] { appendedEvent });
+
+        var appended = await Runs.AppendEventsAsync(
+            tenant, "admin-a", created.Run.Id, request, default);
+        var replay = await Runs.AppendEventsAsync(
+            tenant, "admin-a", created.Run.Id, request, default);
+        var events = await Runs.GetEventsAsync(
+            tenant, "admin-a", created.Run.Id, 0, 10, default);
+
+        Assert.Equal(AgentRunWriteStatus.Success, appended.Status);
+        Assert.Equal(AgentRunWriteStatus.Replay, replay.Status);
+        Assert.Equal(
+            new string('n', 199),
+            Assert.Single(events!.Events, item => item.EventId == appendedEvent.EventId).NodeId);
+    }
+
+    [SkippableFact]
     public async Task EventOutbox_RequiresContiguousCursorAndExactReplayAcrossGenerations()
     {
         _fixture.SkipIfUnavailable();

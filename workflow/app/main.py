@@ -24,8 +24,7 @@ from app.business_rules.validator import (
     validate_rule_set,
 )
 from app.engine import compiler, node_registry, package, tool_registry
-from app.engine.skill import RESERVED_KEYS as skill_reserved_keys
-from app.engine.skill import ValidationResult, validate_source
+from app.engine.skill import ValidationResult, clean_invoke_input, validate_source
 from app.evals.api import router as evals_router
 from app.skills import config_apply, custom
 
@@ -78,13 +77,7 @@ def _clean_skill_input(raw: dict) -> dict:
     夾帶 fatal_error 會讓所有節點走 fatal 短路而跳過，夾帶 trace/errors 更會讓 reducer
     型別不符而 500。引擎內部鍵（__ 前綴）同理一併剝除。
     """
-    return {
-        k: v
-        for k, v in raw.items()
-        if k not in skill_reserved_keys
-        and k not in node_registry.ENGINE_KEYS
-        and not k.startswith("__")
-    }
+    return clean_invoke_input(raw)
 
 
 def _require_role(required_role: str | None, ctx: RequestContext, name: str) -> None:

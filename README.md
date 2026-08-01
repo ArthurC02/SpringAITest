@@ -156,7 +156,7 @@ npm install && npm run dev                # :5173（Vite proxy /api → :8080）
 
 ### 模式 B:備註
 
-`start-full` ＝ `docker compose --profile full up -d --build`。全容器模式：核心服務 `:8002` 與平台閘道 `:8080` 容器均發佈到主機；**容器內前端 nginx 反代** `/api` **走 compose service DNS** `http://platform:8080` **（不經主機，於容器間直連）**，單一 nginx 配置同時支援兩種模式（模式 A 時 Vite dev proxy 連 host :8080，模式 B 時 nginx 連 service DNS）。改碼後重建:`docker compose --profile full up -d --build platform`（或 `backend` 或 `frontend`）。
+`start-full` 會先執行 `docker compose build backend workflow platform frontend`，再以 `docker compose --profile full up -d --no-build` 啟動，避免 Compose 錯誤拉取 image-only mem0。全容器模式：核心服務 `:8002` 與平台閘道 `:8080` 容器均發佈到主機；**容器內前端 nginx 反代** `/api` **走 compose service DNS** `http://platform:8080` **（不經主機，於容器間直連）**，單一 nginx 配置同時支援兩種模式（模式 A 時 Vite dev proxy 連 host :8080，模式 B 時 nginx 連 service DNS）。改碼後可先執行 `docker compose build platform`（或 `backend`、`workflow`、`frontend`），再執行 `docker compose --profile full up -d --no-build`。
 
 ### 各服務位置
 
@@ -434,7 +434,7 @@ D6 is delivered behind fail-closed configuration. Set `AGENT_CHAT_ENABLED=true` 
 
 Before adding a tenant, publish and pin its Root Workflow, Worker Agent, independent read-only Verifier Agent, and tenant runtime binding. Canary one tenant at a time and retain the D6 verifier bundle. To roll back, first disable Platform `AGENT_CHAT_ENABLED` or remove the tenant from the allowlist, then disable the Workflow and Backend flags. Routing changes immediately; durable run and event records remain audit-retained.
 
-Verification snapshot: Backend 479/479 with PostgreSQL coverage; Platform Service 335/335 and Web 269/269; Workflow 862 passed/2 skipped; Frontend 50/50 plus build/lint; deterministic D6 verifier 13/13 PASS. RealModel bundle `20260725T111722672Z-90c9119f` passed E-04 and E-05. The seventh independent review completed with zero findings.
+Historical deterministic D6 snapshot: Backend 479/479 with PostgreSQL coverage; Platform Service 335/335 and Web 269/269; Workflow 862 passed/2 skipped; Frontend 50/50 plus build/lint; deterministic verifier 13/13 PASS. This does not prove the RealModel E-04/E-05 gates. The referenced RealModel bundle is unavailable in this workspace, so release sign-off remains blocked; the canonical status is maintained in [the release evidence plan](plans/copilot-shared-core/05-release-evidence-plan.md).
 
 ## D7 approved write tools and operations
 
@@ -442,4 +442,4 @@ D7 is delivered behind the independent, fail-closed `AGENT_WRITE_TOOLS_ENABLED=t
 
 The approved effect uses a Backend-issued one-time identity. Backend atomically writes its evidence and outbox record, while Workflow only claims and executes that durable effect, so retries and recovery cannot duplicate it. Operators with the exact `workflow.manage` capability use `/api/admin/operations` for regression-gate evidence, audited override, future-roots-only rollout, aggregate metrics, version comparison, and legacy inventory. A failed regression gate blocks rollout absent an audited override. To roll back, disable the write flag to block new work and change the future runtime binding/revision as needed; active runs remain pinned and all approval/effect/outbox records remain audit-retained.
 
-Verification snapshot: Backend 499 total (498 passed, 1 skipped) plus isolated PostgreSQL D7 coverage; Platform Service 335/335 and Web 277/277; Workflow 867 passed/2 skipped; Frontend 52/52 plus build/lint; hybrid cross-service D7 verifier 9/9 PASS; independent review `FINDINGS: 0`.
+Historical D7 verification snapshot: Backend 499 total (498 passed, 1 skipped) plus isolated PostgreSQL D7 coverage; Platform Service 335/335 and Web 277/277; Workflow 867 passed/2 skipped; Frontend 52/52 plus build/lint; hybrid cross-service D7 verifier 9/9 PASS; independent review `FINDINGS: 0`. This D7 snapshot is not D6 release sign-off. The canonical and current D6 release status is maintained only in [the release evidence plan](plans/copilot-shared-core/05-release-evidence-plan.md).

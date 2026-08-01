@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useCopilotReadable, useCopilotAction } from '@copilotkit/react-core'
 import { CopilotSidebar } from '@copilotkit/react-ui'
 import type { ChatOrchestrator, Session } from '../types'
@@ -13,9 +13,11 @@ import ChatView from './ChatView'
 import DocumentsView from './DocumentsView'
 import AnalysisView from './AnalysisView'
 import ConfigView from './ConfigView'
-import AgentPlatformView, { agentPlatformTabs } from './AgentPlatformView'
-import ApprovalInbox from './ApprovalInbox'
-import OperationsGovernanceView from './OperationsGovernanceView'
+import { agentPlatformTabs } from '../agentPlatformTabs'
+
+const AgentPlatformView = lazy(() => import('./AgentPlatformView'))
+const ApprovalInbox = lazy(() => import('./ApprovalInbox'))
+const OperationsGovernanceView = lazy(() => import('./OperationsGovernanceView'))
 
 type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agentPlatform' | 'approvals' | 'operations'
 
@@ -293,6 +295,7 @@ export default function AppShell({
           {/* key={view}：某視圖崩潰後切換到別的視圖即自動復原（重掛邊界）。 */}
           <main className="shell__content">
             <ErrorBoundary key={view}>
+              <Suspense fallback={<div className="muted" role="status">Loading…</div>}>
               {view === 'chat' && (
                 <ChatView
                   orchestrators={chatOrchestrators}
@@ -315,6 +318,7 @@ export default function AppShell({
               )}
               {view === 'approvals' && agentWriteToolsEnabled && <ApprovalInbox />}
               {view === 'operations' && agentWriteToolsEnabled && canManageWorkflow && <OperationsGovernanceView />}
+              </Suspense>
             </ErrorBoundary>
           </main>
         </div>

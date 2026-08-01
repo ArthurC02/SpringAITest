@@ -14,6 +14,9 @@ async function json(route: Route, body: unknown, status = 200) {
 test('202 create optimistically inserts a processing row that a full list replacement cannot wipe', async ({ page }) => {
   let serverDocs: unknown[] = []
   let listCalls = 0
+  let slowLists = false
+  let activeLists = 0
+  let maxActiveLists = 0
 
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -29,6 +32,10 @@ test('202 create optimistically inserts a processing row that a full list replac
     }
     if (path === '/api/documents' && request.method() === 'GET') {
       listCalls += 1
+      activeLists += 1
+      maxActiveLists = Math.max(maxActiveLists, activeLists)
+      if (slowLists) await new Promise((resolve) => setTimeout(resolve, 2500))
+      activeLists -= 1
       return json(route, serverDocs)
     }
     return json(route, [])
@@ -45,6 +52,7 @@ test('202 create optimistically inserts a processing row that a full list replac
   await page.getByRole('button', { name: '貼上文字' }).click()
   await page.getByLabel('內容', { exact: true }).fill('第三季營收摘要')
   const callsBeforeCreate = listCalls
+  slowLists = true
   await page.getByRole('button', { name: '新增文件' }).click()
 
   const row = page.locator('tbody tr').filter({ hasText: '季報' })
@@ -55,6 +63,7 @@ test('202 create optimistically inserts a processing row that a full list replac
   await expect.poll(() => listCalls, { timeout: 10_000 }).toBeGreaterThan(callsBeforeCreate + 1)
   await expect(row.locator('.chip')).toHaveText('處理中')
   await expect(page.locator('tbody tr')).toHaveCount(1)
+  expect(maxActiveLists).toBe(1)
 
   // Once the consumer catches up the same id must merge in place: ready state, real chunk
   // count, and no duplicate row left behind by the pending buffer.

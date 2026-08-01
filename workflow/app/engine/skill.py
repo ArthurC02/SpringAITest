@@ -63,6 +63,17 @@ RESERVED_KEYS = frozenset(
 # 由 Harness 寫入的引擎鍵
 ENGINE_KEYS = frozenset(node_registry.ENGINE_KEYS)
 
+
+def clean_invoke_input(raw: dict[Any, Any]) -> dict[Any, Any]:
+    """Remove caller-controlled keys reserved by the engine and runtime."""
+    return {
+        key: value
+        for key, value in raw.items()
+        if key not in RESERVED_KEYS
+        and key not in ENGINE_KEYS
+        and not str(key).startswith("__")
+    }
+
 _TYPES: dict[str, type] = {
     "str": str,
     "int": int,

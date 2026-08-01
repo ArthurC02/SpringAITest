@@ -111,6 +111,44 @@ public sealed class OrchestratorRunRepositoryTests
     }
 
     [Fact]
+    public async Task TransitionValidation_RejectsBeforeMutation_AndAllowsTimedOut()
+    {
+        var fixture = await FixtureAsync();
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "USER", [], [], fixture.OrchestratorId, "transition-validation",
+            "work", "transition-validation-start", default);
+        var claim = await fixture.Runs.ClaimCommandAsync(
+            "t", "u", created.Run!.Id, created.Dispatch!.CommandId, "worker", 30, default);
+        var state = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        var invalid = await fixture.Runs.TransitionAsync(
+            "t",
+            "u",
+            created.Run.Id,
+            new OrchestratorRootTransitionRequest(
+                state!.StateVersion,
+                claim!.ClaimToken,
+                claim.LeaseGeneration,
+                "completed",
+                Events: Enumerable.Repeat(
+                    new OrchestratorRootEventAppend("trace", null),
+                    201).ToArray()),
+            default);
+
+        Assert.Equal(OrchestratorRunWriteStatus.InvalidState, invalid.Status);
+        Assert.Equal(state.StateVersion, (await fixture.Runs.GetAsync("t", "u", created.Run.Id, default))!.StateVersion);
+
+        var timedOut = await fixture.Runs.TransitionAsync(
+            "t",
+            "u",
+            created.Run.Id,
+            new(state.StateVersion, claim.ClaimToken, claim.LeaseGeneration, "timed_out"),
+            default);
+
+        Assert.Equal(OrchestratorRunWriteStatus.Success, timedOut.Status);
+        Assert.Equal("timed_out", timedOut.Run!.Status);
+    }
+
+    [Fact]
     public async Task ActiveLookup_AndRootResume_AreOwnerScopedAmbiguitySafeAndCheckpointPinned()
     {
         var workflows = new Data.InMemory.InMemoryWorkflowRepository();
@@ -679,6 +717,45 @@ public sealed class OrchestratorRunRepositoryPostgresTests(PostgresFixture fixtu
     }
 
     public Task DisposeAsync() => CleanupAsync();
+
+    [SkippableFact]
+    public async Task TransitionValidation_RejectsBeforeMutation_AndAllowsTimedOut()
+    {
+        fixture.SkipIfUnavailable();
+        var repo = new OrchestratorRunRepository(fixture.DataSource!);
+        var runId = Guid.NewGuid();
+        await InsertAsync(runId, "transition-validation", Guid.NewGuid(), "queued", withStartCommand: true);
+        var initial = await repo.GetAsync(Tenant, "user", runId, default);
+        var claim = await repo.ClaimCommandAsync(
+            Tenant, "user", runId, initial!.CommandId!.Value, "worker", 30, default);
+        var state = await repo.GetAsync(Tenant, "user", runId, default);
+        var invalid = await repo.TransitionAsync(
+            Tenant,
+            "user",
+            runId,
+            new OrchestratorRootTransitionRequest(
+                state!.StateVersion,
+                claim!.ClaimToken,
+                claim.LeaseGeneration,
+                "completed",
+                Events: Enumerable.Repeat(
+                    new OrchestratorRootEventAppend("trace", null),
+                    201).ToArray()),
+            default);
+
+        Assert.Equal(OrchestratorRunWriteStatus.InvalidState, invalid.Status);
+        Assert.Equal(state.StateVersion, (await repo.GetAsync(Tenant, "user", runId, default))!.StateVersion);
+
+        var timedOut = await repo.TransitionAsync(
+            Tenant,
+            "user",
+            runId,
+            new(state.StateVersion, claim.ClaimToken, claim.LeaseGeneration, "timed_out"),
+            default);
+
+        Assert.Equal(OrchestratorRunWriteStatus.Success, timedOut.Status);
+        Assert.Equal("timed_out", timedOut.Run!.Status);
+    }
 
     [SkippableFact]
     public async Task ActiveLookupAndResumeReplay_AreAmbiguitySafeAndInputBound()

@@ -2,8 +2,7 @@ import { useState } from 'react'
 import AgentsView from './AgentsView'
 import WorkflowsView from './WorkflowsView'
 import OrchestratorsView from './OrchestratorsView'
-
-type Tab = 'agents' | 'workflows' | 'orchestrators'
+import { agentPlatformTabs, type AgentPlatformTab as Tab } from '../agentPlatformTabs'
 
 const LABEL: Record<Tab, string> = {
   agents: 'Agents',
@@ -27,13 +26,6 @@ interface Props extends Gates {
  * 可見分頁清單 = 這個工作區的唯一閘門來源。側欄入口(AppShell)也用它決定要不要出現,
  * 兩處共用同一份判斷才不會漂移成「入口在、分頁空」的白畫面。
  */
-export function agentPlatformTabs(g: Gates): Tab[] {
-  return [
-    ...(g.agentBuilderEnabled && g.isAdmin ? (['agents'] as const) : []),
-    ...(g.workflowDesignerEnabled && g.canManageWorkflow ? (['workflows', 'orchestrators'] as const) : []),
-  ]
-}
-
 /**
  * Agent 平台工作區:Agent(D1,可重用單元)→ Workflow Designer(D4,拼圖)→ Orchestrators(D4,
  * 把已發布 Workflow 註冊成可執行的根)三個相依環節共用一個側欄入口 + 內層分頁。

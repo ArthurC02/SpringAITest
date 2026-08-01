@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Backend.Api.Common;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Workflows;
@@ -7,7 +8,7 @@ namespace Backend.Api.Workflows;
 public static class WorkflowCanonicalizer
 {
     public static string Canonicalize(JsonElement value) => Canonicalize(value.GetRawText());
-    public static string Canonicalize(string value) => CanonicalizeNode(JsonNode.Parse(value)).ToJsonString();
+    public static string Canonicalize(string value) => CanonicalJsonTree.Normalize(JsonNode.Parse(value))!.ToJsonString();
     public static string Hash(string value) => SkillHash.Sha256(value);
 
     public static IReadOnlyList<WorkflowValidationError> ValidateEnvelope(string kind, string definition, string uiMetadata)
@@ -39,12 +40,4 @@ public static class WorkflowCanonicalizer
         return errors;
     }
 
-    private static JsonNode CanonicalizeNode(JsonNode? node) => node switch
-    {
-        JsonObject obj => new JsonObject(obj.OrderBy(x => x.Key, StringComparer.Ordinal)
-            .Select(x => new KeyValuePair<string, JsonNode?>(x.Key, CanonicalizeNode(x.Value)))),
-        JsonArray array => new JsonArray(array.Select(CanonicalizeNode).ToArray()),
-        null => null!,
-        _ => node.DeepClone(),
-    };
 }

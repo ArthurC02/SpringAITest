@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app import skills
 from app.engine import compiler, node_registry
-from app.engine.skill import Skill
+from app.engine.skill import Skill, clean_invoke_input
 from app.main import _clean_skill_input, app
 from tests.conftest import auth_headers
 
@@ -42,6 +42,10 @@ def test_clean_skill_input_strips_engine_internal_prefix():
     )
 
     assert cleaned == {"query": "x"}
+
+
+def test_shared_input_cleaner_handles_non_string_keys():
+    assert clean_invoke_input({1: "kept", "__private": "removed"}) == {1: "kept"}
 
 
 def test_engine_keys_are_exactly_trace_errors_fatal_error():

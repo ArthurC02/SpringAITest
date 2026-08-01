@@ -117,6 +117,37 @@ public sealed class OrchestratorRunServiceTests
         Assert.Equal(RunIdText, body.RootElement.GetProperty("id").GetString());
     }
 
+    /// <summary>
+    /// A 2xx allocation without both durable identities is a broken Backend contract, not a
+    /// recoverable Workflow-kick failure. Never return a false successful allocation or send an
+    /// ambiguous dispatch that Workflow cannot safely claim.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"status":"queued","command_id":"77777777-7777-7777-7777-777777777777"}""")]
+    [InlineData("""{"id":"not-a-guid","command_id":"77777777-7777-7777-7777-777777777777"}""")]
+    [InlineData("""{"id":"55555555-5555-5555-5555-555555555555","status":"queued"}""")]
+    [InlineData("""{"id":"55555555-5555-5555-5555-555555555555","command_id":"not-a-guid"}""")]
+    [InlineData("not-json")]
+    [InlineData("[]")]
+    [InlineData("null")]
+    public async Task Start_SuccessfulAllocationWithoutValidDispatchIds_FailsClosed(string body)
+    {
+        var backend = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Accepted, body));
+        var workflowCalls = 0;
+        var workflow = new StubHttpMessageHandler(_ =>
+        {
+            workflowCalls++;
+            return TestHttp.Json(HttpStatusCode.Accepted, "{}");
+        });
+
+        var error = await Assert.ThrowsAsync<WorkflowInvocationException>(() =>
+            Build(backend, workflow).StartAsync(
+                OrchestratorId, "hello", "conversation-1", "root-key", Owner));
+
+        Assert.Contains("缺少有效 id 或 command_id", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, workflowCalls);
+    }
+
     /// <summary>Backend 未受理就沒有耐久命令可 claim:4xx 原樣穿透、5xx 收斂成受控 502,兩者都不得 dispatch。</summary>
     [Fact]
     public async Task Start_Backend4xxOr5xx_DoesNotDispatch()

@@ -15,8 +15,7 @@ from pydantic import ValidationError
 from app import tracing
 from app.canonical_json import canonical_json_sha256
 from app.engine import compiler
-from app.engine.node_registry import ENGINE_KEYS
-from app.engine.skill import RESERVED_KEYS, Skill, build_input_model
+from app.engine.skill import Skill, build_input_model, clean_invoke_input
 from app.evals.fixtures import build_fixture_deps
 from app.evals.models import EvalCase, EvalCaseResult
 from app.settings import settings
@@ -30,11 +29,7 @@ def _clean_case_input(raw: dict[str, Any]) -> dict[str, Any]:
     """比照 app.main._clean_skill_input：eval case 的 input 同樣是不可信輸入，
     剝除保留鍵／引擎鍵／__ 前綴，不讓呼叫端經 case.input 夾帶偽造的保留鍵。
     """
-    return {
-        k: v
-        for k, v in raw.items()
-        if k not in RESERVED_KEYS and k not in ENGINE_KEYS and not k.startswith("__")
-    }
+    return clean_invoke_input(raw)
 
 
 def case_canonical_identity(

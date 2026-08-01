@@ -1,12 +1,14 @@
 ﻿#!/usr/bin/env pwsh
 # 模式 B：全容器——基礎設施 + 前端 + 後端，一鍵起整套（見 README 模式 B）。
-# 加 --build 確保跑的是目前的原始碼（首次或改過程式碼後會重建映像，需幾分鐘）。
+# 先只建置有 build context 的服務，再以 --no-build 啟動，避免 Compose 錯誤 pull image-only mem0。
 $ErrorActionPreference = 'Stop'
 
 Write-Host "▶ 啟動全容器（infra + 前端 + 後端）…"
 . (Join-Path $PSScriptRoot '_bootstrap.ps1')   # 切到 infra、檢查 .env、起 postgres、備妥 mem0 庫
 
-docker compose --profile full up -d --build
+docker compose build backend workflow platform frontend
+if ($LASTEXITCODE -ne 0) { Write-Error "docker compose build 失敗（離開碼 $LASTEXITCODE）"; exit 1 }
+docker compose --profile full up -d --no-build
 if ($LASTEXITCODE -ne 0) { Write-Error "docker compose --profile full up 失敗（離開碼 $LASTEXITCODE）"; exit 1 }
 Write-Host ""
 docker compose --profile full ps

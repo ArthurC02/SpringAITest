@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.AgentRuns;
@@ -627,8 +626,10 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                 return Task.FromResult(InvalidState(
                     "run state version has insufficient lifecycle headroom"));
             }
-            if (!LeaseMatches(
-                    entry,
+            if (!AgentRunLeasePolicy.Matches(
+                    entry.LeaseTokenHash,
+                    entry.LeaseGeneration,
+                    entry.LeaseExpiresAt,
                     request.LeaseToken,
                     request.LeaseGeneration,
                     now))
@@ -738,8 +739,8 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             {
                 return Task.FromResult(InvalidState("checkpoint_version 不可倒退"));
             }
-            if (!WithinJsonLimit(request.PendingInput, 64 * 1024)
-                || !WithinJsonLimit(request.Result, 1024 * 1024))
+            if (!AgentRunEventPolicy.WithinJsonLimit(request.PendingInput, 64 * 1024)
+                || !AgentRunEventPolicy.WithinJsonLimit(request.Result, 1024 * 1024))
             {
                 return Task.FromResult(InvalidState("pending_input 或 result 超過上限"));
             }
@@ -765,8 +766,8 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             entry.CheckpointVersion = request.CheckpointVersion ?? entry.CheckpointVersion;
             entry.PendingInput = Clone(request.PendingInput);
             entry.Result = Clone(request.Result);
-            entry.ErrorCode = Normalize(request.ErrorCode, 100);
-            entry.ErrorMessage = Normalize(request.ErrorMessage, 500);
+            entry.ErrorCode = AgentRunEventPolicy.Normalize(request.ErrorCode, 100);
+            entry.ErrorMessage = AgentRunEventPolicy.Normalize(request.ErrorMessage, 500);
             entry.StateVersion++;
             entry.UpdatedAt = now;
             entry.StartedAt ??= request.ToStatus == AgentRunStatuses.Running ? now : null;
@@ -821,8 +822,10 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             {
                 return Task.FromResult(InvalidState("terminal run 不接受 events"));
             }
-            if (!LeaseMatches(
-                    entry,
+            if (!AgentRunLeasePolicy.Matches(
+                    entry.LeaseTokenHash,
+                    entry.LeaseGeneration,
+                    entry.LeaseExpiresAt,
                     request.LeaseToken,
                     request.LeaseGeneration,
                     now))
@@ -885,14 +888,16 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                 {
                     return Task.FromResult(InvalidState("event id/type/snapshot_hash 無效"));
                 }
-                if (!IsSafePayload(item.Payload))
+                if (!AgentRunEventPolicy.IsSafePayload(item.Payload))
                 {
                     return Task.FromResult(InvalidState("event payload 含敏感欄位或超過上限"));
                 }
                 var prior = entry.Events.FirstOrDefault(e => e.EventId == item.EventId);
                 if (prior is not null
                     && (prior.EventCursor != eventCursor
-                        || !EventReplayMatches(prior, item, entry.SnapshotHash)))
+                        || !AgentRunEventPolicy.ReplayMatches(
+                            prior.EventType, prior.NodeId, prior.SnapshotHash,
+                            prior.Payload.GetRawText(), item, entry.SnapshotHash)))
                 {
                     return Task.FromResult(new AgentRunWriteResult(
                         AgentRunWriteStatus.Conflict,
@@ -910,7 +915,9 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                         candidate => candidate.EventCursor == request.EventCursorStart + index);
                     if (prior is null
                         || prior.EventId != item.EventId
-                        || !EventReplayMatches(prior, item, entry.SnapshotHash))
+                        || !AgentRunEventPolicy.ReplayMatches(
+                            prior.EventType, prior.NodeId, prior.SnapshotHash,
+                            prior.Payload.GetRawText(), item, entry.SnapshotHash))
                     {
                         return Task.FromResult(new AgentRunWriteResult(
                             AgentRunWriteStatus.Conflict,
@@ -936,7 +943,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                     entry,
                     item.EventId,
                     item.EventType!.Trim(),
-                    Normalize(item.NodeId, 200),
+                    AgentRunEventPolicy.Normalize(item.NodeId, 200),
                     Clone(item.Payload) ?? EmptyPayload(),
                     request.LeaseGeneration,
                     eventCursor);
@@ -992,7 +999,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                     AgentRunWriteStatus.InvalidState,
                     Message: "run lease generation is exhausted"));
             }
-            var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+            var token = AgentRunLeasePolicy.NewToken();
             entry.LeaseGeneration = activeSameOwner
                 ? entry.LeaseGeneration
                 : checked(entry.LeaseGeneration + 1);
@@ -1071,7 +1078,8 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             var role = entry.CallerRole;
             if (metadataOnly)
             {
-                if (!HasValidPinnedIdentity(entry))
+                if (!AgentRunRecoveryPolicy.HasValidPinnedIdentity(
+                        entry.TenantId, entry.UserId, entry.CallerRole))
                 {
                     return Task.FromResult(new AgentRunCommandClaimResult(
                         AgentRunWriteStatus.InvalidState,
@@ -1146,8 +1154,8 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                     Message: "run lease generation is exhausted"));
             }
 
-            var leaseToken = NewToken();
-            var claimToken = NewToken();
+            var leaseToken = AgentRunLeasePolicy.NewToken();
+            var claimToken = AgentRunLeasePolicy.NewToken();
             var expiresAt = now.AddSeconds(request.LeaseSeconds);
             entry.LeaseGeneration = reuseGeneration
                 ? entry.LeaseGeneration
@@ -1311,7 +1319,10 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                     break;
                 }
 
-                var runCounterError = RecoveryRunCounterError(candidate.Run);
+                var runCounterError = AgentRunRecoveryPolicy.CounterError(
+                    candidate.Run.LeaseGeneration, candidate.Run.StateVersion,
+                    candidate.Run.CheckpointVersion, candidate.Run.EventAckCursor,
+                    candidate.Run.LatestEventSequence);
                 if (runCounterError is not null)
                 {
                     QuarantineExhaustedRecoveryCandidate(
@@ -1331,14 +1342,18 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                         "run_recovery_counter_exhausted");
                     continue;
                 }
-                if (!HasValidCheckpointSeed(candidate.Run))
+                if (!AgentRunRecoveryPolicy.HasValidCheckpointSeed(
+                        candidate.Run.CheckpointGeneration, candidate.Run.CheckpointRef,
+                        candidate.Run.CheckpointVersion))
                 {
                     DeadLetterRecoveryCandidate(
                         candidate.Run,
                         "run_recovery_seed_invalid");
                     continue;
                 }
-                if (!HasValidPinnedIdentity(candidate.Run))
+                if (!AgentRunRecoveryPolicy.HasValidPinnedIdentity(
+                        candidate.Run.TenantId, candidate.Run.UserId,
+                        candidate.Run.CallerRole))
                 {
                     DeadLetterRecoveryCandidate(
                         candidate.Run,
@@ -1410,8 +1425,8 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                 {
                     continue;
                 }
-                var token = NewToken();
-                var leaseToken = NewToken();
+                var token = AgentRunLeasePolicy.NewToken();
+                var leaseToken = AgentRunLeasePolicy.NewToken();
                 var expiresAt = now.AddSeconds(request.LeaseSeconds);
                 candidate.Run.LeaseGeneration =
                     checked(candidate.Run.LeaseGeneration + 1);
@@ -1498,7 +1513,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
         JsonElement input)
     {
         var now = UtcNow();
-        var token = NewToken();
+        var token = AgentRunLeasePolicy.NewToken();
         var expiresAt = now.AddSeconds(30);
         var command = new CommandEntry
         {
@@ -1523,9 +1538,6 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
 
     private DateTime UtcNow() => _timeProvider.GetUtcNow().UtcDateTime;
 
-    private static string NewToken()
-        => Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-
     private static (JsonElement Envelope, string Role) AuthoritativeSnapshotOf(Entry entry)
     {
         var canonicalSnapshot = AgentRunSnapshotBuilder.ReadAuthoritativeSnapshot(
@@ -1536,7 +1548,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
         var tenantId = caller.GetProperty("tenant_id").GetString();
         var userId = caller.GetProperty("user_id").GetString();
         var role = caller.GetProperty("role").GetString();
-        if (!HasValidPinnedIdentity(tenantId, userId, role)
+        if (!AgentRunRecoveryPolicy.HasValidPinnedIdentity(tenantId, userId, role)
             || !string.Equals(tenantId, entry.TenantId, StringComparison.Ordinal)
             || !string.Equals(userId, entry.UserId, StringComparison.Ordinal)
             || !string.Equals(role, entry.CallerRole, StringComparison.Ordinal))
@@ -1616,52 +1628,6 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
         };
         _commands.Add(key, command);
         return command;
-    }
-
-    private static bool HasValidCheckpointSeed(Entry entry)
-        => entry.CheckpointVersion == 0
-            ? entry.CheckpointGeneration == 0 && entry.CheckpointRef is null
-            : entry.CheckpointVersion > 0
-              && AgentRunCheckpointRef.IsValidPromotion(
-                  entry.CheckpointRef,
-                  entry.CheckpointGeneration);
-
-    private static bool HasValidPinnedIdentity(Entry entry)
-        => HasValidPinnedIdentity(
-            entry.TenantId,
-            entry.UserId,
-            entry.CallerRole);
-
-    private static bool HasValidPinnedIdentity(
-        string? tenantId,
-        string? userId,
-        string? role)
-        => HasValidIdentityValue(
-               tenantId,
-               AgentExecutionContract.MaxCallerIdentityLength)
-           && HasValidIdentityValue(
-               userId,
-               AgentExecutionContract.MaxCallerIdentityLength)
-           && HasValidIdentityValue(
-               role,
-               AgentExecutionContract.MaxCallerRoleLength);
-
-    private static bool HasValidIdentityValue(string? value, int maxLength)
-        => !string.IsNullOrWhiteSpace(value) && value.Length <= maxLength;
-
-    private static string? RecoveryRunCounterError(Entry entry)
-    {
-        if (entry.LeaseGeneration is < 0 or >= long.MaxValue - 1)
-        {
-            return "run_recovery_generation_exhausted";
-        }
-
-        return entry.StateVersion is < 0 or >= long.MaxValue - 2
-               || entry.CheckpointVersion is < 0 or >= long.MaxValue - 1
-               || entry.EventAckCursor is < 0 or >= long.MaxValue - 1
-               || entry.LatestEventSequence is < 0 or >= long.MaxValue - 1
-            ? "run_recovery_counter_exhausted"
-            : null;
     }
 
     private void QuarantineExhaustedRecoveryCandidate(
@@ -1760,7 +1726,9 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             return entry is not null
                 && entry.Status == AgentRunStatuses.Running
                 && entry.CancelRequestedAt is null
-                && LeaseMatches(entry, leaseToken, leaseGeneration, UtcNow());
+                && AgentRunLeasePolicy.Matches(
+                    entry.LeaseTokenHash, entry.LeaseGeneration, entry.LeaseExpiresAt,
+                    leaseToken, leaseGeneration, UtcNow());
         }
     }
 
@@ -1842,23 +1810,6 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
     private static AgentRunWriteResult InvalidState(string message)
         => new(AgentRunWriteStatus.InvalidState, Message: message);
 
-    private static bool LeaseMatches(
-        Entry entry,
-        string? token,
-        long leaseGeneration,
-        DateTime now)
-    {
-        return entry.LeaseTokenHash is not null
-               && leaseGeneration > 0
-               && entry.LeaseGeneration == leaseGeneration
-               && entry.LeaseExpiresAt > now
-               && !string.IsNullOrWhiteSpace(token)
-               && string.Equals(
-                   entry.LeaseTokenHash,
-                   SkillHash.Sha256(token),
-                   StringComparison.Ordinal);
-    }
-
     private void AddEventUnsafe(
         Entry entry,
         Guid eventId,
@@ -1892,81 +1843,6 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
     private static bool HasJsonValue(JsonElement? value)
         => value is
         { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) };
-
-    private static bool WithinJsonLimit(JsonElement? value, int max)
-        => value is null or { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined }
-           || value.Value.GetRawText().Length <= max;
-
-    private static string? Normalize(string? value, int max)
-        => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, max)];
-
-    private static bool IsSafePayload(JsonElement? payload)
-    {
-        if (payload is null or { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined })
-        {
-            return true;
-        }
-        if (payload.Value.GetRawText().Length > 32_768)
-        {
-            return false;
-        }
-        return SafeNode(payload.Value, 0);
-    }
-
-    private static bool SafeNode(JsonElement node, int depth)
-    {
-        if (depth > 8)
-        {
-            return false;
-        }
-        if (node.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var property in node.EnumerateObject())
-            {
-                var key = property.Name.ToLowerInvariant();
-                if (key is "prompt" or "message" or "content" or "args" or "arguments"
-                    or "value" or "token" or "secret" or "resource")
-                {
-                    return false;
-                }
-                if (!SafeNode(property.Value, depth + 1))
-                {
-                    return false;
-                }
-            }
-        }
-        else if (node.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in node.EnumerateArray())
-            {
-                if (!SafeNode(item, depth + 1))
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    private static bool EventReplayMatches(
-        EventEntry prior,
-        AgentRunEventAppend candidate,
-        string snapshotHash)
-    {
-        var candidatePayload = Clone(candidate.Payload) ?? EmptyPayload();
-        return string.Equals(
-                   prior.EventType,
-                   candidate.EventType?.Trim(),
-                   StringComparison.Ordinal)
-               && string.Equals(
-                   prior.NodeId,
-                   Normalize(candidate.NodeId, 200),
-                   StringComparison.Ordinal)
-               && string.Equals(prior.SnapshotHash, snapshotHash, StringComparison.Ordinal)
-               && JsonNode.DeepEquals(
-                   JsonNode.Parse(prior.Payload.GetRawText()),
-                   JsonNode.Parse(candidatePayload.GetRawText()));
-    }
 
     private static AgentRunResponse ToResponse(Entry e) => new(
         e.Id,

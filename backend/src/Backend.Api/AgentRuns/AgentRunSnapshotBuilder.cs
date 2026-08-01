@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Backend.Api.Common;
 using Backend.Api.Agents;
 using Backend.Api.Skills;
 using YamlDotNet.Serialization;
@@ -265,7 +266,7 @@ internal static class AgentRunSnapshotBuilder
             snapshot["orchestrator_attempt"] = orchestratorProvenance.Attempt;
         }
 
-        var stored = Canonicalize(snapshot).ToJsonString(CanonicalJson);
+        var stored = CanonicalJsonTree.Normalize(snapshot)!.ToJsonString(CanonicalJson);
         var canonicalBytes = Encoding.UTF8.GetBytes(stored);
         return new Built(
             stored,
@@ -306,8 +307,8 @@ internal static class AgentRunSnapshotBuilder
         var context = definition["context"]?.DeepClone() as JsonObject
             ?? throw new InvalidOperationException("Orchestrator context policy is missing");
         var rules = new JsonObject { ["version"] = 1, ["rules"] = new JsonArray() };
-        var canonicalRules = Canonicalize(rules).ToJsonString(CanonicalJson);
-        var canonicalPolicy = Canonicalize(policy).ToJsonString(CanonicalJson);
+        var canonicalRules = CanonicalJsonTree.Normalize(rules)!.ToJsonString(CanonicalJson);
+        var canonicalPolicy = CanonicalJsonTree.Normalize(policy)!.ToJsonString(CanonicalJson);
         var callerGrants = AgentRunCapabilityClaims.Parse(capabilityClaims);
         var workerPins = new JsonArray(workers.Select(ToRootWorkerPin).ToArray());
         var snapshot = new JsonObject
@@ -368,10 +369,10 @@ internal static class AgentRunSnapshotBuilder
             ["business_rules"] = rules,
             ["policies"] = policy,
         };
-        var payload = Canonicalize(snapshot).ToJsonString(CanonicalJson);
+        var payload = CanonicalJsonTree.Normalize(snapshot)!.ToJsonString(CanonicalJson);
         var hash = SkillHash.Sha256(payload);
         snapshot["snapshot_hash"] = hash;
-        var stored = Canonicalize(snapshot).ToJsonString(CanonicalJson);
+        var stored = CanonicalJsonTree.Normalize(snapshot)!.ToJsonString(CanonicalJson);
         return new Built(stored, hash, Encoding.UTF8.GetBytes(stored), timeout);
     }
 
@@ -490,7 +491,7 @@ internal static class AgentRunSnapshotBuilder
     }
 
     public static string CanonicalizeJson(string json)
-        => Canonicalize(JsonNode.Parse(json)!).ToJsonString(CanonicalJson);
+        => CanonicalJsonTree.Normalize(JsonNode.Parse(json))!.ToJsonString(CanonicalJson);
 
     public static string SkillDescriptionOf(string immutableDefinition)
     {
@@ -549,18 +550,6 @@ internal static class AgentRunSnapshotBuilder
         }
         return result;
     }
-
-    private static JsonNode Canonicalize(JsonNode node) => node switch
-    {
-        JsonObject obj => new JsonObject(
-            obj.OrderBy(p => p.Key, StringComparer.Ordinal)
-                .Select(p => KeyValuePair.Create(
-                    p.Key,
-                    p.Value is null ? null : Canonicalize(p.Value)))),
-        JsonArray arr => new JsonArray(
-            arr.Select(item => item is null ? null : Canonicalize(item)).ToArray()),
-        _ => node.DeepClone(),
-    };
 
     private static bool HasSnapshotShape(JsonElement root)
         => root.ValueKind == JsonValueKind.Object

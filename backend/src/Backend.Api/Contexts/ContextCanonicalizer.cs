@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Backend.Api.Agents;
+using Backend.Api.Common;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Contexts;
@@ -17,7 +17,7 @@ internal static class ContextCanonicalizer
         if (definition is not { ValueKind: JsonValueKind.Object }) throw new ArgumentException("definition must be a JSON object");
         var raw = definition.Value.GetRawText();
         if (Encoding.UTF8.GetByteCount(raw) > MaxDefinitionBytes) throw new ArgumentException("definition exceeds 256 KB");
-        return AgentCanonicalizer.CanonicalizeDefinition(raw);
+        return CanonicalJsonTree.Normalize(JsonNode.Parse(raw))!.ToJsonString();
     }
 
     public static string CanonicalizeView(JsonElement? definition)
@@ -25,7 +25,7 @@ internal static class ContextCanonicalizer
         if (definition is not { ValueKind: JsonValueKind.Object }) throw new ArgumentException("view definition must be a JSON object");
         var raw = definition.Value.GetRawText();
         if (Encoding.UTF8.GetByteCount(raw) > MaxEvidenceBytes) throw new ArgumentException("view definition exceeds 64 KB");
-        return AgentCanonicalizer.CanonicalizeDefinition(raw);
+        return CanonicalJsonTree.Normalize(JsonNode.Parse(raw))!.ToJsonString();
     }
 
     public static void ValidateEvidence(IEnumerable<ContextEvidenceInput> evidence)
@@ -80,7 +80,7 @@ internal static class ContextCanonicalizer
     {
         var definition = JsonNode.Parse(candidateCanonical)!.AsObject();
         definition["context_authority"] = new JsonObject { ["selected_source_id"] = selectedSourceId, ["adapter_id"] = adapterId };
-        return AgentCanonicalizer.CanonicalizeDefinition(definition.ToJsonString());
+        return CanonicalJsonTree.Normalize(definition)!.ToJsonString();
     }
 
     public static string ReadAuthoritative(byte[]? bytes, string? sha, string authority)
@@ -91,7 +91,7 @@ internal static class ContextCanonicalizer
         {
             var json = StrictUtf8.GetString(bytes);
             using var document = JsonDocument.Parse(bytes);
-            if (document.RootElement.ValueKind != JsonValueKind.Object || !string.Equals(AgentCanonicalizer.CanonicalizeDefinition(json), json, StringComparison.Ordinal))
+            if (document.RootElement.ValueKind != JsonValueKind.Object || !string.Equals(CanonicalJsonTree.Normalize(JsonNode.Parse(json))!.ToJsonString(), json, StringComparison.Ordinal))
                 throw new InvalidOperationException($"{authority} canonical bytes are invalid");
             return json;
         }

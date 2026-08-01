@@ -27,6 +27,7 @@ from app.engine.skill import (
     RESERVED_KEYS,
     Skill,
     build_input_model,
+    clean_invoke_input,
     parse_step,
     resolve_node,
 )
@@ -257,13 +258,7 @@ async def invoke_pinned_flow(
             steps_consumed=0,
             tool_rounds_consumed=0,
         )
-    cleaned = {
-        key: value
-        for key, value in raw_input.items()
-        if key not in RESERVED_KEYS
-        and key not in ENGINE_KEYS
-        and not str(key).startswith("__")
-    }
+    cleaned = clean_invoke_input(raw_input)
     input_model = build_input_model(artifact.skill)
     if input_model is not None:
         try:
