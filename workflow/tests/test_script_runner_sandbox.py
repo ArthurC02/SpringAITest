@@ -11,10 +11,12 @@
    「全部拒絕」不是安全，是壞掉。
 """
 
+import ast
 import asyncio
 
 import pytest
 
+from app.engine.expressions import MAX_AST_DEPTH, ast_depth
 from app.engine.script_runner import (
     MAX_ALLOC,
     MAX_ITERATIONS,
@@ -124,6 +126,25 @@ def test_forbidden_script_survives_yaml_entry_point():
 
     assert result.valid is False
     assert FORBIDDEN_SCRIPT in _codes(result)
+
+
+def test_ast_depth_limit_boundary():
+    """邊界：巢狀深度恰好 100 放行、101 → ScriptViolation（_prepare 的深度先驗）。
+
+    這道護欄擋的是 `_Analyser` 遞迴走訪的 RecursionError —— 沒有它，
+    /skills/validate-package 這個未信任 zip 的信任邊界會直接 500
+    （見 script_runner 的 module docstring）。`1+1+...` 的左結合鏈每多一個 `+` 就多一層
+    BinOp，深度 = 加號數 + 3（Module → Assign → BinOp 鏈 → Constant）；第一行的
+    ast_depth assert 釘住這個算式，免得 AST 形狀變動後這條測試靜悄悄地測到別的深度。
+    """
+    on_point = f"state['x'] = {'1+' * (MAX_AST_DEPTH - 3)}1"
+    assert ast_depth(ast.parse(on_point)) == MAX_AST_DEPTH
+
+    assert _run(on_point) == {"x": MAX_AST_DEPTH - 2}  # 恰好 100 層：照常跑完
+
+    with pytest.raises(ScriptViolation) as exc:
+        _run(f"state['x'] = {'1+' * (MAX_AST_DEPTH - 2)}1")  # 101 層
+    assert str(MAX_AST_DEPTH) in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +395,36 @@ def test_script_cannot_reach_out_of_state_by_mutating_nested_objects():
 
     assert state["items"] == [1, 2, 3]  # 原 state 未被就地改寫
     assert writes == {"ok": True}  # items 沒被宣告寫入 → 不進 state
+
+
+def test_reserved_keys_without_dunder_prefix_are_stripped_from_writes():
+    """【AT-GOV-03】不帶 `__` 前綴的保留鍵：語法合法、跑得過，但 written() 一律剝除。
+
+    EXTRA_ATTACKS 的 engine-key 樣本全是 `__loop_0_count`，在 `_state_key` 的 `__` 檢查
+    就出局，走的是另一條路；FORBIDDEN_WRITE_KEYS 這半邊（身分／不可變／引擎／
+    Configuration Set seed／D3 授權鍵）只有 written() 的過濾在守。整段 script 靜態掃描
+    放行、鍵也真的進了 contract.writes 與 StateView，最後**靜默不落地** —— 決策表另一半
+    的 `ok` 照常寫入，證明剝的是保留鍵而不是整段作廢。
+    """
+    source = (
+        "state['tenant_id'] = 'other-tenant'\n"  # IDENTITY_KEYS：中途換租戶
+        "state['query_id'] = 'forged'\n"  # IMMUTABLE_KEYS：偽造稽核
+        "state['fatal_error'] = 'forged'\n"  # ENGINE_KEYS：偽造短路
+        "state['retrieval_top_k'] = 999\n"  # CONFIG_SEED_KEYS：竄改伺服器注入參數
+        "state['enforce_data_scope'] = False\n"  # RUNTIME_AUTHORITY_KEYS：提權
+        "state['ok'] = True\n"
+    )
+
+    assert scan(source).writes == (
+        "enforce_data_scope",
+        "fatal_error",
+        "ok",
+        "query_id",
+        "retrieval_top_k",
+        "tenant_id",
+    )  # 靜態掃描不擋：這裡不是攔截點
+
+    assert _run(source, {"tenant_id": "t-1", "enforce_data_scope": True}) == {"ok": True}
 
 
 def test_missing_key_raises_controlled_error():

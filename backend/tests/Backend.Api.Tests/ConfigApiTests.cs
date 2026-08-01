@@ -35,6 +35,17 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("on", item["value"]!.GetValue<string>());
     }
 
+    // 0 筆邊界:從未寫過任何 key 的全新租戶 → 200 + 空陣列(不是 404、不是 null)。
+    // 每租戶各自獨立、DB 不種共用預設列,所以「空」才是新租戶的正常起點。
+    [Fact]
+    public async Task Get_TenantWithNoConfig_Returns200_WithEmptyArray()
+    {
+        var resp = await Admin("never-configured").GetAsync("/api/config");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Empty((await resp.ReadJsonAsync()).AsArray());
+    }
+
     // 租戶隔離的 API 側:A 寫的 key 在 B 的 list 看不到,且兩租戶同名 key 值互不覆蓋。
     [Fact]
     public async Task CrossTenant_ConfigIsIsolated_SameKeyDoesNotOverwrite()
@@ -191,10 +202,13 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
 
     // NotBlank 對「空字串」與「只有空白」同屬一個等價類(比照 SecurityTests 的
     // InternalTokenResolver_EmptyOrWhitespace_Throws 慣例,兩個變體一起釘)。
+    // JSON 顯式 null 走的是 NotBlankAttribute 另一條分支(`value is null` 早於 IsNullOrWhiteSpace),
+    // 對外結果必須完全相同 — 同一個 400 + 同一句 fieldErrors.value。
     [Theory]
     [InlineData("")]
     [InlineData("   ")]
-    public async Task Put_Admin_BlankValue_Returns400(string value)
+    [InlineData(null)]
+    public async Task Put_Admin_BlankValue_Returns400(string? value)
     {
         var client = Admin("blank-tenant");
 

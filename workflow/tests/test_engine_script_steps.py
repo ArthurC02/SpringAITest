@@ -11,8 +11,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.engine import compiler, node_registry
-from app.engine.node_shell import CONFIG_SEED_KEYS, RUNTIME_AUTHORITY_KEYS
-from app.engine.script_runner import ScriptTraceEntry
+from app.engine.node_shell import (
+    CONFIG_SEED_KEYS,
+    IDENTITY_KEYS,
+    RUNTIME_AUTHORITY_KEYS,
+)
+from app.engine.script_runner import MAX_WRITE_BYTES, ScriptTraceEntry
 from app.engine.skill import Skill
 from app.nodes.kbquery.adapters import StaticGlossary
 
@@ -155,6 +159,29 @@ def test_script_oversized_state_write_is_rejected():
     assert "next_ran" not in result
 
 
+# json.dumps('x' * n) 的位元組數是 n + 2（前後兩個引號）——上限量的是序列化後的大小。
+_JSON_QUOTES = 2
+
+
+@pytest.mark.parametrize(
+    ("total_bytes", "kept", "status"),
+    [
+        (MAX_WRITE_BYTES, True, "ok"),
+        (MAX_WRITE_BYTES + 1, False, "error"),
+    ],
+)
+def test_script_state_write_size_boundary(total_bytes, kept, status):
+    """【AT3-13 的邊界】上限剛好卡在 256KB：等於上限放行，多 1 位元組即出局。
+
+    300KB 那個測試只證明「夠大會被擋」，上限訂在 200KB 或 290KB 也照樣過關；
+    這裡直接吃生產常數 MAX_WRITE_BYTES 的 on-point / off-point。
+    """
+    result = _run([{"script": f"state['big'] = 'x' * {total_bytes - _JSON_QUOTES}"}])
+
+    assert _script_entry(result).status == status
+    assert ("big" in result) == kept
+
+
 # ---------------------------------------------------------------------------
 # AT3-14 sha256 入 audit trail，原始碼全文不落 trace
 # ---------------------------------------------------------------------------
@@ -225,6 +252,32 @@ def test_script_cannot_forge_tenant_id():
 
     assert result["tenant_id"] == "t-test"
     assert result["ran"] is True
+
+
+# 每個身分鍵的（伺服器依 RequestContext 注入的真值, script 想竄改的值）。
+IDENTITY_VALUES: dict[str, tuple] = {
+    "tenant_id": ("t-test", "other-tenant"),
+    "user_id": ("u-authentic", "u-forged"),
+    "role": ("USER", "ADMIN"),
+}
+
+
+@pytest.mark.parametrize("key", sorted(IDENTITY_KEYS))
+def test_script_cannot_forge_identity_keys(key):
+    """身分鍵三個都要擋：換租戶、冒用他人、自我提權（role=ADMIN）是同一類逃逸。
+
+    直接吃生產常數：日後新增身分鍵會自動被涵蓋（缺對照值即在第一行 assert 出局）。
+    """
+    assert set(IDENTITY_VALUES) == set(IDENTITY_KEYS)
+    authentic, forged = IDENTITY_VALUES[key]
+
+    result = _run(
+        [{"script": f"state[{key!r}] = {forged!r}\nstate['ran'] = True"}],
+        {key: authentic},
+    )
+
+    assert result["ran"] is True  # script 有跑（不是整段被拒）
+    assert result[key] == authentic
 
 
 def test_script_cannot_replace_runtime_authority_seen_by_downstream_node():

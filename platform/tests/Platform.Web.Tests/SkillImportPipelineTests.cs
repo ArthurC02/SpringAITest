@@ -118,6 +118,90 @@ public sealed class SkillImportPipelineTests : IClassFixture<SkillImportPipeline
         Assert.DoesNotContain("ignored", forwarded);
     }
 
+    // 派生路由的缺檔格(與 Import_NoFilePart_… 配對,補齊「路由 × 有無 package 檔位」的另一格):
+    // /api/skills/import 走的是另一個 overload(SkillService.ImportAsync(byte[], …)),同樣不得自己回 400,
+    // 而是把「空 bytes + package.zip」轉送到 additive 路由,再原樣帶回 backend 的判定。
+    [Fact]
+    public async Task ImportDerived_NoFilePart_ForwardsEmptyPackageAndDefaultFileName()
+    {
+        _factory.Backend.Reset(HttpStatusCode.BadRequest,
+            """{"timestamp":"2026-07-25T00:00:00Z","status":400,"message":"缺少 package 檔案","fieldErrors":{}}""");
+        using var noFile = new MultipartFormDataContent();
+        noFile.Add(new StringContent("ignored"), "note");
+
+        var response = await _factory.AdminClient().PostAsync("/api/skills/import", noFile);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("缺少 package 檔案", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+
+        Assert.Equal("/api/skills/import", _factory.Backend.Path);
+        var forwarded = Encoding.UTF8.GetString(_factory.Backend.Body!);
+        Assert.Contains("name=package", forwarded);
+        Assert.Contains("package.zip", forwarded);
+        Assert.DoesNotContain("ignored", forwarded);
+    }
+
+    // PackageFileName 三元式的另一臂:package 檔位「有送、但 filename 空白」。
+    // 與缺檔那格不同 —— 這條會真的讀取位元組(ReadPackageAsync 走 CopyToAsync),只有檔名 fallback 成 package.zip。
+    // 用 "abc.zip" 之類的正常檔名測不到這格,缺檔那格也測不到(它送的是空 bytes)。
+    [Fact]
+    public async Task Import_BlankFileNameOnPresentPackage_ForwardsRealBytesWithDefaultFileName()
+    {
+        _factory.Backend.Reset(HttpStatusCode.OK,
+            """{"name":"sales-helper","description":"匯入的代理技能","required_role":"USER","enabled":true,"current_revision":1,"kind":"agentic"}""");
+
+        // MultipartFormDataContent.Add(content, name, fileName) 拒收空白 fileName,所以手工掛 Content-Disposition。
+        using var blankName = new MultipartFormDataContent();
+        var file = new ByteArrayContent(UploadedBytes);
+        file.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        file.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data")
+        {
+            Name = "package",
+            FileName = " ",
+        };
+        blankName.Add(file);
+
+        var response = await _factory.AdminClient().PostAsync(
+            "/api/skills/sales-helper/import", blankName);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("/api/skills/sales-helper/import", _factory.Backend.Path);
+
+        // 位元組照送(不是缺檔那格的空 bytes),檔名 fallback 成字面值 package.zip。
+        Assert.True(IndexOf(_factory.Backend.Body!, UploadedBytes) >= 0,
+            "filename 空白只影響檔名 fallback,上傳的 package 位元組仍必須逐字轉送。");
+        var forwarded = Encoding.UTF8.GetString(_factory.Backend.Body!);
+        Assert.Contains("name=package", forwarded);
+        Assert.Contains("package.zip", forwarded);
+    }
+
+    // SkillService 轉送前的 16 MiB 上限,off-point(上限 + 1 個位元組)走完整管線:
+    // 對外是 400 + 完整 ApiError(不是 Web 層 17 MiB 那條的 413),訊息用 SkillService 的字面值。
+    // backend 這回合腳本化成 200 —— 若這一個位元組真的被轉送出去,對外就會變成 200 而不是 400,
+    // 所以這個斷言同時證明「擋在轉送之前」。(on-point「恰好 16 MiB 要放行」由
+    // SkillServiceTests.Import_AtSizeLimit_Forwards 釘住,17 MiB 那組邊界由 SkillApiTests 釘住。)
+    [Fact]
+    public async Task Import_OverServiceSizeLimit_Returns400_AndNeverReachesBackend()
+    {
+        _factory.Backend.Reset(HttpStatusCode.OK,
+            """{"name":"sales-helper","description":"匯入的代理技能","required_role":"USER","enabled":true,"current_revision":1,"kind":"agentic"}""");
+        using var oversized = new MultipartFormDataContent();
+        var file = new ByteArrayContent(new byte[16 * 1024 * 1024 + 1]);
+        file.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        oversized.Add(file, "package", "oversized.zip");
+
+        var response = await _factory.AdminClient().PostAsync(
+            "/api/skills/sales-helper/import", oversized);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal(400, body["status"]!.GetValue<int>());
+        Assert.Equal("Skill 服務呼叫失敗：匯入套件超過上限 16777216 bytes",
+            body["message"]!.GetValue<string>());
+        Assert.NotNull(body["timestamp"]);
+        Assert.Empty(body["fieldErrors"]!.AsObject());
+    }
+
     /// <summary>在 haystack 位元組序列中尋找 needle 的起始索引;找不到回 -1。</summary>
     private static int IndexOf(byte[] haystack, byte[] needle)
     {

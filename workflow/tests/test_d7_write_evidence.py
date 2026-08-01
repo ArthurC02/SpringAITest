@@ -17,7 +17,11 @@ from app.runtime.backend import (
 from app.runtime.checkpoints import checkpoint_config, strict_serializer
 from app.runtime.events import RuntimeEvent
 from app.runtime.manager import RuntimeManagerConflict, RuntimeRunManager
-from app.runtime.tool_boundary import ToolObservation, effective_tool_names
+from app.runtime.tool_boundary import (
+    DirectToolDenied,
+    ToolObservation,
+    effective_tool_names,
+)
 from app.runtime.write_evidence import BackendWriteEvidenceSink, WriteEvidenceError
 from app.security import RequestContext
 from app.settings import settings
@@ -368,6 +372,176 @@ async def test_terminal_run_dead_letters_the_execute_claim_without_writing(monke
     assert backend.consumed == []
     assert backend.transitions == []
     assert backend.execution_completions == [(APPROVAL_ID, "execute-claim", True)]
+
+
+@pytest.mark.asyncio
+async def test_non_terminal_run_outside_queued_dead_letters_the_execute_claim(monkeypatch):
+    """A still-running run is neither terminal nor claimable: no write, dead letter."""
+    run_snapshot = RUN_SNAPSHOT
+    backend = ApprovalBackend(run_snapshot, status="running")
+    manager, invocations = _approved_write_manager(monkeypatch, backend, run_snapshot)
+
+    with pytest.raises(RuntimeManagerConflict, match="approved write is not queued"):
+        await manager.execute_approved_write(
+            run_snapshot.run_id, APPROVAL_ID, _approval_context()
+        )
+
+    assert invocations == []
+    assert backend.consumed == []
+    assert backend.transitions == []
+    assert backend.execution_completions == [(APPROVAL_ID, "execute-claim", True)]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_visible_only_at_lease_claim_still_blocks_the_write(monkeypatch):
+    """The lease is the fresher authority: a cancel that lands after get_run wins too."""
+    run_snapshot = RUN_SNAPSHOT
+
+    class LateCancelBackend(ApprovalBackend):
+        async def claim_lease(self, run_id, ctx, expected_version):
+            lease = await super().claim_lease(run_id, ctx, expected_version)
+            return lease.model_copy(
+                update={"run": lease.run.model_copy(update={"cancel_requested": True})}
+            )
+
+    backend = LateCancelBackend(run_snapshot)
+    manager, invocations = _approved_write_manager(monkeypatch, backend, run_snapshot)
+
+    with pytest.raises(RuntimeManagerConflict, match="approved write was cancelled"):
+        await manager.execute_approved_write(
+            run_snapshot.run_id, APPROVAL_ID, _approval_context()
+        )
+
+    # The run record itself never asked for cancellation, so only the
+    # post-claim guard can have produced this conflict.
+    assert backend.record.cancel_requested is False
+    assert invocations == []
+    assert backend.consumed == []
+    assert backend.execution_completions == [(APPROVAL_ID, "execute-claim", True)]
+
+
+@pytest.mark.asyncio
+async def test_lease_without_a_checkpoint_ref_dead_letters_the_execute_claim(monkeypatch):
+    run_snapshot = RUN_SNAPSHOT
+
+    class NoCheckpointBackend(ApprovalBackend):
+        async def claim_lease(self, run_id, ctx, expected_version):
+            lease = await super().claim_lease(run_id, ctx, expected_version)
+            return lease.model_copy(update={"checkpoint_ref": None})
+
+    backend = NoCheckpointBackend(run_snapshot)
+    manager, invocations = _approved_write_manager(monkeypatch, backend, run_snapshot)
+
+    with pytest.raises(RuntimeManagerConflict, match="no durable checkpoint"):
+        await manager.execute_approved_write(
+            run_snapshot.run_id, APPROVAL_ID, _approval_context()
+        )
+
+    assert invocations == []
+    assert backend.consumed == []
+    assert backend.execution_completions == [(APPROVAL_ID, "execute-claim", True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pending_approval",
+    [
+        # The approved command must be a durable object, never a bare string.
+        {"command": "runtime.write_evidence", "action_fingerprint": "fingerprint-1"},
+        {
+            "command": {
+                "kind": "tool_call",
+                "name": "runtime.write_evidence",
+                "arguments": {"record_id": "refund-1", "value": "approved"},
+            },
+            "action_fingerprint": "",
+        },
+    ],
+)
+async def test_corrupt_approval_checkpoint_dead_letters_the_execute_claim(
+    monkeypatch, pending_approval
+):
+    run_snapshot = RUN_SNAPSHOT
+    backend = ApprovalBackend(run_snapshot)
+    manager, invocations = _approved_write_manager(monkeypatch, backend, run_snapshot)
+
+    async def aget_state(_config):
+        return SimpleNamespace(values={"pending_approval": pending_approval})
+
+    manager.graph = SimpleNamespace(aget_state=aget_state)
+
+    with pytest.raises(RuntimeManagerConflict, match="checkpoint is invalid"):
+        await manager.execute_approved_write(
+            run_snapshot.run_id, APPROVAL_ID, _approval_context()
+        )
+
+    assert invocations == []
+    assert backend.consumed == []
+    assert backend.execution_completions == [(APPROVAL_ID, "execute-claim", True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"kind": "final", "name": "runtime.write_evidence", "arguments": {}},
+        {"kind": "tool_call", "arguments": {"record_id": "refund-1", "value": "approved"}},
+    ],
+)
+async def test_approval_not_bound_to_a_tool_call_dead_letters_the_execute_claim(
+    monkeypatch, command
+):
+    """Only a named tool_call may consume an approval; anything else fails closed."""
+    run_snapshot = RUN_SNAPSHOT
+    backend = ApprovalBackend(run_snapshot)
+    manager, invocations = _approved_write_manager(monkeypatch, backend, run_snapshot)
+
+    async def aget_state(_config):
+        return SimpleNamespace(
+            values={
+                "pending_approval": {
+                    "command": command,
+                    "action_fingerprint": "fingerprint-1",
+                }
+            }
+        )
+
+    manager.graph = SimpleNamespace(aget_state=aget_state)
+
+    with pytest.raises(RuntimeManagerConflict, match="not bound to a tool call"):
+        await manager.execute_approved_write(
+            run_snapshot.run_id, APPROVAL_ID, _approval_context()
+        )
+
+    assert invocations == []
+    assert backend.consumed == []
+    assert backend.execution_completions == [(APPROVAL_ID, "execute-claim", True)]
+
+
+@pytest.mark.asyncio
+async def test_failed_write_tool_marks_the_effect_failed_and_fails_the_run(monkeypatch):
+    """A reserved effect that could not be performed is a durable failure, not a dead letter."""
+    run_snapshot = RUN_SNAPSHOT
+    backend = ApprovalBackend(run_snapshot, outcome="granted")
+    manager, invocations = _approved_write_manager(monkeypatch, backend, run_snapshot)
+
+    async def failing_invoke(**kwargs):
+        invocations.append(kwargs)
+        raise DirectToolDenied("tool is not an approved write capability")
+
+    monkeypatch.setattr("app.runtime.manager.invoke_approved_write_tool", failing_invoke)
+
+    result = await manager.execute_approved_write(
+        run_snapshot.run_id, APPROVAL_ID, _approval_context()
+    )
+
+    assert result.status == "failed"
+    assert len(invocations) == 1
+    assert backend.effects == [(EFFECT_ID, False)]
+    assert backend.events == []
+    assert backend.transitions[-1]["to_status"] == "failed"
+    assert backend.transitions[-1]["error_code"] == "approved_write_failed"
+    assert backend.execution_completions == [(APPROVAL_ID, "execute-claim", False)]
 
 
 @pytest.mark.asyncio

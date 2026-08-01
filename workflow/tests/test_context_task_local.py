@@ -16,6 +16,7 @@ from app.runtime.orchestrator_backend import (
     ContextRequest,
     OrchestratorBackendClient,
     OrchestratorBackendConflict,
+    OrchestratorBackendError,
     OrchestratorBackendPermanentError,
     RootCommandClaim,
     VersionedContextRequest,
@@ -103,7 +104,15 @@ async def test_a40_create_request_sends_no_trust_fields_and_accepts_backend_iden
 
 
 @pytest.mark.asyncio
-async def test_a41_etag_conflict_rereads_for_version_but_never_reposts(monkeypatch):
+@pytest.mark.parametrize(
+    "sent_revision,latest_revision",
+    [(1, 1), (1, 2), (None, None)],
+    ids=["a41_same_context_revision", "a42_concurrent_context_revision", "a41_null_refs"],
+)
+async def test_a41_etag_conflict_rereads_for_version_but_never_reposts(
+    monkeypatch, sent_revision, latest_revision
+):
+    """A-CTX-41/42: current_context_ref never turns a stale delta into a rebase."""
     backend, calls = OrchestratorBackendClient(), []
 
     async def response(method, path, ctx, **kwargs):
@@ -111,12 +120,17 @@ async def test_a41_etag_conflict_rereads_for_version_but_never_reposts(monkeypat
         if method == "POST" and len(calls) == 1:
             raise OrchestratorBackendConflict("stale")
         if method == "GET":
-            return httpx.Response(200, headers={"ETag": '"2"'}, json=_request_wire(version=2))
+            return httpx.Response(
+                200,
+                headers={"ETag": '"2"'},
+                json=_request_wire(version=2, current_revision=latest_revision),
+            )
         pytest.fail("stale delta must never be silently rebased")
 
     monkeypatch.setattr(backend, "_request", response)
     request = VersionedContextRequest(
-        value=ContextRequest.model_validate(_request_wire()), etag='"1"'
+        value=ContextRequest.model_validate(_request_wire(current_revision=sent_revision)),
+        etag='"1"',
     )
     with pytest.raises(OrchestratorBackendConflict, match="current version 2"):
         await backend.apply_context_delta(
@@ -125,6 +139,64 @@ async def test_a41_etag_conflict_rereads_for_version_but_never_reposts(monkeypat
 
     assert [item[0] for item in calls] == ["POST", "GET"]
     assert calls[0][1]["headers"] == {"If-Match": '"1"'}
+
+
+@pytest.mark.asyncio
+async def test_a41_backend_changing_immutable_identity_on_reread_is_not_a_conflict(monkeypatch):
+    backend, calls = OrchestratorBackendClient(), []
+
+    async def response(method, path, ctx, **kwargs):
+        calls.append(method)
+        if method == "POST":
+            raise OrchestratorBackendConflict("stale")
+        return httpx.Response(
+            200,
+            headers={"ETag": '"2"'},
+            json=_request_wire(version=2) | {"task_id": "task-2"},
+        )
+
+    monkeypatch.setattr(backend, "_request", response)
+    request = VersionedContextRequest(
+        value=ContextRequest.model_validate(_request_wire()), etag='"1"'
+    )
+
+    with pytest.raises(
+        OrchestratorBackendError, match="Backend changed immutable ContextRequest identity"
+    ) as raised:
+        await backend.apply_context_delta(
+            ROOT, CHILD, request, ContextDelta.model_validate(_delta_wire()), CTX
+        )
+
+    assert type(raised.value) is OrchestratorBackendError
+    assert calls == ["POST", "GET"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "root,child,etag",
+    [
+        (ROOT, CHILD, '"99"'),
+        ("11111111-1111-4111-8111-111111111111", CHILD, '"1"'),
+        (ROOT, "22222222-2222-4222-8222-222222222222", '"1"'),
+    ],
+    ids=["etag_not_its_own_version", "other_root", "other_child"],
+)
+async def test_a41_delta_rejects_a_request_that_is_not_the_supplied_childs(
+    monkeypatch, root, child, etag
+):
+    backend = OrchestratorBackendClient()
+    monkeypatch.setattr(backend, "_request", lambda *_args, **_kwargs: pytest.fail("HTTP must not run"))
+    request = VersionedContextRequest(
+        value=ContextRequest.model_validate(_request_wire()), etag=etag
+    )
+
+    with pytest.raises(
+        OrchestratorBackendPermanentError,
+        match="does not belong to the supplied immutable child",
+    ):
+        await backend.apply_context_delta(
+            root, child, request, ContextDelta.model_validate(_delta_wire()), CTX
+        )
 
 
 @pytest.mark.asyncio
@@ -147,58 +219,6 @@ async def test_a41_unchanged_version_is_permanent_governance_rejection(monkeypat
             ROOT, CHILD, request, ContextDelta.model_validate(_delta_wire()), CTX
         )
     assert calls == ["POST", "GET"]
-
-
-@pytest.mark.asyncio
-async def test_a41_nonready_concurrent_delta_with_null_refs_is_never_rebased(monkeypatch):
-    backend, calls = OrchestratorBackendClient(), []
-
-    async def response(method, path, ctx, **kwargs):
-        calls.append(method)
-        if method == "POST":
-            raise OrchestratorBackendConflict("stale If-Match")
-        return httpx.Response(
-            200,
-            headers={"ETag": '"2"'},
-            json=_request_wire(version=2, current_revision=None),
-        )
-
-    monkeypatch.setattr(backend, "_request", response)
-    request = VersionedContextRequest(
-        value=ContextRequest.model_validate(
-            _request_wire(current_revision=None)
-        ),
-        etag='"1"',
-    )
-
-    with pytest.raises(OrchestratorBackendConflict, match="current version 2"):
-        await backend.apply_context_delta(
-            ROOT, CHILD, request, ContextDelta.model_validate(_delta_wire()), CTX
-        )
-
-    assert calls == ["POST", "GET"]
-
-
-@pytest.mark.asyncio
-async def test_a42_concurrent_context_revision_is_not_silently_overwritten(monkeypatch):
-    backend = OrchestratorBackendClient()
-
-    async def response(method, path, ctx, **kwargs):
-        if method == "POST":
-            raise OrchestratorBackendConflict("stale")
-        return httpx.Response(
-            200, headers={"ETag": '"2"'},
-            json=_request_wire(version=2, current_revision=2),
-        )
-
-    monkeypatch.setattr(backend, "_request", response)
-    request = VersionedContextRequest(
-        value=ContextRequest.model_validate(_request_wire()), etag='"1"'
-    )
-    with pytest.raises(OrchestratorBackendConflict, match="current version 2"):
-        await backend.apply_context_delta(
-            ROOT, CHILD, request, ContextDelta.model_validate(_delta_wire()), CTX
-        )
 
 
 @pytest.mark.asyncio
@@ -235,6 +255,50 @@ async def test_a43_delta_cannot_choose_a_view_other_than_backend_issued_role(mon
         await backend.apply_context_delta(
             ROOT, CHILD, request, ContextDelta.model_validate(delta), CTX
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "views",
+    [
+        [],
+        [
+            {"view_type": "worker", "definition": {}},
+            {"view_type": "worker", "definition": {}},
+        ],
+    ],
+    ids=["no_view", "two_role_matching_views"],
+)
+async def test_a43_delta_must_carry_exactly_one_view(monkeypatch, views):
+    backend = OrchestratorBackendClient()
+    monkeypatch.setattr(backend, "_request", lambda *_args, **_kwargs: pytest.fail("HTTP must not run"))
+    request = VersionedContextRequest(
+        value=ContextRequest.model_validate(_request_wire()), etag='"1"'
+    )
+    delta = _delta_wire()
+    delta["views"] = views
+
+    with pytest.raises(OrchestratorBackendPermanentError, match="Backend-issued task role"):
+        await backend.apply_context_delta(
+            ROOT, CHILD, request, ContextDelta.model_validate(delta), CTX
+        )
+
+
+def test_a44_delta_measurements_enforce_their_numeric_floors():
+    base = _delta_wire()["measurements"]
+    for field, on_point, off_point in (
+        ("context_round", 1, 0),
+        ("max_context_rounds", 1, 0),
+        ("assumptions_count", 0, -1),
+    ):
+        accepted = ContextDelta.model_validate(
+            _delta_wire() | {"measurements": base | {field: on_point}}
+        )
+        assert getattr(accepted.measurements, field) == on_point
+        with pytest.raises(ValidationError):
+            ContextDelta.model_validate(
+                _delta_wire() | {"measurements": base | {field: off_point}}
+            )
 
 
 def test_a44_delta_wire_rejects_arbitrary_context_event_or_trust_fields():
@@ -281,6 +345,44 @@ async def test_a46_both_flags_are_required_before_task_local_api_is_called(monke
     monkeypatch.setattr(backend, "_request", lambda *_args, **_kwargs: pytest.fail("HTTP must not run"))
     with pytest.raises(OrchestratorBackendPermanentError, match="disabled"):
         await backend.create_context_request(ROOT, CHILD, CTX)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enrichment_enabled", [True, False])
+async def test_a46_disabled_dispatch_blocks_both_the_client_and_the_runtime(
+    monkeypatch, enrichment_enabled
+):
+    monkeypatch.setattr(settings, "multi_agent_dispatch_enabled", False)
+    monkeypatch.setattr(settings, "context_enrichment_enabled", enrichment_enabled)
+    backend = OrchestratorBackendClient()
+    monkeypatch.setattr(backend, "_request", lambda *_args, **_kwargs: pytest.fail("HTTP must not run"))
+    monkeypatch.setattr(
+        "app.runtime.orchestrator_backend.get_client",
+        lambda: pytest.fail("HTTP must not run"),
+    )
+
+    with pytest.raises(OrchestratorBackendPermanentError, match="disabled"):
+        await backend.create_context_request(ROOT, CHILD, CTX)
+    with pytest.raises(OrchestratorBackendPermanentError, match="disabled"):
+        await TaskLocalContextRuntime().execute(
+            {"operation": "create", "root_run_id": ROOT, "child_id": CHILD}, CTX
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_surfaces_a_skill_fatal_error_as_a_permanent_error(monkeypatch):
+    monkeypatch.setattr(
+        "app.runtime.orchestrator_backend.get_client",
+        lambda: pytest.fail("an invalid job must never reach the Backend"),
+    )
+
+    with pytest.raises(
+        OrchestratorBackendPermanentError,
+        match="Task-local context Skill failed: .*task-local context operation is invalid",
+    ):
+        await TaskLocalContextRuntime().execute(
+            {"operation": "delete", "root_run_id": ROOT, "child_id": CHILD}, CTX
+        )
 
 
 @pytest.mark.asyncio
@@ -389,3 +491,47 @@ async def test_trusted_node_uses_explicit_child_execution_context():
     })
 
     assert output["context_request"]["value"]["task_id"] == "task-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "job,message",
+    [
+        ("not-a-dict", "task-local context job is invalid"),
+        ({}, "task-local context job is invalid"),
+        ({"operation": "create", "root_run_id": ROOT}, "task-local context job is invalid"),
+        (
+            {"operation": "create", "root_run_id": ROOT, "child_id": CHILD, "extra": 1},
+            "task-local context job is invalid",
+        ),
+        (
+            {"operation": "delete", "root_run_id": ROOT, "child_id": CHILD},
+            "task-local context operation is invalid",
+        ),
+        (
+            {
+                "operation": "create", "root_run_id": ROOT, "child_id": CHILD,
+                "request": {}, "delta": {},
+            },
+            "task-local context operation is invalid",
+        ),
+    ],
+    ids=["not_a_dict", "empty", "missing_key", "extra_key", "unknown_operation", "operation_keyset_mismatch"],
+)
+async def test_trusted_node_rejects_a_malformed_task_context_job(job, message):
+    class Port:
+        async def create_context_request(self, *_args):
+            pytest.fail("an invalid job must never reach the Backend")
+
+        async def apply_context_delta(self, *_args):
+            pytest.fail("an invalid job must never reach the Backend")
+
+    node = node_registry.get("context_task_local_update").build(
+        type("Deps", (), {"context_task_backend": Port()})()
+    )
+
+    with pytest.raises(ValueError, match=message):
+        await node({
+            "task_context_job": job,
+            "tenant_id": "tenant", "user_id": "user", "role": "USER",
+        })

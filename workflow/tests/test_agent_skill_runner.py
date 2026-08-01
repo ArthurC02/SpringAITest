@@ -23,6 +23,7 @@ from app.nodes import agent_skill_runner
 from app.nodes.agent_skill_runner import (
     AGENT_RECURSION_LIMIT,
     MAX_TOOL_ROUNDS,
+    RESOURCE_MAX_BYTES,
     make_registry_tool,
     make_resource_tool,
     read_resource,
@@ -323,6 +324,23 @@ def test_registry_rejects_tool_outside_allowlist():
     assert RECORDER["forbidden"] == 0
 
 
+def test_unregistered_tool_in_uses_tools_is_controlled_fatal_with_audit():
+    """uses_tools 列了未註冊的 tool（validate 之外的路徑進來）→ 受控 fatal，不是 500。
+
+    runner 建 adapter 前 tool_registry.get() 取不到 spec 就 raise，例外穿出 node fn →
+    Harness 轉 fatal_error；model 從未被呼叫、稽核仍執行（與 step limit / timeout 同一條路）。
+    """
+    skill = make_agentic_skill(uses_tools=["test.unregistered"])
+    deps, model, audit = _deps_for(skill, ("final", "never reached"))
+    out = run_agentic(skill, deps, query="x")
+
+    assert "answer" not in out  # 未產出答案
+    assert "test.unregistered" in out["fatal_error"]  # 受控失敗且指名壞掉的 tool
+    assert model.counter["calls"] == 0  # tool 解析在 ReAct loop 之前就擋下
+    assert len(audit.saved) == 1
+    assert out["trace"][-1].node_name == "audit_feedback"
+
+
 # ---------------------------------------------------------------------------
 # AST-P1-005：adapter 呼叫 registry 一次、收到 server-injected 身分、不持 token
 # ---------------------------------------------------------------------------
@@ -381,6 +399,38 @@ def test_resource_tool_denies_bad_paths(bad_path):
     pkg = make_package(skill, resources={"references/a.md": b"ok"})
     with pytest.raises(ValueError):
         read_resource(pkg, bad_path)
+
+
+@pytest.mark.parametrize("blank_path", ["", "   ", "\t\n"])
+def test_resource_tool_denies_empty_or_blank_path(blank_path):
+    """空字串／純空白是與 traversal 不同的邊界：走的是「不可為空」那道 guard。"""
+    skill = make_agentic_skill(uses_tools=[])
+    pkg = make_package(skill, resources={"references/a.md": b"ok"})
+    with pytest.raises(ValueError, match="不可為空"):
+        read_resource(pkg, blank_path)
+
+
+@pytest.mark.parametrize("bad_path", [None, 123, b"references/a.md"])
+def test_resource_tool_denies_non_string_path(bad_path):
+    """白名單、預設拒絕：非字串 path（tool schema 被繞過時）同樣 raise，不是 TypeError/AttributeError。"""
+    skill = make_agentic_skill(uses_tools=[])
+    pkg = make_package(skill, resources={"references/a.md": b"ok"})
+    with pytest.raises(ValueError, match="不可為空"):
+        read_resource(pkg, bad_path)
+
+
+def test_resource_read_truncates_at_max_bytes_boundary():
+    """RESOURCE_MAX_BYTES 邊界：恰好上限全文回傳，多一個 byte 就被截到上限（不整包塞進 prompt）。"""
+    skill = make_agentic_skill(uses_tools=[])
+    pkg = make_package(
+        skill,
+        resources={
+            "references/exact.md": b"x" * RESOURCE_MAX_BYTES,
+            "references/over.md": b"y" * (RESOURCE_MAX_BYTES + 1),
+        },
+    )
+    assert read_resource(pkg, "references/exact.md") == "x" * RESOURCE_MAX_BYTES
+    assert read_resource(pkg, "references/over.md") == "y" * RESOURCE_MAX_BYTES
 
 
 def test_resource_read_never_touches_host_filesystem(tmp_path):

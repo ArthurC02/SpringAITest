@@ -2,6 +2,7 @@ import { expect, test } from 'vitest'
 import {
   createEvalRun,
   diffEvalRuns,
+  getVersionComparison,
   normalizeEvalRun,
   normalizeEvalSuiteDetail,
   normalizeMetrics,
@@ -83,6 +84,45 @@ const SNAKE_CASE_PAYLOAD = {
   },
 }
 
+// 實際 wire 形狀(混用命名):backend OperationsGovernanceController 的 metrics 匿名物件
+// 顯式寫 snake_case 外層鍵(release_gate / multi_agent / rollout_events…),而 agents /
+// skills / tools / nodes / aggregation 是直接序列化 C# record,走預設 camelCase。
+const MIXED_CASE_PAYLOAD = {
+  release_gate: { regression_passed: true, override_active: false, audit_entries: 3 },
+  multi_agent: {
+    rollout_events: 2,
+    root_runs: 5,
+    child_runs: 10,
+    child_success: 9,
+    verifier_reject: 1,
+    repair_rounds: 2,
+    write_effects: 4,
+    agents: [
+      {
+        agentId: 'agent-1', revision: 2, runs: 10, completed: 8, failed: 2,
+        averageLatencyMs: 120, reservedBudgetUnits: 50,
+        observedUsageUnits: 30, observedCostUnits: 1.5, observedLatencyMs: 110,
+      },
+    ],
+    skills: [
+      {
+        name: 'skill-1', revision: 1, runs: 4,
+        observedLatencyMs: 50, observedUsageUnits: 12, observedCostUnits: 0.5,
+        reservedBudgetUnits: 20,
+      },
+    ],
+    tools: [
+      {
+        kind: 'http', count: 6,
+        observedLatencyMs: 30, observedUsageUnits: 6, observedCostUnits: 0.2,
+        reservedBudgetUnits: 10,
+      },
+    ],
+    nodes: [{ nodeId: 'node-1', executions: 7, averageLatencyMs: 40, maxLatencyMs: 90 }],
+    aggregation: { completed: 4, partialOrFailed: 1, averageFanOut: 2, averageLatencyMs: 300 },
+  },
+}
+
 const EXPECTED = {
   releaseGate: { regressionPassed: true, overrideActive: false, auditEntries: 3 },
   rolloutEvents: 2,
@@ -126,6 +166,32 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
     expect(normalizeMetrics(SNAKE_CASE_PAYLOAD)).toEqual(EXPECTED)
   })
 
+  test('normalizes the real mixed-case wire shape (snake outer keys + camelCase record keys)', () => {
+    expect(normalizeMetrics(MIXED_CASE_PAYLOAD)).toEqual(EXPECTED)
+  })
+
+  test('defaults every scalar to 0 and every list to empty for an absent payload', () => {
+    const zeroed = {
+      releaseGate: { regressionPassed: false, overrideActive: false, auditEntries: 0 },
+      rolloutEvents: 0,
+      rootRuns: 0,
+      childRuns: 0,
+      childSuccess: 0,
+      verifierReject: 0,
+      repairRounds: 0,
+      writeEffects: 0,
+      agents: [],
+      skills: [],
+      tools: [],
+      nodes: [],
+      aggregation: { completed: 0, partialOrFailed: 0, averageFanOut: 0, averageLatencyMs: 0 },
+    }
+    expect(normalizeMetrics({})).toEqual(zeroed)
+    expect(normalizeMetrics(undefined)).toEqual(zeroed)
+    // 空集合的和是 0(確定值),與「任一分量未知 → null」是不同語意。
+    expect(sumOrUnknown([])).toBe(0)
+  })
+
   test('never substitutes a partial sum when any observed value is unknown', () => {
     const metrics = normalizeMetrics({
       multiAgent: {
@@ -164,6 +230,68 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
         eval_run_id: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
       },
     ])
+  })
+
+  test('getVersionComparison normalizes both the empty gate and a populated previous-revision delta', async () => {
+    const originalFetch = globalThis.fetch
+    const payloads: unknown[] = [
+      {
+        selected_revision: null,
+        rollout_events: 0,
+        new_roots_only: false,
+        active_runs_keep_immutable_snapshot: false,
+        revisions: [],
+        selected_vs_previous: null,
+      },
+      {
+        // 同樣的混用命名:外層鍵 snake_case,revisions/selected_vs_previous 是 C# record camelCase。
+        selected_revision: 3,
+        rollout_events: 4,
+        new_roots_only: true,
+        active_runs_keep_immutable_snapshot: true,
+        revisions: [
+          {
+            revision: 3, runs: 12, completed: 10, failed: 2,
+            averageLatencyMs: 210, reservedBudgetUnits: 80, activeRuns: 1,
+          },
+        ],
+        selected_vs_previous: {
+          fromRevision: 2, toRevision: 3, runDelta: 5, completedDelta: 4,
+          averageLatencyDeltaMs: -30, reservedBudgetDeltaUnits: 10,
+        },
+      },
+    ]
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify(payloads.shift()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+
+    try {
+      expect(await getVersionComparison()).toEqual({
+        selectedRevision: null,
+        rolloutEvents: 0,
+        newRootsOnly: false,
+        activeRunsKeepImmutableSnapshot: false,
+        revisions: [],
+        selectedVsPrevious: null,
+      })
+      expect(await getVersionComparison()).toEqual({
+        selectedRevision: 3,
+        rolloutEvents: 4,
+        newRootsOnly: true,
+        activeRunsKeepImmutableSnapshot: true,
+        revisions: [
+          {
+            revision: 3, runs: 12, completed: 10, failed: 2,
+            averageLatencyMs: 210, reservedBudgetUnits: 80, activeRuns: 1,
+          },
+        ],
+        selectedVsPrevious: {
+          fromRevision: 2, toRevision: 3, runDelta: 5, completedDelta: 4,
+          averageLatencyDeltaMs: -30, reservedBudgetDeltaUnits: 10,
+        },
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
 
@@ -297,6 +425,27 @@ test.describe('E4 eval suite/run normalizers: camel/snake dual-form parity', () 
       candidate: { kind: 'skill', ref: { name: 'kb-query' } },
       budget_ms: 5000,
     })
+  })
+
+  // 邊界:budgetMs 用 truthy 判斷,所以顯式傳 0 和完全不傳送出去的 body 一模一樣
+  // (0 被丟掉,不會送 budget_ms: 0)。這是現行行為的定性測試。
+  test('createEvalRun drops an explicit budget_ms of 0 exactly like an omitted budget', async () => {
+    const originalFetch = globalThis.fetch
+    const bodies: unknown[] = []
+    globalThis.fetch = async (_input, init) => {
+      bodies.push(init?.body ? JSON.parse(String(init.body)) : undefined)
+      return new Response(JSON.stringify(EVAL_RUN_SNAKE), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+
+    try {
+      await createEvalRun('CSR-EVAL-001', 2, { kind: 'skill', ref: { name: 'kb-query' } }, 'idem-key-3', 0)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(bodies).toEqual([
+      { suite_id: 'CSR-EVAL-001', revision: 2, candidate: { kind: 'skill', ref: { name: 'kb-query' } } },
+    ])
   })
 })
 

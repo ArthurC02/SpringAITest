@@ -64,6 +64,27 @@ public sealed class RunApprovalApiTests
         }
     }
 
+    // List 的三格(匿名/USER/ADMIN)已覆蓋,決策路由卻只被 USER 打過:approve/reject 共用同一支
+    // [Authorize],匿名必須 401(證明授權真的套用在這兩個 action 上),而 ADMIN 這一格必須照樣 202 ——
+    // D7 的決策權在 Backend,平台不得把「非 ADMIN 不能決策」偷渡成閘門。
+    [Theory]
+    [InlineData("approve", "True")]
+    [InlineData("reject", "False")]
+    public async Task Decision_RequiresAuthenticationButNotAdmin(string action, string approve)
+    {
+        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
+        var path = $"/api/runs/{RunId}/approvals/{ApprovalId}/{action}";
+
+        var anonymous = await factory.CreateClient().PostAsJsonAsync(path, new { reason = "r" });
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+
+        var admin = factory.CreateClient().WithToken(factory.IssueToken("boss", "ADMIN", "tenant-x"));
+        var response = await admin.PostAsJsonAsync(path, new { reason = "r" });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Contains($"approval:{RunId}:{ApprovalId}:{approve}:r::boss", FakeAgentRunService.Calls);
+    }
+
     [Fact]
     public async Task Decision_ForwardsOnlySignedIdentityReasonAndIdempotencyKey()
     {
@@ -81,6 +102,26 @@ public sealed class RunApprovalApiTests
         Assert.Contains($"approval:{RunId}:{ApprovalId}:True:reviewed:approval-attempt-1:approver", FakeAgentRunService.Calls);
     }
 
+    // Idempotency-Key 的邊界:「帶了 header 但值為空」與「完全沒帶 header」是兩個相鄰卻不同的等價類 ——
+    // ProxyControllerBase 用 TryGetValue,空值 header 會拿到 ""(不是 null)。平台對空值既不 400、
+    // 也不自行補一把 key,原樣往下轉發(AgentRunService 的 IsNullOrWhiteSpace 讓兩者最終殊途同歸)。
+    [Fact]
+    public async Task Decision_EmptyIdempotencyKeyHeader_IsAcceptedAndForwardsNoKey()
+    {
+        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
+        var client = factory.CreateClient().WithToken(factory.IssueToken("approver", "USER", "tenant-x"));
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/runs/{RunId}/approvals/{ApprovalId}/approve")
+        {
+            Content = JsonContent.Create(new { reason = "reviewed" }),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", string.Empty);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Contains($"approval:{RunId}:{ApprovalId}:True:reviewed::approver", FakeAgentRunService.Calls);
+    }
+
     // reject 是 approve 的鏡像路由,在 platform 之前完全沒被執行過:必須確認 /reject 對應 approve=false
     // (是它決定了 service 層不去 kick 已核准的寫入,見 AgentRunServiceTests)。
     // 同時覆蓋「未帶 Idempotency-Key」的 off-point:轉發 null 而不是憑空生一把 key。
@@ -95,6 +136,21 @@ public sealed class RunApprovalApiTests
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         Assert.Contains($"approval:{RunId}:{ApprovalId}:False:不符政策::approver", FakeAgentRunService.Calls);
+    }
+
+    // 「完全不給理由」是獨立的等價類:其餘決策測試都帶了 reason,而 ApprovalDecisionRequest? 是可為 null 的
+    // [FromBody] —— 連 body 都不帶(審批者只按核准鍵)必須是 202 並轉發 reason=null,不是 400。
+    [Fact]
+    public async Task Approve_WithoutBody_IsAccepted_AndForwardsNullReason()
+    {
+        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
+        var client = factory.CreateClient().WithToken(factory.IssueToken("approver", "USER", "tenant-x"));
+
+        var response = await client.PostAsync(
+            $"/api/runs/{RunId}/approvals/{ApprovalId}/approve", content: null);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Contains($"approval:{RunId}:{ApprovalId}:True:::approver", FakeAgentRunService.Calls);
     }
 
     // 決策權在 Backend:SoD 衝突(403)、已過期/不存在(404)、非 waiting 或 fingerprint 不符(409)

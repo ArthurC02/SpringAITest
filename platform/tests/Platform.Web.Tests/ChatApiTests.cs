@@ -160,6 +160,46 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
     }
 
+    // message 的另一個界:StringLength(4000)。上面的 NotBlank 只釘住下界,這裡補 on-point(4000 受理)
+    // 與 off-point(4001 → 400 + fieldErrors.message)——用「安全內部」的短字串測不出數字打錯。
+    [Fact]
+    public async Task Chat_MessageLengthBoundary_Accepts4000_Rejects4001()
+    {
+        var client = _factory.CreateClient();
+
+        var atLimit = await client.PostAsJsonAsync("/api/chat", new { message = new string('a', 4000) });
+        Assert.Equal(HttpStatusCode.OK, atLimit.StatusCode);
+
+        var overLimit = await client.PostAsJsonAsync("/api/chat", new { message = new string('a', 4001) });
+
+        Assert.Equal(HttpStatusCode.BadRequest, overLimit.StatusCode);
+        var body = await overLimit.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("message 長度不可超過 4000 字", body["fieldErrors"]!["message"]!.GetValue<string>());
+    }
+
+    // 兩個選填欄位共用 StringLength(128) 的同一等價類與邊界:on-point 受理、off-point 回對應的 fieldErrors key。
+    [Theory]
+    [InlineData("userId")]
+    [InlineData("conversationId")]
+    public async Task Chat_OptionalIdLengthBoundary_Accepts128_Rejects129(string field)
+    {
+        var client = _factory.CreateClient();
+
+        var atLimit = await client.PostAsJsonAsync(
+            "/api/chat",
+            new Dictionary<string, object> { ["message"] = "你好", [field] = new string('a', 128) });
+        Assert.Equal(HttpStatusCode.OK, atLimit.StatusCode);
+
+        var overLimit = await client.PostAsJsonAsync(
+            "/api/chat",
+            new Dictionary<string, object> { ["message"] = "你好", [field] = new string('a', 129) });
+
+        Assert.Equal(HttpStatusCode.BadRequest, overLimit.StatusCode);
+        var body = await overLimit.ReadJsonAsync();
+        Assert.Equal($"{field} 長度不可超過 128 字", body["fieldErrors"]![field]!.GetValue<string>());
+    }
+
     // ---- 路由目錄:帶有效 JWT 的聊天以工具目錄做路由,匿名不路由(工作流需要租戶身分) ----
     // 新流程:工具改以「路由目錄」文字經路由呼叫傳入,故斷言 LastRoutingCatalog 而非原生 tools 引數。
 
@@ -293,6 +333,23 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("1", resp.Headers.GetValues("X-Auth-Invalid").Single());
     }
 
+    // SetAuthInvalidHeaderIfNeeded 由兩個 action 各自呼叫,故三種認證狀態要在兩個端點都成對驗:
+    // 串流端點的「有效 JWT」與「完全匿名」兩格補上(header 必須不存在),與上面無效 token 那格合成決策表。
+    [Theory]
+    [InlineData(true)]   // 有效 JWT
+    [InlineData(false)]  // 真匿名(完全沒帶 Authorization)
+    public async Task Stream_WithValidTokenOrAnonymous_HasNoAuthInvalidHeader(bool withToken)
+    {
+        var client = withToken
+            ? _factory.CreateClient().WithToken(_factory.IssueToken())
+            : _factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.False(resp.Headers.Contains("X-Auth-Invalid"));
+    }
+
     // A-21(b):兩個租戶各有歷史時,租戶 A 的 JWT 只讀得到租戶 A 自己的紀錄,讀不到租戶 B 的——
     // 驗內容(id 是否出現),不是驗 nullity(見 04-acceptance-test.md §1.2 的隔離斷言原則)。
     [Fact]
@@ -361,6 +418,20 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull(body["fieldErrors"]);
     }
 
+    // MaxLogicalAttemptIdLength = 512 的 on-point:剛好 512 字元是合法值、照常放行(不是 400),
+    // 與上面 513 的 off-point 合成邊界對(只驗超界那半邊抓不到把 512 誤寫成 511 的錯)。
+    [Fact]
+    public async Task Chat_IdempotencyKeyAtMaxLength_IsAccepted()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        using var request = ChatRequest("/api/chat", ("Idempotency-Key", new string('x', 512)));
+
+        var resp = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("測試回覆", (await resp.ReadJsonAsync())["reply"]!.GetValue<string>());
+    }
+
     // 同一個壞 header 在串流端點刻意是另一個結果:ChatController 的 try/catch 已接管整個 await foreach,
     // 所以對外是 200 + event:error 終止 frame(不是 400),且一個 data: chunk 都不會送出。
     [Fact]
@@ -368,6 +439,27 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     {
         var client = _factory.CreateClient().WithToken(_factory.IssueToken());
         using var request = ChatRequest("/api/chat/stream", ("Idempotency-Key", new string('x', 513)));
+
+        var resp = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(
+            "event:error\ndata:回覆過程發生錯誤，請稍後再試\n\n",
+            await resp.Content.ReadAsStringAsync());
+    }
+
+    // 同一組壞 header 的另外兩格(重複 Idempotency-Key、格式錯誤的 X-Orchestrator-Id)在串流端點也必須
+    // 是 200 + 只有一個 event:error 終止 frame:任何「提早 return 而繞過 try/catch」的回歸會在這裡露餡。
+    [Theory]
+    [InlineData("Idempotency-Key", "one", "two")]          // 重複 header
+    [InlineData("X-Orchestrator-Id", "not-a-guid", null)]  // 格式錯誤
+    public async Task Stream_AmbiguousKeyOrMalformedOrchestratorId_EmitsErrorFrameOnly(
+        string name, string first, string? second)
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        using var request = second is null
+            ? ChatRequest("/api/chat/stream", (name, first))
+            : ChatRequest("/api/chat/stream", (name, first), (name, second));
 
         var resp = await client.SendAsync(request);
 
@@ -390,6 +482,25 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(4, body.AsObject().Count);
         Assert.Equal(400, body["status"]!.GetValue<int>());
         Assert.Equal("orchestratorId 格式錯誤", body["message"]!.GetValue<string>());
+    }
+
+    // D6 鐵律的對外那半邊:格式正確但 canary 不可用(旗標關閉/租戶不在白名單)時,明確指定的
+    // Orchestrator 必須 fail-closed —— AgentChatRuntime 拋 WorkflowNotFoundException,對外恰為 404
+    // (絕不悄悄退回 legacy 回 200)。上面那格只驗了格式錯誤的 400,兩格都要有才算把決策表收完。
+    [Fact]
+    public async Task Chat_WellFormedOrchestratorIdHeader_Returns404_WhenAgentChatUnavailable()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        using var request = ChatRequest(
+            "/api/chat", ("X-Orchestrator-Id", Guid.NewGuid().ToString("D")));
+
+        var resp = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(4, body.AsObject().Count);
+        Assert.Equal(404, body["status"]!.GetValue<int>());
+        Assert.Equal("Orchestrator is unavailable", body["message"]!.GetValue<string>());
     }
 
     // ---- D6 canary 打開時的 Web 層 happy path(先前整層空白) ----
@@ -462,6 +573,30 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         // D6 的答案也走同一套無空格 data: wire contract,且沒有 event:error。
         Assert.Equal($"data:{answer}\n\n", await resp.Content.ReadAsStringAsync());
         Assert.Single(FakeConversationStore.Saved, s => s.Response.Reply == answer);
+    }
+
+    // 其餘 Orchestrator 測試都只走 X-Orchestrator-Id header,但 body 的 orchestratorId 是另一個、
+    // 而且優先度更高的輸入面:ChatService 把它寫進 HttpContext.Items,HttpChatIdentityAccessor 先讀
+    // Items、沒有才退回 header。同時帶不同值,證明短路層收到的是 body 值、header 被忽略。
+    [Fact]
+    public async Task AgentChatEnabled_BodyOrchestratorId_TakesPrecedenceOverHeader()
+    {
+        var bodyId = Guid.NewGuid();
+        var runtime = new StubAgentChatRuntime { Reply = "指定 Orchestrator 的答案" };
+        await using var factory = new TestWebAppFactory(
+            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        var client = AgentChatClient(factory, runtime);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+        {
+            Content = JsonContent.Create(new { message = "這季毛利率多少?", orchestratorId = bodyId }),
+        };
+        request.Headers.TryAddWithoutValidation("X-Orchestrator-Id", Guid.NewGuid().ToString("D"));
+
+        var resp = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var call = Assert.Single(runtime.Calls);
+        Assert.Equal(bodyId, call.OrchestratorId);
     }
 
     // AGENT_CHAT_TENANT_ALLOWLIST 的解析是這道安全閘的輸入,先前零覆蓋:逗號分隔 + trim,

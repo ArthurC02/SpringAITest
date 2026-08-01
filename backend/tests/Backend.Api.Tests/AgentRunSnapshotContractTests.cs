@@ -134,6 +134,96 @@ public sealed class AgentRunSnapshotContractTests
             SkillHash.Sha256(Encoding.UTF8.GetBytes(built.StoredSnapshot)));
     }
 
+    /// <summary>
+    /// 上一條守 on-point(剛好 128 筆 / 4096 字 / 256 字元都必須收下);這條是另外半邊的 off-point:
+    /// 三個上限各 +1 都必須各自報錯,否則常數打錯一位數不會有任何測試變紅。
+    /// </summary>
+    [Fact]
+    public void ExecutionContract_RejectsSkillCountDescriptionAndAgentNameOverByOne()
+    {
+        var overCountSkills = Enumerable
+            .Range(0, AgentExecutionContract.MaxSkillBindings + 1)
+            .Select(index => SkillPin($"skill-{index:D3}"))
+            .ToArray();
+        Assert.Contains(
+            ValidateExecutionContractWith(overCountSkills),
+            error => error.Field == "skills"
+                     && error.Message.Contains(
+                         $"最多 {AgentExecutionContract.MaxSkillBindings} 筆"));
+
+        Assert.Contains(
+            ValidateExecutionContractWith(new[]
+            {
+                SkillPin(
+                    "skill-000",
+                    description: new string(
+                        'd', AgentExecutionContract.MaxSkillDescriptionLength + 1)),
+            }),
+            error => error.Field == "skills.description");
+
+        Assert.Contains(
+            ValidateExecutionContractWith(
+                Array.Empty<SkillSnapshotSource>(),
+                agentName: new string('n', AgentExecutionContract.MaxAgentNameLength + 1)),
+            error => error.Field == "name");
+    }
+
+    /// <summary>
+    /// 每個 skill 級守衛都是「這個 pin 能不能被 D3 runtime 載入」的唯一判斷點,而本檔其他測試
+    /// 餵進去的 skill 全部合法 —— 拿掉任何一條守衛今天都不會有測試變紅。
+    /// </summary>
+    [Fact]
+    public void ExecutionContract_RejectsEverySkillLevelViolation()
+    {
+        // 合法基準先自證,否則以下每一條都可能因為無關原因假綠。
+        Assert.Empty(ValidateExecutionContractWith(
+            new[] { SkillPin("skill-a"), SkillPin("skill-b") }));
+
+        Assert.Contains(
+            ValidateExecutionContractWith(new[] { SkillPin("skill-a"), SkillPin("skill-a") }),
+            error => error.Field == "skills" && error.Message.Contains("不可重複"));
+        Assert.Contains(
+            ValidateExecutionContractWith(new[] { SkillPin("  ") }),
+            error => error.Field == "skills.name");
+        Assert.Contains(
+            ValidateExecutionContractWith(new[]
+            {
+                SkillPin(new string('s', AgentExecutionContract.MaxSkillNameLength + 1)),
+            }),
+            error => error.Field == "skills.name");
+        Assert.Contains(
+            ValidateExecutionContractWith(new[] { SkillPin("skill-a", revision: 0) }),
+            error => error.Field == "skills"
+                     && error.Message.Contains("無法由 D3 runtime 載入"));
+        Assert.Contains(
+            ValidateExecutionContractWith(new[] { SkillPin("skill-a", kind: "agent") }),
+            error => error.Field == "skills"
+                     && error.Message.Contains("無法由 D3 runtime 載入"));
+    }
+
+    /// <summary>
+    /// Workflow pin 是快照裡唯一的圖來源;它的三個無效等價類在本檔從未出現過(其他測試一律
+    /// 帶 seeded 合法 revision + contract version)。
+    /// </summary>
+    [Fact]
+    public void ExecutionContract_RejectsInvalidWorkflowPin()
+    {
+        foreach (var invalid in new[]
+                 {
+                     WorkflowPin(revision: 0),
+                     WorkflowPin(compilerContractVersion: "   "),
+                     WorkflowPin(compilerContractVersion: new string(
+                         'v', AgentExecutionContract.MaxWorkflowContractVersionLength + 1)),
+                 })
+        {
+            Assert.Contains(
+                ValidateExecutionContractWith(
+                    Array.Empty<SkillSnapshotSource>(), workflow: invalid),
+                error => error.Field == "runtime_workflow"
+                         && error.Message.Contains("execution snapshot contract"));
+        }
+    }
+
     [Fact]
     public void OrchestratorChildSnapshot_ClampsAndHashesItsPinnedTokenCap()
     {
@@ -180,6 +270,86 @@ public sealed class AgentRunSnapshotContractTests
             .GetProperty("runtime_limits").GetProperty("token_budget").GetInt32());
         Assert.Equal(built.SnapshotHash,
             SkillHash.Sha256(Encoding.UTF8.GetBytes(built.StoredSnapshot)));
+    }
+
+    /// <summary>
+    /// execution_kind 是三選一白名單,且必須在讀 definition 之前就擋下 —— 未知角色若能寫進
+    /// 不可變快照,Workflow 端的 worker/verifier 角色強制就失去了唯一來源。
+    /// </summary>
+    [Fact]
+    public void Build_RejectsUnsupportedExecutionKind()
+    {
+        var (agent, workflow) = MinimalAgentAndWorkflow(
+            Guid.Parse("34111111-1111-4111-8111-111111111111"), "kind-guarded");
+
+        var rejected = Assert.Throws<ArgumentOutOfRangeException>(() =>
+        {
+            AgentRunSnapshotBuilder.Build(
+                Guid.Parse("34222222-2222-4222-8222-222222222222"),
+                "tenant-a", "admin-a", "ADMIN", Array.Empty<string>(),
+                agent, workflow, Array.Empty<SkillSnapshotSource>(),
+                "orchestrator-planner");
+        });
+
+        Assert.Equal("executionKind", rejected.ParamName);
+    }
+
+    /// <summary>
+    /// cap 守衛是五個條件的 OR,而上面那條 clamp 測試只走過唯一全合法的組合 —— 任一條件被刪掉
+    /// 都不會變紅。每個無效等價類都必須讓子快照建不出來:建得出來就等於子 run 逃出根預算/來源。
+    /// </summary>
+    [Fact]
+    public void Build_RejectsEveryInvalidOrchestratorTokenCapCombination()
+    {
+        var (agent, workflow) = MinimalAgentAndWorkflow(
+            Guid.Parse("35111111-1111-4111-8111-111111111111"), "cap-guarded");
+        var provenance = new OrchestratorChildSnapshotProvenance(
+            Guid.Parse("35333333-3333-4333-8333-333333333333"), "bounded-task", 1);
+
+        using var accepted = JsonDocument.Parse(
+            Snapshot("orchestrator-worker", 10_000, provenance));
+        Assert.Equal(
+            10_000,
+            accepted.RootElement.GetProperty("orchestrator_token_cap").GetInt32());
+
+        Assert.Equal("orchestratorTokenCap", Rejected("direct-worker", 10_000, provenance));
+        Assert.Equal("orchestratorTokenCap", Rejected("orchestrator-worker", 0, provenance));
+        Assert.Equal(
+            "orchestratorTokenCap",
+            Rejected(
+                "orchestrator-worker",
+                AgentExecutionContract.MaxOrchestratorTokenCap + 1,
+                provenance));
+        Assert.Equal("orchestratorTokenCap", Rejected("orchestrator-worker", 10_000, null));
+        Assert.Equal(
+            "orchestratorTokenCap",
+            Rejected(
+                "orchestrator-worker", 10_000, provenance with { RootRunId = Guid.Empty }));
+        Assert.Equal(
+            "orchestratorTokenCap",
+            Rejected("orchestrator-worker", 10_000, provenance with { TaskId = "  " }));
+        Assert.Equal(
+            "orchestratorTokenCap",
+            Rejected("orchestrator-worker", 10_000, provenance with { Attempt = 0 }));
+
+        string Snapshot(
+            string executionKind,
+            int tokenCap,
+            OrchestratorChildSnapshotProvenance? childProvenance)
+            => AgentRunSnapshotBuilder.Build(
+                Guid.Parse("35222222-2222-4222-8222-222222222222"),
+                "tenant-a", "admin-a", "ADMIN", Array.Empty<string>(),
+                agent, workflow, Array.Empty<SkillSnapshotSource>(),
+                executionKind, tokenCap, childProvenance).StoredSnapshot;
+
+        string Rejected(
+            string executionKind,
+            int tokenCap,
+            OrchestratorChildSnapshotProvenance? childProvenance)
+            => Assert.Throws<ArgumentOutOfRangeException>(() =>
+            {
+                Snapshot(executionKind, tokenCap, childProvenance);
+            }).ParamName!;
     }
 
     /// <summary>
@@ -230,6 +400,99 @@ public sealed class AgentRunSnapshotContractTests
         Assert.False(snapshot.RootElement.TryGetProperty("prompt_manifest", out _));
     }
 
+    /// <summary>
+    /// 三個 execution_kind 裡只有 orchestrator-verifier 從未進過 Build;而 cap 夾預算和 P1 manifest pin
+    /// 都改寫同一塊 agentNode/runtime_limits,兩者同時出現時必須互不吃掉對方。cap 取 on-point 上限,
+    /// 且高於 Agent 自身預算 —— 夾出來的必須是伺服器預設值,不是 cap。
+    /// </summary>
+    [Fact]
+    public void VerifierChildSnapshot_CarriesTokenCapAndPromptManifestPinTogether()
+    {
+        var pinnedSha256 = new string('9', 64);
+        var (agent, workflow) = MinimalAgentAndWorkflow(
+            Guid.Parse("54111111-1111-4111-8111-111111111111"),
+            "pinned-verifier",
+            promptManifestRevision: 7,
+            promptManifestSha256: pinnedSha256);
+
+        var built = AgentRunSnapshotBuilder.Build(
+            Guid.Parse("54222222-2222-4222-8222-222222222222"),
+            "tenant-a", "admin-a", "ADMIN", Array.Empty<string>(),
+            agent, workflow, Array.Empty<SkillSnapshotSource>(),
+            "orchestrator-verifier", AgentExecutionContract.MaxOrchestratorTokenCap,
+            new OrchestratorChildSnapshotProvenance(
+                Guid.Parse("55333333-3333-4333-8333-333333333333"), "verify-task", 1));
+
+        using var snapshot = JsonDocument.Parse(built.StoredSnapshot);
+        Assert.Equal(
+            "orchestrator-verifier",
+            snapshot.RootElement.GetProperty("execution_kind").GetString());
+        Assert.Equal(
+            AgentExecutionContract.MaxOrchestratorTokenCap,
+            snapshot.RootElement.GetProperty("orchestrator_token_cap").GetInt32());
+        Assert.Equal(1, snapshot.RootElement.GetProperty("orchestrator_attempt").GetInt32());
+        var agentNode = snapshot.RootElement.GetProperty("agent");
+        Assert.Equal(
+            AgentExecutionContract.DefaultTokenBudget,
+            agentNode.GetProperty("runtime_limits").GetProperty("token_budget").GetInt32());
+        var pin = agentNode.GetProperty("prompt_manifest");
+        Assert.Equal(7, pin.GetProperty("revision").GetInt32());
+        Assert.Equal(pinnedSha256, pin.GetProperty("sha256").GetString());
+        Assert.Equal(
+            built.SnapshotHash,
+            SkillHash.Sha256(Encoding.UTF8.GetBytes(built.StoredSnapshot)));
+    }
+
+    private static SkillSnapshotSource SkillPin(
+        string name,
+        int revision = 1,
+        string kind = "flow",
+        string description = "bounded description")
+    {
+        var immutableDefinition =
+            $"name: {name}\ndescription: bounded description\nflow: []\n";
+        return new SkillSnapshotSource(
+            Guid.NewGuid(),
+            name,
+            description,
+            revision,
+            kind,
+            immutableDefinition,
+            SkillHash.Sha256(immutableDefinition),
+            null);
+    }
+
+    private static WorkflowSnapshotSource WorkflowPin(
+        int revision = AgentDefaults.RuntimeWorkflowRevision,
+        string compilerContractVersion = "1")
+    {
+        var definition = AgentRunSnapshotBuilder.CanonicalizeJson(
+            AgentDefaults.RuntimeWorkflowDefinition);
+        return new WorkflowSnapshotSource(
+            Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+            revision,
+            1,
+            definition,
+            SkillHash.Sha256(definition),
+            compilerContractVersion);
+    }
+
+    private static IReadOnlyList<AgentValidationError> ValidateExecutionContractWith(
+        IReadOnlyList<SkillSnapshotSource> skills,
+        string agentName = "bounded-agent",
+        WorkflowSnapshotSource? workflow = null)
+    {
+        var (agent, seededWorkflow) = MinimalAgentAndWorkflow(
+            Guid.Parse("41111111-1111-4111-8111-111111111111"), agentName);
+        return AgentRunSnapshotBuilder.ValidateExecutionContract(
+            agent,
+            workflow ?? seededWorkflow,
+            skills,
+            "tenant-a",
+            "admin-a",
+            "ADMIN");
+    }
+
     private static (PublishedAgentSnapshotSource Agent, WorkflowSnapshotSource Workflow) MinimalAgentAndWorkflow(
         Guid agentId,
         string name,
@@ -249,16 +512,7 @@ public sealed class AgentRunSnapshotContractTests
             Array.Empty<AgentRevisionSkillInfo>(),
             promptManifestRevision,
             promptManifestSha256);
-        var workflowDefinition = AgentRunSnapshotBuilder.CanonicalizeJson(
-            AgentDefaults.RuntimeWorkflowDefinition);
-        var workflow = new WorkflowSnapshotSource(
-            Guid.Parse(AgentDefaults.RuntimeWorkflowId),
-            AgentDefaults.RuntimeWorkflowRevision,
-            1,
-            workflowDefinition,
-            SkillHash.Sha256(workflowDefinition),
-            "1");
-        return (agent, workflow);
+        return (agent, WorkflowPin());
     }
 
     [Fact]
@@ -361,6 +615,36 @@ public sealed class AgentRunSnapshotContractTests
 
         static string Rejected(byte[]? bytes, string sha)
             => Assert.Throws<InvalidOperationException>(() => Read(bytes, sha)).Message;
+    }
+
+    /// <summary>
+    /// 上一條的 badShape 樣本一次缺 10 個 key,而 `HasDefinitionShape` 是 && 串接 —— 只證明得到
+    /// 第一個短路點。十一個必要 key 必須逐一拿掉都拒收,和 snapshot 側的六個 key 同一寫法。
+    /// </summary>
+    [Fact]
+    public void AuthoritativeDefinition_FailsClosedOnEachMissingRequiredKey()
+    {
+        var valid = DefinitionWithPadding(
+            string.Empty, Array.Empty<AgentRevisionSkillInfo>());
+
+        foreach (var required in new[]
+                 {
+                     "system_prompt", "execution_roles", "capabilities", "output_contract",
+                     "audience", "allowed_tools", "skill_bindings", "knowledge_sources",
+                     "business_rules", "runtime_limits", "runtime_workflow",
+                 })
+        {
+            var stripped = JsonNode.Parse(valid)!.AsObject();
+            Assert.True(stripped.Remove(required));
+            var bytes = Encoding.UTF8.GetBytes(
+                AgentCanonicalizer.CanonicalizeDefinition(stripped.ToJsonString()));
+            Assert.Contains(
+                "invalid root schema",
+                Assert.Throws<InvalidOperationException>(
+                        () => AgentCanonicalizer.ReadAuthoritativeDefinition(
+                            bytes, SkillHash.Sha256(bytes), "Agent draft"))
+                    .Message);
+        }
     }
 
     /// <summary>

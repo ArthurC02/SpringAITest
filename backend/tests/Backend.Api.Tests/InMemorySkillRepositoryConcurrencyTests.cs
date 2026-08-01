@@ -101,6 +101,76 @@ public sealed class InMemorySkillRepositoryConcurrencyTests
         Assert.Equal(winner.Definition, (await repo.GetAsync(tenant, name, default))!.Definition);
     }
 
+    // DeleteAsync 的另半邊:同一列的併發軟刪必須恰好一個成功(其餘回 false → controller 404)。
+    // read-check-write 少了 lock 或 enabled 檢查,16 個呼叫會全部回 true,DELETE 的冪等語義就沒了。
+    [Fact]
+    public async Task ConcurrentDelete_SameSkill_ExactlyOneWins()
+    {
+        var repo = new InMemorySkillRepository();
+        const string tenant = "atomic-tenant";
+        const string name = "atomic-delete";
+        await repo.CreateAsync(
+            tenant, Value(name, "name: atomic-delete\nversion: 1\n"), "seed", default);
+
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tasks = Enumerable.Range(0, 16).Select(_ => Task.Run(async () =>
+        {
+            await start.Task;
+            return await repo.DeleteAsync(tenant, name, default);
+        })).ToArray();
+
+        start.SetResult();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.Single(results, deleted => deleted);
+
+        // 軟刪後不可見,但稽核鏈不動:revision 停在 1 且仍查得到。
+        Assert.Null(await repo.GetAsync(tenant, name, default));
+        var revision = Assert.Single(await repo.ListRevisionsAsync(tenant, name, default));
+        Assert.Equal(1, revision.Revision);
+    }
+
+    [Fact]
+    public async Task CompatibilityDelete_GetThenImportBeforeWrite_IsStoppedByFlowFence()
+    {
+        var repo = new InMemorySkillRepository();
+        const string tenant = "atomic-tenant";
+        const string name = "compat-delete-race";
+        await repo.CreateAsync(tenant, Value(name, "name: flow-v1"), "seed", default);
+
+        var readObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var importFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var compatibilityDelete = Task.Run(async () =>
+        {
+            var before = await repo.GetAsync(tenant, name, default);
+            Assert.Equal("flow", before!.Kind);
+            readObserved.SetResult();
+            await importFinished.Task;
+            return await repo.DeleteAsync(tenant, name, "flow", default);
+        });
+        var import = Task.Run(async () =>
+        {
+            await readObserved.Task;
+            var package = Encoding.UTF8.GetBytes("agent-delete-race-package");
+            var result = await repo.ImportAsync(
+                tenant, Value(name, "kind: agentic", "agentic"), package,
+                SkillHash.Sha256(package), "agent-writer", default);
+            importFinished.SetResult();
+            return result;
+        });
+
+        Assert.False(await compatibilityDelete);
+        Assert.Equal(2, (await import)!.CurrentRevision);
+
+        // flow-scoped 軟刪不得停用已被轉成 Agent Skill 的列,而且軟刪本來就不寫稽核鏈。
+        var current = await repo.GetAsync(tenant, name, default);
+        Assert.Equal("agentic", current!.Kind);
+        Assert.Equal("kind: agentic", current.Definition);
+        Assert.Equal(2, current.CurrentRevision);
+        var revisions = await repo.ListRevisionsAsync(tenant, name, default);
+        Assert.Equal(new[] { 2, 1 }, revisions.Select(r => r.Revision));
+    }
+
     [Fact]
     public async Task ExpectedKindUpdate_RacingAgenticImport_CannotOverwriteConvertedRow()
     {

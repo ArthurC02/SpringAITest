@@ -4,6 +4,8 @@
 正解 32.8%)。切開後 LLM 只抽數字、script 做確定性算術。本檔驗:
 - 單元:instruction→system(含固定抽取指令)、input_keys→user 依序 k: repr、抽出的
   欄位都是 float、LLM 回 None 時大聲 raise(不吐 silent 錯數字)。
+- 邊界:input_keys 空時的回落三階(normalized_query → query → 空字串)、fields 空
+  (參數預設值)時抽出空 dict。
 - 註冊:GET /nodes 含 nl_extract@1.0。
 - 整合:retrieve→nl_extract→script 編譯 + 執行,給 5200/6905 → business_result 含 "32.8%"。
 - 決策表收尾:最終 revenue_qa YAML 過 /skills/validate(valid=True),印證 script 過白名單。
@@ -85,6 +87,34 @@ def test_nl_extract_empty_input_keys_fallback_to_query():
     node = make_nl_extract_node(llm, fields=["a"])  # input_keys 預設空
     asyncio.run(node({"normalized_query": "NQ", "query": "Q"}))
     assert llm.calls[0]["user"] == "NQ"  # normalized_query 優先
+
+
+def test_nl_extract_fallback_ladder_drops_to_query_then_empty_string():
+    """input_keys 空時的回落三階,上面那顆只驗了第一階(normalized_query)。"""
+    llm = RecordingExtractLLM(values={"a": 1})
+    node = make_nl_extract_node(llm, fields=["a"])  # input_keys 預設空
+
+    # 第二階:沒有 normalized_query → 退到 query
+    asyncio.run(node({"query": "Q"}))
+    assert llm.calls[0]["user"] == "Q"
+
+    # 第三階:兩鍵皆無 → 空字串(照樣呼叫 LLM,不 raise)
+    out = asyncio.run(node({}))
+    assert llm.calls[1]["user"] == ""
+    assert out["extracted"] == {"a": 1.0}
+
+
+def test_nl_extract_zero_fields_extracts_empty_dict():
+    """fields 邊界下界 0(也是預設值):動態模型無欄位 → extracted 為空 dict。"""
+    llm = RecordingExtractLLM(values={})
+    node = make_nl_extract_node(llm, fields=())
+
+    out = asyncio.run(node({"query": "q"}))
+
+    assert out == {"extracted": {}}
+    # 沒有欄位就不附「需要抽取的欄位」那行,固定抽取指令仍在
+    assert "需要抽取的欄位" not in llm.calls[0]["system"]
+    assert "只輸出這些欄位的純數值" in llm.calls[0]["system"]
 
 
 # ---------------------------------------------------------------------------

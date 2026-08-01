@@ -42,6 +42,17 @@ public sealed class HttpChatIdentityAccessorTests
         Assert.Throws<WorkflowBadInputException>(() => _ = accessor.LogicalAttemptId);
     }
 
+    // 完全沒帶 header 的預設情況(Count == 0):必須回 null 而不是丟例外 —— 一般聊天請求都走這條,
+    // 若它退化成「無效輸入」等於每一輪都 400。
+    [Fact]
+    public void LogicalAttemptId_HeaderAbsent_IsNull()
+    {
+        var context = new DefaultHttpContext();
+        var accessor = new HttpChatIdentityAccessor(new HttpContextAccessor { HttpContext = context });
+
+        Assert.Null(accessor.LogicalAttemptId);
+    }
+
     [Fact]
     public void LogicalAttemptId_RejectsAmbiguousOrOversizedInboundHeaders()
     {
@@ -109,6 +120,19 @@ public sealed class HttpChatIdentityAccessorTests
     {
         var context = new DefaultHttpContext();
         context.Request.Headers["X-Orchestrator-Id"] = HeaderSelection.ToString("D");
+        var accessor = Accessor(context);
+        accessor.SetRequestedOrchestratorId(BodySelection);
+
+        Assert.Equal(BodySelection, accessor.RequestedOrchestratorId);
+    }
+
+    // body 有值時 header 根本不會被解析:即使 header 是壞掉的字串也不得丟例外(Items 命中就短路返回)。
+    // 沒有這一案,把短路搬到解析之後的改動會靜默通過。
+    [Fact]
+    public void RequestedOrchestratorId_BodyValueWins_WithoutParsingMalformedHeader()
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Headers["X-Orchestrator-Id"] = "not-a-guid";
         var accessor = Accessor(context);
         accessor.SetRequestedOrchestratorId(BodySelection);
 

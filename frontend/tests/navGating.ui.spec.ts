@@ -123,12 +123,15 @@ const scenarios: Scenario[] = [
     forbidden: ['/api/admin/operations'],
   },
   {
-    name: 'Operations additionally requires workflow.manage',
+    // Operations is gated on `agentWriteToolsEnabled && canManageWorkflow` with no role check,
+    // so the capability alone opens it — the USER counterpart of the scenario above.
+    name: 'workflow.manage opens Operations for a plain USER too',
+    role: 'USER',
     capabilities: ['workflow.manage'],
     features: { agentWriteToolsEnabled: true },
-    expected: [...ADMIN_BASE, APPROVALS, OPERATIONS],
+    expected: [...USER_BASE, APPROVALS, OPERATIONS],
     control: 'nav-operations',
-    forbidden: [],
+    forbidden: ['/api/admin/workflows', '/api/admin/orchestrators'],
   },
   {
     name: 'the disabled Agent Builder flag hides the workspace from an ADMIN',
@@ -217,8 +220,17 @@ const orchestratorWire = {
   definition: { workflow: { id: 'w1', revision: 1 } },
 }
 
-for (const multiAgentDispatchEnabled of [true, false]) {
-  test(`D5 test-run console follows multiAgentDispatchEnabled=${multiAgentDispatchEnabled}`, async ({ page }) => {
+// The console is `multiAgentDispatchEnabled && item.enabled`, so each factor gets its own
+// false case: a soft-disabled Orchestrator stays console-free even on a D5 deployment.
+const d5Cases = [
+  { multiAgentDispatchEnabled: true, enabled: true, consoles: 1 },
+  { multiAgentDispatchEnabled: false, enabled: true, consoles: 0 },
+  { multiAgentDispatchEnabled: true, enabled: false, consoles: 0 },
+]
+
+for (const { multiAgentDispatchEnabled, enabled, consoles } of d5Cases) {
+  test(`D5 test-run console follows multiAgentDispatchEnabled=${multiAgentDispatchEnabled} enabled=${enabled}`, async ({ page }) => {
+    const wire = { ...orchestratorWire, enabled }
     let runApiRequested = false
     await page.route('**/api/**', async (route) => {
       const path = new URL(route.request().url()).pathname
@@ -232,8 +244,8 @@ for (const multiAgentDispatchEnabled of [true, false]) {
       if (path === '/api/features') {
         return json(route, { workflowDesignerEnabled: true, multiAgentDispatchEnabled })
       }
-      if (path === '/api/admin/orchestrators') return json(route, [orchestratorWire])
-      if (path === '/api/admin/orchestrators/o1') return json(route, orchestratorWire)
+      if (path === '/api/admin/orchestrators') return json(route, [wire])
+      if (path === '/api/admin/orchestrators/o1') return json(route, wire)
       if (path.includes('/runs')) {
         runApiRequested = true
         return json(route, {}, 404)
@@ -253,7 +265,7 @@ for (const multiAgentDispatchEnabled of [true, false]) {
     await expect(page.getByRole('heading', { name: 'Root', level: 2 })).toBeVisible()
     await expect(page.getByRole('button', { name: '驗證' })).toBeVisible()
 
-    await expect(page.locator('.agent-test-console')).toHaveCount(multiAgentDispatchEnabled ? 1 : 0)
+    await expect(page.locator('.agent-test-console')).toHaveCount(consoles)
     expect(runApiRequested).toBe(false)
   })
 }

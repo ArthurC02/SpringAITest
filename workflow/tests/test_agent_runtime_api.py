@@ -142,8 +142,19 @@ def test_runtime_api_error_mapping(
         (auth_headers(user_id=None), 400, "missing_context"),
         (auth_headers(role=None), 400, "missing_context"),
         (auth_headers(tenant_id="   "), 400, "missing_context"),
+        (auth_headers(user_id="   "), 400, "missing_context"),
+        (auth_headers(role="   "), 400, "missing_context"),
     ],
-    ids=["no-token", "wrong-token", "no-tenant", "no-user", "no-role", "blank-tenant"],
+    ids=[
+        "no-token",
+        "wrong-token",
+        "no-tenant",
+        "no-user",
+        "no-role",
+        "blank-tenant",
+        "blank-user",
+        "blank-role",
+    ],
 )
 def test_runtime_api_rejects_incomplete_identity(
     monkeypatch: pytest.MonkeyPatch, runtime_manager, headers: dict, status: int, code: str
@@ -210,3 +221,49 @@ def test_approved_write_endpoint_follows_the_write_flag(
     else:
         assert response.status_code == 404
         assert calls == []
+
+
+def test_approved_write_flag_off_returns_404_before_auth(
+    monkeypatch: pytest.MonkeyPatch, runtime_manager
+) -> None:
+    """寫入旗標的 404 必須排在身分檢查之前:連 internal token 都沒有時也只能看到
+    404,不能先驗身分而漏出 401 —— 否則「能力看起來像沒安裝過」就破功了。"""
+    monkeypatch.setattr(settings, "agent_test_run_enabled", True)
+    monkeypatch.setattr(settings, "agent_write_tools_enabled", False)
+
+    response = TestClient(app).post(
+        f"/agent-runs/{RUN_ID}/approvals/3f8b2f5e-6c42-4abc-8def-0123456789ab/execute",
+        headers=auth_headers(token=None),
+        json={},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Not Found"
+    assert runtime_manager.calls == []
+
+
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ({"command_id": ""}, 422),
+        ({}, 422),
+        ({"command_id": "c"}, 202),
+        ({"command_id": "c" * 128}, 202),
+        ({"command_id": "c" * 129}, 422),
+    ],
+    ids=["empty", "missing", "min-length", "max-length", "over-max-length"],
+)
+def test_start_enforces_command_id_length_bounds(
+    monkeypatch: pytest.MonkeyPatch, runtime_manager, body: dict, status: int
+) -> None:
+    """command_id 的 min_length=1／max_length=128 兩端各測 on-point 與 off-point;
+    被 pydantic 擋下時 body 驗證發生在 handler 之前,manager 一次都不該被叫到。"""
+    monkeypatch.setattr(settings, "agent_test_run_enabled", True)
+
+    response = TestClient(app).post(
+        f"/agent-runs/{RUN_ID}/start", headers=auth_headers(), json=body
+    )
+
+    assert response.status_code == status
+    expected = [body["command_id"]] if status == 202 else []
+    assert [item[0] for item in runtime_manager.calls] == expected

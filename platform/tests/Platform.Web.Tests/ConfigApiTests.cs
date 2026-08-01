@@ -43,6 +43,17 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull(body["fieldErrors"]);
     }
 
+    // 認證狀態 × 端點的另一格:類別層級單一 [Authorize] 也要罩到 PUT ——
+    // 帶合法 body 但無 token 仍須在進入 action 前被 401 擋下(不會走到 FakeConfigService)。
+    [Fact]
+    public async Task Update_Returns401_WithoutToken()
+    {
+        var resp = await _factory.CreateClient().PutAsJsonAsync("/api/config/chat_model", new { value = "gpt-4o" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        Assert.Equal("未認證或憑證無效", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task Update_Returns200_AsAdmin()
     {
@@ -79,6 +90,20 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
+        Assert.Equal("value 不可為空", body["fieldErrors"]!["value"]!.GetValue<string>());
+    }
+
+    // 角色 × body 合法性的第四格(非 ADMIN + 空白 value):釘住優先序 ——
+    // [ApiController] 的自動模型驗證是 action filter,早於 action 內才呼叫的 service 授權檢查,
+    // 所以驗證先贏:回 400「輸入驗證失敗」,而不是 403(下游 FakeConfigService 根本沒被呼叫)。
+    [Fact]
+    public async Task Update_Returns400_NotForbidden_WhenNonAdminSendsBlankValue()
+    {
+        var resp = await _factory.UserClient().PutAsJsonAsync("/api/config/chat_model", new { value = "   " });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
         Assert.Equal("value 不可為空", body["fieldErrors"]!["value"]!.GetValue<string>());
     }
 }

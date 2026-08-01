@@ -44,6 +44,14 @@ def _guid_snapshot() -> RootExecutionSnapshot:
     return RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw)
 
 
+def _snapshot_without_input() -> RootExecutionSnapshot:
+    """Backend 允許 root_input 不存在（純程式觸發的 Root）；雜湊要跟著重算。"""
+    raw = _snapshot_with_input().model_dump(mode="python")
+    raw.pop("root_input")
+    raw.pop("snapshot_hash")
+    return RootExecutionSnapshot(snapshot_hash=canonical_json_sha256(raw), **raw)
+
+
 class _Policy:
     async def get_active(self, **_kwargs):
         return {
@@ -151,6 +159,28 @@ def test_context_graph_never_recomputes_backend_readiness():
     assert output["context_status"] == "NEED_MORE_CONTEXT"
     assert "context_ref" not in output
     assert output["unmet_requirements"] == ["document"]
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        {"status": None, "unmet_requirements": []},
+        {"status": "READY", "unmet_requirements": "document"},
+    ],
+)
+def test_mistyped_backend_readiness_decision_is_fail_closed(decision):
+    """Backend 是唯一 readiness 權威，但型別壞掉的回覆不能被當成 READY 吞下去。"""
+
+    class _MistypedStore(_Store):
+        async def submit_revision(self, **kwargs):
+            await super().submit_revision(**kwargs)
+            return decision
+
+    output = _run_graph(_MistypedStore())
+
+    assert "Backend returned an invalid readiness decision" in output["fatal_error"]
+    assert "context_status" not in output
+    assert "context_ref" not in output
 
 
 def test_context_loop_honors_single_remaining_snapshot_round():
@@ -416,6 +446,89 @@ def test_near_deadline_skips_optional_source_but_attempts_mandatory_source():
     assert output["retrieval_measurements"]["optional_skipped"] == 1
 
 
+def test_non_timeout_adapter_error_is_a_generic_failure_gap():
+    """逾時以外的例外同樣只留下客觀 gap，不會把整輪 enrichment 炸掉。"""
+
+    class _BrokenRetrieval:
+        async def retrieve(self, **_kwargs):
+            raise ConnectionError("adapter refused the connection")
+
+    fn = node_registry.get("context_retrieve_documents").build(
+        SimpleNamespace(context_retrieval=_BrokenRetrieval())
+    )
+    output = asyncio.run(fn({
+        "normalized_request": {"query": "q"}, "tenant_id": "tenant",
+        "security_scope": {"knowledge_sources": ["docs"]},
+        "validated_job": {"deadline_monotonic": time.monotonic() + 60},
+        "candidate_sources": _discovered_sources(
+            precedence=["mandatory"],
+            sources=[_source("mandatory", "adapter.mandatory", required=True)],
+            context_tools=["adapter.mandatory"],
+        ),
+    }))
+
+    assert output["evidence_raw"] == []
+    assert output["retrieval_gaps"] == [
+        {"source_id": "mandatory", "failure_code": "failure"}
+    ]
+    assert output["retrieval_measurements"] == {
+        "attempted": 1, "failed": 1, "optional_skipped": 0
+    }
+
+
+def test_empty_knowledge_scope_retrieves_nothing_without_reaching_an_adapter():
+    class _UnusedRetrieval:
+        async def retrieve(self, **_kwargs):
+            raise AssertionError("an empty knowledge scope must not reach an adapter")
+
+    fn = node_registry.get("context_retrieve_documents").build(
+        SimpleNamespace(context_retrieval=_UnusedRetrieval())
+    )
+    output = asyncio.run(fn({
+        "normalized_request": {"query": "q"}, "tenant_id": "tenant",
+        "security_scope": {"knowledge_sources": []},
+        "validated_job": {"deadline_monotonic": time.monotonic() + 60},
+        "candidate_sources": _discovered_sources(
+            precedence=["mandatory"],
+            sources=[_source("mandatory", "adapter.mandatory", required=True)],
+            context_tools=["adapter.mandatory"],
+        ),
+    }))
+
+    assert output == {
+        "evidence_raw": [], "retrieval_gaps": [],
+        "retrieval_measurements": {"attempted": 0, "failed": 0, "optional_skipped": 0},
+    }
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"required": "yes"},
+        {"timeout_seconds": 0},
+        {"minimum_deadline_seconds": -1},
+        {"adapter_id": ""},
+    ],
+)
+def test_invalid_source_policy_fields_fail_closed_before_any_retrieval(override):
+    class _UnusedRetrieval:
+        async def retrieve(self, **_kwargs):
+            raise AssertionError("an invalid source policy must not be retrieved from")
+
+    fn = node_registry.get("context_retrieve_documents").build(
+        SimpleNamespace(context_retrieval=_UnusedRetrieval())
+    )
+    with pytest.raises(ValueError, match="context source policy is invalid"):
+        asyncio.run(fn({
+            "normalized_request": {"query": "q"}, "tenant_id": "tenant",
+            "security_scope": {"knowledge_sources": ["docs"]},
+            "validated_job": {"deadline_monotonic": time.monotonic() + 60},
+            "candidate_sources": [
+                _source("mandatory", "adapter.mandatory", required=True) | override
+            ],
+        }))
+
+
 def test_source_without_explicit_backend_enabled_flag_is_fail_closed():
     fn = node_registry.get("context_discover_sources").build()
     with pytest.raises(ValueError, match="no authorized enabled source"):
@@ -455,6 +568,42 @@ def test_missing_or_unknown_source_precedence_is_fail_closed(values, message):
                 "knowledge_sources": ["docs"],
             },
         }))
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        {"known": {"enabled": True, "adapter_id": "adapter.known"}},
+        [{"enabled": True, "adapter_id": "adapter.known"}],
+        [{"source_id": "", "enabled": True, "adapter_id": "adapter.known"}],
+        [
+            _source("known", "adapter.known", required=True),
+            _source("known", "adapter.known", required=False),
+        ],
+    ],
+)
+def test_malformed_source_catalog_is_fail_closed(sources):
+    """目錄本身的形狀（非清單／缺 source_id／重複 source_id）也是信任邊界。"""
+    with pytest.raises(ValueError, match="context source catalog is invalid"):
+        _discovered_sources(
+            precedence=["known"], sources=sources,
+            context_tools=["adapter.known"],
+        )
+
+
+def test_only_sources_that_are_both_enabled_and_tool_authorized_survive():
+    """enabled 與 context_tools 是兩個獨立維度，任一維度不成立就出局。"""
+    candidates = _discovered_sources(
+        precedence=["authorized", "disabled", "unauthorized"],
+        sources=[
+            _source("authorized", "adapter.granted", required=True),
+            _source("disabled", "adapter.granted_but_off", required=True) | {"enabled": False},
+            _source("unauthorized", "adapter.not_granted", required=True),
+        ],
+        context_tools=["adapter.granted", "adapter.granted_but_off"],
+    )
+
+    assert [item["source_id"] for item in candidates] == ["authorized"]
 
 
 def test_discovery_returns_every_authorized_source_in_precedence_order():
@@ -514,11 +663,43 @@ def test_job_round_must_stay_within_snapshot_outer_budget():
         }}))
 
 
+def test_first_round_is_accepted_and_anything_below_it_is_rejected():
+    """輪次下界：1 是合法的起始輪，0／負數一律出局。"""
+    fn = node_registry.get("context_validate_job").build()
+
+    def _validate(context_round: int) -> dict:
+        return asyncio.run(fn({"job": {
+            "context_id": "root-1", "root_run_id": "root-1",
+            "message": "question", "observed_at": "2026-01-01T00:00:00Z",
+            "context_round": context_round, "max_context_rounds": 2,
+            "deadline_monotonic": time.monotonic() + 60,
+        }}))
+
+    assert _validate(1)["remaining_context_rounds"] == 2
+    for invalid_round in (0, -1):
+        with pytest.raises(ValueError, match="outside the Backend-issued budget"):
+            _validate(invalid_round)
+
+
 def test_context_enrichment_cannot_be_invoked_through_public_skill_api(monkeypatch):
     monkeypatch.setattr(settings, "context_enrichment_enabled", False)
 
     response = client.post(
         "/skills/context-enrichment/invoke",
+        json={"input": {"job": {}}},
+        headers=auth_headers(role="ADMIN"),
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("name", ["context-enrichment", "context-task-local"])
+def test_internal_context_skills_stay_hidden_even_with_the_feature_enabled(monkeypatch, name):
+    """開關打開也不會把 Root 內部元件變成可公開呼叫的資產（404 早於任何 feature 判讀）。"""
+    monkeypatch.setattr(settings, "context_enrichment_enabled", True)
+
+    response = client.post(
+        f"/skills/{name}/invoke",
         json={"input": {"job": {}}},
         headers=auth_headers(role="ADMIN"),
     )
@@ -540,6 +721,67 @@ async def test_root_adapter_fails_closed_when_policy_stage_fails(monkeypatch):
     result = await acquirer.acquire(snapshot, {"__runtime_deadline_monotonic": time.monotonic() + 60}, 1)
 
     assert result == ContextAcquisition(ready=False, missing=["context-policy-unavailable"])
+
+
+@pytest.mark.asyncio
+async def test_root_adapter_maps_an_unrecognized_fatal_stage_to_generic_unavailable(monkeypatch):
+    """非 policy 階段的 fatal 不能被誤報成 context-policy-unavailable。"""
+
+    class _Graph:
+        async def ainvoke(self, _state, config):
+            return {"fatal_error": "context_retrieve_documents: adapter exploded"}
+
+    monkeypatch.setattr(skills, "get", lambda _name: SimpleNamespace(graph=_Graph(), recursion_limit=10))
+    acquirer = ContextEnrichmentAcquirer(object(), RequestContext(tenant_id="tenant", user_id="user", role="USER"))
+
+    result = await acquirer.acquire(
+        _snapshot_with_input(), {"__runtime_deadline_monotonic": time.monotonic() + 60}, 1
+    )
+
+    assert result == ContextAcquisition(ready=False, missing=["context-enrichment-unavailable"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skill_available", "with_root_input", "missing"),
+    [
+        (False, True, "context-enrichment-unavailable"),
+        (True, False, "root-input-unavailable"),
+    ],
+)
+async def test_missing_skill_or_root_input_fails_closed_before_the_graph_runs(
+    monkeypatch, skill_available, with_root_input, missing
+):
+    builtin = skills.get("context-enrichment")
+    monkeypatch.setattr(
+        skills, "get", lambda _name: builtin if skill_available else None
+    )
+    snapshot = _snapshot_with_input() if with_root_input else _snapshot_without_input()
+    acquirer = ContextEnrichmentAcquirer(object(), RequestContext(tenant_id="tenant", user_id="user", role="USER"))
+
+    result = await acquirer.acquire(
+        snapshot, {"__runtime_deadline_monotonic": time.monotonic() + 60}, 1
+    )
+
+    assert result == ContextAcquisition(ready=False, missing=[missing])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deadline", [None, True, "60", 0, -1.0])
+async def test_unusable_runtime_deadline_fails_closed_before_the_graph_runs(monkeypatch, deadline):
+    """沒有可用的 runtime deadline 就不准開工：檢索的逾時預算完全靠它。"""
+
+    class _Graph:
+        async def ainvoke(self, _state, _config=None, **_kwargs):
+            raise AssertionError("an unusable deadline must not start enrichment")
+
+    monkeypatch.setattr(skills, "get", lambda _name: SimpleNamespace(graph=_Graph(), recursion_limit=10))
+    current = {} if deadline is None else {"__runtime_deadline_monotonic": deadline}
+    acquirer = ContextEnrichmentAcquirer(object(), RequestContext(tenant_id="tenant", user_id="user", role="USER"))
+
+    result = await acquirer.acquire(_snapshot_with_input(), current, 1)
+
+    assert result == ContextAcquisition(ready=False, missing=["runtime-deadline-unavailable"])
 
 
 @pytest.mark.asyncio
@@ -931,6 +1173,38 @@ async def test_backend_acquire_rejects_context_without_exact_unique_provenance(m
                     "source_id": "docs", "observed_at": "2026-01-01T00:00:00Z",
                     "content_sha256": "a" * 64,
                 }],
+                "missing": [],
+            },
+        )
+
+    monkeypatch.setattr(backend, "_request", response)
+    with pytest.raises(OrchestratorBackendError, match="exact unique provenance"):
+        await backend.acquire_context(
+            snapshot, {}, 1,
+            RequestContext(tenant_id="tenant", user_id="user", role="USER"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_backend_acquire_rejects_two_provenance_entries_for_one_context_key(monkeypatch):
+    """鍵集合對得上還不夠：同一個 context key 兩筆來源等於出處不唯一。"""
+    snapshot = _guid_snapshot()
+    backend = OrchestratorBackendClient()
+    entry = {
+        "context_key": "context_ref", "source_type": "knowledge-source",
+        "source_id": "docs", "observed_at": "2026-01-01T00:00:00Z",
+        "content_sha256": "a" * 64,
+    }
+
+    async def response(*_args, **_kwargs):
+        request = httpx.Request("POST", "http://backend/context/acquire")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "ready": True,
+                "context": {"context_ref": {}},
+                "provenance": [entry, entry],
                 "missing": [],
             },
         )

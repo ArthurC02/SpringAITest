@@ -293,6 +293,21 @@ public sealed class SkillServiceTests
         Assert.Equal("definition 不可為空", ex.FieldErrors!["definition"]);
     }
 
+    // 2xx 但沒有可用 body 的等價類:backend 回 JSON null(走 onEmptyBody)或整包沒有 body(解析失敗),
+    // 兩者都必須收斂成受控 502(帶 FailurePrefix),不得被當成建立成功而回一個半空的 Skill。
+    [Theory]
+    [InlineData("null", "Skill 服務呼叫失敗：回應內容為空")]
+    [InlineData("", "Skill 服務呼叫失敗：")]
+    public async Task Create_Backend2xxWithoutUsableBody_ThrowsControlled502(string body, string expectedPrefix)
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created, body));
+
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(stub).CreateAsync(Upsert(), AdminCtx));
+
+        Assert.StartsWith(expectedPrefix, ex.Message);
+    }
+
     [Fact] // backend 400 沒帶 fieldErrors → null(全域處理輸出空 map,ApiError 形狀不變)。
     public async Task Create_Backend400WithoutFieldErrors_HasNullFieldErrors()
     {
@@ -367,6 +382,20 @@ public sealed class SkillServiceTests
         Assert.Equal("server-derived", result.GetProperty("name").GetString());
     }
 
+    // 上傳檔名為空白的等價類:multipart 檔位仍要帶合法檔名 —— fallback 到字面值 package.zip,
+    // 不得送出空檔名(backend 的 multipart reader 靠檔位檔名判斷這是檔案而非一般欄位)。
+    [Fact]
+    public async Task Import_BlankFileName_FallsBackToPackageZip()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            """{"name":"sales-helper","kind":"agentic","current_revision":1}"""));
+
+        await Build(stub).ImportAsync("sales-helper", PackageBytes(), "", AdminCtx);
+
+        Assert.Contains("name=package", stub.LastBody);
+        Assert.Contains("filename=package.zip", stub.LastBody);
+    }
+
     // backend 422(套件驗證失敗)→ SkillValidationFailedException,fieldErrors(引擎錯誤碼)原樣穿過代理層。
     [Fact]
     public async Task Import_Backend422_PassesThroughFieldErrors()
@@ -380,6 +409,22 @@ public sealed class SkillServiceTests
         Assert.Equal("Skill 套件驗證失敗", ex.Message);
         Assert.Equal("腳本未通過 AST 掃描", ex.FieldErrors!["forbidden_script"]);
         Assert.Equal("工具未註冊", ex.FieldErrors!["unknown_tool"]);
+    }
+
+    // 另一條匯入入口(衍生路由,不帶名稱)碰上非 2xx:與具名路由共用同一條錯誤映射 ——
+    // 422 一樣是 SkillValidationFailedException,fieldErrors 同樣原樣穿透(錯誤處理不隨入口而異)。
+    [Fact]
+    public async Task ImportDerived_Backend422_PassesThroughFieldErrors()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
+            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 套件驗證失敗","fieldErrors":{"missing_skill_md":"套件缺少 SKILL.md"}}"""));
+
+        var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
+            () => Build(stub).ImportAsync(PackageBytes(), PackageFileName, AdminCtx));
+
+        Assert.Equal("http://backend/api/skills/import", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("Skill 套件驗證失敗", ex.Message);
+        Assert.Equal("套件缺少 SKILL.md", ex.FieldErrors!["missing_skill_md"]);
     }
 
     // 傳輸上限(16 MiB)的邊界:on-point(剛好上限)照常轉送;off-point(上限 +1)快速失敗(對外 400),不打 backend。

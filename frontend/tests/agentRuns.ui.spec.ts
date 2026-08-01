@@ -710,6 +710,294 @@ test('a delayed old-run poll cannot overwrite a newly started run or its event c
   expect(newRunCursors).not.toContain('99')
 })
 
+test('definitive resume and cancel failures unlock retry, rotate the key, and clear cancel state', async ({
+  page,
+}) => {
+  const resumeKeys: Array<string | undefined> = []
+  const cancelKeys: Array<string | undefined> = []
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'run-definitive-token',
+        username: 'admin',
+        role: 'ADMIN',
+        tenantCode: 'demo',
+      })
+    }
+    if (path === '/api/features') {
+      return json(route, { agentBuilderEnabled: true, agentTestRunEnabled: true })
+    }
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [publishedAgent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, publishedAgent, { headers: { ETag: '"4"' } })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') {
+      return json(route, { facts: [], gates: ['pre-action'], operators: [], limits: {} })
+    }
+    if (path === '/api/agents/catalog/rule-actions') return json(route, { actions: [] })
+    if (path === `/api/agents/${agentId}/runs` && request.method() === 'POST') {
+      return json(
+        route,
+        {
+          runId: runOne,
+          status: 'waiting_input',
+          stateVersion: 1,
+          checkpointVersion: 7,
+          latestEventSequence: 0,
+          pinnedAgentRevision: 3,
+          pinnedWorkflowRevision: 2,
+          pendingInput: { message: '請提供案號' },
+        },
+        { status: 202 },
+      )
+    }
+    if (path === `/api/runs/${runOne}/resume` && request.method() === 'POST') {
+      resumeKeys.push(request.headers()['idempotency-key'])
+      if (resumeKeys.length === 1) {
+        return json(
+          route,
+          {
+            timestamp: '2026-07-25T00:00:00Z',
+            status: 409,
+            message: 'checkpoint 版本已過期',
+            fieldErrors: {},
+          },
+          { status: 409 },
+        )
+      }
+      return json(
+        route,
+        {
+          runId: runOne,
+          status: 'waiting_input',
+          stateVersion: 2,
+          checkpointVersion: 8,
+          latestEventSequence: 0,
+          pendingInput: { message: '請補上聯絡人' },
+        },
+        { status: 202 },
+      )
+    }
+    if (path === `/api/runs/${runOne}/cancel` && request.method() === 'POST') {
+      cancelKeys.push(request.headers()['idempotency-key'])
+      return json(
+        route,
+        {
+          timestamp: '2026-07-25T00:00:00Z',
+          status: 409,
+          message: 'Run 已進入終態，無法取消',
+          fieldErrors: {},
+        },
+        { status: 409 },
+      )
+    }
+    return json(route, [])
+  })
+
+  await loginAndOpenAgent(page)
+  await page.getByRole('button', { name: '測試 Run' }).click()
+  await page.getByLabel('測試訊息').fill('definitive failures')
+  await page.getByRole('button', { name: '啟動測試 Run' }).click()
+  await expect(page.getByText('請提供案號')).toBeVisible()
+
+  await page.getByLabel('補充資訊').fill('CASE-9')
+  await page.getByRole('button', { name: '從 checkpoint 恢復' }).click()
+  await expect(page.getByRole('alert')).toContainText('checkpoint 版本已過期')
+  await expect(page.getByRole('button', { name: '以新嘗試重送 Resume' })).toBeEnabled()
+  await expect(page.getByText('結果尚未確定，請先以相同 key 重送 Resume。')).toHaveCount(0)
+
+  await page.getByRole('button', { name: '以新嘗試重送 Resume' }).click()
+  await expect(page.getByText('請補上聯絡人')).toBeVisible()
+  await expect(page.getByRole('button', { name: '以新嘗試重送 Resume' })).toHaveCount(0)
+  expect(resumeKeys).toHaveLength(2)
+  expect(resumeKeys[1]).not.toBe(resumeKeys[0])
+
+  await page.getByRole('button', { name: '取消 Run', exact: true }).click()
+  await page
+    .getByRole('dialog', { name: '確認操作' })
+    .getByRole('button', { name: '取消 Run' })
+    .click()
+  await expect(page.getByRole('alert')).toContainText('Run 已進入終態，無法取消')
+  expect(cancelKeys).toHaveLength(1)
+  expect(
+    await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.includes('cancel'))),
+  ).toEqual([])
+})
+
+test('waiting_approval shows the no-approval notice and a failed refresh renders the run error', async ({
+  page,
+}) => {
+  let failed = false
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'run-approval-token',
+        username: 'admin',
+        role: 'ADMIN',
+        tenantCode: 'demo',
+      })
+    }
+    if (path === '/api/features') {
+      return json(route, { agentBuilderEnabled: true, agentTestRunEnabled: true })
+    }
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [publishedAgent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, publishedAgent, { headers: { ETag: '"4"' } })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') {
+      return json(route, { facts: [], gates: ['pre-action'], operators: [], limits: {} })
+    }
+    if (path === '/api/agents/catalog/rule-actions') return json(route, { actions: [] })
+    if (path === `/api/agents/${agentId}/runs` && request.method() === 'POST') {
+      return json(
+        route,
+        {
+          runId: runOne,
+          status: 'waiting_approval',
+          stateVersion: 2,
+          checkpointVersion: 4,
+          latestEventSequence: 0,
+          pinnedAgentRevision: 3,
+          pinnedWorkflowRevision: 2,
+        },
+        { status: 202 },
+      )
+    }
+    if (path === `/api/runs/${runOne}` && request.method() === 'GET') {
+      return json(route, {
+        runId: runOne,
+        status: failed ? 'failed' : 'waiting_approval',
+        stateVersion: failed ? 3 : 2,
+        checkpointVersion: 4,
+        latestEventSequence: 0,
+        pinnedAgentRevision: 3,
+        pinnedWorkflowRevision: 2,
+        error: failed ? '工具預算已用盡' : undefined,
+      })
+    }
+    if (path === `/api/runs/${runOne}/events`) {
+      return json(route, { events: [], latestEventSequence: 0 })
+    }
+    return json(route, [])
+  })
+
+  await loginAndOpenAgent(page)
+  await page.getByRole('button', { name: '測試 Run' }).click()
+  await page.getByLabel('測試訊息').fill('needs approval')
+  await page.getByRole('button', { name: '啟動測試 Run' }).click()
+  await expect(page.getByText('等待核准（D3 不提供核准操作）', { exact: true })).toBeVisible()
+  await expect(
+    page.getByText('此 Run 正在等待核准。D3 測試主控台不提供 approval 或寫入操作；可取消 Run。'),
+  ).toBeVisible()
+  await expect(page.getByLabel('補充資訊')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '取消 Run', exact: true })).toBeEnabled()
+
+  failed = true
+  await page.getByRole('button', { name: '立即重新整理' }).click()
+  await expect(page.getByText('失敗', { exact: true })).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('工具預算已用盡')
+  await expect(
+    page.getByText('此 Run 正在等待核准。D3 測試主控台不提供 approval 或寫入操作；可取消 Run。'),
+  ).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '取消 Run', exact: true })).toBeDisabled()
+})
+
+test('pinned skill and budget sections render when populated and vanish when the run omits them', async ({
+  page,
+}) => {
+  let stripped = false
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'run-pins-token',
+        username: 'admin',
+        role: 'ADMIN',
+        tenantCode: 'demo',
+      })
+    }
+    if (path === '/api/features') {
+      return json(route, { agentBuilderEnabled: true, agentTestRunEnabled: true })
+    }
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [publishedAgent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, publishedAgent, { headers: { ETag: '"4"' } })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') {
+      return json(route, { facts: [], gates: ['pre-action'], operators: [], limits: {} })
+    }
+    if (path === '/api/agents/catalog/rule-actions') return json(route, { actions: [] })
+    if (path === `/api/agents/${agentId}/runs` && request.method() === 'POST') {
+      return json(
+        route,
+        {
+          runId: runOne,
+          status: 'completed',
+          stateVersion: 3,
+          checkpointVersion: 2,
+          latestEventSequence: 0,
+          pinnedAgentRevision: 3,
+          pinnedWorkflowRevision: 2,
+          pinnedSkills: [{ name: 'review', revision: 6 }],
+          budget: { stepBudget: 20, stepsUsed: 1 },
+        },
+        { status: 202 },
+      )
+    }
+    if (path === `/api/runs/${runOne}` && request.method() === 'GET') {
+      return json(route, {
+        runId: runOne,
+        status: 'completed',
+        stateVersion: 3,
+        checkpointVersion: 2,
+        latestEventSequence: 0,
+        pinnedAgentRevision: 3,
+        pinnedWorkflowRevision: 2,
+        pinnedSkills: stripped ? [] : [{ name: 'review', revision: 6 }],
+        budget: stripped ? {} : { stepBudget: 20, stepsUsed: 1 },
+      })
+    }
+    if (path === `/api/runs/${runOne}/events`) {
+      return json(route, { events: [], latestEventSequence: 0 })
+    }
+    return json(route, [])
+  })
+
+  await loginAndOpenAgent(page)
+  await page.getByRole('button', { name: '測試 Run' }).click()
+  await page.getByLabel('測試訊息').fill('pinned run')
+  await page.getByRole('button', { name: '啟動測試 Run' }).click()
+  await expect(page.getByText('Pinned Skills')).toBeVisible()
+  await expect(page.getByText('review · r6')).toBeVisible()
+  await expect(page.getByText('Budget 使用量')).toBeVisible()
+
+  stripped = true
+  await page.getByRole('button', { name: '立即重新整理' }).click()
+  await expect(page.getByText('Pinned Skills')).toHaveCount(0)
+  await expect(page.getByText('Budget 使用量')).toHaveCount(0)
+  await expect(page.getByText(runOne, { exact: true })).toBeVisible()
+})
+
 test('Agent test tab stays hidden for an unpublished Agent even when the feature is enabled', async ({
   page,
 }) => {

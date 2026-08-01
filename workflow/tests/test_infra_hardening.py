@@ -40,6 +40,30 @@ def test_get_client_returns_same_singleton_and_aclose_resets():
         asyncio.run(backend_http.aclose_client())
 
 
+def test_get_client_reuses_within_one_loop_but_rebuilds_across_loops():
+    """事件圈守衛：同圈沿用、換圈重建（TestClient 每請求換短命圈的情境）。
+
+    上面的單例測試都在事件圈外呼叫（current 為 None，守衛整段跳過），守衛本身沒被走過。
+    這裡用 asyncio.run 起兩個各自獨立、跑完即關的事件圈，逼出重建那一支。
+    """
+    try:
+        asyncio.run(backend_http.aclose_client())
+
+        async def _pair():
+            return backend_http.get_client(), backend_http.get_client()
+
+        a1, a2 = asyncio.run(_pair())
+        assert a1 is a2  # 同一圈內：綁定圈＝當前圈，沿用同一顆
+
+        b1, _ = asyncio.run(_pair())
+        assert b1 is not a1  # 換圈（且舊圈已關）：丟棄舊 client 重建
+
+        # 圈外呼叫 current 為 None，守衛不觸發：即使綁定圈已關也照樣沿用（現行行為）
+        assert backend_http.get_client() is b1
+    finally:
+        asyncio.run(backend_http.aclose_client())
+
+
 def test_shared_client_base_url_points_at_backend():
     try:
         asyncio.run(backend_http.aclose_client())
@@ -83,6 +107,14 @@ def test_runnable_config_swallows_non_import_errors(monkeypatch):
 
     monkeypatch.setattr(tracing, "_handler", _boom)
     assert tracing.runnable_config() == {}
+
+
+def test_runnable_config_enabled_returns_callbacks_with_handler(monkeypatch):
+    """決策表最後一格：開啟且 _handler 正常 → 唯一回非空 dict 的那支。"""
+    monkeypatch.setattr(settings, "langfuse_enabled", True)
+    handler = object()
+    monkeypatch.setattr(tracing, "_handler", lambda: handler)
+    assert tracing.runnable_config() == {"callbacks": [handler]}
 
 
 def test_runnable_config_disabled_returns_empty():

@@ -97,6 +97,26 @@ def test_rag_answer_multiple_docs_build_citations_in_order():
     ]
 
 
+def test_rag_answer_snippet_slices_at_80_char_boundary():
+    """snippet = content[:80] 的切片邊界：80 字（on-point，整段留下）與 81 字（off-point，砍掉第 81 字）。
+
+    既有測試只用 100 字與遠短於 80 字的內容，off-by-one（改成 [:81] 或 [:79]）不會有人變紅。
+    """
+    llm = RecordingLLM(output=_RagAnswerOutput(answer="答案"))
+    node = make_rag_answer_node(llm)
+    docs = [
+        {"document_id": "a", "title": "A", "content": "a" * 80, "score": 0.9},
+        {"document_id": "b", "title": "B", "content": "b" * 80 + "尾", "score": 0.8},
+    ]
+
+    out = asyncio.run(node({"question": "問題", "docs": docs}))
+
+    assert out["citations"] == [
+        {"document_id": "a", "title": "A", "snippet": "a" * 80},
+        {"document_id": "b", "title": "B", "snippet": "b" * 80},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 編譯後的引擎路徑：走真正的 rag_qa.yaml（retrieve@1.0 → rag_answer@1.0）
 # ---------------------------------------------------------------------------
@@ -182,6 +202,28 @@ def test_rag_qa_invoke_api_level_with_docs(monkeypatch):
         skills._SKILLS["rag-qa"] = original
 
 
+def test_rag_qa_invoke_api_level_no_docs_returns_fixed_answer(monkeypatch):
+    """docs 空的那半在 HTTP 層的回應形狀（節點層／引擎層已各測一次，這裡補完整鏈路）。
+
+    docs 空時不呼叫 LLM，所以不需要換掉註冊表裡的 deps —— 「沒換 fake LLM 也能 200」
+    本身就是這條路徑不碰 LLM 的證據。
+    """
+    patch_retrieve(monkeypatch, [])
+
+    resp = client.post(
+        "/skills/rag-qa/invoke",
+        json={"input": {"question": "沒人上傳過的問題"}},
+        headers=auth_headers(),
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["skill"] == "rag-qa"
+    assert body["output"]["answer"] == "在你的租戶資料中找不到相關內容，請先上傳文件。"
+    assert body["output"]["citations"] == []
+    assert not any(k.startswith("__") for k in body["output"])
+
+
 def test_rag_qa_invoke_api_level_rejects_blank_question():
     """input_schema 的 required/min_length：422（決策表另一半見上面 happy path）。"""
     resp = client.post(
@@ -189,6 +231,38 @@ def test_rag_qa_invoke_api_level_rejects_blank_question():
     )
     assert resp.status_code == 422
     assert resp.json()["detail"]["error"] == "workflow_input_invalid"
+
+
+def test_rag_qa_invoke_api_level_rejects_missing_question():
+    """required 的另一個錯誤類別：question 整個缺席（pydantic missing）≠ 給了空字串
+    （string_too_short）。兩者在 _humanize_input_error 是不同分支、不同中文訊息。
+    """
+    resp = client.post(
+        "/skills/rag-qa/invoke", json={"input": {}}, headers=auth_headers()
+    )
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "workflow_input_invalid"
+    assert detail["field_errors"] == {"question": "「question」為必填。"}
+
+
+def test_rag_qa_invoke_api_level_accepts_single_char_question(monkeypatch):
+    """min_length: 1 的合法邊界（on-point）：單一字元的 question 通過驗證，並原樣送進檢索。"""
+    captured: dict = {}
+
+    async def fake_post(self, url, json=None, headers=None, **kwargs):
+        captured["json"] = json
+        return FakeBackendResponse([])
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    resp = client.post(
+        "/skills/rag-qa/invoke", json={"input": {"question": "誰"}}, headers=auth_headers()
+    )
+
+    assert resp.status_code == 200
+    assert captured["json"]["query"] == "誰"
 
 
 def test_rag_qa_invoke_api_level_reserved_tenant_id_cannot_override_caller(monkeypatch):

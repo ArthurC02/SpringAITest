@@ -337,6 +337,194 @@ def test_required_agent_runtime_stages_and_typed_ports_fail_closed() -> None:
     assert "incompatible_port_type" in codes(result)
 
 
+def test_governance_limits_must_be_positive_integers() -> None:
+    lowest_valid = agent_runtime_graph()
+    lowest_valid["governance"] = {"maxSteps": 1, "maxConcurrency": 1}
+    assert validate(lowest_valid).valid
+
+    for governance in (
+        {"maxSteps": 0, "maxConcurrency": 1},
+        {"maxSteps": -1, "maxConcurrency": 1},
+        {"maxSteps": 40.0, "maxConcurrency": 1},
+        {"maxSteps": 40, "maxConcurrency": True},
+        {"maxConcurrency": 1},
+    ):
+        graph = agent_runtime_graph()
+        graph["governance"] = governance
+        assert codes(validate(graph)) == {"invalid_governance_limit"}, governance
+
+
+def test_bounded_control_nodes_require_an_explicit_positive_limit() -> None:
+    lowest_valid = agent_runtime_graph()
+    lowest_valid["nodes"][4]["config"] = {"maxIterations": 1}
+    assert validate(lowest_valid).valid
+
+    missing = agent_runtime_graph()
+    del missing["nodes"][4]["config"]["maxIterations"]
+    assert codes(validate(missing)) == {"unbounded_loop"}
+
+    zero = agent_runtime_graph()
+    zero["nodes"][4]["config"]["maxIterations"] = 0
+    assert codes(validate(zero)) == {"unbounded_loop"}
+
+    # bounded_repair_or_controlled_failure is bounded by maxRepairRounds instead.
+    negative_rounds = agent_runtime_graph()
+    negative_rounds["nodes"][6]["config"]["maxRepairRounds"] = -1
+    assert codes(validate(negative_rounds)) == {"unbounded_loop"}
+
+
+def test_schema_version_must_be_exactly_one() -> None:
+    newer = agent_runtime_graph()
+    newer["schemaVersion"] = 2
+    assert codes(validate(newer)) == {"unsupported_schema_version"}
+
+    stringly_typed = agent_runtime_graph()
+    stringly_typed["schemaVersion"] = "1"
+    assert codes(validate(stringly_typed)) == {"unsupported_schema_version"}
+
+    missing = agent_runtime_graph()
+    del missing["schemaVersion"]
+    assert codes(validate(missing)) == {"unsupported_schema_version"}
+
+
+def test_unsupported_workflow_kind_is_rejected() -> None:
+    bogus = orchestrator_graph()
+    bogus["kind"] = "bogus"
+    assert "unsupported_workflow_kind" in codes(validate(bogus))
+
+    missing = orchestrator_graph()
+    del missing["kind"]
+    assert "unsupported_workflow_kind" in codes(validate(missing))
+
+    # runtimeVariant is checked first and its branch shadows the kind check, so
+    # an unknown kind carrying runtimeVariant reports a different code; it still
+    # fails closed because no catalogue node is allowed for that kind.
+    with_variant = agent_runtime_graph()
+    with_variant["kind"] = "bogus"
+    result = codes(validate(with_variant))
+    assert "unsupported_workflow_kind" not in result
+    assert {"runtime_variant_not_allowed", "node_not_allowed_for_kind"} <= result
+
+
+def test_node_ids_must_be_stable_identifiers_within_length_bounds() -> None:
+    longest = agent_runtime_graph()
+    longest["nodes"][4]["children"][0]["id"] = "a" * 128
+    assert validate(longest).valid
+
+    too_long = agent_runtime_graph()
+    too_long["nodes"][4]["children"][0]["id"] = "a" * 129
+    assert codes(validate(too_long)) == {"invalid_node_id"}
+
+    malformed = agent_runtime_graph()
+    malformed["nodes"][4]["children"][0]["id"] = "1bad id"
+    assert codes(validate(malformed)) == {"invalid_node_id"}
+
+    empty = agent_runtime_graph()
+    empty["nodes"][4]["children"][0]["id"] = ""
+    assert codes(validate(empty)) == {"invalid_node_id"}
+
+
+def test_latest_selector_is_forbidden_anywhere_in_the_definition() -> None:
+    unpinned = agent_runtime_graph()
+    unpinned["nodes"][1]["config"] = {"revision": "latest"}
+    assert {"forbidden_latest_selector", "unknown_config_field"} <= codes(validate(unpinned))
+
+    padded = agent_runtime_graph()
+    padded["nodes"][1]["config"] = {"revision": "  LATEST  "}
+    assert "forbidden_latest_selector" in codes(validate(padded))
+
+    # Only the exact selector is forbidden; a pinned revision that merely
+    # contains the word stays an ordinary (here: unknown) config value.
+    pinned = agent_runtime_graph()
+    pinned["nodes"][1]["config"] = {"revision": "latest-1"}
+    assert codes(validate(pinned)) == {"unknown_config_field"}
+
+
+def test_unknown_node_type_or_version_is_rejected() -> None:
+    unknown_version = agent_runtime_graph()
+    unknown_version["nodes"][4]["children"][0]["typeVersion"] = "9.9"
+    assert codes(validate(unknown_version)) == {"unknown_node_version"}
+
+    unknown_type = agent_runtime_graph()
+    unknown_type["nodes"][4]["children"][0]["type"] = "not_in_the_catalogue"
+    assert {"unknown_node_version", "missing_required_loop_stage"} <= codes(validate(unknown_type))
+
+
+def test_node_types_are_rejected_outside_their_workflow_kind() -> None:
+    orchestrator_node = agent_runtime_graph()
+    orchestrator_node["nodes"][4]["children"].append(
+        {"id": "stray-dispatch", "type": "dispatch_agents", "typeVersion": "1.0", "config": {}}
+    )
+    assert codes(validate(orchestrator_node)) == {"node_not_allowed_for_kind"}
+
+    agent_runtime_node = orchestrator_graph()
+    agent_runtime_node["nodes"][7]["children"] = [
+        {"id": "stray-model", "type": "model_step", "typeVersion": "1.0", "config": {}}
+    ]
+    assert codes(validate(agent_runtime_node)) == {"node_not_allowed_for_kind"}
+
+
+def test_malformed_edges_are_rejected_before_topology() -> None:
+    graph = agent_runtime_graph()
+    graph["edges"][0]["label"] = "not part of the versioned edge schema"
+    graph["edges"].extend(
+        [
+            "not-an-object",
+            {"id": "e0", "source": {"nodeId": "output", "port": "out"}, "target": {"nodeId": "end", "port": "in"}},
+            {"id": "half-endpoint", "source": {"nodeId": "start"}, "target": {"nodeId": "end", "port": "in"}},
+            {"id": "nonstring-port", "source": {"nodeId": "start", "port": 1}, "target": {"nodeId": "end", "port": "in"}},
+        ]
+    )
+    result = validate(graph)
+    assert not result.valid
+    # Every malformed edge is dropped before topology, so no cycle/fan-out
+    # error can be manufactured by a structurally broken edge object.
+    assert codes(result) == {
+        "unknown_edge_field",
+        "invalid_edge",
+        "duplicate_edge_id",
+        "invalid_edge_endpoint",
+    }
+
+
+def test_dispatch_fanout_requires_a_concurrency_budget() -> None:
+    budgeted = orchestrator_graph()
+    budgeted["governance"]["maxConcurrency"] = 1
+    assert validate(budgeted).valid
+
+    missing = orchestrator_graph()
+    del missing["governance"]["maxConcurrency"]
+    assert codes(validate(missing)) == {"invalid_governance_limit", "fanout_missing_concurrency_budget"}
+
+    zero = orchestrator_graph()
+    zero["governance"]["maxConcurrency"] = 0
+    assert codes(validate(zero)) == {"invalid_governance_limit", "fanout_missing_concurrency_budget"}
+
+    # Without a dispatch_agents node the very same omission is only a
+    # governance-limit error, never a fan-out budget error.
+    without_fanout = agent_runtime_graph()
+    del without_fanout["governance"]["maxConcurrency"]
+    assert codes(validate(without_fanout)) == {"invalid_governance_limit"}
+
+
+def test_required_input_port_needs_at_least_one_connection() -> None:
+    assert validate(orchestrator_graph()).valid
+
+    graph = orchestrator_graph()
+    graph["edges"] = [edge for edge in graph["edges"] if edge["id"] != "data-tasks"]
+    result = validate(graph)
+    assert not result.valid
+    assert codes(result) == {"missing_required_input"}
+
+
+def test_orchestrator_node_config_rejects_unknown_fields() -> None:
+    graph = orchestrator_graph()
+    graph["nodes"][4]["config"] = {"unsafe": True}
+    result = validate(graph)
+    assert not result.valid
+    assert codes(result) == {"unknown_config_field"}
+
+
 def test_internal_catalog_validate_and_simulate_contracts() -> None:
     client = TestClient(app)
     assert client.get("/workflow-designer/catalog/nodes").status_code == 401

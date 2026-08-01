@@ -270,6 +270,47 @@ public sealed class ChatSessionWindowTests
         Assert.Contains(stored, m => m.Text == "reply");
     }
 
+    // ---- 恰好 21 則(門檻正上方一則,seed 19 + 一輪 HIT 的 2 則 = 21)—— 仍以整個 turn 為單位裁,結果會低於視窗 ----
+    // 上面兩個 "At21Messages" 其實停在 22(seed 20 + 2),恰好 21 這個「剛好超過 MessagesExceed(20) 一則」的
+    // 狀態從未被走過。它的行為與 22 不同:裁掉最舊整個 turn(2 則)後剩 19 —— 框架是「整 turn 排除到 target
+    // 滿足為止」,不是裁到剛好 20,所以視窗會下沖(undershoot)。此案把這個特性釘住。
+    [Fact]
+    public async Task ConsecutiveHits_AtExactly21Messages_OldestTurnDropped_UndershootsTo19()
+    {
+        var agent = new FakeLlmAgent();
+        var wf = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat(SingleSkillCatalog),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"x" } }"""),
+        };
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, historyProvider, _) = TestChatAgent.Build(identity: identity, llmAgent: agent, workflows: wf);
+        identity.SetRequestKeys("u1", "c-hit21exact", UserA);
+
+        var session = await hostAgent.GetOrCreateSessionAsync("c-hit21exact");
+        Seed(historyProvider, session, 19);   // hist0(U)…hist18(U):hist18 自成一個沒有 assistant 的 turn
+        await hostAgent.SaveSessionAsync("c-hit21exact", session);
+
+        EnqueueHit(agent, "reply");
+        var round = await hostAgent.GetOrCreateSessionAsync("c-hit21exact");
+        await hostAgent.RunAsync("Q", round);
+        await hostAgent.SaveSessionAsync("c-hit21exact", round);
+
+        var finalSession = await hostAgent.GetOrCreateSessionAsync("c-hit21exact");
+        var stored = historyProvider.GetMessages(finalSession);
+
+        // 21 > 20 觸發;排除最舊 turn(hist0/hist1 共 2 則)後 19 ≤ 20 已達 target,不再往下裁。
+        Assert.Equal(19, stored.Count);
+        Assert.DoesNotContain(stored, m => m.Text == "hist0");
+        Assert.DoesNotContain(stored, m => m.Text == "hist1");
+        for (var i = 2; i < 19; i++)
+        {
+            Assert.Contains(stored, m => m.Text == $"hist{i}");
+        }
+        Assert.Contains(stored, m => m.Text == "Q");
+        Assert.Contains(stored, m => m.Text == "reply");
+    }
+
     // ---- HIT 路徑也必須整 turn 原子裁切:tool-call/result 配對不得被手動 append 的裁切拆散 ----
     // (Window_ToolCallAndResult_NotSplitByCompaction 只證明了 ChatClientAgent 那條路徑;HIT 輪走的是
     //  SkillRoutingAgent.AppendExchangeToSessionAsync 自己呼叫 ChatReducer 的另一段程式碼,先前只用純文字測過。)

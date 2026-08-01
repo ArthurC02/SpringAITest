@@ -71,6 +71,27 @@ test('mid-stream event:error keeps rendered tokens and adds an error bubble', as
   await expect(answered).toHaveText('Hello')
 })
 
+test('several data: lines inside one frame rejoin with a newline', async ({ page }) => {
+  // Distinct from the multi-frame case above: one frame carrying one multi-line token, which
+  // platform writes as consecutive `data:` lines. Markdown makes the join observable — the
+  // rejoined value is a two-item list, a dropped newline would collapse it into one item.
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') return sse(route, 'data:- alpha\ndata:- beta\n\n')
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'list please')
+
+  await expect(page.locator('.bubble--assistant .bubble__content li')).toHaveText(['alpha', 'beta'])
+})
+
 test('chat state is debounced and flushed on unmount and page unload', async ({ page }) => {
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
@@ -187,4 +208,127 @@ test('any 401 while logged in clears the session and chat keys and shows the exp
   expect(await readKey(page, MESSAGES_KEY)).toBeNull()
   expect(await readKey(page, CONVERSATION_KEY)).toBeNull()
   expect(await readKey(page, USER_ID_KEY)).toBeNull()
+})
+
+test('an X-Auth-Invalid stream response logs out even though the status is 200', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      // This endpoint is AllowAnonymous, so an expired JWT never arrives as a 401 the way the
+      // apiFetch paths get one — platform flags it with this response header on a normal 200 SSE.
+      return route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream', 'X-Auth-Invalid': '1' },
+        body: 'data:ok\n\n',
+      })
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'confidential plan')
+
+  // Same global logout as a 401: session and chat keys gone, expiry notice on the login page.
+  await expect(page.getByTestId('auth-page')).toBeVisible()
+  await expect(page.getByText('session 已過期，請重新登入。')).toBeVisible()
+  expect(await readKey(page, SESSION_KEY)).toBeNull()
+  expect(await readKey(page, MESSAGES_KEY)).toBeNull()
+})
+
+test('a stream request that fails outright shows the ApiError message, not raw JSON', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      // Failing before a single SSE byte: the body is ApiError JSON, not text/event-stream.
+      return json(
+        route,
+        { timestamp: '2026-07-25T00:00:00Z', status: 503, message: '模型服務暫時不可用', fieldErrors: {} },
+        503,
+      )
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'hello')
+
+  await expect(page.locator('.bubble--error .bubble__content')).toHaveText('模型服務暫時不可用')
+  // No token ever arrived, so the placeholder itself becomes the error bubble.
+  await expect(page.locator('.bubble--assistant:not(.bubble--error)')).toHaveCount(0)
+})
+
+test('stopping a stream before any token removes the placeholder without an error bubble', async ({ page }) => {
+  let releaseStream!: () => void
+  const heldStream = new Promise<void>((resolve) => { releaseStream = resolve })
+
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      // Keep the request in flight so the composer stays in its streaming state until we stop it.
+      await heldStream
+      return sse(route, 'data:too late\n\n').catch(() => {})
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'stop me')
+  const stopButton = page.locator('button.composer__stop')
+  await expect(stopButton).toBeVisible()
+  await expect(page.locator('.bubble--assistant')).toHaveCount(1)
+
+  // dispatchEvent instead of click: CopilotKit's floating sidebar button sits over this corner.
+  await stopButton.dispatchEvent('click')
+
+  // A user-initiated abort is not a failure: the empty placeholder is dropped rather than turned
+  // into an error bubble, and the composer goes back to its send state.
+  await expect(page.locator('.bubble--assistant')).toHaveCount(0)
+  await expect(page.locator('.bubble--user .bubble__content')).toHaveText('stop me')
+  await expect(stopButton).toHaveCount(0)
+  releaseStream()
+})
+
+test('a stream sent without a stored session omits Bearer and still renders a mid-stream error', async ({ page }) => {
+  let authHeader: string | undefined
+  const stream = `data:Hi\n\nevent:error\ndata:${STREAM_ERROR}\n\n`
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      authHeader = route.request().headers()['authorization']
+      return sse(route, stream)
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  // Logging out in another tab clears the shared key while this tab still renders the chat.
+  // streamChat re-reads localStorage per request, so this turn takes the anonymous branch.
+  await page.evaluate((key) => localStorage.removeItem(key), SESSION_KEY)
+  await send(page, 'anonymous turn')
+
+  await expect(page.locator('.bubble--assistant:not(.bubble--error) .bubble__content')).toHaveText('Hi')
+  await expect(page.locator('.bubble--error .bubble__content')).toHaveText(STREAM_ERROR)
+  expect(authHeader).toBeUndefined()
+  // Anonymous chat is allowed, so a failed stream must not be mistaken for an expired session.
+  await expect(page.getByTestId('auth-page')).toHaveCount(0)
 })

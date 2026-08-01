@@ -163,6 +163,28 @@ public sealed class SkillExecutionArtifactTests : IClassFixture<TestWebAppFactor
         Assert.NotNull(body["timestamp"]);
     }
 
+    // 上一格的鏡像 legacy 形狀:package bytes 還在、但 package_sha256 沒存下來。
+    // 完整性守門只在「有存 sha」時比對(SkillController 第 125 行),這格因此完全不比對:
+    // 現況是放行,並以現場重算的 sha 交付 artifact。鎖住此 fail-open 行為 —— 沒有存下的期望值可比,
+    // 擋掉等於讓所有 pre-sha 的舊 revision 永久不可執行。
+    [Fact]
+    public async Task ExecutionArtifact_PackageWithoutStoredSha_ReturnsFreshlyComputedSha()
+    {
+        var zip = Zip("SKILL.md", "---\nname: legacy\n---\n沒有存 sha 的舊 package");
+        using var factory = new StubRevisionFactory(new StoredSkillRevision(
+            1, "name: legacy\nflow: []\n", SkillHash.Sha256("name: legacy\nflow: []\n"),
+            "admin-a", DateTime.UtcNow, "agentic", zip, null));
+
+        var response = await factory.CreateInternalClient()
+            .WithTenant("demo-a").WithRole("ADMIN").WithUser("admin-a")
+            .GetAsync("/api/skills/legacy/revisions/1/execution-artifact");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var artifact = await response.ReadJsonAsync();
+        Assert.Equal(SkillHash.Sha256(zip), artifact["package_sha256"]!.GetValue<string>());
+        Assert.Equal(zip, Convert.FromBase64String(artifact["package_base64"]!.GetValue<string>()));
+    }
+
     /// <summary>只把 ISkillRepository 換成會回傳「hash 對不上」列的 stub;其餘沿用共用測試骨架。</summary>
     private sealed class StubRevisionFactory : TestWebAppFactory
     {

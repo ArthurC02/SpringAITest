@@ -197,21 +197,16 @@ def test_nl_rule_slot_is_in_nl_logic_instruction_block(name):
 
 
 @pytest.mark.parametrize("name", SCRIPT_TEMPLATES_MIGRATED)
-def test_migrated_compare_stats_rule_slot_is_in_nl_logic_block(name):
-    """B2-py:compare/stats 的規則槽已從 script block 遷至 nl_logic 的 instruction block。
+def test_migrated_compare_stats_have_no_script_step(name):
+    """B2-py:compare/stats 遷移後,flow 內不再有任何 script 步驟。
 
     決策表另一半 —— 舊 test_script_rule_slot_is_in_script_block 驗「規則在 script block」;
-    遷移後改驗「規則在 nl_logic instruction block、且 flow 內不再有任何 script 步驟」。
+    遷移後「規則落在 nl_logic 的 instruction block」已由上面
+    test_nl_rule_slot_is_in_nl_logic_instruction_block[compare/stats] 覆蓋（NL_TEMPLATES
+    已塌成五支全含）,此處只留遷移專屬、別處沒有的那一條:script 步驟真的消失了。
     """
     data = yaml.safe_load(skills.get(name).definition)
     assert not any(isinstance(s, dict) and "script" in s for s in data["flow"])
-    nl_steps = [
-        s
-        for s in data["flow"]
-        if isinstance(s, dict) and str(s.get("node", "")).startswith("nl_logic")
-    ]
-    assert len(nl_steps) == 1
-    assert nl_steps[0]["params"]["instruction"].strip() == "__RULE_SLOT__"
 
 
 @pytest.mark.parametrize("name", TEMPLATE_NAMES)
@@ -288,6 +283,25 @@ def test_patched_migrated_invoke_flows_docs_through_nl_logic(name, rule, monkeyp
     assert "retrieve" in node_names and "nl_logic" in node_names
 
 
+def test_empty_retrieval_docs_still_flow_through_nl_logic(monkeypatch):
+    """檢索 0 筆時（docs=[]）nl_logic 照跑、user message 仍是 `docs: []`、business_result 照樣落地。
+
+    BVT:docs 集合大小的下界（既有 invoke 測試一律吃固定 3 筆的 DOCS）。build_user_message
+    對 input_keys 一律組 `k: repr(value)`,對空集合沒有任何守衛,nl_logic 也不短路;
+    若日後有人加「docs 為空就跳過 LLM／回預設值」的守衛,這條會轉紅而非靜默改語意。
+    """
+    _install_fake_retrieve(monkeypatch, docs=[])
+    patched = patch_rule(skills.get("template-compare").definition, COMPARE_NL_RULE)
+    llm = RecordingLLM(output=_NlLogicOutput(result="空集合結果"))
+    out = _invoke(patched, make_deps({}, llm=llm), query="q")
+
+    assert out["docs"] == []
+    assert out["business_result"] == "空集合結果"
+    assert llm.calls[-1]["user"] == "docs: []"
+    node_names = [t.node_name for t in out["trace"]]
+    assert "retrieve" in node_names and "nl_logic" in node_names
+
+
 # ---------------------------------------------------------------------------
 # SSR-P4-013 / 縫⑦:compare/stats 的檢索筆數槽 —— 通用 retrieve 實收覆寫值
 # ---------------------------------------------------------------------------
@@ -339,3 +353,20 @@ def test_topk_slot_override_zero_is_carried_to_retrieve(monkeypatch):
     llm = RecordingLLM(output=_NlLogicOutput(result="x"))
     _invoke(patched, make_deps({}, llm=llm), query="q")
     assert captured["json"]["top_k"] == 0
+
+
+def test_topk_slot_override_is_carried_to_retrieve_for_stats(monkeypatch):
+    """template-stats 也走得通覆寫路徑:patch 成 3 → 通用 retrieve 實收 3（all-pairs 缺口）。
+
+    上面兩支覆寫測試（17、0）都寫死 template-compare,stats 只被驗過「不覆寫吃骨架的 50」;
+    3 同時異於骨架值 50、compare 骨架值 8 與模組全域 4,patch 沒生效就只會看到 50。
+    """
+    captured: dict = {}
+    _install_fake_retrieve(monkeypatch, captured=captured)
+    raw = skills.get("template-stats").definition
+    patched = patch_topk(raw, 3)
+    patched = patch_rule(patched, STATS_NL_RULE)
+    assert skill_mod.validate_source(patched).valid is True
+    llm = RecordingLLM(output=_NlLogicOutput(result="x"))
+    _invoke(patched, make_deps({}, llm=llm), query="q")
+    assert captured["json"]["top_k"] == 3

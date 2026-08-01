@@ -37,8 +37,42 @@ test.describe('Workflow Designer graph boundary', () => {
     expect(canConnect({ ...connection, sourceHandle: 'missing' }, graph, catalog)).toBe(false)
   })
 
+  test('rejects a self-loop even when the node exposes matching in and out ports', () => {
+    const withOptional: WorkflowDefinition = { ...graph, nodes: [...graph.nodes, { id: 'c', type: 'optional', typeVersion: '1.0', config: {} }] }
+    expect(canConnect({ source: 'c', sourceHandle: 'out', target: 'c', targetHandle: 'in' }, withOptional, catalog)).toBe(false)
+    // The very same ports connect to another node, so the rejection is the self-loop guard.
+    expect(canConnect({ source: 'c', sourceHandle: 'out', target: 'b', targetHandle: 'in' }, withOptional, catalog)).toBe(true)
+  })
+
+  test('rejects connections whose source and target port dataTypes differ', () => {
+    const connection = { source: 'a', sourceHandle: 'out', target: 'd', targetHandle: 'in' }
+    const typedGraph: WorkflowDefinition = { ...graph, nodes: [graph.nodes[0], { id: 'd', type: 'data_sink', typeVersion: '1.0', config: {} }] }
+    const dataSink = { ...catalog[2], type: 'data_sink' }
+    expect(canConnect(connection, typedGraph, [catalog[0], { ...dataSink, inputs: [{ id: 'in', dataType: 'data' }] }])).toBe(false)
+    expect(canConnect(connection, typedGraph, [catalog[0], { ...dataSink, inputs: [{ id: 'in', dataType: 'control' }] }])).toBe(true)
+  })
+
+  test('rejects a different source once the target input port reaches maxConnections', () => {
+    const nodes = [...graph.nodes, { id: 'c', type: 'optional', typeVersion: '1.0', config: {} }]
+    const connection = { source: 'c', sourceHandle: 'out', target: 'b', targetHandle: 'in' }
+    expect(canConnect(connection, { ...graph, nodes }, catalog)).toBe(true)
+    // 'join'.in caps at one connection and an unrelated edge already fills it, so this is
+    // the maxConnections comparison, not the duplicate-edge short-circuit.
+    const filled: WorkflowDefinition = { ...graph, nodes, edges: [{ id: 'e1', source: { nodeId: 'a', port: 'out' }, target: { nodeId: 'b', port: 'in' } }] }
+    expect(canConnect(connection, filled, catalog)).toBe(false)
+  })
+
   test('revision diff operates on semantic nodes, not UI metadata', () => {
     expect(semanticDiff({ ...graph, nodes: [...graph.nodes, { id: 'c', type: 'join', typeVersion: '1.0', config: {} }] }, graph)).toEqual({ added: ['c'], removed: [], changed: [] })
+  })
+
+  test('revision diff reports removed and changed semantic nodes', () => {
+    const withExtra: WorkflowDefinition = { ...graph, nodes: [...graph.nodes, { id: 'c', type: 'join', typeVersion: '1.0', config: {} }] }
+    expect(semanticDiff(graph, withExtra)).toEqual({ added: [], removed: ['c'], changed: [] })
+    const reconfigured: WorkflowDefinition = { ...graph, nodes: [{ ...graph.nodes[0], config: { retries: 2 } }, graph.nodes[1]] }
+    expect(semanticDiff(reconfigured, graph)).toEqual({ added: [], removed: [], changed: ['a'] })
+    const retyped: WorkflowDefinition = { ...graph, nodes: [{ ...graph.nodes[0], type: 'optional' }, graph.nodes[1]] }
+    expect(semanticDiff(retyped, graph)).toEqual({ added: [], removed: [], changed: ['a'] })
   })
 
   test('palette is kind-scoped and required-stage metadata remains locked', () => {
@@ -82,10 +116,57 @@ test.describe('Workflow Designer graph boundary', () => {
     expect(removeSemanticEdges(definition, ['e1']).edges.map((edge) => edge.id)).toEqual(['e2'])
   })
 
+  test('node removal ignores empty and unmatched id lists and removes batches together', () => {
+    const definition: WorkflowDefinition = {
+      ...graph,
+      nodes: [...graph.nodes,
+        { id: 'c', type: 'optional', typeVersion: '1.0', config: {} },
+        { id: 'd', type: 'optional', typeVersion: '1.0', config: {} }],
+      edges: [{ id: 'e1', source: { nodeId: 'a', port: 'out' }, target: { nodeId: 'c', port: 'in' } }],
+    }
+    expect(removeSemanticNodes(definition, [], catalog)).toEqual(definition)
+    expect(removeSemanticNodes(definition, ['does-not-exist'], catalog)).toEqual(definition)
+    expect(removeSemanticEdges(definition, []).edges.map((edge) => edge.id)).toEqual(['e1'])
+    // A batch drops every deletable id at once; the required stage 'a' survives its own removal request.
+    const batched = removeSemanticNodes(definition, ['a', 'c', 'd'], catalog)
+    expect(batched.nodes.map((node) => node.id)).toEqual(['a', 'b'])
+    expect(batched.edges).toEqual([])
+  })
+
+  test('node removal honours an agent-runtime definition kind and runtime variant', () => {
+    const runtimeDefinition: WorkflowDefinition = {
+      schemaVersion: 1, kind: 'agent-runtime', runtimeVariant: 'verifier', governance: {},
+      nodes: [
+        { id: 'a', type: 'start', typeVersion: '1.0', config: {} },
+        { id: 'm', type: 'model_step', typeVersion: '1.0', config: {} },
+        { id: 'l', type: 'load_skill', typeVersion: '1.0', config: {} },
+      ],
+      edges: [],
+    }
+    // verifier: start stays required, model_step is deletable, worker-only load_skill fails closed.
+    expect(removeSemanticNodes(runtimeDefinition, ['a', 'm', 'l'], catalog).nodes.map((node) => node.id)).toEqual(['a', 'l'])
+    expect(removeSemanticNodes({ ...runtimeDefinition, runtimeVariant: 'worker' }, ['a', 'm', 'l'], catalog).nodes.map((node) => node.id)).toEqual(['a'])
+  })
+
   test('semantic edge can reconnect through typed catalog ports', () => {
     const definition: WorkflowDefinition = { ...graph, nodes: [...graph.nodes, { id: 'c', type: 'optional', typeVersion: '1.0', config: {} }], edges: [{ id: 'e1', source: { nodeId: 'a', port: 'out' }, target: { nodeId: 'b', port: 'in' } }] }
     const reconnected = reconnectSemanticEdge(definition, 'e1', { source: 'a', sourceHandle: 'out', target: 'c', targetHandle: 'in' }, catalog)
     expect(reconnected.edges[0].target.nodeId).toBe('c')
+  })
+
+  test('semantic edge reconnect fails closed and leaves the old edge in place', () => {
+    const definition: WorkflowDefinition = {
+      ...graph,
+      nodes: [...graph.nodes, { id: 'c', type: 'optional', typeVersion: '1.0', config: {} }],
+      edges: [
+        { id: 'e1', source: { nodeId: 'a', port: 'out' }, target: { nodeId: 'c', port: 'in' } },
+        { id: 'e2', source: { nodeId: 'c', port: 'out' }, target: { nodeId: 'b', port: 'in' } },
+      ],
+    }
+    expect(reconnectSemanticEdge(definition, 'e1', { source: 'a', sourceHandle: 'out', target: 'c', targetHandle: 'missing' }, catalog)).toEqual(definition)
+    expect(reconnectSemanticEdge(definition, 'e1', { source: 'a', sourceHandle: 'out', target: 'c', targetHandle: null }, catalog)).toEqual(definition)
+    // Moving e2 onto e1's exact ports would duplicate a surviving edge, so the whole edit is dropped.
+    expect(reconnectSemanticEdge(definition, 'e2', { source: 'a', sourceHandle: 'out', target: 'c', targetHandle: 'in' }, catalog)).toEqual(definition)
   })
 
   test('node deletion fails closed for absent catalog, unknown versions, and missing metadata', () => {
@@ -95,5 +176,16 @@ test.describe('Workflow Designer graph boundary', () => {
     const missingMetadata = [{ ...catalog[2], requiredStage: undefined }]
     expect(canDeleteNode(missingMetadata, 'orchestrator', 'optional', '1.0')).toBe(false)
     expect(canDeleteNode(catalog, 'orchestrator', 'optional', '1.0')).toBe(true)
+  })
+
+  test('node deletion pairs the workflow kind with an explicit runtime variant', () => {
+    // model_step is offered to both variants; load_skill is worker-only.
+    expect(canDeleteNode(catalog, 'agent-runtime', 'model_step', '1.0', 'worker')).toBe(true)
+    expect(canDeleteNode(catalog, 'agent-runtime', 'model_step', '1.0', 'verifier')).toBe(true)
+    expect(canDeleteNode(catalog, 'agent-runtime', 'load_skill', '1.0', 'worker')).toBe(true)
+    expect(canDeleteNode(catalog, 'agent-runtime', 'load_skill', '1.0', 'verifier')).toBe(false)
+    // Variant-scoped nodes stay locked when no variant is supplied; orchestrators ignore the argument.
+    expect(canDeleteNode(catalog, 'agent-runtime', 'model_step', '1.0')).toBe(false)
+    expect(canDeleteNode(catalog, 'orchestrator', 'optional', '1.0', 'verifier')).toBe(true)
   })
 })

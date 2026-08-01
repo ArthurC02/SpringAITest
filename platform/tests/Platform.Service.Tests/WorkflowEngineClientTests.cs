@@ -109,6 +109,33 @@ public sealed class WorkflowEngineClientTests
         Assert.Equal("「query」為必填。", ex.FieldErrors!["query"]);
     }
 
+    // 邊界:field_errors 存在但是空物件(0 筆)→ 收斂成 null,對外 ApiError.fieldErrors 不會出現空容器。
+    [Fact]
+    public async Task InvokeSkill_422EmptyFieldErrorsObject_KeepsMessage_CollapsesFieldErrorsToNull()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
+            """{"detail":{"error":"workflow_input_invalid","message":"輸入資料不符合 schema","field_errors":{}}}"""));
+
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+
+        Assert.Equal("輸入資料不符合 schema", ex.Message);
+        Assert.Null(ex.FieldErrors);
+    }
+
+    // 邊界:message 存在但只有空白 → 視同缺 message,回落固定文案(不把空白字串當訊息送出去),fieldErrors 仍保留。
+    [Fact]
+    public async Task InvokeSkill_422BlankMessage_FallsBackToFixedMessage_KeepsFieldErrors()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
+            """{"detail":{"message":"   ","field_errors":{"query":"「query」為必填。"}}}"""));
+
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+
+        Assert.Equal("Skill 輸入不符合規範", ex.Message);
+        Assert.NotNull(ex.FieldErrors);
+        Assert.Equal("「query」為必填。", ex.FieldErrors!["query"]);
+    }
+
     [Fact]
     public async Task InvokeSkill_TransportFailure_ThrowsWorkflowInvocation()
     {
@@ -160,6 +187,16 @@ public sealed class WorkflowEngineClientTests
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
         Assert.True(result.GetProperty("valid").GetBoolean());
+    }
+
+    [Fact] // 與 /skills/validate 同一條傳輸契約:非 2xx 一律是呼叫失敗 → 502,不是 valid:false。
+    public async Task ValidateBusinessWorkflow_DownstreamHttpError_ThrowsWorkflowInvocation()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => svc.ValidateBusinessWorkflowAsync("name: x", Ctx));
+        Assert.Contains("500", ex.Message);
     }
 
     [Fact]

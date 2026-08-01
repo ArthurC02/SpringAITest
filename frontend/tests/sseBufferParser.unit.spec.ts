@@ -44,4 +44,35 @@ test.describe('parseSseBuffer', () => {
     expect(noSpace.events[0].rawPrefix).toBe('data:')
     expect(withSpace.events[0].rawPrefix).toBe('data: ')
   })
+
+  test('a data-less frame (event: only) is consumed and dropped, not emitted', () => {
+    const { events, remaining } = parseSseBuffer('event:ping\n\n')
+    expect(events).toEqual([])
+    expect(remaining).toBe('')
+  })
+
+  test('comment and id: lines are ignored instead of corrupting the event they precede', () => {
+    const { events, remaining } = parseSseBuffer(': keep-alive\nid:1\ndata:x\n\n')
+    expect(events).toEqual([{ event: null, data: 'x', rawPrefix: 'data:' }])
+    expect(remaining).toBe('')
+  })
+
+  test('an empty buffer yields no events and nothing to carry over', () => {
+    expect(parseSseBuffer('')).toEqual({ events: [], remaining: '' })
+  })
+
+  test('two complete events in one chunk are both extracted, not just the first', () => {
+    const { events, remaining } = parseSseBuffer('data:a\n\ndata:b\n\n')
+    expect(events).toEqual([
+      { event: null, data: 'a', rawPrefix: 'data:' },
+      { event: null, data: 'b', rawPrefix: 'data:' },
+    ])
+    expect(remaining).toBe('')
+  })
+
+  test('a CRLF frame carries a named event: alongside the space-prefixed data: variant', () => {
+    const { events, remaining } = parseSseBuffer('event: RUN_STARTED\r\ndata: {"a":1}\r\n\r\n')
+    expect(events).toEqual([{ event: 'RUN_STARTED', data: '{"a":1}', rawPrefix: 'data: ' }])
+    expect(remaining).toBe('')
+  })
 })

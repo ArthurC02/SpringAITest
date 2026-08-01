@@ -7,7 +7,12 @@ import {
   planAgentDraftFill,
 } from '../src/components/AgentBuilderCopilot'
 import { createEmptyAgentDraft } from '../src/agentBuilder'
-import type { AgentBusinessRules, RuleActionCatalogEntry, RuleFactCatalogEntry } from '../src/types'
+import type {
+  AgentBusinessRule,
+  AgentBusinessRules,
+  RuleActionCatalogEntry,
+  RuleFactCatalogEntry,
+} from '../src/types'
 
 const CATALOG = { skills: ['rag-qa', 'sales-report'], tools: ['kb_search'] }
 
@@ -21,6 +26,7 @@ const FACTS: RuleFactCatalogEntry[] = [
     operators: [
       { name: 'gt', label: '大於', value_count: 1 },
       { name: 'lt', label: '小於', value_count: 1 },
+      { name: 'between', label: '介於', value_count: 2 },
     ],
   },
   {
@@ -31,6 +37,25 @@ const FACTS: RuleFactCatalogEntry[] = [
     gates: ['pre-action'],
     operators: [{ name: 'eq', label: '等於', value_count: 1 }],
     enumValues: ['TW', 'JP'],
+  },
+  {
+    name: 'context.verified',
+    label: '已驗證',
+    type: 'boolean',
+    provenance: 'context',
+    gates: ['pre-action'],
+    operators: [
+      { name: 'eq', label: '等於', value_count: 1 },
+      { name: 'is_true', label: '為真', value_count: 0 },
+    ],
+  },
+  {
+    name: 'action.retry_count',
+    label: '重試次數',
+    type: 'integer',
+    provenance: 'runtime',
+    gates: ['pre-action'],
+    operators: [{ name: 'gt', label: '大於', value_count: 1 }],
   },
 ]
 
@@ -103,6 +128,52 @@ test.describe('fillAgentDraft 計畫', () => {
     expect(plan.message).toContain('已移除:sales-report')
   })
 
+  test('純文字欄位直接進 patch,訊息逐項講明改了什麼', () => {
+    const plan = planAgentDraftFill(
+      { name: '客服 Agent', description: '處理退換貨問答', systemPrompt: '你是客服助理。' },
+      { current: createEmptyAgentDraft(), locked: false, ...CATALOG },
+    )
+
+    expect(plan.patch.name).toBe('客服 Agent')
+    expect(plan.patch.description).toBe('處理退換貨問答')
+    expect(plan.patch.system_prompt).toBe('你是客服助理。')
+    expect(plan.message).toContain('名稱=「客服 Agent」')
+    expect(plan.message).toContain('描述=「處理退換貨問答」')
+    expect(plan.message).toContain('System Prompt')
+    // 三個都是基本區欄位,不必展開進階設定。
+    expect(plan.revealAdvanced).toBe(false)
+  })
+
+  test('只給空白字串時該欄位完全不動', () => {
+    const current = createEmptyAgentDraft()
+    current.name = '既有名稱'
+
+    const plan = planAgentDraftFill(
+      { name: '   ', description: '', systemPrompt: '\n\t' },
+      { current, locked: false, ...CATALOG },
+    )
+
+    expect(plan.patch).toEqual({})
+    expect(plan.message).toContain('沒有可套用的內容')
+  })
+
+  // 空清單是「這次沒指定」,不是「清空」——否則 LLM 少填一個參數就等於撤掉整份授權。
+  test('明確給空清單時不會把既有授權洗成空集合', () => {
+    const current = createEmptyAgentDraft()
+    current.capabilities = ['analysis']
+    current.knowledge_sources = ['handbook']
+    current.allowed_tools = ['kb_search']
+
+    const plan = planAgentDraftFill(
+      { capabilities: [], knowledgeSources: [], tools: [] },
+      { current, locked: false, ...CATALOG },
+    )
+
+    expect(plan.patch).toEqual({})
+    expect(plan.revealAdvanced).toBe(false)
+    expect(plan.message).toContain('沒有可套用的內容')
+  })
+
   test('locked 時完全不產生 patch', () => {
     const plan = planAgentDraftFill(
       { name: '客服 Agent', skills: ['rag-qa'], tools: ['kb_search'] },
@@ -153,6 +224,96 @@ test.describe('addAgentBusinessRule 計畫', () => {
         expect(plan.message).toContain(expectedHint)
       })
     }
+  })
+
+  test('運算子存在於目錄、但不屬於這個 fact 時不改草稿', () => {
+    const plan = planAgentBusinessRule(
+      { fact: 'action.amount', operator: 'eq', action: 'deny', value: '1' },
+      ruleContext(),
+    )
+    expect(plan.rules).toBeUndefined()
+    expect(plan.message).toContain('不適用於 action.amount')
+    expect(plan.message).toContain('gt')
+  })
+
+  test('列舉值在允許清單中時照常建立規則', () => {
+    const plan = planAgentBusinessRule(
+      { fact: 'context.region', operator: 'eq', action: 'deny', value: 'TW' },
+      ruleContext(),
+    )
+    expect(plan.rules?.rules[0]?.when).toEqual({ fact: 'context.region', op: 'eq', value: 'TW' })
+  })
+
+  // LLM 一律用字串傳值,型別要在這裡轉成 canonical AST 的原生型別,轉不出來就整條不收。
+  test('布林與整數 fact 依型別轉型,轉不出來就不改草稿', () => {
+    const boolPlan = planAgentBusinessRule(
+      { fact: 'context.verified', operator: 'eq', action: 'deny', value: 'false' },
+      ruleContext(),
+    )
+    expect(boolPlan.rules?.rules[0]?.when).toEqual({
+      fact: 'context.verified',
+      op: 'eq',
+      value: false,
+    })
+
+    const intPlan = planAgentBusinessRule(
+      { fact: 'action.retry_count', operator: 'gt', action: 'deny', value: '3' },
+      ruleContext(),
+    )
+    expect(intPlan.rules?.rules[0]?.when).toEqual({
+      fact: 'action.retry_count',
+      op: 'gt',
+      value: 3,
+    })
+
+    const invalid: [Parameters<typeof planAgentBusinessRule>[0], string][] = [
+      [{ fact: 'context.verified', operator: 'eq', action: 'deny', value: 'maybe' }, '布林值'],
+      [{ fact: 'action.retry_count', operator: 'gt', action: 'deny', value: '2.5' }, '整數'],
+    ]
+    for (const [input, hint] of invalid) {
+      const plan = planAgentBusinessRule(input, ruleContext())
+      expect(plan.rules).toBeUndefined()
+      expect(plan.message).toContain(hint)
+    }
+  })
+
+  test('不需要比較值的運算子不寫出 when.value', () => {
+    const plan = planAgentBusinessRule(
+      { fact: 'context.verified', operator: 'is_true', action: 'deny' },
+      ruleContext(),
+    )
+    expect(plan.rules?.rules[0]?.when).toEqual({ fact: 'context.verified', op: 'is_true' })
+  })
+
+  test('需要範圍值的運算子交還給表單編輯器,不改草稿', () => {
+    const plan = planAgentBusinessRule(
+      { fact: 'action.amount', operator: 'between', action: 'deny', value: '1000' },
+      ruleContext(),
+    )
+    expect(plan.rules).toBeUndefined()
+    expect(plan.message).toContain('需要範圍值')
+  })
+
+  test('草稿已有規則時是附加,既有規則原封保留且 priority 依序遞減', () => {
+    const existing: AgentBusinessRule = {
+      id: 'rule-existing',
+      name: '既有規則',
+      enabled: true,
+      priority: 100,
+      when: { fact: 'action.amount', op: 'lt', value: '10' },
+      then: [{ action: 'deny' }],
+    }
+
+    const plan = planAgentBusinessRule(
+      { fact: 'action.amount', operator: 'gt', action: 'require_approval', value: '5000' },
+      ruleContext({ current: { version: 1, rules: [existing] } }),
+    )
+
+    expect(plan.rules?.rules).toHaveLength(2)
+    expect(plan.rules?.rules[0]).toEqual(existing)
+    expect(plan.rules?.rules[1]?.priority).toBe(90)
+    // 沒給名稱時沿用 createBusinessRule 依位置產生的預設名。
+    expect(plan.rules?.rules[1]?.name).toBe('規則 2')
   })
 
   test('缺少必要的比較值時不改草稿', () => {

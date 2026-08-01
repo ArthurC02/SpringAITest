@@ -185,6 +185,29 @@ def test_no_override_retrieve_gets_slot_value(active_backend, probe, captured_to
     assert captured_top_k == [8]
 
 
+def _unreachable(url, headers):
+    """backend 連不上（httpx.ConnectError 由 client.get 直接拋）。"""
+    raise httpx.ConnectError("backend 不可達")
+
+
+def _server_error(url, headers):
+    """backend 回 5xx（由 _fetch 的 raise_for_status 轉成 BackendUnavailable）。"""
+    return _ActiveResponse(500, None)
+
+
+@pytest.mark.parametrize("handler", [_unreachable, _server_error], ids=["unreachable", "5xx"])
+def test_backend_failure_falls_back_to_slot_value(monkeypatch, probe, captured_top_k, handler):
+    """取 active 失敗（不可達／5xx，非 404）→ resolve 記 log 回全域路徑 → retrieve 仍收 SLOT 8。
+
+    與 404 是兩條不同程式路徑（except Exception vs. 空 values 早退），故障不得跨租戶回落，
+    也不得寫 per-config 快取。
+    """
+    install_fake_get(monkeypatch, handler)
+    _invoke(probe)
+    assert captured_top_k == [8]
+    assert config_apply._config_deps_cache == {}  # 故障 → 不寫 per-config 快取
+
+
 def test_other_keys_overridden_but_retrieval_topk_absent_keeps_slot(
     active_backend, probe, captured_top_k
 ):

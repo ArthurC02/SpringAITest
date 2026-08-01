@@ -69,11 +69,14 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     // Mirrors the client-side history that @ag-ui/client sends back after it has received a TOOL_CALL_*
     // event. Keeping the parent assistant id is essential: non-text messages deliberately do not use the
     // text fallback in AguiWireDedupAgent, because doing so could split a tool call/result exchange.
-    private static object AssistantToolCallMsg(string id, string callId, string name, string arguments) => new
+    // content 預設為空字串(真實 client 的 tool-call 訊息通常沒有文字);需要「文字與既存回覆相同、
+    // 但形狀是 tool call」這格等價類時才傳入(見 …_NotCollapsedByTextFallback)。
+    private static object AssistantToolCallMsg(
+        string id, string callId, string name, string arguments, string content = "") => new
     {
         id,
         role = "assistant",
-        content = string.Empty,
+        content,
         toolCalls = new[] { new { id = callId, type = "function", function = new { name, arguments } } },
     };
 
@@ -385,6 +388,42 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
         {
             Assert.Single(lastRunTexts, text => text == userText);
         }
+    }
+
+    // 文字 fallback 只適用「純文字」assistant 訊息:AguiWireDedupAgent.GetAssistantTextFingerprint 對含
+    // function call/result 的訊息一律回 null(拆散工具配對的代價遠大於多送一則重複訊息),所以 id 對不齊的
+    // tool-call 形狀 assistant 訊息不會被吞掉,而是原樣多流一則進模型輸入。本案 session 只存過純文字回覆,
+    // 且 callId 是伺服器從未發過的值 → 模型輸入裡的 FunctionCallContent 只可能來自這次 wire 重送。
+    [Fact]
+    [Trait("EvidenceGate", "E-03")]
+    public async Task Agui_FullArrayResend_MismatchedId_ToolCallShapedAssistantMessage_NotCollapsedByTextFallback()
+    {
+        const string threadId = "b-p2-04-toolcall-mismatched-id";
+        const string echoedCallId = "call-never-issued-by-server";
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+        var wireHistory = new List<object> { UserMsg(Guid.NewGuid().ToString("N"), "第一輪") };
+
+        var firstResponse = await SendAguiAsync(client, RunInputWithMessages(threadId, wireHistory));
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        var (_, assistantText) = ExtractAssistantMessage(await firstResponse.Content.ReadAsStringAsync());
+
+        // 與 session 既存 assistant 回覆同文字、id 又刻意對不齊,唯一差別是它帶了 toolCalls——文字 fallback
+        // 若沒有排除非文字內容,這則就會被誤判成「已知的那則回覆」而消失,工具呼叫也跟著不見。
+        wireHistory.Add(AssistantToolCallMsg(
+            Guid.NewGuid().ToString("N"), echoedCallId, "switchView", "{\"view\":\"documents\"}", assistantText));
+        wireHistory.Add(UserMsg(Guid.NewGuid().ToString("N"), "第二輪"));
+
+        var secondResponse = await SendAguiAsync(client, RunInputWithMessages(threadId, wireHistory));
+        Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
+        await secondResponse.Content.ReadAsStringAsync();
+
+        var modelInput = ChatClient.Runs[^1];
+        var calls = modelInput.SelectMany(message => message.Contents.OfType<FunctionCallContent>()).ToList();
+        Assert.Equal(echoedCallId, Assert.Single(calls).CallId);
+        // session 既存 2 則(第一輪 user + assistant)+ 本輪新收 2 則(tool-call 形狀 assistant + 第二輪 user):
+        // 對不齊的那則是「多出來的一則」,既沒被吞掉,也沒取代既存那則。
+        Assert.Equal(4, modelInput.Count);
+        Assert.Single(modelInput, message => (message.Text ?? string.Empty) == "第二輪");
     }
 
     // 使用者連續兩輪送出「內容相同、id 不同」的訊息(單訊息 client 模式,每輪只送新訊息)——

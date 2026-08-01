@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import io
 import json
 import os
 import subprocess
@@ -25,6 +26,7 @@ import pytest
 from app.engine import script_isolation
 from app.engine.script_isolation import (
     ALLOWED_TOOL_RISKS,
+    MAX_IPC_BYTES,
     MAX_TOOL_CALLS,
     IsolatedSubprocessRunner,
     accept_writes,
@@ -310,6 +312,58 @@ def test_wellformed_ipc_decodes():
     }
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        b'{"op": "hello", "pid": 1}\n',  # 解得開但不是 ready
+        b'{"op": "ready", "pid": "1"}\n',  # pid 不是整數（child 說謊或版本不合）
+        b'{"op": "ready"}\n',  # 根本沒回報 pid
+    ],
+    ids=["op-not-ready", "pid-not-int", "pid-missing"],
+)
+def test_bad_startup_handshake_fails_closed_and_still_reaps_the_child(monkeypatch, line):
+    """握手不合格 → 連 job 都不送出，且子行程照樣收屍（孤兒 pid 追蹤不到就不能放過它）。
+
+    真實的 child 只會送出合格的握手，所以這條 fail-closed 分支只能靠替換讀取層來驗。
+    """
+    runner = IsolatedSubprocessRunner()
+    monkeypatch.setattr(script_isolation, "_read_line", lambda stream: line)
+
+    with pytest.raises(ScriptError) as exc:
+        _run(runner, "state['x'] = 1")
+
+    assert "握手" in str(exc.value)
+    assert runner.last_child_pid is None  # 沒有可信的 pid 就不記
+    assert runner.last_process.returncode is not None  # 但行程一定收乾淨
+
+
+def test_ipc_read_size_boundary_is_at_max_ipc_bytes():
+    """讀取層的 1MB 上限：恰好 MAX_IPC_BYTES 讀得回來，多一個位元組就出局。
+
+    上限擋在 readline 這一層，child 才沒機會用一條無限長的行灌爆 parent 的記憶體。
+    """
+    on_point = b"x" * (MAX_IPC_BYTES - 1) + b"\n"  # 含換行恰好 MAX_IPC_BYTES
+
+    assert script_isolation._read_line(io.BytesIO(on_point)) == on_point
+
+    with pytest.raises(ScriptLimitExceeded):
+        script_isolation._read_line(io.BytesIO(b"x" * MAX_IPC_BYTES + b"\n"))
+
+
+def test_oversized_input_state_projection_is_rejected_before_any_process_is_spawned():
+    """送出方向的同一個上限：state 投影超過 1MB → 受控例外，連子行程都不啟動。
+
+    決策表另一半（正常大小的投影照常送得出去）是本檔其餘每一個 `_isolated` 測試。
+    """
+    runner = IsolatedSubprocessRunner()
+
+    with pytest.raises(ScriptLimitExceeded) as exc:
+        _run(runner, "state['n'] = len(state['blob'])", {"blob": "x" * MAX_IPC_BYTES})
+
+    assert "IPC 上限" in str(exc.value)
+    assert runner.last_process is None
+
+
 # ---------------------------------------------------------------------------
 # 3c. 縱深防禦：parent 端重新過契約（child 說謊拿不到好處）
 # ---------------------------------------------------------------------------
@@ -364,6 +418,27 @@ def test_oversized_state_write_is_rejected_end_to_end():
         _isolated("state['big'] = 'x' * (300 * 1024)")
 
 
+@pytest.mark.parametrize(
+    "forged",
+    ["not an identifier", "os.system", "E" * 65, 7, None],
+    ids=["spaces", "dotted", "too-long-65", "not-str", "missing"],
+)
+def test_lying_child_cannot_forge_an_arbitrary_error_code(forged):
+    """trace 的 error_code 取自例外類別名 → 只收合法識別字且 ≤64 字元，其餘退回 ScriptError。"""
+    error = script_isolation._remote_error({"type": forged, "message": "boom"})
+
+    assert type(error) is ScriptError  # 不是以 child 給的字串動態命名的子類別
+    assert str(error) == "boom"
+
+
+def test_child_error_type_length_boundary_still_names_the_exception():
+    """邊界另一半：恰好 64 字元的合法識別字仍還原成同名例外（ScriptError 的子類別）。"""
+    error = script_isolation._remote_error({"type": "E" * 64, "message": "boom"})
+
+    assert type(error).__name__ == "E" * 64
+    assert isinstance(error, ScriptError)
+
+
 # ---------------------------------------------------------------------------
 # 3d. 縱深防禦：tool broker（child 不持憑證，parent 重新驗證）
 # ---------------------------------------------------------------------------
@@ -401,6 +476,46 @@ def test_write_risk_tool_is_denied_and_never_invoked():
 def test_allowed_tool_risks_are_a_whitelist():
     """釘住 allowlist 本身：新增 risk 類別預設就是拒絕，不必回頭補黑名單。"""
     assert ALLOWED_TOOL_RISKS == frozenset({"low", "read"})
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"op": "tool", "name": 7, "args": {}},
+        {"op": "tool", "name": "local.calculator"},  # 沒有 args
+        {"op": "tool", "name": "local.calculator", "args": ["expression", "1+1"]},
+    ],
+    ids=["name-not-str", "args-missing", "args-not-dict"],
+)
+def test_malformed_tool_request_is_denied_before_the_registry_is_consulted(message):
+    """child 的 tool 請求形狀不對 → broker 直接回拒，不查表也不代打（fail closed）。"""
+    tools = FakeToolBag()
+
+    reply = IsolatedSubprocessRunner()._broker(message, tools, 1)
+
+    assert reply == {
+        "op": "tool_result",
+        "ok": False,
+        "type": "ToolError",
+        "error": "tool 請求格式不正確",
+    }
+    assert tools.calls == []
+
+
+def test_tool_result_ipc_size_boundary_is_at_max_ipc_bytes():
+    """代打結果吃的是同一個 IPC 上限：序列化後恰好 1MB 送得回去，多一個位元組被擋。"""
+    request = {"op": "tool", "name": "local.calculator", "args": {}}
+    runner = IsolatedSubprocessRunner()
+
+    on_point = "x" * (MAX_IPC_BYTES - 2)  # 加上 json 的兩個引號恰好 MAX_IPC_BYTES
+    assert runner._broker(request, FakeToolBag(result=on_point), 1) == {
+        "op": "tool_result",
+        "ok": True,
+        "result": on_point,
+    }
+
+    denied = runner._broker(request, FakeToolBag(result="x" * (MAX_IPC_BYTES - 1)), 1)
+    assert denied["ok"] is False and denied["type"] == "ScriptLimitExceeded"
 
 
 def test_unknown_tool_is_rejected_by_the_broker():

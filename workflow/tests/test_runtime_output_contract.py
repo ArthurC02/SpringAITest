@@ -53,6 +53,31 @@ def test_scalar_root_and_json_type_enum_identity() -> None:
     assert not output_matches({"type": "number"}, "NaN")
 
 
+def test_boolean_and_null_root_contracts_are_valid_and_match() -> None:
+    """boolean/null 兩個 scalar type 過去只出現在非法向量裡,合法路徑零覆蓋。"""
+    validate_output_contract({"type": "boolean"})
+    validate_output_contract({"type": "null"})
+
+    assert output_matches({"type": "boolean"}, "true") is True
+    assert output_matches({"type": "boolean"}, "false") is True
+    assert output_matches({"type": "boolean"}, "1") is False
+    assert output_matches({"type": "null"}, "null") is True
+    assert output_matches({"type": "null"}, "0") is False
+
+
+def test_object_additional_properties_defaults_to_permissive() -> None:
+    """additionalProperties 省略／true 是寬鬆預設:多出來的鍵不算違約。"""
+    permissive = {"type": "object", "properties": {"a": {"type": "string"}}}
+    explicit_true = dict(permissive, additionalProperties=True)
+    validate_output_contract(permissive)
+    validate_output_contract(explicit_true)
+
+    assert output_matches(permissive, '{"a":"x","extra":1}') is True
+    assert output_matches(explicit_true, '{"a":"x","extra":1}') is True
+    strict = dict(permissive, additionalProperties=False)
+    assert output_matches(strict, '{"a":"x","extra":1}') is False
+
+
 def test_empty_output_contract_means_string() -> None:
     """D1/D2 已發布 Agent 的相容路徑：空契約＝任意字串輸出。"""
     validate_output_contract({})
@@ -198,3 +223,60 @@ def test_output_contract_rejects_oversized_canonical_bytes() -> None:
 
     with pytest.raises(ValueError, match="canonical byte limit"):
         validate_output_contract(oversized)
+
+
+def test_enum_length_lower_boundary() -> None:
+    """enum 長度下界:1 個值合法,0 個(空 enum)必須擋掉。"""
+    validate_output_contract({"type": "string", "enum": ["only"]})
+
+    with pytest.raises(ValueError, match="enum is invalid"):
+        validate_output_contract({"type": "string", "enum": []})
+
+
+def test_property_name_length_lower_boundary() -> None:
+    """屬性名長度下界:1 字合法,空字串必須擋掉。"""
+    validate_output_contract({"type": "object", "properties": {"n": {"type": "string"}}})
+
+    with pytest.raises(ValueError, match="property name is invalid"):
+        validate_output_contract(
+            {"type": "object", "properties": {"": {"type": "string"}}}
+        )
+
+
+def test_output_contract_rejects_duplicate_required_entries() -> None:
+    """required 重複列同一個屬性,與「指向不存在的屬性」是不同的非法類別。"""
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    validate_output_contract(dict(schema, required=["a"]))
+
+    with pytest.raises(ValueError, match="required fields are invalid"):
+        validate_output_contract(dict(schema, required=["a", "a"]))
+
+
+def test_output_contract_rejects_unrecognized_type_name() -> None:
+    """type 是字串但不在白名單:既有向量只涵蓋 type 根本不是字串的那半邊。"""
+    with pytest.raises(ValueError, match="type is invalid"):
+        validate_output_contract({"type": "banana"})
+
+    with pytest.raises(ValueError, match="type is invalid"):
+        validate_output_contract({"type": "String"})
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {"type": "string", "items": {"type": "string"}},
+        {"type": "boolean", "properties": {"a": {"type": "string"}}},
+        {"type": "array", "items": {"type": "string"}, "required": ["a"]},
+        {"type": "integer", "additionalProperties": False},
+    ],
+    ids=[
+        "items-on-string",
+        "properties-on-boolean",
+        "required-on-array",
+        "additionalProperties-on-integer",
+    ],
+)
+def test_output_contract_rejects_keyword_not_valid_for_its_type(contract: dict) -> None:
+    """關鍵字本身在白名單內、但放錯 type 也要擋——既有向量用的 pattern 走的是另一條分支。"""
+    with pytest.raises(ValueError, match="not valid for its type"):
+        validate_output_contract(contract)

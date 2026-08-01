@@ -95,6 +95,32 @@ def test_non_whitelisted_syntax_rejected_at_both_phases(expr):
         evaluate(expr, {"x": [1], "y": True, "z": 1})
 
 
+@pytest.mark.parametrize("expr", ["state.x == 1j", "state.x == b'ab'"])
+def test_unsupported_constant_type_rejected_with_actionable_message(expr):
+    """複數／bytes 字面量仍是 ast.Constant，但不在 _CONST_TYPES：兩期都拒絕且點名常數型別。
+
+    決策表另一半（str/int/float/bool/None 常數）已由上面的白名單參數涵蓋；
+    訊息若退化成籠統的「不支援的語法: Constant」，作者就看不出是常數型別的問題。
+    """
+    for phase in (lambda: validate(expr), lambda: evaluate(expr, {"x": 1})):
+        with pytest.raises(ExpressionError, match="不支援的常數型別"):
+            phase()
+
+
+def test_ast_depth_limit_on_and_off_point():
+    """MAX_AST_DEPTH 的 on/off-point：剛好 100 層照常求值、101 層被擋成 ExpressionError。
+
+    `state.x` 自身佔 3 層（Attribute → Name → ctx），每個 `not` 再加 1 層。
+    這道上限存在的理由是不讓 RecursionError 穿過 ExpressionError（見模組 docstring），
+    所以 on-point 一定要真的走完 _check + _eval，不能只驗 validate。
+    """
+    nots = expressions.MAX_AST_DEPTH - 3
+    at_limit = "not " * nots + "state.x"
+    assert evaluate(at_limit, {"x": True}) is (nots % 2 == 0)
+    with pytest.raises(ExpressionError, match="巢狀深度超過上限"):
+        evaluate("not " + at_limit, {"x": True})
+
+
 def test_and_short_circuit_does_not_skip_validation_of_right_operand():
     """左運算元為假也要驗右邊：靜態檢查是完整走訪，不隨求值短路而漏檢。"""
     with pytest.raises(ExpressionError):
@@ -125,8 +151,10 @@ def test_is_operator_is_rejected_with_actionable_message(expr):
         ({"x": 5}, True),  # 兩段都成立
         ({"x": 0}, False),  # 第一段就不成立（右段不需成立）
         ({"x": 20}, False),  # 第一段成立、第二段不成立（走 left = right 那一輪）
+        ({"x": 1}, False),  # 下界 on-point：`<` 誤寫成 `<=` 這裡才抓得到
+        ({"x": 10}, False),  # 上界 on-point：同上，且必須走到第二輪比較
     ],
-    ids=["inside", "below", "above"],
+    ids=["inside", "below", "above", "at-lower-bound", "at-upper-bound"],
 )
 def test_chained_comparison(state, expected):
     """`1 < state.x < 10` 是單一 Compare 節點的多運算子形式（_eval 的 left = right 迴圈）。"""

@@ -292,6 +292,55 @@ def test_script_beyond_parser_stack_is_script_violation_not_memory_error():
         script_runner.scan(_deep_script(PARSER_OVERFLOW))
 
 
+@pytest.mark.parametrize(
+    "definition, role, code",
+    [
+        pytest.param(
+            "name: deep-probe\n"
+            "description: 深度探針\n"
+            "input_schema:\n"
+            "  query: {type: str, required: true, min_length: 1}\n"
+            "flow:\n"
+            "  - branch:\n"
+            f"      when: {_deep_expression(PARSER_OVERFLOW)}\n"
+            "      then:\n"
+            "        - node: query_intake@1.0\n",
+            "USER",
+            "invalid_expression",
+            id="when",
+        ),
+        pytest.param(
+            "name: deep-probe\n"
+            "description: 深度探針\n"
+            "flow:\n"
+            f"  - script: {_deep_script(PARSER_OVERFLOW)}\n",
+            "ADMIN",
+            "forbidden_script",
+            id="script",
+        ),
+    ],
+)
+def test_validate_endpoint_stays_200_beyond_parser_stack(definition, role, code):
+    """入口 1／2 × parser 堆疊溢位：上面那兩條端點測試只驗到 MAX_AST_DEPTH+1 這個量級。
+
+    真正先發生的是 ast.parse 自己丟的 MemoryError（深度上限量在 parse 之後，攔不到）。
+    definition 欄位沒有長度上限，80KB 的一元運算鏈送得進 HTTP body —— 這裡證明兩種
+    形狀（branch 的 when、script 原文）在該量級下仍是 200 + errors[]，不是 500。
+    script 那半邊同時是 validate_source 在此量級下唯一的 script 路徑覆蓋。
+    """
+    resp = TestClient(app).post(
+        "/skills/validate",
+        json={"definition": definition},
+        headers=auth_headers(role=role),
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is False
+    assert [e["code"] for e in body["errors"]] == [code]
+    assert "skill" not in body  # 失敗回應不得帶可寫入的 metadata
+
+
 def test_validate_source_returns_invalid_expression_for_parser_overflow():
     """端到端：例外逃出 validate_source = /skills/validate 500（違反「永遠 200 + errors[]」）。"""
     from app.engine.skill import validate_source

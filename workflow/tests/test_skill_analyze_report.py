@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import dataclasses
 
 from fastapi.testclient import TestClient
 
@@ -170,3 +171,62 @@ def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
         assert body["output"]["report"] == "API 報告"
     finally:
         skills._SKILLS["analyze-report"] = original
+
+
+def test_analyze_report_invoke_api_level_admin_role_with_no_docs(monkeypatch):
+    """ADMIN × 檢索空結果：角色閘門通過後仍走「（無資料）」分支（不呼叫 doc_insights 的 LLM）。
+
+    既有的 no_docs 測試走內部 _invoke 繞過 HTTP 路由，這裡補齊真實端點的那一格。
+    """
+    patch_retrieve(monkeypatch, [])
+
+    original = skills.get("analyze-report")
+    llm = FakeStructuredLLM(
+        outputs={_ReportSynthesizeOutput: _ReportSynthesizeOutput(report="API 報告（無資料）")}
+    )
+    deps = make_deps({}, llm=llm)
+    skills._SKILLS["analyze-report"] = dataclasses.replace(
+        original, graph=compiler.compile(original.skill, deps), deps=deps
+    )
+    try:
+        resp = client.post(
+            "/skills/analyze-report/invoke",
+            json={"input": {"topic": "無資料主題"}},
+            headers=auth_headers(role="ADMIN"),
+        )
+
+        assert resp.status_code == 200
+        output = resp.json()["output"]
+        assert output["insights"] == "（無資料）"
+        assert output["report"] == "API 報告（無資料）"
+    finally:
+        skills._SKILLS["analyze-report"] = original
+
+
+# ---------------------------------------------------------------------------
+# API 級：ADMIN 通過角色閘門後，topic 的 required / min_length: 1 兩側
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_report_invoke_api_level_rejects_missing_topic():
+    resp = client.post(
+        "/skills/analyze-report/invoke",
+        json={"input": {}},
+        headers=auth_headers(role="ADMIN"),
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "workflow_input_invalid"
+    assert detail["field_errors"] == {"topic": "「topic」為必填。"}
+
+
+def test_analyze_report_invoke_api_level_rejects_blank_topic():
+    resp = client.post(
+        "/skills/analyze-report/invoke",
+        json={"input": {"topic": ""}},
+        headers=auth_headers(role="ADMIN"),
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "workflow_input_invalid"
+    assert detail["field_errors"] == {"topic": "「topic」至少需 1 個字。"}

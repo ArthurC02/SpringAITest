@@ -266,6 +266,23 @@ public sealed class AgentApiTests : IDisposable
         Assert.Equal(400, (await resp.ReadJsonAsync())["status"]!.GetValue<int>());
     }
 
+    // publish 的併發權威是 body 的 expected_draft_version(不是 If-Match):欄位缺漏 → 400(上一個測試),
+    // 欄位良好但版本過期 → 409。帶著相符的 If-Match 才能確定 409 來自 expected_draft_version 而非前置條件。
+    [Fact]
+    public async Task Publish_StaleExpectedDraftVersion_Returns409_Passthrough()
+    {
+        var resp = await _factory.AdminClient().SendAsync(Request(
+            "POST",
+            ExistingPath + "/publish",
+            ifMatch: FakeAgentService.CurrentETag,
+            body: new { expected_draft_version = 2 }));
+
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(409, body["status"]!.GetValue<int>());
+        Assert.Equal("草稿版本衝突，請重新載入", body["message"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task Deactivate_Admin_Returns204()
     {
@@ -298,6 +315,21 @@ public sealed class AgentApiTests : IDisposable
         Assert.Equal(2, (await resp.ReadJsonAsync())["published_revision"]!.GetValue<int>());
     }
 
+    [Fact]
+    public async Task NonNumericRevision_DoesNotMatchRestoreRoute()
+    {
+        var before = FakeAgentService.Calls.Count;
+
+        // {revision:int} 與 {id:guid} 同屬路由層的守門:非數字 segment 連路由都不該匹配,
+        // 代理更不該被呼叫(不會變成 revision=0 之類的預設值送到 backend)。
+        var resp = await _factory.AdminClient().PostAsync(
+            ExistingPath + "/revisions/abc/restore",
+            content: null);
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Equal(before, FakeAgentService.Calls.Count);
+    }
+
     // 生命週期(validate → publish → revisions → restore → deactivate)的狀態機不變量無法在這一層驗:
     // FakeAgentService 是無狀態的,每個動作的回應與呼叫順序無關。真正的順序契約在 backend 的
     // AgentsApiTests / AgentRepositoryTests;此處保留的是每個 action 各自的穿透行為。
@@ -325,7 +357,9 @@ public sealed class AgentApiTests : IDisposable
 
     [Theory]
     [InlineData("GET", "/api/agents/catalog/rule-facts")]
+    [InlineData("GET", "/api/agents/catalog/rule-actions")]
     [InlineData("POST", "/api/agents/rules/validate")]
+    [InlineData("POST", "/api/agents/rules/simulate")]
     public async Task RuleEndpoints_RequireAuthenticationAndAdmin(string method, string path)
     {
         var anonymous = await _factory.CreateClient().SendAsync(Request(

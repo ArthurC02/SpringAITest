@@ -86,14 +86,33 @@ public sealed class DocumentServiceTests
         Assert.Equal("找不到文件：d1", ex.Message);
     }
 
-    // B2:List 改走 BackendErrorMapper —— backend 4xx 不再被一律壓成 502,403 對外仍是 403。
+    // backend 非 404 的可映射 4xx 走共用映射(不是被文件專屬的 404 訊息蓋掉,也不是被壓成 502)。
     [Fact]
-    public async Task List_Backend403_ThrowsWorkflowForbidden()
+    public async Task Delete_Backend403_ThrowsWorkflowForbidden()
     {
         var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足")));
 
-        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(() => svc.ListAsync(Ctx));
+        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(() => svc.DeleteAsync("d1", Ctx));
         Assert.Equal("權限不足", ex.Message);
+    }
+
+    // B2:List 改走 BackendErrorMapper —— backend 4xx 不再被一律壓成 502,各自對應同狀態碼且 message 不改寫。
+    // 404 在此是 WorkflowNotFoundException(文件專屬的 DocumentNotFoundException 只在 delete 分支)。
+    [Theory]
+    [InlineData(400, typeof(WorkflowBadInputException), "輸入驗證失敗")]
+    [InlineData(403, typeof(WorkflowForbiddenException), "權限不足")]
+    [InlineData(404, typeof(WorkflowNotFoundException), "找不到文件")]
+    [InlineData(409, typeof(DownstreamConflictException), "文件狀態衝突")]
+    [InlineData(422, typeof(SkillValidationFailedException), "文件內容驗證失敗")]
+    public async Task List_BackendError_MapsToSameStatusException_KeepsMessage(
+        int status, Type expected, string message)
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error((HttpStatusCode)status, message)));
+
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => svc.ListAsync(Ctx));
+
+        Assert.IsType(expected, ex);
+        Assert.Equal(message, ex.Message);
     }
 
     // 非預期狀態(5xx)統一包成 502(backend 是上游)。

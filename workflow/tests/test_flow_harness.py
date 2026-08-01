@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 
 import pytest
 
@@ -68,6 +69,63 @@ async def test_flow_budget_rejects_before_side_effect():
 
 
 @pytest.mark.asyncio
+async def test_flow_budget_rejects_when_only_tool_bound_exceeds():
+    graph = _Graph({"side_effect": True})
+    result = await invoke_flow_with_governance(
+        skill=Skill(name="tooled", flow=[{"tool": "probe.tool", "save_as": "out"}]),
+        raw_input={}, deps=None, timeout_seconds=1, step_budget=2,
+        tool_round_budget=0, graph=graph,
+    )
+    assert result.status == "budget_exhausted"
+    assert result.output == {}
+    assert graph.calls == 0
+    # Budget rejection is not a preflight failure: the pin/compile stage stayed ok.
+    assert result.governance["preflight"]["status"] == "ok"
+    assert result.governance["finalize"]["tool_rounds_consumed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flow_budget_rejects_when_both_step_and_tool_bounds_exceed():
+    graph = _Graph({"side_effect": True})
+    result = await invoke_flow_with_governance(
+        skill=Skill(name="tooled", flow=[{"tool": "probe.tool", "save_as": "out"}]),
+        raw_input={}, deps=None, timeout_seconds=1, step_budget=1,
+        tool_round_budget=0, graph=graph,
+    )
+    assert result.status == "budget_exhausted"
+    assert result.output == {}
+    assert graph.calls == 0
+    assert result.governance["finalize"]["steps_consumed"] == 0
+    assert result.governance["finalize"]["tool_rounds_consumed"] == 0
+    assert "error" not in result.governance
+
+
+@pytest.mark.asyncio
+async def test_flow_maps_mid_run_fatal_error_to_status():
+    exhausted = await invoke_flow_with_governance(
+        skill=Skill(name="probe", flow=[]), raw_input={}, deps=None,
+        timeout_seconds=1, step_budget=1, tool_round_budget=1,
+        graph=_Graph({"fatal_error": "budget_exhausted: step budget exhausted before n"}),
+    )
+    assert exhausted.status == "budget_exhausted"
+    assert exhausted.governance["error"] == (
+        "budget_exhausted: step budget exhausted before n"
+    )
+    assert exhausted.output == {}
+
+    failed = await invoke_flow_with_governance(
+        skill=Skill(name="probe", flow=[]), raw_input={}, deps=None,
+        timeout_seconds=1, step_budget=1, tool_round_budget=1,
+        graph=_Graph({"fatal_error": "node blew up", "partial": "kept"}),
+    )
+    assert failed.status == "error"
+    assert failed.governance["error"] == "node blew up"
+    # fatal_error itself never leaks out; partial state does.
+    assert failed.output == {"partial": "kept"}
+    assert failed.governance["finalize"]["status"] == "error"
+
+
+@pytest.mark.asyncio
 async def test_flow_preflight_rejects_authoritative_hash_mismatch():
     graph = _Graph()
     result = await invoke_flow_with_governance(
@@ -78,6 +136,22 @@ async def test_flow_preflight_rejects_authoritative_hash_mismatch():
     assert result.status == "error"
     assert result.governance["preflight"]["status"] == "error"
     assert graph.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_flow_preflight_accepts_matching_authoritative_hash():
+    definition = "name: pinned"
+    expected = hashlib.sha256(definition.encode("utf-8")).hexdigest()
+    graph = _Graph({"answer": "ok"})
+    result = await invoke_flow_with_governance(
+        skill=Skill(name="pinned", flow=[]), raw_input={}, deps=None,
+        timeout_seconds=1, step_budget=1, tool_round_budget=1,
+        graph=graph, definition=definition, definition_sha256=expected,
+    )
+    assert result.status == "completed"
+    assert result.governance["preflight"] == {"status": "ok", "definition_sha256": expected}
+    assert result.output == {"answer": "ok"}
+    assert graph.calls == 1
 
 
 @pytest.mark.asyncio

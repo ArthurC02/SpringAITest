@@ -87,3 +87,54 @@ async def test_root_context_checkpoint_signature_and_digest() -> None:
             await store.get_root_context_checkpoint(f"rctx2:{ident}:{digest}:{mac}")
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_root_context_reference_must_have_exactly_four_segments() -> None:
+    """參照格式是「恰好四段」：段數不對必須在比對 HMAC 之前就擋掉，前綴正確也不例外。"""
+    store = PostgresCheckpointStore(_live_dsn())
+    await store.open()
+    try:
+        reference, _ = await store.put_root_context_checkpoint({"scope": "root"})
+        ident, digest, mac = reference.split(":")[1:]
+        for bad in (
+            "rctx1",  # 一段
+            f"rctx1:{ident}:{digest}",  # 三段：少一段
+            f"rctx1:{ident}:{digest}:{mac}:extra",  # 五段：多一段
+        ):
+            with pytest.raises(ValueError, match="invalid Root context checkpoint"):
+                await store.get_root_context_checkpoint(bad)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_root_context_checkpoint_unknown_ident_is_rejected() -> None:
+    """簽章自洽但資料列不存在（例如他處偽造的 ident）同樣算 corrupt，不得回空 payload。"""
+    store = PostgresCheckpointStore(_live_dsn())
+    await store.open()
+    try:
+        # 先寫一筆確保資料表已建立，再查一個從未寫入過的 ident。
+        await store.put_root_context_checkpoint({"scope": "root"})
+        unknown = str(uuid.uuid4())
+        digest = hashlib.sha256(b'{"scope":"root"}').hexdigest()
+        mac = hmac.new(
+            settings.checkpoint_hmac_key.encode(),
+            f"{unknown}:{digest}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        with pytest.raises(ValueError, match="missing or corrupt"):
+            await store.get_root_context_checkpoint(f"rctx1:{unknown}:{digest}:{mac}")
+    finally:
+        await store.close()
+
+
+def test_blank_dsn_is_rejected_without_touching_a_database() -> None:
+    """DSN 守衛在建構子、不連線，所以是本檔唯一不需要 CHECKPOINT_DATABASE_URL 也該跑的案例。"""
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(ValueError, match="checkpoint DSN must not be blank"):
+            PostgresCheckpointStore(blank)
+
+    # 決策表另一半：只要有一個非空白字元就建得起來，且建構子本身不開連線。
+    store = PostgresCheckpointStore(" postgresql://unused ")
+    assert store.saver is None

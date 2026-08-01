@@ -34,7 +34,10 @@ from app.nodes.kbquery.nodes.data_locator import make_data_locator_node
 from app.nodes.kbquery.nodes.evidence_verification import (
     make_evidence_verification_node,
 )
-from app.nodes.kbquery.nodes.intent_classification import classify_by_rules
+from app.nodes.kbquery.nodes.intent_classification import (
+    classify_by_rules,
+    make_intent_classification_node,
+)
 from app.nodes.kbquery.nodes.query_intake import make_query_intake_node
 from app.nodes.kbquery.nodes.query_rewrite import make_query_rewrite_node
 from app.nodes.kbquery.nodes.retrieval_planner import make_retrieval_planner_node
@@ -142,6 +145,31 @@ def test_rewrite_drops_variant_with_new_period():
     assert q in out["query_variants"]  # 必含 original
 
 
+def test_rewrite_caps_merged_variants_at_five():
+    """【規格 3】上限邊界：original + 5 個合法 variant 共 6 筆 → 截斷成剛好 5 筆，
+    original 保留在第一位，超出上限的最後一個 variant 被丟掉。"""
+    q = "2025Q3 稅後淨利是多少"
+    variants = [
+        "2025Q3 稅後淨利金額",
+        "2025Q3 稅後淨利數字",
+        "2025Q3 的稅後淨利",
+        "稅後淨利 2025Q3",
+        "2025Q3 稅後淨利多少錢",  # 第 6 筆（含 original），超出上限
+    ]
+    llm = FakeStructuredLLM(
+        {
+            QueryRewriteOutput: QueryRewriteOutput(
+                normalized_query=q,
+                query_variants=variants,
+                rewrite_reason="同義改寫",
+            )
+        }
+    )
+    out = asyncio.run(make_query_rewrite_node(llm, _GLOSSARY)({"original_query": q}))
+    assert out["query_variants"] == [q, *variants[:4]]
+    assert variants[4] not in out["query_variants"]
+
+
 # ---------------------------------------------------------------------------
 # Intent Classification：確定性規則
 # ---------------------------------------------------------------------------
@@ -156,6 +184,7 @@ def test_rewrite_drops_variant_with_new_period():
         ("2025Q3 相對 2025Q2 稅後淨利成長率是多少", IntentType.CALCULATION),
         ("為什麼 2025Q3 稅後淨利下降", IntentType.CAUSE_ANALYSIS),
         ("2025Q3 的績效達成率如何", IntentType.PERFORMANCE_ANALYSIS),
+        ("這個數字出自哪份文件", IntentType.DOCUMENT_LOCATION),
         ("完全無關的閒聊", IntentType.UNKNOWN),
     ],
     ids=[
@@ -165,6 +194,7 @@ def test_rewrite_drops_variant_with_new_period():
         "calculation",
         "cause",
         "performance",
+        "document-location",
         "unknown",
     ],
 )
@@ -180,6 +210,35 @@ def test_classify_by_rules_first_match_wins_on_overlap():
     intent, label = classify_by_rules("比較 2025Q3 稅後淨利金額")
     assert intent == IntentType.COMPARISON
     assert label == "comparison"
+
+
+def test_intent_classification_llm_fallback_confidence_threshold():
+    """【規格 5】節點層的 LLM 補位分支：規則判 UNKNOWN 才問 LLM，且信心值剛好等於
+    門檻（0.6）才採用、低於門檻（0.59）維持 UNKNOWN 不硬猜——先前只測 module 級的
+    classify_by_rules，整條 UNKNOWN→LLM 交棒與 requires_* 輸出零覆蓋。"""
+    q = "完全無關的閒聊"
+
+    accepted = make_intent_classification_node(
+        FakeStructuredLLM(
+            {IntentOutput: IntentOutput(intent_type=IntentType.TABLE_LOOKUP, confidence=0.6)}
+        )
+    )
+    out = asyncio.run(accepted({"normalized_query": q}))
+    assert out["intent_type"] == IntentType.TABLE_LOOKUP
+    assert out["question_type"] == "table"  # LLM 未給 question_type → 取規則標籤
+    assert out["requires_table"] is True
+    assert out["requires_calculation"] is False
+    assert out["requires_multi_doc"] is False
+
+    rejected = make_intent_classification_node(
+        FakeStructuredLLM(
+            {IntentOutput: IntentOutput(intent_type=IntentType.TABLE_LOOKUP, confidence=0.59)}
+        )
+    )
+    out_low = asyncio.run(rejected({"normalized_query": q}))
+    assert out_low["intent_type"] == IntentType.UNKNOWN
+    assert out_low["question_type"] == "unknown"
+    assert out_low["requires_table"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +346,54 @@ def test_planner_retry_insufficient_evidence_doubles_top_k():
     assert out["top_k"] == 16
 
 
+def test_planner_remaining_adjustment_branches_and_multi_doc_top_k():
+    """【規格 8】其餘重試調整分支各驗一次：METRIC_MISMATCH → 加 keyword 檢索；
+    TABLE_CELL_MISMATCH → 前插 table/structured。另驗 requires_multi_doc 在首輪
+    （attempt=1、無 failure_codes）就讓 top_k 加倍，與重試調整無關。"""
+    node = make_retrieval_planner_node(8)
+
+    out_metric = asyncio.run(
+        node(
+            {
+                "intent_type": IntentType.TABLE_LOOKUP,  # 基本盤無 keyword，才看得出加了
+                "retrieval_attempt": 1,
+                "failure_codes": [FailureCode.METRIC_MISMATCH],
+            }
+        )
+    )
+    plan_metric = out_metric["retrieval_plan"]
+    assert "keyword" in plan_metric.methods
+    assert plan_metric.use_keyword is True
+    assert "加 keyword 檢索" in plan_metric.adjustment_reason
+    assert out_metric["top_k"] == 8  # 這條規則不動 top_k
+
+    out_cell = asyncio.run(
+        node(
+            {
+                "intent_type": IntentType.SINGLE_VALUE_LOOKUP,
+                "retrieval_attempt": 1,
+                "failure_codes": [FailureCode.TABLE_CELL_MISMATCH],
+            }
+        )
+    )
+    plan_cell = out_cell["retrieval_plan"]
+    assert plan_cell.methods[:2] == ["table", "structured"]  # 前插，不是附加
+    assert plan_cell.use_table is True and plan_cell.use_structured is True
+    assert "前插 table/structured 檢索" in plan_cell.adjustment_reason
+
+    out_multi = asyncio.run(
+        node(
+            {
+                "intent_type": IntentType.SINGLE_VALUE_LOOKUP,
+                "requires_multi_doc": True,
+            }
+        )
+    )
+    assert out_multi["retrieval_attempt"] == 1
+    assert out_multi["top_k"] == 16
+    assert out_multi["retrieval_plan"].adjustment_reason == ""  # 首輪不做重試調整
+
+
 # ---------------------------------------------------------------------------
 # Rerank 與 Locator
 # ---------------------------------------------------------------------------
@@ -329,6 +436,37 @@ def test_table_cell_locator_exact_cell():
     assert e.column_identifier == "2025Q3"
     assert e.exact_value == "1234.0"
     assert e.unit == "百萬元"
+
+
+def test_table_cell_locator_without_metric_terms_or_target_period():
+    """【規格 10】另兩種輸入組合：無 metric_terms → 無法確定列，一律不回證據；
+    有 metric_terms 但無 target_period → 該列所有欄位都成為證據，分數降為 0.6。"""
+    locator = TableCellLocator()
+
+    no_metric = locator.locate(
+        TABLE_2025.model_copy(deep=True),
+        context={
+            "canonical_metric": "稅後淨利",
+            "metric_terms": [],
+            "target_period": "2025Q3",
+            "excluded_terms": [],
+            "query": "損益表中 2025Q3 稅後淨利是多少",
+        },
+    )
+    assert no_metric == []
+
+    no_period = locator.locate(
+        TABLE_2025.model_copy(deep=True),
+        context={
+            "canonical_metric": "稅後淨利",
+            "metric_terms": ["稅後淨利"],
+            "excluded_terms": [],
+            "query": "損益表中稅後淨利是多少",
+        },
+    )
+    assert [e.column_identifier for e in no_period] == ["2025Q2", "2025Q3"]
+    assert all(e.row_identifier == "稅後淨利" for e in no_period)
+    assert all(e.locator_score == 0.6 for e in no_period)
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +580,52 @@ def test_data_locator_formula_rules_diff_and_ratio():
     )
     assert ratio_out["calculation_trace"].formula == "a / b"
     assert ratio_out["calculation_result"] == pytest.approx(1234.0 / 1100.0)
+
+
+def test_data_locator_single_value_lookup_without_calculation():
+    """【全對偶：requires_calculation=False × requires_multi_doc=False × 單一期間字串】
+    最普通的 SINGLE_VALUE_LOOKUP 路徑：只取分數最高的一筆證據，candidate_answer 由
+    「指標 期間 為 值單位」組成，不得產生任何計算軌跡——先前 data_locator 只測過
+    (True, True, list) 那一格。"""
+    only = Evidence(
+        source_id="s-late",
+        document_id="doc",
+        document_title="t",
+        source_type="text",
+        page_number=3,
+        exact_excerpt="2025Q3 稅後淨利為 1234.0 百萬元",
+        period="2025Q3",
+        exact_value="1234.0",
+        unit="百萬元",
+    )
+    source = SourceResult(
+        source_id="s-late",
+        document_id="doc",
+        document_title="t",
+        source_type="text",
+        retrieval_method="vector",
+        original_score=0.5,
+    )
+    node = make_data_locator_node({"text": _FixedLocator({"s-late": only})})
+    out = asyncio.run(
+        node(
+            {
+                "ranked_sources": [source],
+                "requires_calculation": False,
+                "requires_multi_doc": False,
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "normalized_query": "2025Q3 稅後淨利是多少",
+            }
+        )
+    )
+    assert out["selected_evidence"] == [only]
+    assert out["page_evidence"] == [only]
+    assert out["table_cell_evidence"] == []
+    assert out["text_claims"] == ["2025Q3 稅後淨利為 1234.0 百萬元"]
+    assert out["candidate_answer"] == "稅後淨利 2025Q3 為 1234.0百萬元"
+    assert out["calculation_result"] is None
+    assert out["calculation_trace"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +898,90 @@ def test_verification_source_not_traceable():
     assert FailureCode.SOURCE_NOT_TRACEABLE in out2["failure_codes"]
 
 
+def test_verification_value_mismatch_when_candidate_number_has_no_source():
+    """【決策表1】規則6 數值一致性：candidate_answer 講出的數字對不回任何證據值時判
+    VALUE_MISMATCH（RETRY），先前所有測試的 candidate_answer 都與證據一致，這條零覆蓋。"""
+    evidence = Evidence(
+        source_id="fin-2025q3#c1",
+        document_id="doc-fin-2025q3",
+        document_title="2025Q3 財務季報",
+        source_type="text",
+        page_number=3,
+        exact_excerpt="2025Q3 稅後淨利為 1234.0 百萬元",
+        exact_value="1234.0",
+        metric="稅後淨利",
+        period="2025Q3",
+        unit="百萬元",
+    )
+    node = make_evidence_verification_node()
+    out = asyncio.run(
+        node(
+            {
+                "selected_evidence": [evidence],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+                "candidate_answer": "稅後淨利 2025Q3 為 5678.0 百萬元",  # 憑空捏造
+            }
+        )
+    )
+    assert out["verification_result"] == VerificationResult.RETRY
+    assert out["failure_codes"] == [FailureCode.VALUE_MISMATCH]
+    assert out["verified_evidence"] == []
+
+
+def test_verification_requires_calculation_without_trace_is_insufficient():
+    """【決策表1】requires_calculation=True 但完全沒有 calculation_trace：判
+    INSUFFICIENT_EVIDENCE（RETRY，非 hard_fail 的 CALCULATION_ERROR）——先前只測過
+    「有 trace 但算錯」，缺 trace 這個守衛零覆蓋。"""
+    evidence = Evidence(
+        source_id="fin-2025q3#c1",
+        document_id="doc-fin-2025q3",
+        document_title="2025Q3 財務季報",
+        source_type="text",
+        page_number=3,
+        exact_excerpt="2025Q3 稅後淨利為 1234.0 百萬元",
+        exact_value="1234.0",
+        metric="稅後淨利",
+        period="2025Q3",
+    )
+    node = make_evidence_verification_node()
+    out = asyncio.run(
+        node(
+            {
+                "selected_evidence": [evidence],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+                "requires_calculation": True,  # 無 calculation_trace
+            }
+        )
+    )
+    assert out["verification_result"] == VerificationResult.RETRY
+    assert out["failure_codes"] == [FailureCode.INSUFFICIENT_EVIDENCE]
+    assert out["verified_evidence"] == []
+
+
+def test_verification_empty_evidence_is_insufficient():
+    """【決策表1】邊界：selected_evidence 為零筆時，光是這個守衛就必須產出
+    INSUFFICIENT_EVIDENCE，不得因為「沒有任何一筆證據違規」而落入 PASS 分支。"""
+    node = make_evidence_verification_node()
+    out = asyncio.run(
+        node(
+            {
+                "selected_evidence": [],
+                "target_period": "2025Q3",
+                "canonical_metric": "稅後淨利",
+                "metric_terms": ["稅後淨利"],
+            }
+        )
+    )
+    assert out["verification_result"] == VerificationResult.RETRY
+    assert out["failure_codes"] == [FailureCode.INSUFFICIENT_EVIDENCE]
+    assert out["confidence"] == 0.0
+    assert out["verified_evidence"] == []
+
+
 # ---------------------------------------------------------------------------
 # Structured LLM Adapter：吞下非 schema 相容的回應
 # ---------------------------------------------------------------------------
@@ -846,6 +1114,18 @@ def test_calculator_rejects_unsupported_node():
     """【規格 15】白名單外的節點（函式呼叫）一律 ValueError，不得執行任意程式。"""
     with pytest.raises(ValueError):
         calculator.evaluate("__import__('os')", {})
+
+
+def test_calculator_whitelist_add_pow_usub_and_invalid_operands():
+    """【規格 15】白名單其餘分支：Add / Pow / 一元負號可求值；未提供的變數與非數值
+    常數（字串）一律 ValueError，不得靜默當 0 或當成可用值——先前只練到 Sub/Mult/Div
+    與函式呼叫這一種拒絕樣本。"""
+    assert calculator.evaluate("a + b ** 2", {"a": 1.0, "b": 3.0}) == pytest.approx(10.0)
+    assert calculator.evaluate("-a", {"a": 2.0}) == pytest.approx(-2.0)
+    with pytest.raises(ValueError):
+        calculator.evaluate("x", {})  # 未提供的變數
+    with pytest.raises(ValueError):
+        calculator.evaluate("'s'", {})  # 非數值常數
 
 
 def test_calculator_zero_division_propagates():

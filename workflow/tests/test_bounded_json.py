@@ -37,6 +37,14 @@ def test_text_one_char_over_limit_is_truncated_with_suffix() -> None:
     assert text == _SERIALIZED[:-1] + "..."
 
 
+def test_truncation_without_suffix_appends_nothing() -> None:
+    # 不傳 truncated_suffix（預設 ""）→ 仍截斷，但不附加任何字元。
+    text = bounded_canonical_json(
+        _VALUE, max_chars=len(_SERIALIZED) - 1, on_unserializable=lambda exc: "unused"
+    )
+    assert text == _SERIALIZED[:-1]
+
+
 def test_unserializable_fallback_can_raise_like_legacy_flow_does() -> None:
     class Denied(RuntimeError):
         pass
@@ -59,3 +67,15 @@ def test_unserializable_fallback_can_return_placeholder_like_tool_boundary_does(
         on_unserializable=lambda exc: '{"status":"unserializable_result"}',
     )
     assert text == '{"status":"unserializable_result"}'
+
+
+def test_unserializable_fallback_placeholder_is_also_truncated() -> None:
+    # 回退佔位字串同樣走截斷路徑：超過 max_chars 一樣被切斷並附後綴。
+    placeholder = '{"status":"unserializable_result"}'
+    text = bounded_canonical_json(
+        {"bad": float("nan")},
+        max_chars=len(placeholder) - 1,
+        on_unserializable=lambda exc: placeholder,
+        truncated_suffix="...",
+    )
+    assert text == placeholder[:-1] + "..."

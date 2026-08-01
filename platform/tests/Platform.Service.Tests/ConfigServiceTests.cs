@@ -62,6 +62,40 @@ public sealed class ConfigServiceTests
         Assert.Equal("權限不足，無法修改系統組態", ex.Message);
     }
 
+    // BackendErrorMapper 其餘四個分支(403 見上、5xx 見下):各自對外同狀態碼,message 不改寫,
+    // 不得被一律壓成 502。注意 404 在 Update/List 是例外,在 GetRuntime 才是 null(見下方)。
+    [Theory]
+    [InlineData(400, typeof(WorkflowBadInputException), "缺少租戶識別標頭：X-Tenant-Id")]
+    [InlineData(404, typeof(WorkflowNotFoundException), "找不到組態鍵：a")]
+    [InlineData(409, typeof(DownstreamConflictException), "組態已被其他人修改")]
+    [InlineData(422, typeof(SkillValidationFailedException), "組態值不合法")]
+    public async Task Update_BackendError_MapsToSameStatusException_KeepsMessage(
+        int status, Type expected, string message)
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Error((HttpStatusCode)status, message)));
+
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() =>
+            svc.UpdateAsync("a", new ConfigUpdateRequest("2"), AdminCtx));
+
+        Assert.IsType(expected, ex);
+        Assert.Equal(message, ex.Message);
+    }
+
+    // backend 400 的 fieldErrors 必須穿過代理層 —— 被吞成空 map 的話,前端只剩一句籠統訊息,指不出哪個欄位。
+    [Fact]
+    public async Task Update_Backend400WithFieldErrors_KeepsFieldErrors()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
+            "{\"timestamp\":\"2026-07-12T00:00:00Z\",\"status\":400,\"message\":\"輸入驗證失敗\","
+            + "\"fieldErrors\":{\"value\":\"value 不可為空\"}}")));
+
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() =>
+            svc.UpdateAsync("a", new ConfigUpdateRequest("2"), AdminCtx));
+
+        Assert.Equal("輸入驗證失敗", ex.Message);
+        Assert.Equal("value 不可為空", ex.FieldErrors!["value"]);
+    }
+
     [Fact]
     public async Task Update_500_ThrowsWorkflowInvocation()
     {

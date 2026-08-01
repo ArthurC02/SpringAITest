@@ -194,6 +194,24 @@ public sealed class ConfigurationSetServiceTests
         Assert.Equal("找不到 Configuration Set", ex.Message);
     }
 
+    [Fact] // List 走 SendForJsonElementAsync,錯誤映射與 Get/Create 是不同呼叫路徑 —— 非 ADMIN → backend 403 原樣轉發。
+    public async Task List_Backend403_ThrowsForbidden()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.Forbidden, "權限不足，需要管理員權限"));
+
+        var ex = await Assert.ThrowsAsync<WorkflowForbiddenException>(() => Build(stub).ListAsync(AdminCtx));
+        Assert.Equal("權限不足，需要管理員權限", ex.Message);
+    }
+
+    [Fact] // Delete 走 SendExpectSuccessAsync(不讀 body)—— 仍須接上同一套錯誤映射,不可把 404 當成功吞掉。
+    public async Task Delete_Backend404_ThrowsNotFound()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Error(HttpStatusCode.NotFound, $"找不到 Configuration Set：{SetId}"));
+
+        var ex = await Assert.ThrowsAsync<WorkflowNotFoundException>(() => Build(stub).DeleteAsync(SetId, AdminCtx));
+        Assert.Equal($"找不到 Configuration Set：{SetId}", ex.Message);
+    }
+
     [Fact] // 非 2xx 且非映射狀態(5xx)→ 對外 502。
     public async Task Get_500_ThrowsWorkflowInvocation()
     {
@@ -202,6 +220,16 @@ public sealed class ConfigurationSetServiceTests
         var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
             () => Build(stub).GetAsync(SetId, AdminCtx));
         Assert.Contains("500", ex.Message);
+    }
+
+    [Fact] // 狀態碼成功但 body 反序列化成 null 的等價類 → 502「回應內容為空」,不得 NPE 或回 null set。
+    public async Task Create_SuccessWithNullBody_ThrowsEmptyResponse()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created, "null"));
+
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(stub).CreateAsync(Upsert(), AdminCtx));
+        Assert.Equal("Configuration Set 服務呼叫失敗：回應內容為空", ex.Message);
     }
 
     [Fact] // 「沒有回應」的等價類:傳輸失敗 → 502(不誤判成使用者設定有問題)。

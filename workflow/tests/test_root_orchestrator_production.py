@@ -10,6 +10,7 @@ from app.runtime.orchestrator import (
     RootExecutionSnapshot,
     RootInput,
     TaskAssignment,
+    VerificationItem,
 )
 from app.runtime.orchestrator_backend import ChildRecord, ChildStatus
 from app.runtime.orchestrator_production import (
@@ -279,6 +280,23 @@ async def test_context_acquisition_rejects_unknown_tool_without_calling_network(
         await planner.acquire(forged, {}, 1)
 
 
+@pytest.mark.asyncio
+async def test_acquire_without_the_immutable_root_input_fails_before_the_tool_check():
+    """The bare snapshot also carries an unsupported `retrieve` context tool.
+
+    The missing immutable input is still the reported failure, so the order of
+    the two fail-closed checks is part of the contract.
+    """
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+
+    with pytest.raises(
+        Exception, match="Root snapshot is missing its immutable input"
+    ):
+        await planner.acquire(_snapshot(), {}, 1)
+
+
 @pytest.mark.parametrize(
     "payload, message",
     [
@@ -363,6 +381,136 @@ async def test_context_sufficiency_grounds_every_fact_in_its_trusted_quote(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "inputs, expected_facts",
+    [
+        # max_context_rounds is 2: exactly two trusted inputs still reach the model.
+        (["Region: Taiwan", "City: Taipei"], {"region": "Taiwan"}),
+        # One input past the bound short-circuits before any provider call.
+        (["Region: Taiwan", "City: Taipei", "Country: Taiwan"], None),
+    ],
+)
+async def test_assess_context_stops_one_input_past_max_context_rounds(
+    monkeypatch, inputs, expected_facts
+):
+    calls = _install_structured_model(
+        monkeypatch,
+        {
+            "ready": True,
+            "facts": {"region": "Taiwan"},
+            "evidence": [
+                {"fact_key": "region", "quote": "Region: Taiwan", "input_index": 0}
+            ],
+            "missing": [],
+        },
+    )
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+
+    assessed = await planner._assess_context(_snapshot_with_input(), inputs)
+
+    if expected_facts is None:
+        assert assessed is None
+        assert calls == [], "an over-budget round must not spend a provider call"
+    else:
+        assert assessed is not None and assessed.facts == expected_facts
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_decompose_renders_legacy_zones_and_requires_exact_acquired_provenance(
+    monkeypatch,
+):
+    calls = _install_structured_model(
+        monkeypatch,
+        {
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "objective": "Read the contract",
+                    "required_capabilities": ["research"],
+                }
+            ]
+        },
+    )
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+    snapshot = _snapshot_without_retrieval()
+    acquired = await planner.acquire(snapshot, {}, 1)
+
+    tasks = await planner.decompose(snapshot, acquired.context)
+
+    assert [
+        (item.task_id, item.attempt, item.objective, item.required_capabilities)
+        for item in tasks
+    ] == [("task-1", 1, "Read the contract", ["research"])]
+    assert tasks[0].context == {"goal": "Find the contract evidence"}
+    # No Backend view in the context: the legacy zones still ship every section.
+    assert tasks[0].context_ref is None
+    assert [item.context_key for item in tasks[0].context_provenance] == ["goal"]
+    human = calls[0][1][1]
+    assert '[TASK]\n{"goal":"Find the contract evidence"}' in human
+    assert "[UNTRUSTED_EVIDENCE]\n[]" in human
+    assert '[AVAILABLE_CAPABILITIES]\n["research"]' in human
+
+    # A context key the acquirer never vouched for cannot reach a worker.
+    with pytest.raises(Exception, match="lacks exact trusted provenance"):
+        await planner.decompose(snapshot, acquired.context | {"forged": "x"})
+
+
+@pytest.mark.asyncio
+async def test_repairs_and_aggregate_carry_only_their_pinned_lineage():
+    planner = ProductionRootPlanner(
+        FakeBackend(), RequestContext(tenant_id="tenant", user_id="user", role="USER")
+    )
+    snapshot = _snapshot()
+
+    repairs = await planner.repairs(
+        snapshot,
+        [
+            VerificationItem(
+                task_id="a",
+                attempt=1,
+                verdict="NEEDS_REPAIR",
+                repair_request="more evidence",
+            ),
+            VerificationItem(task_id="b", attempt=1, verdict="NEEDS_REPAIR"),
+        ],
+        1,
+    )
+
+    assert [
+        (item.task_id, item.attempt, item.objective, item.repair_of)
+        for item in repairs
+    ] == [
+        ("a", 2, "more evidence", "a"),
+        # A finding without a repair request still gets a bounded objective.
+        ("b", 2, "Address verifier findings.", "b"),
+    ]
+    # A repair assignment inherits no context, so it needs no provenance either.
+    assert all(
+        item.context == {} and item.context_provenance == [] for item in repairs
+    )
+
+    completed = _worker_result(snapshot).model_copy(
+        update={"output": {"answer": "durable"}, "citations": [{"source": "doc"}]}
+    )
+    assert await planner.aggregate(snapshot, [completed]) == {
+        "results": [
+            {
+                "task_id": "worker-task",
+                "attempt": 1,
+                "output": {"answer": "durable"},
+                "citations": [{"source": "doc"}],
+                "child_run_id": "child",
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
 async def test_verifier_parses_bounded_json_string_before_strict_validation():
     class VerifierBackend(FakeBackend):
         async def get_child(self, root_run_id, child_id, ctx):
@@ -442,3 +590,50 @@ async def test_verifier_output_that_is_not_a_bounded_report_fails_closed(
 
     with pytest.raises(Exception, match=message):
         await runtime.run_verifier(snapshot, [_worker_result(snapshot)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verifier_output, expected_verdict",
+    [
+        # No "output" wrapper: the terminal payload itself is the report candidate.
+        (
+            {
+                "items": [
+                    {
+                        "task_id": "worker-task",
+                        "attempt": 1,
+                        "verdict": "PASS",
+                        "evidence": [],
+                        "repair_request": None,
+                    }
+                ]
+            },
+            "PASS",
+        ),
+        # Same unwrapped fallback, but the payload is not a report at all.
+        ({"answer": "real durable result"}, None),
+    ],
+)
+async def test_verifier_falls_back_to_the_unwrapped_terminal_output(
+    verifier_output, expected_verdict
+):
+    class VerifierBackend(FakeBackend):
+        async def get_child(self, root_run_id, child_id, ctx):
+            status = await super().get_child(root_run_id, child_id, ctx)
+            status.output = verifier_output
+            return status
+
+    runtime = ProductionChildRuntime(
+        VerifierBackend(),
+        FakeManager(),
+        RequestContext(tenant_id="tenant", user_id="user", role="USER"),
+    )
+    snapshot = _snapshot()
+
+    if expected_verdict is None:
+        with pytest.raises(Exception, match="validation error"):
+            await runtime.run_verifier(snapshot, [_worker_result(snapshot)])
+    else:
+        report = await runtime.run_verifier(snapshot, [_worker_result(snapshot)])
+        assert report.items[0].verdict == expected_verdict

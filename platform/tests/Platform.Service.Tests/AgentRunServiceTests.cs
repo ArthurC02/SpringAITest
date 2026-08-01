@@ -151,6 +151,51 @@ public sealed class AgentRunServiceTests
         Assert.Equal(0, workflowCalls);
     }
 
+    /// <summary>讀取路徑:GET /api/runs/{id} 原樣穿透 backend 的 status/body,並帶簽發身分;讀取不得觸發 Workflow。</summary>
+    [Fact]
+    public async Task Get_ForwardsRunDetailPathAndSignedIdentity()
+    {
+        var backend = new StubHttpMessageHandler(_ => Json(
+            HttpStatusCode.OK,
+            $$"""{"id":"{{RunIdText}}","status":"running","state_version":4}"""));
+        var workflow = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException("讀取執行狀態不得觸發 Workflow"));
+
+        var result = await Build(backend, workflow).GetAsync(RunId, Admin);
+
+        Assert.Equal($"http://backend/api/runs/{RunIdText}", backend.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Get, backend.LastRequest.Method);
+        Assert.Equal("demo-a", backend.Header("X-Tenant-Id"));
+        Assert.Equal("admin-a", backend.Header("X-User-Id"));
+        Assert.Equal(200, result.Status);
+        Assert.Equal($$"""{"id":"{{RunIdText}}","status":"running","state_version":4}""", result.Body);
+    }
+
+    /// <summary>
+    /// after_sequence / limit 在 platform 這層不做驗證也不夾擠,原樣以不變文化格式串進查詢字串
+    /// (0、負數、型別上界都照送);兩個參數名對調或順序寫錯會在這裡爆。
+    /// </summary>
+    [Theory]
+    [InlineData(0L, 1, "after_sequence=0&limit=1")]
+    [InlineData(-1L, 0, "after_sequence=-1&limit=0")]
+    [InlineData(long.MaxValue, int.MaxValue, "after_sequence=9223372036854775807&limit=2147483647")]
+    public async Task Events_ForwardsSequenceAndLimitBoundariesVerbatim(
+        long afterSequence, int limit, string expectedQuery)
+    {
+        var backend = new StubHttpMessageHandler(_ => Json(HttpStatusCode.OK, "[]"));
+        var workflow = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException("讀取事件不得觸發 Workflow"));
+
+        var result = await Build(backend, workflow).EventsAsync(RunId, afterSequence, limit, Admin);
+
+        Assert.Equal(
+            $"http://backend/api/runs/{RunIdText}/events?{expectedQuery}",
+            backend.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Get, backend.LastRequest.Method);
+        Assert.Equal("demo-a", backend.Header("X-Tenant-Id"));
+        Assert.Equal(200, result.Status);
+    }
+
     [Fact]
     public async Task Resume_AllocatesCheckpointCommand_AndKicksWithOnlyCommandId()
     {
@@ -299,6 +344,36 @@ public sealed class AgentRunServiceTests
         Assert.Equal(context.Groups, forwardedGroups);
     }
 
+    /// <summary>
+    /// capabilities/groups 齊備**且**真的需要 dispatch 時,Workflow kick 也必須帶同一組簽發身分——
+    /// 上一個測試走 replay(根本不 kick),這半邊組合之前沒有任何斷言守著。
+    /// </summary>
+    [Fact]
+    public async Task Start_ForwardsCapabilityClaimsToWorkflowKick_WhenDispatchRequired()
+    {
+        var backend = new StubHttpMessageHandler(_ =>
+            Command($$"""{"id":"{{RunIdText}}","status":"queued"}"""));
+        var workflow = new StubHttpMessageHandler(_ =>
+            Json(HttpStatusCode.Accepted, $$"""{"run_id":"{{RunIdText}}","status":"queued"}"""));
+        var context = Admin with
+        {
+            Capabilities = new[] { "tool.use:local.calculator" },
+            Groups = new[] { "operations", "reviewers" },
+        };
+
+        await Build(backend, workflow).StartAsync(
+            AgentId,
+            "hello",
+            "capability-dispatch",
+            context);
+
+        Assert.Equal($"http://workflow/agent-runs/{RunIdText}/start", workflow.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("demo-a", workflow.Header("X-Tenant-Id"));
+        Assert.Equal("admin-a", workflow.Header("X-User-Id"));
+        Assert.Equal("tool.use:local.calculator", workflow.Header("X-User-Capabilities"));
+        Assert.Equal("operations reviewers", workflow.Header("X-User-Groups"));
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.BadRequest)]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
@@ -442,6 +517,8 @@ public sealed class AgentRunServiceTests
     [InlineData("missing-command-id-header")]
     [InlineData("non-guid-command-id")]
     [InlineData("body-missing-id")]
+    [InlineData("body-non-guid-id")]
+    [InlineData("body-numeric-id")]
     [InlineData("backend-5xx")]
     public async Task BackendCommandMetadata_Invalid_MapsToControlledFailure(string scenario)
     {
@@ -452,9 +529,17 @@ public sealed class AgentRunServiceTests
                 return Json(HttpStatusCode.InternalServerError, """{"detail":"secret"}""");
             }
 
-            var body = scenario == "body-missing-id"
-                ? """{"status":"queued","command_id":"55555555-5555-5555-5555-555555555555"}"""
-                : $$"""{"id":"{{RunIdText}}","status":"queued","command_id":"{{CommandIdText}}"}""";
+            // id 有三種不可信等價類:缺鍵、字串但非 GUID、非字串 JSON 型別(對應 RequiredGuid 的三個合取條件)。
+            var body = scenario switch
+            {
+                "body-missing-id" =>
+                    """{"status":"queued","command_id":"55555555-5555-5555-5555-555555555555"}""",
+                "body-non-guid-id" =>
+                    """{"id":"not-a-guid","status":"queued","command_id":"55555555-5555-5555-5555-555555555555"}""",
+                "body-numeric-id" =>
+                    """{"id":123,"status":"queued","command_id":"55555555-5555-5555-5555-555555555555"}""",
+                _ => $$"""{"id":"{{RunIdText}}","status":"queued","command_id":"{{CommandIdText}}"}""",
+            };
             var response = Json(HttpStatusCode.Accepted, body);
             if (scenario != "missing-dispatch-header")
             {

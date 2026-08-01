@@ -62,6 +62,30 @@ public sealed class RingBufferActivityExporterTests
         Assert.Equal(new[] { "span-4", "span-3", "span-2" }, spans.Select(s => s.Name).ToArray());
     }
 
+    // B-O-02 邊界:limit=0 → 空;limit(10) 超過筆數(5) → 全部回、仍最新優先(TakeLast 不 clamp 也不 throw)。
+    [Theory]
+    [InlineData(0, new string[0])]
+    [InlineData(10, new[] { "span-4", "span-3", "span-2", "span-1", "span-0" })]
+    public void GetRecentSpans_LimitBoundary_ClampsToBufferedCount(int limit, string[] expected)
+    {
+        var exporter = new RingBufferActivityExporter();
+        Export(exporter, Enumerable.Range(0, 5).Select(i => MakeActivity($"span-{i}")).ToArray());
+
+        var spans = exporter.GetRecentSpans(limit);
+
+        Assert.Equal(expected, spans.Select(s => s.Name).ToArray());
+    }
+
+    // B-O-02 邊界:零筆(從未 Export)讀取回空清單,帶不帶 limit 都不 throw。
+    [Fact]
+    public void GetRecentSpans_EmptyBuffer_ReturnsEmptyList()
+    {
+        var exporter = new RingBufferActivityExporter();
+
+        Assert.Empty(exporter.GetRecentSpans());
+        Assert.Empty(exporter.GetRecentSpans(3));
+    }
+
     // B-O-03:attribute 白名單——保留 skill_name/model,丟棄白名單外的 key。
     [Fact]
     public void Export_ExtractsWhitelistedAttributesOnly()

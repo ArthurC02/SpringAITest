@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { decideRunApproval, normalizeRunApproval, normalizeRunApprovals } from '../src/api/runApprovals'
+import { decideRunApproval, listRunApprovals, normalizeRunApproval, normalizeRunApprovals } from '../src/api/runApprovals'
 
 test.describe('D7 approval public projection', () => {
   test('allowlists redacted fields and drops prompt, tool and anti-replay data', () => {
@@ -18,6 +18,44 @@ test.describe('D7 approval public projection', () => {
     expect(normalizeRunApprovals({ approvals: [{ id: 'approval-2', status: 'pending' }, {}] })).toHaveLength(1)
   })
 
+  test('accepts a bare array payload, a decided approval and a missing payload', () => {
+    // The list route may answer with a raw array instead of the {approvals} envelope.
+    expect(normalizeRunApprovals([{ id: 'approval-3', status: 'pending' }])).toEqual([
+      {
+        id: 'approval-3', runId: null, status: 'pending', requiredRole: null,
+        expiresAt: null, decision: null, decidedBy: null, decidedAt: null,
+      },
+    ])
+    // Neither array nor object (null/undefined body) degrades to an empty inbox, never a throw.
+    expect(normalizeRunApprovals(null)).toEqual([])
+    expect(normalizeRunApprovals(undefined)).toEqual([])
+    // An already-decided approval keeps its outcome trio while still dropping tool payloads.
+    expect(normalizeRunApproval({
+      id: 'approval-4', run_id: 'run-1', status: 'approved', required_role: 'ADMIN',
+      expires_at: '2026-01-01T00:00:00Z',
+      decision: 'approved', decided_by: 'alice', decided_at: '2026-01-02T00:00:00Z',
+      tool_args: { secret: 'x' },
+    })).toEqual({
+      id: 'approval-4', runId: 'run-1', status: 'approved', requiredRole: 'ADMIN',
+      expiresAt: '2026-01-01T00:00:00Z',
+      decision: 'approved', decidedBy: 'alice', decidedAt: '2026-01-02T00:00:00Z',
+    })
+  })
+
+  test('listing an inbox is a plain GET on the encoded run id and skips unidentifiable entries', async () => {
+    const originalFetch = globalThis.fetch
+    let seen: { url: string; method: string; key: string | null } | null = null
+    globalThis.fetch = async (input, init) => {
+      seen = { url: String(input), method: init?.method ?? 'GET', key: new Headers(init?.headers).get('Idempotency-Key') }
+      return new Response('{"approvals":[{"id":"approval-5","status":"pending"},{"status":"pending"}]}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    try {
+      // A read carries no idempotency key: only the decision commands are replay-protected.
+      expect((await listRunApprovals('run/1')).map((approval) => approval.id)).toEqual(['approval-5'])
+    } finally { globalThis.fetch = originalFetch }
+    expect(seen).toEqual({ url: '/api/runs/run%2F1/approvals', method: 'GET', key: null })
+  })
+
   test('decision sends a caller-generated idempotency key but never requires an anti-replay token', async () => {
     const originalFetch = globalThis.fetch
     let seen: { method: string; key: string | null; body: unknown } | null = null
@@ -29,5 +67,20 @@ test.describe('D7 approval public projection', () => {
     try { await decideRunApproval('run-1', 'approval-1', 'approve', 'reviewed', 'logical-attempt-1') }
     finally { globalThis.fetch = originalFetch }
     expect(seen).toEqual({ method: 'POST', key: 'logical-attempt-1', body: { reason: 'reviewed' } })
+  })
+
+  test('rejection posts the reject route and a whitespace-only reason is dropped from the body', async () => {
+    const originalFetch = globalThis.fetch
+    let seen: { url: string; key: string | null; body: unknown } | null = null
+    globalThis.fetch = async (input, init) => {
+      seen = { url: String(input), key: new Headers(init?.headers).get('Idempotency-Key'), body: JSON.parse(String(init?.body)) }
+      return new Response('{"id":"approval-1","status":"rejected","decision":"rejected","decided_by":"alice"}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    try {
+      const decided = await decideRunApproval('run-1', 'approval-1', 'reject', '   ', 'logical-attempt-2')
+      expect(decided).toMatchObject({ status: 'rejected', decision: 'rejected', decidedBy: 'alice' })
+    } finally { globalThis.fetch = originalFetch }
+    // Reject is a distinct route segment, and a blank reason is omitted rather than sent as ''.
+    expect(seen).toEqual({ url: '/api/runs/run-1/approvals/approval-1/reject', key: 'logical-attempt-2', body: {} })
   })
 })

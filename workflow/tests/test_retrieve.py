@@ -83,6 +83,26 @@ def test_retrieve_uses_explicit_top_k_override(monkeypatch):
     assert captured["json"]["top_k"] == 10
 
 
+def test_retrieve_seeded_top_k_wins_over_constructor_override(monkeypatch):
+    """state["retrieval_top_k"]（invoke 期由 active Configuration Set seed）優先度最高：
+    即使建構期已烤進 top_k=10，租戶調參的 7 仍須勝出（設計 §9／§10 縫⑦ runtime apply）。
+    """
+    captured = {}
+
+    async def fake_post(self, url, json=None, headers=None, **kwargs):
+        captured["json"] = json
+        return FakeBackendResponse([])
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    node = make_retrieve_node(query_key="question", top_k=10)
+    asyncio.run(
+        node({"question": "公司地址在哪？", "tenant_id": "demo-a", "retrieval_top_k": 7})
+    )
+
+    assert captured["json"]["top_k"] == 7
+
+
 def test_retrieve_propagates_backend_http_error(monkeypatch):
     """backend 呼叫失敗（非 2xx）時，錯誤應直接往上拋，讓 app.main 的
     workflow_execution_failed（500）處理接住，節點本身不吞錯誤。

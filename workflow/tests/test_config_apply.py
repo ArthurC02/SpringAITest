@@ -13,6 +13,7 @@ per-config LLM 為 LangChainStructuredLLM（惰性建 client、測試不觸發�
 
 import dataclasses
 
+import asyncio
 import hashlib
 import httpx
 import pytest
@@ -22,6 +23,7 @@ from app import skills
 from app.engine import compiler
 from app.engine import skill as skill_mod
 from app.main import app
+from app.security import RequestContext
 from app.settings import settings
 from app.skills import config_apply, custom
 from tests.conftest import auth_headers as _headers, install_fake_get
@@ -148,9 +150,15 @@ def test_build_config_deps_single_override_others_are_global_defaults():
         # 各鍵的 on-point 邊界值（範圍見規格 §9；off-point 拒收由 backend
         # ConfigurationValues 把關，workflow 信任已驗證的值，不在此層重驗）
         {"kb_query.top_k": 1},
+        {"retrieval.top_k": 1},
         {"retrieval.top_k": 50},
         {"kb_query.max_retrieval_attempts": 1},
         {"workflow.timeout_seconds": 1},
+        # 這三鍵規格是 int ≥1、無上限（backend ValidateInt 的 max=None），所以「另一側」
+        # 不是某個 on-point，而是「大值不被夾扣、不被誤判為未設」。
+        {"kb_query.top_k": 10000},
+        {"kb_query.max_retrieval_attempts": 10000},
+        {"workflow.timeout_seconds": 86400},
         {"intent.confidence_threshold": 0.0},
         {"intent.confidence_threshold": 1.0},
         {"llm.temperature": 0.0},
@@ -412,6 +420,38 @@ def test_active_fetch_is_direct_with_internal_token_and_identity(backend, fake_b
 
 
 # ---------------------------------------------------------------------------
+# resolve() 的 retrieval.top_k seed（縫⑦ 入口）：只在租戶「明確覆寫」該鍵時才給值
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "values, expected_seed",
+    [
+        ({"retrieval.top_k": 20}, 20),   # 明確覆寫 → 具體 seed 流向初始 state
+        ({"kb_query.top_k": 25}, None),  # 覆寫別的鍵、缺 retrieval.top_k → 不 seed
+    ],
+    ids=["explicit-override", "other-keys-only"],
+)
+def test_resolve_seeds_retrieval_top_k_only_when_explicitly_overridden(
+    backend, fake_base_deps, values, expected_seed
+):
+    """resolve() 用「原始 values」而非 effective 決定 seed：沒覆寫就回 None，不是全域 4。
+
+    這正是模組 docstring 點名的精度差：effective 會把 retrieval.top_k 回落成全域 4，
+    若無條件 seed 4 會蓋掉骨架 SLOT 的 8（per-config > SLOT > 全域 破功）。
+    兩組皆有覆寫（values 非空）→ per_config 必為非 None、逾時仍回落全域。
+    """
+    backend.set_active("demo-a", values)
+    ctx = RequestContext(tenant_id="demo-a", user_id="alice", role="USER")
+
+    per_config, timeout, seed = asyncio.run(config_apply.resolve(ctx))
+
+    assert seed == expected_seed
+    assert per_config is not None  # values 非空 → 走 per-config 路徑
+    assert timeout == settings.workflow_timeout_seconds  # 未覆寫逾時 → 全域 120
+
+
+# ---------------------------------------------------------------------------
 # SSR-P4-016：無 active → 全域預設，builtin 沿用啟動圖（不重編、不回歸）
 # ---------------------------------------------------------------------------
 
@@ -575,6 +615,36 @@ def test_active_bad_json_falls_back_to_global(backend, fake_base_deps):
 
     assert resp.status_code == 200
     assert config_apply._config_deps_cache == {}
+
+
+@pytest.mark.parametrize("failure", ["down", "badjson"], ids=["unreachable", "bad-json"])
+def test_active_failure_builtin_still_uses_startup_graph(
+    backend, fake_base_deps, build_spy, failure
+):
+    """builtin × 硬故障（連不上／壞 JSON，非 404）→ 沿用啟動圖：零重編、不寫快取。
+
+    既有 builtin 只驗過「active 不存在（404）」這條路；後端真的壞掉是另一條程式路徑
+    （resolve 的 except Exception，非空 values 早退），builtin 在那條路上同樣不得
+    半編出一張 per_config 圖，也不得偷用取不到的那份設定。
+    """
+    backend.active_fail = failure
+    backend.set_active("demo-a", FULL_OVERRIDE)  # 有設定但取不到 → 不得偷用
+    cleanup = _register_builtin_probe("cfg-builtin-probe", fake_base_deps)
+    try:
+        resp = client.post(
+            "/skills/cfg-builtin-probe/invoke",
+            json={"input": {"query": "hi"}},
+            headers=_headers(),
+        )
+        assert resp.status_code == 200  # 全域預設回落，skill 照跑
+        assert resp.json()["output"]["final_answer"] == "echo: hi"
+        per_config_builds = [
+            d for (n, d) in build_spy if n == "cfg-builtin-probe" and d is not fake_base_deps
+        ]
+        assert per_config_builds == []  # 故障 → 沿用啟動圖，零重編
+        assert config_apply._config_deps_cache == {}  # 故障 → 不留半成品快取
+    finally:
+        cleanup()
 
 
 def test_active_404_does_not_cross_tenant_fallback(backend, fake_base_deps, build_spy):

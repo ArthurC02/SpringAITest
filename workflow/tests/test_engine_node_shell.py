@@ -153,6 +153,62 @@ def test_step_guard_denies_before_node_side_effect_and_allows_exact_one():
     assert second["trace"][0].status == "error"
 
 
+def test_step_guard_non_budget_exception_becomes_fatal_without_running_node():
+    """step guard 拋非 BudgetExhausted → fatal 用「{node}: {e}」，沒有 budget_exhausted 前綴。"""
+    calls = []
+
+    async def node(_state: dict) -> dict:
+        calls.append(True)
+        return {"ok": True}
+
+    async def guard(_node_name: str) -> None:
+        raise ValueError("quota")
+
+    set_step_guard(guard)
+    try:
+        out = _run(harnessed("x", node), {})
+    finally:
+        set_step_guard(None)
+
+    assert calls == []  # guard 在節點本體之前擋下
+    assert out["fatal_error"] == "x: quota"
+    assert out["errors"][0] == {"node": "x", "error": "quota", "error_type": "ValueError"}
+    assert out["trace"][0].status == "error"
+    assert out["trace"][0].error_code == "ValueError"
+
+
+def test_run_on_fatal_node_is_sacrificed_when_budget_callback_exhausts():
+    """run_on_fatal 節點照樣執行，但 callback 耗盡預算 → 輸出被丟棄、fatal 被改寫。"""
+    executed = []
+
+    async def _composer(_state: dict) -> dict:
+        executed.append("ran")
+        return {"final_answer": "【無法提供答案】"}
+
+    async def callback(_node_name: str, _elapsed_ms: float) -> None:
+        raise BudgetExhausted("step limit")
+
+    set_budget_callback(callback)
+    try:
+        out = _run(
+            harnessed(
+                "answer_composer",
+                _composer,
+                run_on_fatal=True,
+                writes=["final_answer"],
+            ),
+            {"fatal_error": "earlier"},
+        )
+    finally:
+        set_budget_callback(None)
+
+    assert executed == ["ran"]  # 本體已跑完（副作用已發生），callback 才在事後拋
+    assert "final_answer" not in out  # 例外路徑不回傳 out，清理節點的輸出一併陪葬
+    assert out["fatal_error"] == "budget_exhausted:answer_composer"  # 蓋掉原本的 earlier
+    assert out["errors"][0]["error"] == "step limit"
+    assert out["trace"][0].status == "error"
+
+
 # ---------------------------------------------------------------------------
 # AT1-04 剝除未宣告的 writes 鍵
 # ---------------------------------------------------------------------------
@@ -177,6 +233,19 @@ def test_node_shell_without_writes_declaration_keeps_all_keys():
 
     assert out["allowed_key"] == "ok"
     assert out["sneaky_key"] == "x"
+
+
+def test_node_shell_writes_empty_list_strips_every_output_key():
+    """writes=[]（宣告了空契約，與 writes=None 只差一步）→ 輸出鍵全剝光，只剩 trace。"""
+
+    async def _leaky(_state: dict) -> dict:
+        return {"leaked": 1}
+
+    out = _run(harnessed("leaky", _leaky, writes=[]), {})
+
+    assert out.keys() == {"trace"}
+    assert out["trace"][0].status == "ok"  # 剝除不是錯誤
+    assert out["trace"][0].output_summary == ""
 
 
 # ---------------------------------------------------------------------------
@@ -390,3 +459,26 @@ def test_node_and_tool_shell_outputs_cannot_replace_runtime_authority():
             downstream_state,
         )
         assert observed["seen_authority"] == authentic
+
+
+def test_runtime_authority_keys_stripped_even_without_writes_declaration():
+    """未宣告 writes 一樣偽造不了 snapshot authority：剝除無條件執行，一般鍵照留。"""
+    authentic = {
+        "run_id": "run-authentic",
+        "agent_id": "agent-authentic",
+        "agent_revision": 7,
+        "knowledge_sources": ["source-authentic"],
+        "enforce_data_scope": True,
+    }
+
+    async def _legacy(_state: dict) -> dict:
+        return {**{key: "forged" for key in RUNTIME_AUTHORITY_KEYS}, "ordinary": "kept"}
+
+    update = _run(harnessed("legacy_node", _legacy), authentic)
+
+    assert set(update).isdisjoint(RUNTIME_AUTHORITY_KEYS)
+    assert update["ordinary"] == "kept"
+    assert {**authentic, **{k: v for k, v in update.items() if k != "trace"}} == {
+        **authentic,
+        "ordinary": "kept",
+    }

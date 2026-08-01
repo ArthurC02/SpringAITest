@@ -1,10 +1,10 @@
 import { expect, test } from '@playwright/test'
 import {
-  createWorkflow, decodeWorkflow, encodeWorkflowUpsert, getWorkflow, listWorkflowNodeCatalog, publishWorkflow, putWorkflowDraft,
-  restoreWorkflowRevision, simulateWorkflow, validateWorkflow,
+  createWorkflow, decodeWorkflow, decodeWorkflowSimulation, decodeWorkflowValidation, encodeWorkflowUpsert, getWorkflow,
+  listWorkflowNodeCatalog, publishWorkflow, putWorkflowDraft, restoreWorkflowRevision, simulateWorkflow, validateWorkflow,
 } from '../src/api/workflows'
 import { createOrchestrator, decodeOrchestrator, encodeOrchestratorUpsert, getOrchestrator, putOrchestratorDraft } from '../src/api/orchestrators'
-import type { OrchestratorDraft, WorkflowDraft } from '../src/types'
+import type { OrchestratorDraft, WorkflowDefinition, WorkflowDraft } from '../src/types'
 
 const workflowDraft: WorkflowDraft = { definition: { schemaVersion: 1, kind: 'orchestrator', nodes: [], edges: [], governance: {} }, ui_metadata: { positions: {} } }
 const workflowWire = { id: 'w1', name: 'Root', kind: 'orchestrator', enabled: true, draft_version: 4, published_revision: null, definition: workflowDraft.definition, ui_metadata: workflowDraft.ui_metadata, updated_at: '2026-01-01' }
@@ -67,6 +67,55 @@ test.describe('D4 management wire adapters', () => {
       .not.toHaveProperty('definition.runtimeVariant')
   })
 
+  test('agent-runtime workflows drop an unknown runtime variant exactly like an absent one', () => {
+    for (const runtimeVariant of ['bogus', undefined]) {
+      const definition = { ...workflowDraft.definition, kind: 'agent-runtime', runtimeVariant } as unknown as WorkflowDefinition
+      const decoded = decodeWorkflow({ ...workflowWire, kind: 'agent-runtime' as const, definition })
+      // Only 'worker'/'verifier' survive the decode, so an unrecognised variant can never be echoed back on save.
+      expect(decoded.draft.definition).not.toHaveProperty('runtimeVariant')
+      expect(encodeWorkflowUpsert({ name: decoded.name, kind: decoded.kind, draft: decoded.draft })).toEqual({
+        name: 'Root', kind: 'agent-runtime', definition: { ...workflowDraft.definition, kind: 'agent-runtime' }, ui_metadata: workflowDraft.ui_metadata,
+      })
+    }
+  })
+
+  test('validation issues fall back to edge and graph scope when no node id is present', () => {
+    const validation = decodeWorkflowValidation({ valid: false, errors: [{ field: 'edges', message: 'dangling edge', edge_id: 'e1' }, { message: 'cycle detected' }] })
+    // Scope decides which canvas element lights up; a graph-level error must stay unattached instead of borrowing an id.
+    expect(validation.errors).toEqual([
+      { scope: 'edge', id: 'e1', code: 'edges', message: 'dangling edge' },
+      { scope: 'graph', id: undefined, code: 'validation', message: 'cycle detected' },
+    ])
+    expect(validation.canonical_definition).toBeUndefined()
+  })
+
+  test('simulation diagnostics map camelCase ids and fall back through code/path/field', () => {
+    // The Python simulator answers in camelCase, so scope/id must be read from both spellings.
+    const simulation = decodeWorkflowSimulation({ valid: false, errors: [
+      { edgeId: 'e1', message: 'bad edge' },
+      { nodeId: 'n1', path: 'nodes[0].config', message: 'bad node' },
+      { field: 'definition' },
+    ] })
+    expect(simulation).toEqual({
+      valid: false, canonical_definition: undefined, trace: undefined,
+      errors: [
+        { scope: 'edge', id: 'e1', code: 'validation', message: 'bad edge' },
+        { scope: 'node', id: 'n1', code: 'nodes[0].config', message: 'bad node' },
+        { scope: 'graph', id: undefined, code: 'definition', message: 'validation failed' },
+      ],
+    })
+  })
+
+  test('node catalog degrades to an empty palette when the response carries no nodes array', async () => {
+    const original = globalThis.fetch; const responses = [{ catalogVersion: '1' }, { nodes: [] }]
+    globalThis.fetch = async () => new Response(JSON.stringify(responses.shift()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    try {
+      // A catalog without the key and an explicitly empty one are the same empty palette, never a crash.
+      expect(await listWorkflowNodeCatalog()).toEqual([])
+      expect(await listWorkflowNodeCatalog()).toEqual([])
+    } finally { globalThis.fetch = original }
+  })
+
   test('orchestrator valid canonical create and load-save preserve every required field exactly', async () => {
     const original = globalThis.fetch; const calls: Array<{ init?: RequestInit }> = []; const responses = [orchestratorWire, orchestratorWire, orchestratorWire]
     globalThis.fetch = async (_, init) => { calls.push({ init }); return new Response(JSON.stringify(responses.shift()), { status: 200, headers: { 'Content-Type': 'application/json', ETag: '"2"' } }) }
@@ -77,6 +126,15 @@ test.describe('D4 management wire adapters', () => {
       expect(current.data.draft).toEqual(orchestratorDraft)
       expect(JSON.parse(String(calls[2].init?.body))).toEqual(body)
     } finally { globalThis.fetch = original }
+  })
+
+  test('orchestrator decode degrades unknown policies and missing budgets to their safe defaults', () => {
+    const relaxed = decodeOrchestrator({ ...orchestratorWire, definition: { ...orchestratorDefinition, policy: { joinPolicy: 'repair', repairPolicy: 'unknown' }, budgets: {} } })
+    // 'repair' is a real join policy, but an unreadable repair policy degrades to 'fail' — the UI never inherits a value it could not verify.
+    expect(relaxed.draft.policy).toEqual({ dispatchMode: 'bounded-parallel', joinPolicy: 'repair', repairPolicy: 'fail', aggregationPolicy: 'verified-only', denialPolicy: 'fail-closed' })
+    expect(relaxed.draft.budgets).toEqual({ maxContextRounds: 0, maxTasks: 0, maxChildRuns: 0, maxConcurrency: 0, maxRepairRounds: 0, tokenBudget: 0, timeoutSeconds: 0 })
+    const bare = decodeOrchestrator({ ...orchestratorWire, definition: { ...orchestratorDefinition, policy: undefined } })
+    expect(bare.draft.policy.joinPolicy).toBe('fail-fast')
   })
 
   test('orchestrator load-save drops unknown policy fields instead of reproducing them', () => {

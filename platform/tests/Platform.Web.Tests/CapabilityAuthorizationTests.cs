@@ -53,6 +53,22 @@ public sealed class CapabilityAuthorizationTests : IClassFixture<TestWebAppFacto
         Assert.False(principal.HasCapability("agent.author"));
     }
 
+    // capabilities 與 groups 的畸形處理刻意不同:groups 一筆畸形整組作廢(見
+    // GetGroups_OneMalformedClaimRejectsWholeSet),capabilities 只逐筆過濾掉畸形項,
+    // 其餘合法 grant 存活。這裡釘住現行行為,免得日後誤以為兩者對稱而改錯任一側。
+    [Fact]
+    public void GetCapabilities_OneMalformedClaimAmongValidOnes_KeepsOnlyValidEntries()
+    {
+        var principal = Principal(
+            "USER",
+            new Claim("capabilities", "workflow.manage"),
+            new Claim("capabilities", "agent.author orchestrator.manage"));
+
+        Assert.Equal(new[] { "workflow.manage" }, principal.GetCapabilities());
+        Assert.True(principal.HasCapability("workflow.manage"));
+        Assert.False(principal.HasCapability("agent.author"));
+    }
+
     [Fact]
     public void GetCapabilities_Missing_ReturnsNull_HasCapabilityFalse()
     {
@@ -114,6 +130,17 @@ public sealed class CapabilityAuthorizationTests : IClassFixture<TestWebAppFacto
 
         Assert.Null(principal.GetCapabilities());
         Assert.False(principal.HasCapability("workflow.manage"));
+    }
+
+    // 數量下界(GetGroups 自有的 claims.Length == 0 early return):完全沒有 groups claim →
+    // null 而非空集合,下游因此不帶 X-User-Groups header。capabilities 側已有對應測試。
+    [Fact]
+    public void GetGroups_Missing_ReturnsNull()
+    {
+        var principal = Principal("ADMIN");
+
+        Assert.Null(principal.GetGroups());
+        Assert.Null(principal.ToUserContext().Groups);
     }
 
     [Fact]
@@ -218,12 +245,15 @@ public sealed class CapabilityAuthorizationTests : IClassFixture<TestWebAppFacto
         var authz = scope.ServiceProvider.GetRequiredService<IAuthorizationService>();
 
         var withCap = Principal("USER", new Claim("capabilities", "workflow.manage"));
+        var adminWithCap = Principal("ADMIN", new Claim("capabilities", "workflow.manage"));
         var unauthenticatedWithCap = new ClaimsPrincipal(new ClaimsIdentity(
             new[] { new Claim("capabilities", "workflow.manage") }));
         var adminNoCap = Principal("ADMIN");
         var userNoCap = Principal("USER");
 
         Assert.True((await authz.AuthorizeAsync(withCap, null, "workflow.manage")).Succeeded);
+        // policy 只看 capability,不看 role:ADMIN 帶 capability 同樣放行(角色既不加分也不扣分)。
+        Assert.True((await authz.AuthorizeAsync(adminWithCap, null, "workflow.manage")).Succeeded);
         Assert.False((await authz.AuthorizeAsync(
             unauthenticatedWithCap, null, "workflow.manage")).Succeeded);
         // 單純 tenant ADMIN 不自動取得 —— 不升格所有 ADMIN。

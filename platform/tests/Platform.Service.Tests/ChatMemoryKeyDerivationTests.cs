@@ -60,18 +60,30 @@ public sealed class ChatMemoryKeyDerivationTests
         Assert.Equal("u1", cid);
     }
 
+    // 匿名分支的最後一格組合(userId 空白 × conversationId 非空白):uid 退回 "default",但 cid 原封不動,
+    // **不會**被前綴成 "default:conv1" —— 與已登入分支「cid 一律前綴 {tenant}:{user}」刻意不對稱。
+    // 匿名沒有身分可隔離,所以兩個匿名呼叫端只要送同一個 conversationId 就共用同一個短期視窗;
+    // 這是既有契約(匿名只有短期連續性,不 recall/remember/persist),在此釘住以免哪天被「順手補前綴」。
+    [Fact]
+    public void Anonymous_UserIdBlank_ConversationProvided_CidIsNotPrefixedWithUid()
+    {
+        var (uid, cid) = ChatMemoryKeyDerivation.Derive(userId: null, conversationId: "conv1", userCtx: null);
+
+        Assert.Equal("default", uid);
+        Assert.Equal("conv1", cid);
+        Assert.DoesNotContain("default", cid);
+    }
+
     // 前後空白「不」被 trim(ChatMemoryKeyDerivation.cs:25 直接字串插值):" c1 " 與 "c1" 是兩個不同的
     // 短期記憶視窗。這是刻意釘住的現況,因為 AgentChatRuntime.cs:41-42 對同一個 conversationId 會 Trim()
     // 後才送去 backend —— 兩邊的正規化不對稱,改動任一側都必須同時檢視另一側(D6 的 durable
     // conversation_id 與 session 命名空間會對不齊)。
-    [Theory]
-    [InlineData("  c1  ", "demo-a:user-a:  c1  ")]
-    [InlineData("c1", "demo-a:user-a:c1")]
-    public void LoggedIn_ConversationIdSurroundingWhitespace_IsNotTrimmed(string conversationId, string expectedCid)
+    [Fact]
+    public void LoggedIn_ConversationIdSurroundingWhitespace_IsNotTrimmed()
     {
-        var (_, cid) = ChatMemoryKeyDerivation.Derive(userId: null, conversationId, UserA);
+        var (_, cid) = ChatMemoryKeyDerivation.Derive(userId: null, conversationId: "  c1  ", UserA);
 
-        Assert.Equal(expectedCid, cid);
+        Assert.Equal("demo-a:user-a:  c1  ", cid);
     }
 
     // ---- 身分含 ':' 的撞鍵:fail closed ----

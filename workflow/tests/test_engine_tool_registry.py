@@ -285,6 +285,57 @@ def test_tool_call_from_script_enters_trace():
     assert "1+1" not in "".join(e.model_dump_json() for e in result["trace"])
 
 
+def test_failed_tool_call_from_script_is_traced_as_error():
+    """script 內失敗的 tools.call 也要留下 status=error 的子 entry（而不是只剩 script 的錯）。
+
+    tool 步驟那條路（as_step=True）由 test_failed_tool_call_is_traced_as_error 蓋；
+    這裡蓋的是 script 那條路（as_step=False）的 finally 分支：例外照樣往上拋給 script
+    runner（→ Node Shell 的 fatal 短路），但「呼叫過誰、失敗在哪」得先入 trace，
+    且 args 的值一樣不落。
+    """
+    result = _run(
+        {
+            "uses_tools": ["local.calculator"],
+            "flow": [
+                {"script": "state['x'] = tools.call('local.calculator', expression='1/0')\n"}
+            ],
+        }
+    )
+
+    entries = _tool_entries(result)
+    assert len(entries) == 1
+    assert entries[0].tool == "local.calculator"
+    assert entries[0].status == "error"
+    assert entries[0].error_code == "ZeroDivisionError"
+    assert entries[0].args_keys == "expression"  # 失敗路徑也只留鍵名
+    assert "1/0" not in "".join(e.model_dump_json() for e in result["trace"])
+
+    assert "x" not in result  # 例外穿出 script → 這一步的寫入不落地
+    assert "fatal_error" in result
+    assert result["trace"][-1].node_name == "audit_feedback"  # 稽核照樣落地
+
+
+def test_tool_trace_args_keys_summary_stops_at_200_chars():
+    """args 鍵名摘要的 200 字上限：剛好 200 全留、超過只准截短（不是整串丟掉）。
+
+    3 個 66 字鍵 + 2 個逗號 = 200（on-point）；同樣 3 個鍵改成 67 字 = 203（off-point）。
+    """
+
+    def args_keys_for(key_length: int) -> str:
+        args = {letter * key_length: 1 for letter in "abc"}
+        result = _run({"flow": [{"tool": PROBE_TOOL, "args": args, "save_as": "out"}]})
+        return _tool_entries(result)[0].args_keys
+
+    on_point = args_keys_for(66)
+    assert on_point == ",".join(letter * 66 for letter in "abc")
+    assert len(on_point) == 200
+
+    off_point = args_keys_for(67)
+    assert len(off_point) == 200
+    assert off_point.startswith(f"{'a' * 67},{'b' * 67},")
+    assert off_point.endswith("c" * 64)  # 第三個鍵被切斷，摘要不會溢出
+
+
 # ---------------------------------------------------------------------------
 # AT3-16 uses_tools 白名單
 # ---------------------------------------------------------------------------
@@ -493,6 +544,32 @@ def test_args_schema_declaring_argument_absent_from_callable_is_rejected():
             return None
 
     assert tool_registry.get(name) is None
+
+
+def test_tool_spec_derives_required_and_nullable_args_from_signature():
+    """required_args／nullable_args 由簽名推導（下游拿它組 JSON schema 與必填檢查）。
+
+    三個等價類各一：無預設值 → required、有預設值 → 非 required、註解含 None → nullable。
+    `**args` 是另一條分支：callable 看不出必填，改以 args_schema 宣告的鍵全數視為必填
+    （PROBE_TOOL 即此形狀）—— 保守方向與 risk 預設 privileged 一致。
+    """
+    name = "local.arg-contract-probe"
+
+    @tool_registry.tool(name=name, kind="local", risk="read")
+    async def arg_contract(
+        ctx: ToolContext, needed: str, defaulted: int = 0, maybe: str | None = None
+    ) -> dict:
+        return {}
+
+    try:
+        spec = tool_registry.get(name)
+        assert spec.required_args == frozenset({"needed"})
+        assert spec.nullable_args == frozenset({"maybe"})
+    finally:
+        tool_registry._REGISTRY.pop(name, None)
+
+    assert tool_registry.get(PROBE_TOOL).required_args == frozenset({"x"})
+    assert tool_registry.get(PROBE_TOOL).nullable_args == frozenset()
 
 
 def test_duplicate_tool_name_raises_value_error():

@@ -98,6 +98,32 @@ test('Agent Skill retains shared run and revision flows after IA split', async (
   await expect(page.getByText('invoice run result', { exact: true })).toBeVisible()
 })
 
+test('a single-revision history renders the row but offers no restore target', async ({ page }) => {
+  await signIn(page)
+  // 邊界：0 筆走「尚無 revision。」、2 筆才有回溯對象；恰好 1 筆是唯讀當前版，兩者皆非。
+  await page.route('**/api/skills/invoice-skill/revisions', (route) => json(route, [
+    { revision: 1, definition: 'only', definition_sha256: '111111111111', created_by: 'tester', created_at: '2026-07-30T00:00:00Z', kind: 'agentic', has_package: true },
+  ]))
+  await page.getByRole('button', { name: 'Agent Skills' }).click()
+  await page.getByRole('row').filter({ hasText: 'invoice-skill' }).getByRole('button', { name: '版本' }).click()
+  await expect(page.locator('.rev')).toHaveCount(1)
+  await expect(page.getByText('尚無 revision。')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '回溯此版' })).toHaveCount(0)
+})
+
+test('an agentic revision without a stored package keeps its restore button disabled', async ({ page }) => {
+  await signIn(page)
+  // agentic 的 package bytes 只留在 server：舊版沒保存 package 就不可回溯（flow 則永遠可回溯）。
+  await page.route('**/api/skills/invoice-skill/revisions', (route) => json(route, [
+    { revision: 3, definition: 'current', definition_sha256: '333333333333', created_by: 'tester', created_at: '2026-07-30T00:00:00Z', kind: 'agentic', has_package: true },
+    { revision: 2, definition: 'old', definition_sha256: '222222222222', created_by: 'tester', created_at: '2026-07-29T00:00:00Z', kind: 'agentic', has_package: false },
+  ]))
+  await page.getByRole('button', { name: 'Agent Skills' }).click()
+  await page.getByRole('row').filter({ hasText: 'invoice-skill' }).getByRole('button', { name: '版本' }).click()
+  await expect(page.getByText('此舊版未保存套件，無法回溯')).toBeVisible()
+  await expect(page.getByRole('button', { name: '回溯此版' })).toBeDisabled()
+})
+
 test('built-in Agent Skill opens a read-only catalog view and returns without duplicate requests', async ({ page }) => {
   const requested = await signIn(page)
   await page.getByRole('button', { name: 'Agent Skills' }).click()
@@ -188,6 +214,48 @@ for (const initialKind of ['flow', 'agentic'] as const) {
       : '/api/business-workflows/switchable-artifact')
   })
 }
+
+test('a restore whose snapshot never synchronizes gives up after three attempts', async ({ page }) => {
+  let detailGets = 0
+  const flow = {
+    name: 'expense-review', description: 'Flow only', required_role: 'USER', current_revision: 2,
+    updated_at: '2026-07-30T00:00:00Z', enabled: true, kind: 'flow',
+  }
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') return json(route, {
+      token: 'token', username: 'tester', role: 'ADMIN', tenantCode: 'demo', capabilities: [],
+    })
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/business-workflows') return json(route, [flow])
+    if (path === '/api/business-workflows/expense-review') {
+      // restore 已回 r3,但 detail 與 catalog 都還停在 r2 —— 每次重試都取到不同步的快照。
+      detailGets += 1
+      return json(route, { ...flow, definition: 'name: expense-review' })
+    }
+    if (path === '/api/skills/catalog') return json(route, [{ ...flow, source: 'custom', revision: 2, bindable: true }])
+    if (path === '/api/skills/expense-review/revisions') return json(route, [
+      { revision: 2, definition: 'name: expense-review', definition_sha256: '222222222222', created_by: 'tester', created_at: '2026-07-30T00:00:00Z', kind: 'flow' },
+      { revision: 1, definition: 'name: expense-review', definition_sha256: '111111111111', created_by: 'tester', created_at: '2026-07-29T00:00:00Z', kind: 'flow' },
+    ])
+    if (path === '/api/skills/expense-review/revisions/1/restore') {
+      return json(route, { ...flow, current_revision: 3, definition: 'name: expense-review' })
+    }
+    return json(route, [])
+  })
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('tester')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-config').click()
+  await page.getByRole('row').filter({ hasText: 'expense-review' }).getByRole('button', { name: '版本' }).click()
+  await page.getByRole('button', { name: '回溯此版' }).click()
+  await page.getByRole('button', { name: '回溯', exact: true }).click()
+  await expect(page.getByText('能力已回溯，但最新版本資料尚未同步，請返回清單後重新開啟。')).toBeVisible()
+  expect(detailGets).toBe(3)
+  await expect(page.getByRole('button', { name: '新增業務流程' })).toBeVisible()
+})
 
 async function openSimpleCreate(page: Page, catalogHandler: (route: Route) => Promise<void>) {
   await page.route('**/api/**', async (route) => {
@@ -329,6 +397,50 @@ test('out-of-order template skeleton responses only apply the current template',
   await save.click()
   await expect.poll(() => savedDefinition).toContain('compare-marker')
   expect(savedDefinition).not.toContain('retrieval-marker')
+})
+
+test('blocking server validation refuses a simple save and keeps the run panel locked', async ({ page }) => {
+  await openSimpleCreate(page, (route) => json(route, [templateEntry('template-retrieval', 'retrieval-marker')]))
+  await page.route('**/api/business-workflows/validate', (route) => json(route, {
+    valid: false, errors: [{ code: 'unknown_node', message: 'node kb_query@9 not found' }],
+  }))
+  let createRequests = 0
+  await page.route('**/api/business-workflows', async (route) => {
+    if (route.request().method() === 'POST') createRequests += 1
+    await json(route, [])
+  })
+  await page.getByText('知識問答', { exact: true }).click()
+  await page.locator('.simple-skill input.input').first().fill('blocked-flow')
+  await page.getByRole('button', { name: '儲存', exact: true }).click()
+  await expect(page.locator('.simple-skill__errors')).toContainText('引用了不存在的節點或版本')
+  expect(createRequests).toBe(0)
+  // 未存檔 → ⑥ 試一下維持停用（savedName 仍為 null）。
+  await expect(page.getByText('先儲存後才能試跑（試跑會執行已存在的 Skill）。')).toBeVisible()
+})
+
+test('advanced handoff carries the composed definition into create mode and surfaces its 409', async ({ page }) => {
+  await openSimpleCreate(page, (route) => json(route, [templateEntry('template-retrieval', 'retrieval-marker')]))
+  let createRequests = 0
+  await page.route('**/api/business-workflows', async (route) => {
+    if (route.request().method() !== 'POST') return json(route, [])
+    createRequests += 1
+    await route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({ timestamp: '2026-07-30T00:00:00Z', status: 409, message: 'name taken', fieldErrors: {} }),
+    })
+  })
+  await page.getByText('知識問答', { exact: true }).click()
+  await page.locator('.simple-skill input.input').first().fill('handed-over')
+  await page.getByRole('button', { name: '進階編輯' }).click()
+  await expect(page.getByRole('heading', { name: '新增業務流程（進階）' })).toBeVisible()
+  await expect(page.getByLabel('業務流程 YAML 定義')).toHaveValue(/name: "handed-over"/)
+  // 自動驗證（debounce）先落地,才不會在 canSave 短暫關閉的空窗按到儲存。
+  await expect(page.getByText('✅ 通過所有靜態驗證。')).toBeVisible()
+  await page.locator('.skill-editor__actions .btn--primary').click()
+  await expect(page.locator('.skill-editor').getByText('名稱已存在：name taken')).toBeVisible()
+  expect(createRequests).toBe(1)
+  await expect(page.locator('.skill-editor')).toBeVisible()
 })
 
 async function signInFailureWorkspace(page: Page, kind: 'flow' | 'agentic') {

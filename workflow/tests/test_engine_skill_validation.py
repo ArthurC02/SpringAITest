@@ -112,6 +112,25 @@ def test_loop_max_iterations_bounds(max_iterations, expect_valid):
     assert (UNBOUNDED_LOOP in _codes(result)) is not expect_valid
 
 
+def test_loop_without_until_is_accepted():
+    """until 是選填欄位（省略邊界）：只靠 max_iterations 收斂的 loop 必須乾淨通過。
+
+    _check_loop 只在 `until is not None` 時檢查條件式；整個鍵不存在時不得誤報
+    invalid_expression（缺席 ≠ 空字串，空字串那半邊見
+    test_non_string_or_empty_condition_is_invalid_expression）。
+    """
+    result = _validate(
+        "flow:\n"
+        "  - loop:\n"
+        "      max_iterations: 2\n"
+        "      body:\n"
+        "        - node: query_intake\n"
+    )
+
+    assert result.valid is True
+    assert _codes(result) == []
+
+
 # ---------------------------------------------------------------------------
 # AT2-04 invalid_expression
 # ---------------------------------------------------------------------------
@@ -144,6 +163,36 @@ def test_invalid_expression_in_branch_when():
 
     assert result.valid is False
     assert INVALID_EXPRESSION in _codes(result)
+
+
+def test_non_string_or_empty_condition_is_invalid_expression():
+    """條件式的型別／空值守衛（白名單求值器之前那一關）：空字串與非字串都直接 invalid_expression。
+
+    這條路徑不會走進 expressions.validate()，訊息因此不是白名單的理由，
+    而是固定的「<欄位> 必須是非空條件式字串」。
+    """
+    empty_until = _validate(
+        "flow:\n"
+        "  - loop:\n"
+        "      max_iterations: 2\n"
+        '      until: ""\n'
+        "      body:\n"
+        "        - node: query_intake\n"
+    )
+    assert empty_until.valid is False
+    assert INVALID_EXPRESSION in _codes(empty_until)
+    assert any(e.message == "until 必須是非空條件式字串" for e in empty_until.errors)
+
+    numeric_when = _validate(
+        "flow:\n"
+        "  - branch:\n"
+        "      when: 123\n"
+        "      then:\n"
+        "        - node: query_intake\n"
+    )
+    assert numeric_when.valid is False
+    assert INVALID_EXPRESSION in _codes(numeric_when)
+    assert any(e.message == "when 必須是非空條件式字串" for e in numeric_when.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +358,29 @@ def test_retrieve_dynamic_reads_resolved_from_params():
     assert _codes(supplied) == []  # query 來自 input_schema
 
 
+def test_dynamic_reads_param_missing_or_wrong_shape_reports_unspecified():
+    """dynamic_reads 的第三類輸入（未給／型別不對）：報「需要 params.X 指定要讀取的 state 鍵」。
+
+    只有單一 str 與純 str 的 list 兩種形狀會被解析成 state 鍵；params 整包缺席、
+    或 list 混進非字串元素，都落到這條 fallback（仍是警告級，不阻擋存檔）。
+    """
+    unspecified = _validate("flow:\n  - node: retrieve\n")
+    assert DATAFLOW_ERROR in _codes(unspecified)
+    assert any(
+        e.message == "節點 retrieve 需要 params.query_key 指定要讀取的 state 鍵"
+        for e in unspecified.errors
+    )
+    assert unspecified.valid is True
+
+    mixed_list = _validate(
+        "flow:\n  - node: nl_logic\n    params: {instruction: r, input_keys: [query, 7]}\n"
+    )
+    assert any(
+        e.message == "節點 nl_logic 需要 params.input_keys 指定要讀取的 state 鍵"
+        for e in mixed_list.errors
+    )
+
+
 def test_nl_logic_list_input_keys_dataflow_check():
     """P0-c：dynamic_reads 的 list 值（input_keys: [...]）逐項做資料流檢查，
     不再因 list 型別整包誤報「需要 params.input_keys 指定要讀取的 state 鍵」。"""
@@ -326,6 +398,42 @@ def test_nl_logic_list_input_keys_dataflow_check():
     assert not any(
         "'query'" in e.message and "input_keys" in e.message for e in supplied.errors
     )
+
+
+def test_branch_else_is_checked_and_its_writes_become_available():
+    """branch 的 else 是選填分支：內容照樣受檢，寫入的鍵也要併回後續步驟的 available。
+
+    寬鬆解讀是刻意的（見 skill._check_node 的 ponytail 註解）：只有 else 才寫的鍵，
+    branch 之後一律視為可用，不報 dataflow_error。
+    """
+    branch_head = (
+        "flow:\n"
+        "  - node: query_intake\n"
+        "  - branch:\n"
+        '      when: "state.x == 1"\n'
+        "      then:\n"
+        "        - node: query_intake\n"
+    )
+    tail = "  - node: intent_classification\n"
+
+    # 對照組：沒有 else → normalized_query 無人寫入 → dataflow_error
+    only_then = _validate(branch_head + tail)
+    assert DATAFLOW_ERROR in _codes(only_then)
+    assert any("normalized_query" in e.message for e in only_then.errors)
+
+    # else 內的 query_rewrite 寫 normalized_query → 併回 available，警告消失
+    with_else = _validate(
+        branch_head + "      else:\n        - node: query_rewrite\n" + tail
+    )
+    assert _codes(with_else) == []
+    assert with_else.valid is True
+
+    # else 內的步驟獨立受檢：未註冊節點不會因為藏在 else 就漏檢
+    bad_else = _validate(
+        branch_head + "      else:\n        - node: no_such_node\n" + tail
+    )
+    assert bad_else.valid is False
+    assert UNKNOWN_NODE in _codes(bad_else)
 
 
 def test_min_length_on_numeric_type_rejected_at_write_time():

@@ -681,3 +681,201 @@ async def test_pinned_registered_node_tools_must_be_in_effective_set() -> None:
             )
     finally:
         node_registry._REGISTRY.pop((name, "1.0"), None)
+
+
+@pytest.mark.asyncio
+async def test_pinned_flow_denies_unknown_node_before_execution() -> None:
+    """節點名在註冊表解析不到時（resolve_node → None）必須在編譯／執行前就拒絕。"""
+    artifact = replace(
+        flow_artifact(),
+        skill=Skill(
+            name="research-skill",
+            revision=3,
+            kind="flow",
+            flow=[{"node": "no-such-node"}],
+        ),
+    )
+    with pytest.raises(FlowDenied, match="unknown node: no-such-node"):
+        await invoke_pinned_flow(
+            artifact=artifact, raw_input={},
+            snapshot=snapshot(with_skill=True, skill_kind="flow"),
+            rule_tools=None, deps=None, timeout_seconds=2,
+            recursion_cap=20, remaining_tool_rounds=4,
+        )
+
+
+@pytest.mark.asyncio
+async def test_pinned_flow_executes_sequence_and_branch_steps() -> None:
+    """sequence / branch 兩種步驟型別：治理遞迴進 then+else,執行則真的走 then。"""
+    name = "test_phase2_sequence_branch_node"
+
+    @node_registry.node(name=name, writes=["custom_result"])
+    def make_node():
+        async def run(state):
+            return {"custom_result": "ok"}
+
+        return run
+
+    artifact = replace(
+        flow_artifact(scripts_present=True),
+        skill=Skill(
+            name="research-skill",
+            revision=3,
+            kind="flow",
+            flow=[
+                {"sequence": [{"node": name}]},
+                {
+                    "branch": {
+                        "when": "state.custom_result == 'ok'",
+                        "then": [{"script": "state['branch_taken'] = 'then'"}],
+                        "else": [{"script": "state['branch_taken'] = 'else'"}],
+                    }
+                },
+            ],
+        ),
+    )
+    try:
+        result = await invoke_pinned_flow(
+            artifact=artifact, raw_input={},
+            snapshot=snapshot(with_skill=True, skill_kind="flow"),
+            rule_tools=None, deps=None, timeout_seconds=2,
+            recursion_cap=20, remaining_tool_rounds=4,
+        )
+        assert result.status == "completed"
+        public = json.loads(result.content)
+        assert public["custom_result"] == "ok"
+        assert public["branch_taken"] == "then"
+    finally:
+        node_registry._REGISTRY.pop((name, "1.0"), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("risk", ["read", "write"])
+async def test_pinned_flow_rule_tools_narrow_but_never_widen(risk: str) -> None:
+    """rule_tools 非 None 時只做交集：能再收窄,不能把 write 風險工具放回有效集合。"""
+    calls: list[str] = []
+    name = f"test.runtime-rule-{risk}"
+
+    @tool_registry.tool(
+        name=name,
+        kind="http",
+        description="test tool capability",
+        args_schema={"expression": str},
+        returns="none",
+        risk=risk,
+    )
+    async def probe_tool(ctx, expression: str):
+        calls.append(expression)
+
+    def invocation(rule_tools: frozenset[str]):
+        return invoke_pinned_flow(
+            artifact=flow_artifact(tool=name),
+            raw_input={},
+            snapshot=snapshot(tools=[name], with_skill=True, skill_kind="flow"),
+            rule_tools=rule_tools,
+            deps=None,
+            timeout_seconds=2,
+            recursion_cap=20,
+            remaining_tool_rounds=4,
+        )
+
+    try:
+        # agent/caller/artifact 三方都授權,但 rule_tools 沒列到 → 收窄後仍拒。
+        with pytest.raises(FlowDenied, match="not in effective set"):
+            await invocation(frozenset({"other.tool"}))
+        assert calls == []
+        if risk == "write":
+            with pytest.raises(FlowDenied, match="not in effective set"):
+                await invocation(frozenset({name}))
+            assert calls == []
+        else:
+            result = await invocation(frozenset({name}))
+            assert result.status == "completed"
+            assert calls == ["1+1"]
+    finally:
+        tool_registry._REGISTRY.pop(name, None)
+
+
+@pytest.mark.asyncio
+async def test_pinned_flow_admits_budgets_equal_to_its_bounds() -> None:
+    """預算比較是嚴格大於：剛好等於上界要放行（少一格才拒,見 budget_exhaustion 測試）。"""
+    result = await invoke_pinned_flow(
+        artifact=flow_artifact(),
+        raw_input={"query": "hello"},
+        snapshot=snapshot(with_skill=True, skill_kind="flow"),
+        rule_tools=None,
+        deps=SimpleNamespace(max_retrieval_attempts=1),
+        timeout_seconds=2,
+        recursion_cap=20,
+        remaining_tool_rounds=0,
+        remaining_steps=2,
+    )
+
+    assert (result.steps_bound, result.tool_calls_bound) == (2, 0)
+    assert result.status == "completed"
+    assert result.steps_consumed == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fatal_error", "expected_status"),
+    [
+        ("query_intake: query 不可為空白", "error"),
+        ("budget_exhausted:query_intake", "budget_exhausted"),
+    ],
+    ids=["fatal-error", "fatal-budget"],
+)
+async def test_flow_fatal_error_left_in_state_downgrades_status(
+    monkeypatch: pytest.MonkeyPatch, fatal_error: str, expected_status: str
+) -> None:
+    """圖跑完但 state 留著 fatal_error：狀態降級,且 fatal_error 本身不得進 public。"""
+    _stub_compile(
+        monkeypatch,
+        _StubGraph({"fatal_error": fatal_error, "answer": "partial"}),
+    )
+
+    result = await invoke_pinned_flow(
+        artifact=flow_artifact(),
+        raw_input={"query": "hello"},
+        snapshot=snapshot(
+            tools=["local.calculator"], with_skill=True, skill_kind="flow"
+        ),
+        rule_tools=None,
+        deps=SimpleNamespace(max_retrieval_attempts=1),
+        timeout_seconds=2,
+        recursion_cap=20,
+        remaining_tool_rounds=4,
+    )
+
+    assert result.status == expected_status
+    assert json.loads(result.content) == {"answer": "partial"}
+
+
+@pytest.mark.asyncio
+async def test_flow_execution_exception_is_contained_as_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """圖執行拋出非 FlowDenied／非逾時的例外：收斂成 error,不外洩例外訊息或半成品。"""
+
+    class _ExplodingGraph(_StubGraph):
+        async def ainvoke(self, state, config=None):
+            raise RuntimeError("node blew up for tenant-甲")
+
+    _stub_compile(monkeypatch, _ExplodingGraph({"answer": "never"}))
+
+    result = await invoke_pinned_flow(
+        artifact=flow_artifact(),
+        raw_input={"query": "hello"},
+        snapshot=snapshot(
+            tools=["local.calculator"], with_skill=True, skill_kind="flow"
+        ),
+        rule_tools=None,
+        deps=SimpleNamespace(max_retrieval_attempts=1),
+        timeout_seconds=2,
+        recursion_cap=20,
+        remaining_tool_rounds=4,
+    )
+
+    assert result.status == "error"
+    assert result.content == "{}"
+    assert (result.steps_consumed, result.tool_rounds_consumed) == (0, 0)

@@ -38,4 +38,28 @@ public sealed class AnalysisServiceTests
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.SummaryAsync(Ctx));
     }
+
+    // 「沒有回應」與「回了 500」是兩條不同的程式路徑(WrapTransport vs mapError),對外同為 502。
+    [Fact]
+    public async Task Summary_TransportFailure_ThrowsWorkflowInvocation()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("backend 不可達")));
+
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.SummaryAsync(Ctx));
+        Assert.StartsWith("分析服務呼叫失敗：", ex.Message);
+    }
+
+    // 2xx 但沒有可用 body 的等價類:backend 回 JSON null(走 onEmptyBody)或整包沒有 body(解析失敗),
+    // 兩者都必須收斂成受控 502(帶 FailurePrefix),不得被當成查詢成功而回一個半空的統計摘要。
+    [Theory]
+    [InlineData("null", "分析服務呼叫失敗：回應內容為空")]
+    [InlineData("", "分析服務呼叫失敗：")]
+    public async Task Summary_Backend2xxWithoutUsableBody_ThrowsControlled502(string body, string expectedPrefix)
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, body)));
+
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.SummaryAsync(Ctx));
+
+        Assert.StartsWith(expectedPrefix, ex.Message);
+    }
 }

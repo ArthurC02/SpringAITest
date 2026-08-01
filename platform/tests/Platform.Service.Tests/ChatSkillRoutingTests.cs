@@ -97,6 +97,25 @@ public sealed class ChatSkillRoutingTests
             tools!.Select(t => t.Name).ToArray());
     }
 
+    // required_role 鍵整個缺席(不是空字串、也不是 "USER")→ 落在隱含預設 "USER" 那條 else 分支,
+    // 一般 USER 身分照樣可路由;本檔其餘目錄樣本每一筆都明寫 required_role,碰不到這個預設。
+    [Fact]
+    public async Task MissingRequiredRole_DefaultsToUser_IsRoutable()
+    {
+        var wf = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat("""
+            [ { "name":"no-role-skill", "description":"沒有 required_role 鍵", "source":"custom",
+                "input_schema": { "query": { "type":"str", "required":true } } } ]
+            """),
+        };
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+
+        Assert.Equal(new[] { "no-role-skill" }, tools!.Select(t => t.Name).ToArray());
+    }
+
     // 匿名不讀目錄/不執行 skill(阻塞 + 串流兩半)由 ChatBehaviorBaselineTests.A06a/A06b 覆蓋(超集);
     // 「匿名時 BuildToolsAsync 回 null(不是空清單)」由 ChatServiceTests.Chat_Anonymous_BuildsNoTools 覆蓋。
     // builtin 與 custom 路由地位相同已由上面兩案的精確集合斷言涵蓋(SampleCatalog 兩種 source 都有)。
@@ -165,6 +184,33 @@ public sealed class ChatSkillRoutingTests
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
 
         Assert.Empty(tools!);
+    }
+
+    // 上一案是「整包 catalog 不是陣列」;這一案是陣列合法、但個別 entry 壞掉(非物件元素、缺 name 鍵、
+    // name 非字串)——逐項跳過而非整包放棄,同一陣列裡的正常 entry 仍要照常路由,且不拋例外。
+    [Fact]
+    public async Task MalformedCatalogEntries_AreSkipped_ValidSiblingStillRouted()
+    {
+        var wf = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat("""
+            [
+              { "description":"缺 name 鍵", "required_role":"USER", "source":"custom",
+                "input_schema": { "query": { "type":"str", "required":true } } },
+              "just-a-string-item",
+              123,
+              { "name": 42, "description":"name 非字串", "required_role":"USER", "source":"custom",
+                "input_schema": { "query": { "type":"str", "required":true } } },
+              { "name":"kb-query", "description":"唯一正常的一筆", "required_role":"USER", "source":"builtin",
+                "input_schema": { "query": { "type":"str", "required":true } } }
+            ]
+            """),
+        };
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+
+        Assert.Equal(new[] { "kb-query" }, tools!.Select(t => t.Name).ToArray());
     }
 
     // ---- 跨案關鍵修正:template-* 內建骨架不可被路由 ----
@@ -285,6 +331,26 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal(value, result);
     }
 
+    // 標準 output key 存在但值不是字串(數字/物件/陣列)→ 該鍵不算命中,繼續往下一個標準 key 找;
+    // 上一案只餵字串值,踩不到 v.ValueKind == String 這道守衛(不可把 123 當答案、也不可炸)。
+    [Fact]
+    public async Task NonStringStandardOutputKey_IsSkipped_NextKeyWins()
+    {
+        var wf = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
+            SkillOutput = Cat("""{ "skill":"s", "output": { "answer": 123, "final_answer":"文字答案" } }"""),
+        };
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "s");
+
+        var result = await tool.InvokeAsync("q", CancellationToken.None);
+
+        Assert.Equal("文字答案", result);
+    }
+
     // ---- business_result 優先:nl_logic 套規則後的權威答案須先於 final_answer(套規則前) ----
     [Fact]
     public async Task BusinessResult_TakesPriorityOver_FinalAnswer()
@@ -389,6 +455,29 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal(2, parsed.RootElement.GetProperty("rows").GetArrayLength());
     }
 
+    // fatal_error 三態的中間值:上面兩案分別覆蓋「有值字串」(fatal)與「整個缺鍵」(非 fatal),
+    // 這一案是「鍵在、值是 JSON null」——判定看的是 ValueKind 不是「鍵存不存在」,故仍非 fatal,
+    // 維持 raw JSON fallback,不可誤判成友善訊息把 output 吞掉。
+    [Fact]
+    public async Task FatalErrorExplicitNull_IsNotFatalRun_StillUsesRawJsonFallback()
+    {
+        var wf = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat("""[ { "name":"s", "description":"x", "required_role":"USER", "source":"custom", "input_schema": { "q": { "type":"str", "required":true } } } ]"""),
+            SkillOutput = Cat("""{ "skill":"s", "output": { "trace":["n1"], "fatal_error": null, "errors":[] } }"""),
+        };
+        var (_, routing) = BuildRouting(new FakeLlmAgent(), wf);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "s");
+
+        var result = await tool.InvokeAsync("q", CancellationToken.None);
+
+        Assert.NotEqual("回覆過程發生錯誤，請稍後再試", result);
+        using var parsed = JsonDocument.Parse(result);
+        Assert.Equal(JsonValueKind.Null, parsed.RootElement.GetProperty("fatal_error").ValueKind);
+    }
+
     [Fact]
     public async Task OutputWithoutWrapper_FallsBackToRootRawJson()
     {
@@ -459,6 +548,34 @@ public sealed class ChatSkillRoutingTests
         // 沒有靜態工具可退了:目錄失敗這輪就是空清單。
         var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
         Assert.Empty(tools!);
+    }
+
+    // 傳輸維度的另一半:同一個目錄抓取失敗走串流時也必須 best-effort 退純聊天——委派共用 hosted agent
+    // 串流,不冒泡、不吞成靜默空話,串流正常結束後整段回覆照常持久化。
+    // (串流 × skill invoke 失敗那一格由 ChatBehaviorBaselineTests.A04_StreamChatAsync_SingleSkillFailure_
+    //  DoesNotThrow_StillStreamsSummary 覆蓋,不重複。)
+    [Fact]
+    public async Task CatalogFailure_Streaming_FallsBackToPlainChatStream_AndPersistsFullReply()
+    {
+        var agent = new FakeLlmAgent();
+        var chatClient = new FakeChatClient { Chunks = new[] { "純聊天", "串流" } };
+        var wf = new FakeWorkflowEngineClient { ThrowOnCatalog = new HttpRequestException("dns failure") };
+        var convos = new FakeConversationStore();
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, convos: convos, identity: identity, llmAgent: agent, workflows: wf);
+        var svc = new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
+
+        var collected = new List<string>();
+        await foreach (var c in svc.StreamChatAsync("這季毛利率?", "u1", "c1", UserA))
+        {
+            collected.Add(c);
+        }
+
+        Assert.Single(wf.CatalogContexts);      // 串流路徑確實嘗試過取目錄(不是跳過路由)
+        Assert.Equal(new[] { "純聊天", "串流" }, collected);
+        Assert.Empty(wf.SkillInvokes);
+        Assert.Empty(agent.CompleteCalls);      // 工具清單為空 → 連路由那一刀都不打
+        Assert.Equal("純聊天串流", Assert.Single(convos.Saved).Reply);
     }
 
     // T11 / CSR-P1-019(路由未命中 → 純聊天、零 skill invoke)由本檔

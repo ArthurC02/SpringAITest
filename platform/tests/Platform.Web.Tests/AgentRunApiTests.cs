@@ -58,6 +58,26 @@ public sealed class AgentRunApiTests
         Assert.Equal(expected, response.StatusCode);
     }
 
+    // EnabledRoutes_RequireAdmin 只涵蓋被擋下的兩格(匿名 401、USER 403);ADMIN 這格證明 Get 真的
+    // 把 runId 往下轉發、並把下游的 200 body 原樣寫回(start/resume/events 各有成功案例,Get 之前沒有)。
+    [Fact]
+    public async Task Get_AsAdmin_ForwardsRunIdAndWritesProxiedBody()
+    {
+        using var factory = EnabledFactory();
+        var client = factory.CreateClient().WithToken(
+            factory.IssueToken("admin-x", "ADMIN", "tenant-x"));
+
+        var response = await client.GetAsync("/api/runs/" + RunId);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains($"get:{RunId}", FakeAgentRunService.Calls);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal(RunId, body["id"]!.GetValue<string>());
+        Assert.Equal("queued", body["status"]!.GetValue<string>());
+        Assert.Equal("admin-x", FakeAgentRunService.LastContext!.UserId);
+        Assert.Equal("tenant-x", FakeAgentRunService.LastContext.TenantCode);
+    }
+
     [Fact]
     public async Task Start_ForwardsJwtIdentityInputAndIdempotencyKey()
     {
@@ -161,6 +181,30 @@ public sealed class AgentRunApiTests
         Assert.Contains(
             $"resume:{RunId}:details:4:resume-key",
             FakeAgentRunService.Calls);
+    }
+
+    // Cancel 之前只在「旗標關閉」那格被打過(中介軟體先攔,controller 從未執行);啟用+ADMIN 這格證明
+    // reason 與 Idempotency-Key 都原樣往下送,且下游的 202 原樣寫回。
+    [Fact]
+    public async Task Cancel_AsAdmin_ForwardsReasonAndIdempotencyKey()
+    {
+        using var factory = EnabledFactory();
+        var client = factory.CreateClient().WithToken(
+            factory.IssueToken("admin-x", "ADMIN", "tenant-x"));
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/runs/{RunId}/cancel")
+        {
+            Content = JsonContent.Create(new { reason = "手動中止" }),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "cancel-key");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Contains($"cancel:{RunId}:手動中止:cancel-key", FakeAgentRunService.Calls);
+        Assert.Equal("admin-x", FakeAgentRunService.LastContext!.UserId);
+        Assert.Equal("tenant-x", FakeAgentRunService.LastContext.TenantCode);
     }
 
     private static TestWebAppFactory EnabledFactory()

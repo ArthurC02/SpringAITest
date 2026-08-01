@@ -200,6 +200,38 @@ public sealed class ChatContextProviderAndRecorderTests
             Assert.Single(mem0.Remembered));
     }
 
+    // 串流 × 持久化成功(上面兩個短路案例只涵蓋「阻塞×成功」「阻塞×失敗」「串流×失敗」):短路那一輪
+    // 串流送出的答案除了 remember,也必須原文寫進 store 並帶上 D6 lineage —— 串流累積的是短路層那唯一
+    // 一塊 update,不是 ChatClientAgent 的塊。
+    [Fact]
+    public async Task AgentChatRouted_StreamingShortCircuit_PersistsStreamedReplyAndRemembers()
+    {
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore();
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "d6-stream-hit", UserA);
+        var agentChat = new FakeAgentChatRuntime { Reply = "Root 串流答案", Metadata = RootLineage };
+        var (hostAgent, _, _) = TestChatAgent.Build(
+            new FakeChatClient(), mem0, convos, identity, agentChat: agentChat);
+
+        var session = await hostAgent.GetOrCreateSessionAsync("d6-stream-hit");
+        var collected = new List<string>();
+        await foreach (var update in hostAgent.RunStreamingAsync("問題", session))
+        {
+            collected.Add(update.Text ?? string.Empty);
+        }
+
+        Assert.Equal("Root 串流答案", string.Concat(collected));
+        Assert.Equal(("問題", "Root 串流答案"), Assert.Single(convos.Saved));
+        Assert.Same(RootLineage, Assert.Single(convos.SavedMetadata));
+        Assert.Equal(
+            ("demo-a:user-a", "問題", "Root 串流答案"),
+            Assert.Single(mem0.Remembered));
+        Assert.Null(identity.PersistFailure);
+        // 持久化後的 backend 回應(含 Id)回填給呼叫端的管道,短路輪同樣要有。
+        Assert.Equal("Root 串流答案", identity.PersistedResponse!.Reply);
+    }
+
     [Fact]
     public async Task Mem0Recall_CallerRequestedCancellation_Propagates()
     {
@@ -234,5 +266,38 @@ public sealed class ChatContextProviderAndRecorderTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => hostAgent.RunAsync("問題", session, cancellationToken: cancellation.Token));
+    }
+
+    // 上面兩案的另一半等價類:mem0 擲 OperationCanceledException,但呼叫端自己的 token 從未被取消
+    // (例如下游自行設限的逾時借用了同一種例外型別)。`!cancellationToken.IsCancellationRequested`
+    // 這個守衛存在的唯一理由就是把這一類跟「呼叫端真的取消」分開——它必須照 best-effort 吞掉:
+    // recall 退化成沒有長期記憶、remember 變 no-op,聊天照常完成且持久化不受影響。
+    [Fact]
+    public async Task Mem0Cancellation_WithoutCallerCancellation_IsSwallowedAsBestEffort()
+    {
+        var chatClient = new FakeChatClient();
+        var mem0 = new FakeMem0Client
+        {
+            ThrowOnRecall = new OperationCanceledException(),
+            ThrowOnRemember = new OperationCanceledException(),
+        };
+        var convos = new FakeConversationStore();
+        var identity = new FakeChatIdentityAccessor();
+        identity.SetRequestKeys("u1", "mem0-oce-uncancelled", UserA);
+        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0, convos, identity);
+
+        var session = await hostAgent.GetOrCreateSessionAsync("mem0-oce-uncancelled");
+        var response = await hostAgent.RunAsync("問題", session);
+
+        // 聊天照常走到 LLM 並完成;recall 失敗只是「這輪沒有長期記憶可注入」,護欄仍在。
+        Assert.Equal("測試回覆", response.Text);
+        var instructions = chatClient.LastOptions!.Instructions!;
+        Assert.StartsWith("回答前先判斷問題類型", instructions);
+        Assert.DoesNotContain("以下是你先前記住、關於這位使用者的長期記憶", instructions);
+
+        // remember 的例外同樣被吞掉:沒記住任何東西,但先行的持久化照常成功、無失敗訊號。
+        Assert.Empty(mem0.Remembered);
+        Assert.Equal(("問題", "測試回覆"), Assert.Single(convos.Saved));
+        Assert.Null(identity.PersistFailure);
     }
 }

@@ -282,6 +282,21 @@ async def test_backend_unreachable_fails_closed(
 
 
 @pytest.mark.asyncio
+async def test_non_json_backend_body_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, artifacts_on: None
+) -> None:
+    """200 但 body 不是 JSON：`response.json()` 的 ValueError 走同一條 fail-closed。"""
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>not json</html>", request=request)
+
+    install_backend(monkeypatch, malformed)
+
+    with pytest.raises(PromptManifestUnavailable, match="request failed"):
+        await assemble(pinned_snapshot())
+
+
+@pytest.mark.asyncio
 async def test_cache_is_per_tenant_and_serves_repeat_runs(
     monkeypatch: pytest.MonkeyPatch, artifacts_on: None
 ) -> None:
@@ -306,6 +321,35 @@ async def test_cached_manifest_still_fails_a_mismatched_pin(
 
     with pytest.raises(PromptManifestUnavailable, match="snapshot pin"):
         await assemble(pinned_snapshot(sha256="ab" * 32))
+
+
+@pytest.mark.asyncio
+async def test_cache_evicts_the_oldest_entry_only_past_its_slot_cap(
+    monkeypatch: pytest.MonkeyPatch, artifacts_on: None
+) -> None:
+    """FIFO 上限邊界：剛好 64 筆不淘汰任何東西，第 65 筆才擠掉最先插入的那一筆。"""
+    requests = install_backend(monkeypatch, serve(resolved_body()))
+    cap = prompt_manifest.MAX_CACHED_MANIFESTS
+
+    for index in range(cap):
+        await assemble(pinned_snapshot(tenant_id=f"tenant-{index:03d}"))
+    assert len(requests) == cap
+    assert len(prompt_manifest._cache) == cap
+
+    # on-point：剛好裝滿，最舊的一筆仍在快取裡，重跑不再打 backend。
+    await assemble(pinned_snapshot(tenant_id="tenant-000"))
+    assert len(requests) == cap
+
+    # off-point：第 65 筆越界，淘汰最先插入的 tenant-000（命中不會把它移到隊尾），
+    # 其餘不動，總量維持在上限。
+    await assemble(pinned_snapshot(tenant_id=f"tenant-{cap:03d}"))
+    assert len(requests) == cap + 1
+    assert len(prompt_manifest._cache) == cap
+    assert ("tenant-000", MANIFEST_REVISION) not in prompt_manifest._cache
+    assert ("tenant-001", MANIFEST_REVISION) in prompt_manifest._cache
+
+    await assemble(pinned_snapshot(tenant_id="tenant-000"))
+    assert len(requests) == cap + 2
 
 
 @pytest.mark.asyncio

@@ -112,6 +112,22 @@ public sealed class FeaturesApiTests
         Assert.False(body["contextEnrichmentEnabled"]!.GetValue<bool>());
     }
 
+    // AND 閘的另一半:父旗標(dispatch 鏈)全開、CONTEXT_ENRICHMENT_ENABLED 維持預設關 → 仍必須關。
+    // 少了這格,把 `contextEnrichmentEnabled = multiAgentDispatchEnabled`(掉了自己那半個條件)
+    // 的變異不會有任何測試失敗——現有測試裡 dispatch 開著時剛好都同時開了 CONTEXT_ENRICHMENT_ENABLED。
+    [Fact]
+    public async Task Features_ContextEnrichment_DispatchOnWithoutOwnFlag_StaysFalse()
+    {
+        using var factory = new TestWebAppFactory(
+            workflowDesignerEnabled: true,
+            multiAgentDispatchEnabled: true);
+
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+
+        Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.False(body["contextEnrichmentEnabled"]!.GetValue<bool>());
+    }
+
     [Fact]
     public async Task Features_ContextEnrichmentEnabledWithDispatch_IsExposed()
     {
@@ -144,5 +160,34 @@ public sealed class FeaturesApiTests
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
         Assert.True(body["agentWriteToolsEnabled"]!.GetValue<bool>());
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
+    }
+
+    // 每個旗標的「獨立」測試都只在其他旗標全關的基準上開一個;全開這格補上另一端:
+    // 兩條 AND 鏈(builder→testRun、designer→dispatch→context)與兩個獨立旗標同時開時,
+    // 七個值必須全 true——任何把不相干旗標互相耦合成條件的改動會在這裡爆。
+    [Fact]
+    public async Task Features_AllFlagsOn_Anonymous_Returns200_AllTrue()
+    {
+        using var factory = new TestWebAppFactory(
+            agentBuilderEnabled: true,
+            agentTestRunEnabled: true,
+            workflowDesignerEnabled: true,
+            multiAgentDispatchEnabled: true,
+            contextEnrichmentEnabled: true,
+            agentWriteToolsEnabled: true,
+            agentChatEnabled: true,
+            agentChatTenantAllowlist: "tenant-x");
+
+        var resp = await factory.CreateClient().GetAsync("/api/features");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.True(body["agentBuilderEnabled"]!.GetValue<bool>());
+        Assert.True(body["agentTestRunEnabled"]!.GetValue<bool>());
+        Assert.True(body["workflowDesignerEnabled"]!.GetValue<bool>());
+        Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.True(body["contextEnrichmentEnabled"]!.GetValue<bool>());
+        Assert.True(body["agentChatEnabled"]!.GetValue<bool>());
+        Assert.True(body["agentWriteToolsEnabled"]!.GetValue<bool>());
     }
 }

@@ -334,6 +334,22 @@ def test_same_precedence_uses_rule_priority_then_stable_id():
     assert result["decision"]["sourceRuleId"] == "a-high"
 
 
+def test_disabled_rule_is_skipped_without_evaluating_its_condition():
+    """`enabled: false` 走執行期的 disabled 分支：條件即使會匹配也不得產生任何 action。"""
+    rules = _canonical(_rule_set({**_rule(), "enabled": False}))
+
+    result = evaluate("pre-action", rules, {"action.amount": "9000"})
+
+    assert result["decision"] == {"outcome": "continue", "action": None}
+    assert result["matchedRules"] == []
+    assert result["actions"] == []
+    rule_trace = result["trace"]["rules"][0]
+    assert rule_trace["status"] == "disabled"
+    assert rule_trace["emittedActions"] == []
+    # 條件根本沒被求值，所以 trace 沒有 condition 這一鍵。
+    assert "condition" not in rule_trace
+
+
 def test_a_rule_05_missing_safety_fact_fails_closed_with_trace():
     result = evaluate("pre-action", _canonical(_rule_set(_rule())), {})
 
@@ -656,6 +672,42 @@ def test_validation_bounds_unknown_fields_and_error_count():
     assert len(outcome.errors) == LIMITS["maxErrors"]
     assert any(error.code == "too_many_fields" for error in outcome.errors)
     assert outcome.errors[-1].code == "too_many_errors"
+
+
+def test_object_field_limit_reports_overflow_only_past_the_limit():
+    """`_validate_object_fields` 用 `len(raw) > maxObjectFields`：剛好 32 個欄位只該報 unknown_field。"""
+    at_limit = _rule()
+    extra = LIMITS["maxObjectFields"] - len(at_limit)
+    at_limit.update({f"unknown-{index}": index for index in range(extra)})
+    over_limit = {**at_limit, "unknown-overflow": 1}
+
+    at_limit_outcome = validate_rule_set("pre-action", _rule_set(at_limit))
+    over_limit_outcome = validate_rule_set("pre-action", _rule_set(over_limit))
+
+    assert len(at_limit) == LIMITS["maxObjectFields"]
+    assert {error.code for error in at_limit_outcome.errors} == {"unknown_field"}
+    assert any(
+        error.code == "too_many_fields" for error in over_limit_outcome.errors
+    )
+
+
+def test_rule_enabled_must_be_a_boolean_not_a_truthy_value():
+    """`enabled` 只收 bool：字串與 1 都必須是 invalid_boolean,而不是被當成「開啟」。"""
+    outcome = validate_rule_set(
+        "pre-action",
+        _rule_set(
+            {**_rule("truthy-string"), "enabled": "yes"},
+            {**_rule("truthy-int"), "enabled": 1},
+        ),
+    )
+
+    assert outcome.valid is False
+    assert outcome.canonical_rule_set is None
+    assert [error.code for error in outcome.errors] == [
+        "invalid_boolean",
+        "invalid_boolean",
+    ]
+    assert outcome.errors[0].path == "$.ruleSet.rules[0].enabled"
 
 
 def test_rule_set_version_must_be_an_integer():
@@ -1077,6 +1129,24 @@ def test_priority_bounds_are_inclusive(priority: int):
     assert outcome.valid is True, outcome.errors
 
 
+def test_priority_rejects_booleans_disguised_as_integers():
+    """bool 是 int 的子類：少了 `isinstance(priority, bool)` 這道防線,True 會靜默變成 priority=1。"""
+    outcome = validate_rule_set(
+        "pre-action",
+        _rule_set(
+            _rule("true-priority", priority=True),
+            _rule("false-priority", priority=False),
+        ),
+    )
+
+    assert outcome.valid is False
+    assert outcome.canonical_rule_set is None
+    assert [error.code for error in outcome.errors] == [
+        "invalid_priority",
+        "invalid_priority",
+    ]
+
+
 def test_simulator_rejects_more_facts_than_the_catalog_limit():
     """maxFacts+1 走的是 early return 分支（`too_many_facts` 過去零覆蓋）。"""
     response = client.post(
@@ -1096,6 +1166,39 @@ def test_simulator_rejects_more_facts_than_the_catalog_limit():
     assert response.status_code == 200
     assert body["valid"] is False
     assert [error["code"] for error in body["errors"]] == ["too_many_facts"]
+    assert body["simulation"] is None
+
+
+def test_simulator_takes_the_per_fact_path_at_exactly_the_catalog_limit():
+    """`validate_simulation_facts` 用 `len(facts) > maxFacts`：剛好 128 筆必須逐筆檢查。
+
+    128 個相異名稱必然超過型錄的 14 個 fact,所以只能反證早退分支沒被觸發:
+    若改成 `>=`,整份回應會塌成單一 too_many_facts（見上一個測試）。
+    """
+    facts = {
+        f"unknown.fact.{index}": "x" for index in range(LIMITS["maxFacts"] - 1)
+    }
+    facts["action.amount"] = "9000"
+
+    response = client.post(
+        "/business-rules/simulate",
+        headers=auth_headers(),
+        json={
+            "gate": "pre-action",
+            "ruleSet": {"version": 1, "rules": []},
+            "facts": facts,
+        },
+    )
+
+    body = response.json()
+    assert len(facts) == LIMITS["maxFacts"]
+    assert response.status_code == 200
+    assert body["valid"] is False
+    assert {error["code"] for error in body["errors"]} == {
+        "unknown_fact",
+        "too_many_errors",
+    }
+    assert body["canonicalRuleSet"] == {"version": 1, "rules": []}
     assert body["simulation"] is None
 
 

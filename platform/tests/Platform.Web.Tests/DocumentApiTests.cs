@@ -97,6 +97,26 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(message, body["fieldErrors"]![field]!.GetValue<string>());
     }
 
+    // 上面兩組 400 測試每次只讓一個欄位失效,另一個永遠合法;title 與 text 的驗證屬性彼此獨立,
+    // ValidationErrorResponse 走的是「掃過整個 ModelState」的聚合路徑,所以兩欄同時不合法時
+    // 必須在同一份 fieldErrors 裡看到兩個 key(同屬性型別與跨屬性型別各一個代表)。
+    [Theory]
+    [InlineData(0, 0, "title 不可為空", "text 不可為空")]
+    [InlineData(501, 0, "title 長度不可超過 500 字", "text 不可為空")]
+    public async Task Create_BothFieldsInvalid_Returns400_WithBothFieldErrors(
+        int titleLen, int textLen, string titleMessage, string textMessage)
+    {
+        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents",
+            new { title = new string('a', titleLen), text = new string('b', textLen) });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        var fieldErrors = body["fieldErrors"]!.AsObject();
+        Assert.Equal(titleMessage, fieldErrors["title"]!.GetValue<string>());
+        Assert.Equal(textMessage, fieldErrors["text"]!.GetValue<string>());
+        Assert.Equal(2, fieldErrors.Count); // 只聚合這兩個欄位,不得混入空 key 或其他雜訊
+    }
+
     [Fact]
     public async Task List_Returns200()
     {

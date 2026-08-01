@@ -11,7 +11,7 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 
-from app.engine.package import LIMITS
+from app.engine.package import LIMITS, TIMEOUT_SECONDS_MAX, TIMEOUT_SECONDS_MIN
 from app.main import app
 from tests.conftest import auth_headers as _headers
 
@@ -217,6 +217,81 @@ def test_illegal_package_name_rejected_without_expected_name():
     body = _post(_zip({"SKILL.md": md})).json()
     assert body["valid"] is False
     assert body["errors"][0]["code"] == "invalid_frontmatter"
+
+
+def test_archive_without_skill_md_rejected():
+    """zip 內沒有任何 root／前綴 SKILL.md → missing_skill_md（自成一碼，不是 invalid_package）。"""
+    body = _post(_zip({"readme.txt": b"x"}), "sales-helper").json()
+
+    assert body["valid"] is False
+    assert body["errors"][0]["code"] == "missing_skill_md"
+    assert "skill" not in body
+    assert "canonical_definition" not in body
+
+
+def test_folder_prefix_not_matching_frontmatter_name_rejected():
+    """{folder}/SKILL.md 的 folder 須等於 frontmatter name。
+
+    expected_name 這裡刻意給對的（sales-helper），證明這是與 name_mismatch 不同的分支：
+    比對對象是 zip 自己的頂層資料夾名，不是匯入路徑名稱。
+    """
+    body = _post(_zip({"wrong-folder/SKILL.md": AGENTIC_SKILL_MD}), "sales-helper").json()
+
+    assert body["valid"] is False
+    assert body["errors"][0]["code"] == "folder_name_mismatch"
+    assert "skill" not in body
+
+
+def test_unknown_allowed_tool_rejected_via_endpoint():
+    """frontmatter allowed-tools 引用未註冊 tool → unknown_tool（重用既有 registry 檢查）。"""
+    md = AGENTIC_SKILL_MD.replace(
+        "allowed-tools: local.calculator", "allowed-tools: nonexistent.tool"
+    )
+    body = _post(_zip({"SKILL.md": md}), "sales-helper").json()
+
+    assert body["valid"] is False
+    assert body["errors"][0]["code"] == "unknown_tool"
+    assert "skill" not in body
+
+
+def test_file_count_at_limit_accepted():
+    """檔案數上限的 on-point：恰好 LIMITS.max_file_count 個 entry 仍是 valid=true
+    （off-point max+1 由下方 parametrize 的 file-count case 蓋）。"""
+    files = {"SKILL.md": AGENTIC_SKILL_MD}
+    files.update(
+        {f"references/f{i}.md": b"x" for i in range(LIMITS.max_file_count - 1)}
+    )
+    body = _post(_zip(files), "sales-helper").json()
+
+    assert body["valid"] is True
+    assert len(body["package_manifest"]["entries"]) == LIMITS.max_file_count
+
+
+@pytest.mark.parametrize(
+    "timeout_seconds,expected_valid",
+    [
+        ("0", False),
+        (str(TIMEOUT_SECONDS_MIN), True),
+        (str(TIMEOUT_SECONDS_MAX), True),
+        # MAX+1 與 MAX 同為 19 位數，先過字數/格式前置檢查，真正踩到數值範圍那條分支
+        (str(TIMEOUT_SECONDS_MAX + 1), False),
+    ],
+    ids=["below-min", "min", "max", "above-max"],
+)
+def test_timeout_seconds_range_boundaries(timeout_seconds, expected_valid):
+    """metadata.timeout_seconds 的 int64 範圍：MIN/MAX 兩端各配一個 off-point。"""
+    md = AGENTIC_SKILL_MD.replace(
+        'timeout_seconds: "30"', f'timeout_seconds: "{timeout_seconds}"'
+    )
+    body = _post(_zip({"SKILL.md": md}), "sales-helper").json()
+
+    assert body["valid"] is expected_valid
+    if expected_valid:
+        assert body["errors"] == []
+        assert body["skill"]["name"] == "sales-helper"
+    else:
+        assert body["errors"][0]["code"] == "invalid_frontmatter"
+        assert "skill" not in body
 
 
 def _oversize_archive() -> bytes:

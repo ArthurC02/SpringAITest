@@ -189,6 +189,29 @@ def test_appends_must_be_subset_of_writes():
     assert node_registry.get("__throwaway__") is None
 
 
+def test_valid_appends_subset_registers_and_round_trips():
+    """決策表另一半：appends ⊆ writes → 註冊成功，get() 取回的 appends 原樣（list→tuple）。
+
+    生產節點 retrieval_planner 走的就是這條路（retrieval_plans 累加供稽核），compiler
+    據此掛 operator.add reducer；只測「錯的會擋」證不了「對的會過」。
+    """
+    name = "__appends_probe__"
+    try:
+        node_registry.node(
+            name=name, writes=["plan", "note"], appends=["plan"], description="合法 appends"
+        )(lambda: None)
+
+        spec = node_registry.get(name)
+        assert spec.appends == ("plan",)
+        assert spec.writes == ("plan", "note")
+    finally:
+        node_registry._REGISTRY.pop((name, "1.0"), None)
+
+    planner = node_registry.get("retrieval_planner", version="1.0")
+    assert planner.appends == ("retrieval_plans",)
+    assert "retrieval_plans" in planner.writes
+
+
 def test_version_resolution_is_numeric_not_lexicographic():
     """未指定版本 → 取數值上最新的版本（字串排序會讓 '2.0' 贏過 '10.0'）。"""
     name = "__version_probe__"
@@ -200,6 +223,28 @@ def test_version_resolution_is_numeric_not_lexicographic():
         assert node_registry.get(name, version="2.0").version == "2.0"  # 鎖版仍拿得到舊版
     finally:
         for version in ("2.0", "10.0"):
+            node_registry._REGISTRY.pop((name, version), None)
+
+
+def test_non_numeric_version_segment_falls_back_to_zero():
+    """版本含非數字段落（'2.0-beta'）→ 該段視為 0，排序不會被 int() 炸掉。
+
+    fallback 讓 '2.0-beta' 的排序鍵等同 '2.0'：贏過 '1.9'、輸給 '2.5'；鎖版查詢走字典
+    鍵，原字串仍照樣取得回來。
+    """
+    name = "__version_fallback_probe__"
+    versions = ("1.9", "2.0-beta", "2.5")
+    try:
+        for version in ("1.9", "2.0-beta"):
+            node_registry.node(name=name, version=version, writes=["x"])(lambda: None)
+
+        assert node_registry.get(name).version == "2.0-beta"  # (2, 0) > (1, 9)
+        assert node_registry.get(name, version="2.0-beta").version == "2.0-beta"
+
+        node_registry.node(name=name, version="2.5", writes=["x"])(lambda: None)
+        assert node_registry.get(name).version == "2.5"  # (2, 5) > (2, 0)
+    finally:
+        for version in versions:
             node_registry._REGISTRY.pop((name, version), None)
 
 

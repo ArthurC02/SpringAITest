@@ -35,6 +35,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("GET", "/api/skills/echo-skill/export")]
     [InlineData("POST", "/api/skills")]
     [InlineData("POST", "/api/skills/echo-skill/import")]
+    [InlineData("POST", "/api/skills/import")]
     [InlineData("PUT", "/api/skills/echo-skill")]
     [InlineData("DELETE", "/api/skills/echo-skill")]
     [InlineData("POST", "/api/skills/validate")]
@@ -196,6 +197,27 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         return content;
     }
 
+    /// <summary>
+    /// 一份「整個 request body 恰好 totalBytes 位元組」的 multipart(package 檔位,內容補零)。
+    /// MultipartFormDataContent 的 boundary 與各部標頭長度不可控,量不到邊界值,所以手工組。
+    /// </summary>
+    private static ByteArrayContent ExactSizeMultipart(int totalBytes)
+    {
+        const string boundary = "exact-size-boundary";
+        var head = Encoding.ASCII.GetBytes(
+            $"--{boundary}\r\nContent-Disposition: form-data; name=\"package\"; filename=\"exact.zip\"\r\n"
+            + "Content-Type: application/zip\r\n\r\n");
+        var tail = Encoding.ASCII.GetBytes($"\r\n--{boundary}--\r\n");
+        var body = new byte[totalBytes];
+        head.CopyTo(body, 0);
+        tail.CopyTo(body, totalBytes - tail.Length);
+
+        var content = new ByteArrayContent(body);
+        content.Headers.ContentType =
+            MediaTypeHeaderValue.Parse($"multipart/form-data; boundary={boundary}");
+        return content;
+    }
+
     // ADMIN 匯入 → 2xx,回應原樣穿透 backend 的 Skill JSON(含 additive kind)。
     [Fact]
     public async Task Import_Admin_Returns200_PassesThroughSkillWithKind()
@@ -259,6 +281,23 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         Assert.NotNull(body["timestamp"]);
         Assert.Empty(body["fieldErrors"]!.AsObject());
         Assert.Equal(before, FakeSkillService.Calls.Count(c => c == call));
+    }
+
+    // 上限的 on-point 邊界:PackageTooLargeAttribute 用的是嚴格大於(ContentLength > 17 MiB),
+    // 所以 Content-Length 恰好等於 17 MiB 的請求必須放行(不是 413),照常抵達 service 層。
+    // 只測 17 MiB + 4096 這種「剛好超過」抓不到把比較寫成 >= 的錯。
+    [Fact]
+    public async Task Import_AtExactRequestSizeLimit_IsNotRejected_AndReachesService()
+    {
+        var before = FakeSkillService.Calls.Count(c => c == "import:sales-helper");
+        using var exact = ExactSizeMultipart(17 * 1024 * 1024);
+
+        var response = await _factory.AdminClient().PostAsync(
+            "/api/skills/sales-helper/import", exact);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("agentic", (await response.ReadJsonAsync())["kind"]!.GetValue<string>());
+        Assert.Equal(before + 1, FakeSkillService.Calls.Count(c => c == "import:sales-helper"));
     }
 
     [Fact]
@@ -432,6 +471,25 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
         var body = await resp.ReadJsonAsync();
         Assert.Equal("quarterly-qa", body["skill"]!.GetValue<string>());
         Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
+    }
+
+    // invoke body 的 input 是必填([Required]):缺欄位在 model binding 階段就被 [ApiController] 擋下,
+    // 對外是 400「輸入驗證失敗」+ fieldErrors["input"],引擎一次都不會被呼叫
+    // (與 Create_Returns400_WhenDefinitionBlank_AndNeverReachesBackend 同一條「platform 先擋明顯無效請求」規則)。
+    [Fact]
+    public async Task Invoke_Returns400_WhenInputMissing_AndNeverReachesEngine()
+    {
+        var before = FakeWorkflowEngineClient.EngineCalls.Count;
+
+        var resp = await _factory.AdminClient().PostAsJsonAsync(
+            "/api/skills/quarterly-qa/invoke", new { });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal(400, body["status"]!.GetValue<int>());
+        Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
+        Assert.Equal("input 不可為空", body["fieldErrors"]!["input"]!.GetValue<string>());
+        Assert.Equal(before, FakeWorkflowEngineClient.EngineCalls.Count);
     }
 
     // additive 欄位穿透由 WorkflowEngineClientTests(真 WorkflowEngineClient + stub handler)覆蓋;

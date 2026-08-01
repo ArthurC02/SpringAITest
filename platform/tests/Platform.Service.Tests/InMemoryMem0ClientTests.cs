@@ -16,6 +16,8 @@ public sealed class InMemoryMem0ClientTests
     [InlineData("u1", "")]     // 空 query
     [InlineData(null, "q")]
     [InlineData("u1", null)]
+    [InlineData("   ", "q")]   // 空白 userId 也算 IsNullOrWhiteSpace
+    [InlineData("u1", "   ")]  // 空白 query 同理
     public async Task Recall_MissingOrUnknown_ReturnsEmpty(string? userId, string? query)
     {
         var client = new InMemoryMem0Client();
@@ -46,6 +48,18 @@ public sealed class InMemoryMem0ClientTests
         var recalled = await client.RecallAsync("u1", "hello");
 
         Assert.Contains("HELLO WORLD", recalled);
+    }
+
+    // 比對條件是 userMsg || aiReply:query 只命中 aiReply 時,整對仍要回傳。
+    [Fact]
+    public async Task Recall_QueryMatchesAiReplyOnly_ReturnsPair()
+    {
+        var client = new InMemoryMem0Client();
+        await client.RememberAsync("u1", "你好", "ALPHA 機密");
+
+        var recalled = await client.RecallAsync("u1", "ALPHA");
+
+        Assert.Equal("- 你好\n- ALPHA 機密", recalled);
     }
 
     // B-M-04:多筆符合時最新優先(第一行是最新那對的 userMsg)。
@@ -119,6 +133,17 @@ public sealed class InMemoryMem0ClientTests
 
         // 雙空 message 的 u1 應無記錄。
         Assert.Equal("", await client.RecallAsync("u1", "msg"));
+    }
+
+    // no-op 條件是「兩者皆空白」(AND):單邊有內容仍要記錄,空白那側原樣輸出。
+    [Fact]
+    public async Task Remember_OnlyOneSideHasContent_StillRecorded()
+    {
+        var client = new InMemoryMem0Client();
+
+        await client.RememberAsync("u1", "", "只有 AI 側有內容");
+
+        Assert.Equal("- \n- 只有 AI 側有內容", await client.RecallAsync("u1", "只有 AI 側"));
     }
 
     // B-M-08:併發 remember+recall 不 throw(集合被併發修改)。

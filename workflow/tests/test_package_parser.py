@@ -522,6 +522,14 @@ def test_missing_skill_md():
     assert ei.value.errors[0].code == package.MISSING_SKILL_MD
 
 
+def test_empty_archive_is_missing_skill_md():
+    """entry 數 0 的下邊界：合法但空的 zip 走同一條 missing_skill_md，不是別的未護欄路徑。"""
+    raw = make_zip({})
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(raw, "sales-helper")
+    assert ei.value.errors[0].code == package.MISSING_SKILL_MD
+
+
 def test_no_frontmatter():
     raw = make_zip({"SKILL.md": "just a body, no frontmatter\n"})
     with pytest.raises(PackageError) as ei:
@@ -568,6 +576,13 @@ def test_name_mismatch_cannot_rename_via_package():
     with pytest.raises(PackageError) as ei:
         package.parse_package(raw, "sales-helper")
     assert ei.value.errors[0].code == package.NAME_MISMATCH
+
+
+def test_expected_name_omitted_lets_frontmatter_name_stand():
+    """決策表另一半：expected_name 省略（None）→ 跳過名稱核對，SKILL.md 自己決定名稱。"""
+    parsed = package.parse_package(agentic_zip(name="unrouted-name"))
+    assert parsed.kind == "agentic"
+    assert parsed.skill.name == "unrouted-name"
 
 
 def test_non_agentic_kind_routed_to_flow_and_needs_yaml_block():
@@ -1021,6 +1036,24 @@ def test_compatibility_length_on_off_point():
     assert ei.value.errors[0].code == package.INVALID_FRONTMATTER
 
 
+@pytest.mark.parametrize(
+    ("field", "yaml_value", "fragment"),
+    [
+        ("license", "''", "license 必須是非空字串"),
+        ("license", "'   '", "license 必須是非空字串"),
+        ("license", "[MIT]", "license 必須是非空字串"),
+        ("compatibility", "[a, b]", "compatibility 必須是字串"),
+    ],
+    ids=["license-empty", "license-blank", "license-non-string", "compatibility-non-string"],
+)
+def test_license_and_compatibility_type_and_blank_rejected(field, yaml_value, fragment):
+    """標準頂層欄位的型別/空白半邊（通過半邊見 round_trip 的 Proprietary/相容性字串）。"""
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(agentic_zip(**{field: yaml_value}), "sales-helper")
+    assert ei.value.errors[0].code == package.INVALID_FRONTMATTER
+    assert fragment in ei.value.errors[0].message
+
+
 def test_agentic_bad_input_schema_json_rejected():
     raw = agentic_zip(input_schema_json="not json at all")
     with pytest.raises(PackageError) as ei:
@@ -1238,6 +1271,30 @@ def test_flow_safe_script_is_scanned_but_never_executed():
     parsed = package.parse_package(raw, "flow-probe")
     assert parsed.kind == "flow"
     assert "package_script_executed" not in parsed.canonical_definition
+
+
+def test_flow_script_step_authoring_role_gate_both_halves():
+    """author_role 三格：ADMIN 通過、非 ADMIN forbidden_script、省略（runtime 載入）不檢查。
+
+    這是 /skills/validate 同一套撰寫者 gate 在匯入路徑的那一格；package 匯入是寫入路徑，
+    非 ADMIN 不得靠「包成 zip 匯入」繞過 script 撰寫限制。
+    """
+    definition = FLOW_YAML.replace(
+        "flow:\n  - node: query_intake@1.0\n",
+        'flow:\n  - script: |\n      state["final_answer"] = "echo: " + state["query"]\n',
+    )
+    raw = make_zip({"SKILL.md": flow_skill_md("flow-probe", "flow 匯出", definition)})
+
+    parsed = package.parse_package(raw, "flow-probe", author_role="ADMIN")
+    assert parsed.canonical_definition == definition
+
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(raw, "flow-probe", author_role="USER")
+    assert ei.value.errors[0].code == package.FORBIDDEN_SCRIPT
+    assert "僅限 ADMIN 撰寫" in ei.value.errors[0].message
+
+    # 省略 author_role = runtime 載入既有 package 的路徑：gate 關閉，照常解析。
+    assert package.parse_package(raw, "flow-probe").kind == "flow"
 
 
 def test_flow_non_python_file_under_scripts_is_read_only_resource():

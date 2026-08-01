@@ -7,7 +7,13 @@ import {
   resumeAgentRun,
   startAgentTestRun,
 } from '../src/api/agentRuns'
-import { mergeRunEvents, sanitizeRunDisplay } from '../src/agentRunDisplay'
+import {
+  isAmbiguousFailure,
+  mergeRunEvents,
+  sanitizeRunDisplay,
+  withAcceptedCancelStatus,
+} from '../src/agentRunDisplay'
+import { ApiError } from '../src/api/http'
 import {
   AGENT_RUN_ATTEMPT_STORAGE_PREFIX,
   clearLogicalAttemptStorage,
@@ -201,6 +207,68 @@ test.describe('D3 Agent run public contracts', () => {
     })
   })
 
+  test('keeps a terminal status despite a cancel request, rejects a runId-less run, and maps object-form pinned skills', () => {
+    expect(
+      normalizeAgentRun({
+        runId: 'run-terminal-camel',
+        status: 'completed',
+        cancelRequestedAt: '2026-07-25T00:00:00Z',
+      }).status,
+    ).toBe('completed')
+    expect(
+      normalizeAgentRun({
+        run_id: 'run-terminal-snake',
+        status: 'failed',
+        cancel_requested_at: '2026-07-25T00:00:00Z',
+      }).status,
+    ).toBe('failed')
+
+    expect(() => normalizeAgentRun({ status: 'running' })).toThrow('Run 回應缺少 runId。')
+
+    expect(
+      normalizeAgentRun({
+        run_id: 'run-map',
+        status: 'running',
+        pinned_skills: { research: 5, broken: 'not-a-number' },
+      }).pinnedSkills,
+    ).toEqual([{ name: 'research', revision: 5 }])
+  })
+
+  test('accepts event sequence 0, drops negative sequences, and clamps a negative cursor to zero', async () => {
+    expect(
+      normalizeAgentRunEventPage({
+        items: [
+          { event_sequence: 0, event_type: 'run.started', payload: {} },
+          { event_sequence: -1, event_type: 'ignored', payload: {} },
+        ],
+      }),
+    ).toEqual({
+      events: [{ sequence: 0, eventType: 'run.started', createdAt: null, payload: {} }],
+      latestEventSequence: 0,
+    })
+
+    const originalFetch = globalThis.fetch
+    const paths: string[] = []
+    globalThis.fetch = async (input) => {
+      paths.push(String(input))
+      return new Response(JSON.stringify({ events: [], latestEventSequence: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    try {
+      await getAgentRunEvents('run-1', -5)
+      await getAgentRunEvents('run-1', 0)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(paths).toEqual([
+      '/api/runs/run-1/events?afterSequence=0&limit=100',
+      '/api/runs/run-1/events?afterSequence=0&limit=100',
+    ])
+  })
+
   test('uses polling paths, camelCase resume body, and Idempotency-Key for every command', async () => {
     const originalFetch = globalThis.fetch
     const requests: Array<{
@@ -292,5 +360,31 @@ test.describe('D3 Agent run public contracts', () => {
       accessToken: '[已遮罩]',
       nested: { api_key: '[已遮罩]', result: 'safe' },
     })
+  })
+
+  test('truncates long strings, stops at nesting depth, and caps collection length', () => {
+    expect(sanitizeRunDisplay('x'.repeat(2000))).toBe('x'.repeat(2000))
+    expect(sanitizeRunDisplay('x'.repeat(2001))).toBe(`${'x'.repeat(2000)}…`)
+
+    expect(sanitizeRunDisplay({ a: { b: { c: { d: { e: { f: 'deep' } } } } } })).toEqual({
+      a: { b: { c: { d: { e: { f: '[內容過深，已省略]' } } } } },
+    })
+
+    expect(sanitizeRunDisplay(Array.from({ length: 60 }, (_, index) => index))).toEqual(
+      Array.from({ length: 50 }, (_, index) => index),
+    )
+  })
+
+  test('treats network and 5xx failures as ambiguous and shows cancelling only before a terminal status', () => {
+    expect(isAmbiguousFailure(new TypeError('network down'))).toBe(true)
+    expect(isAmbiguousFailure(new ApiError(500, '伺服器錯誤'))).toBe(true)
+    expect(isAmbiguousFailure(new ApiError(404, '找不到 Run'))).toBe(false)
+
+    const running = normalizeAgentRun({ run_id: 'run-1', status: 'running' })
+    expect(withAcceptedCancelStatus(running, true).status).toBe('cancelling')
+    expect(withAcceptedCancelStatus(running, false)).toBe(running)
+
+    const completed = normalizeAgentRun({ run_id: 'run-1', status: 'completed' })
+    expect(withAcceptedCancelStatus(completed, true)).toBe(completed)
   })
 })

@@ -49,4 +49,29 @@ public sealed class DevelopmentEnvironmentSmokeTests
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
+
+    // 同一釘子的另一半:"ChatAssistant" 是第二顆 Singleton hosted agent,且它的 AIHostAgent 是手動組裝、
+    // 只在第一次被 ChatService 解析時才建構(不像 "OperationsAssistant" 由 MapAGUI 於啟動期解析),
+    // 因此上面兩個案例都碰不到它——只有真的打一次 /api/chat 才會在 ValidateScopes=true 下建構整條
+    // pipeline(ChatTurnRecorder → AgentChatRoutingAgent → SkillRoutingAgent → ChatClientAgent)。
+    // 斷言帶到 reply 與 id:captive dependency(工廠內直接 sp.GetRequiredService 取 Scoped 服務)
+    // 會在此拋例外變成 500,持久化(每次呼叫開新 scope 取 IConversationStore)也就拿不到 backend id。
+    [Fact]
+    public async Task DevelopmentEnvironment_ChatEndpoint_ResolvesChatAssistantHostAgent_WithoutValidateScopesCrash()
+    {
+        await using var factory = new TestWebAppFactory(useDevelopmentEnvironment: true);
+        var client = factory.CreateClient().WithToken(factory.IssueToken());
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+        {
+            Content = System.Net.Http.Json.JsonContent.Create(new { message = "你好" }),
+        };
+
+        var resp = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.ReadJsonAsync();
+        Assert.Equal("測試回覆", body["reply"]!.GetValue<string>());
+        Assert.True(body["id"]!.GetValue<long>() > 0);
+    }
 }

@@ -6,6 +6,8 @@ triage_classify 節點內就正規化，因此邊界案例改對 triage_classify
 """
 
 import asyncio
+import dataclasses
+from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
@@ -171,6 +173,68 @@ def test_triage_invoke_api_level_simple_branch():
         assert body["output"]["answer"] == "API 簡答"
     finally:
         skills._SKILLS["triage"] = original
+
+
+@contextmanager
+def _triage_with_fake_llm(llm):
+    """暫時把已載入的 triage 換成假 LLM 編出的圖（API 級測試不打真 LLM），離開時還原。
+
+    只換 graph/deps，definition 與 definition_sha256 原樣保留 —— flow 治理包裝會比對
+    定義雜湊，換掉會變成 definition hash mismatch 而不是真的走完圖。
+    """
+    original = skills.get("triage")
+    deps = make_deps({}, llm=llm)
+    skills._SKILLS["triage"] = dataclasses.replace(
+        original, graph=compiler.compile(original.skill, deps), deps=deps
+    )
+    try:
+        yield
+    finally:
+        skills._SKILLS["triage"] = original
+
+
+def test_triage_invoke_api_level_complex_branch():
+    llm = FakeStructuredLLM(
+        outputs={
+            _TriageClassifyOutput: _TriageClassifyOutput(category="COMPLEX"),
+            _TriageAnswerOutput: _TriageAnswerOutput(answer="API 深答"),
+        }
+    )
+    with _triage_with_fake_llm(llm):
+        resp = client.post(
+            "/skills/triage/invoke",
+            json={"input": {"question": "請推導廣義相對論場方程"}},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["skill"] == "triage"
+    assert body["output"]["category"] == "COMPLEX"
+    assert body["output"]["answer"] == "API 深答"
+    # trace 是引擎鍵，對外輸出一律剝除（兩條分支皆然）
+    assert "trace" not in body["output"]
+
+
+def test_triage_invoke_api_level_accepts_one_char_question():
+    """min_length=1 的合法邊界：恰好一個字的 question 要通過驗證並跑完圖（對照下方空字串 422）。"""
+    llm = FakeStructuredLLM(
+        outputs={
+            _TriageClassifyOutput: _TriageClassifyOutput(category="SIMPLE"),
+            _TriageAnswerOutput: _TriageAnswerOutput(answer="一個字也答得出來"),
+        }
+    )
+    with _triage_with_fake_llm(llm):
+        resp = client.post(
+            "/skills/triage/invoke",
+            json={"input": {"question": "嗨"}},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["output"]["category"] == "SIMPLE"
+    assert body["output"]["answer"] == "一個字也答得出來"
 
 
 def test_triage_invoke_api_level_rejects_blank_question():

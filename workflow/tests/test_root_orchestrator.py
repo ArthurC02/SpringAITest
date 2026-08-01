@@ -340,6 +340,33 @@ async def test_repair_budget_exhaustion_fails_without_aggregating():
 
 
 @pytest.mark.asyncio
+async def test_zero_repair_rounds_fails_on_the_very_first_needs_repair_verdict():
+    """max_repair_rounds=0 is the documented lower bound: no repair round at all."""
+    planned = False
+
+    async def never_plan(snapshot, findings, repair_round):
+        nonlocal planned
+        planned = True
+        return []
+
+    runtime = FakeRuntime()
+    result = await RootOrchestrator(
+        runtime,
+        acquire_context=_acquire,
+        decompose=_decompose,
+        plan_repairs=never_plan,
+        aggregate=_aggregate,
+    ).execute(_snapshot(max_repair_rounds=0), {"goal": "compare"})
+
+    assert result.status == "failed"
+    assert result.limitations == ["repair budget exhausted"]
+    assert runtime.verifications == 1
+    assert not planned
+    # The PASSing sibling is still reported as accepted lineage on the failure.
+    assert [item.task_id for item in result.accepted_results] == ["b"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "max_child_runs, status, limitations",
     [(6, "completed", []), (5, "failed", ["child budget exhausted"])],
@@ -461,6 +488,36 @@ async def test_join_policy_matrix_fail_fast_allow_partial_and_no_completion(
     assert runtime.cancelled == (join_policy == "fail-fast")
     if status == "completed":
         assert result.aggregate == {"tasks": ["a"]}
+
+
+@pytest.mark.asyncio
+async def test_repair_join_policy_keeps_going_after_a_failed_worker_child():
+    """`repair` neither fail-fasts nor reports the failed child as a limitation."""
+
+    class HalfFailingRuntime(FakeRuntime):
+        async def run_worker(self, snapshot, worker, task):
+            result = await super().run_worker(snapshot, worker, task)
+            if task.task_id == "b":
+                return result.model_copy(update={"status": "failed"})
+            return result
+
+    runtime = HalfFailingRuntime()
+    result = await RootOrchestrator(
+        runtime,
+        acquire_context=_acquire,
+        decompose=_decompose,
+        plan_repairs=_repairs,
+        aggregate=_aggregate,
+        # _snapshot() defaults to join_policy="repair".
+    ).execute(_snapshot(), {"goal": "compare"})
+
+    assert result.status == "completed"
+    assert not runtime.cancelled
+    # Only the completed child reaches the verifier, so its NEEDS_REPAIR verdict
+    # still buys a repair round; the failed child is silently dropped.
+    assert runtime.verifications == 2
+    assert result.aggregate == {"tasks": ["a", "a-repair-1"]}
+    assert result.limitations == []
 
 
 @pytest.mark.asyncio
@@ -592,6 +649,41 @@ async def test_parallel_write_tasks_fail_closed_before_dispatch():
         ).execute(_snapshot(), {})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plan, message",
+    [
+        ([], "task plan is empty or exceeds max_tasks"),
+        # _snapshot() fixes max_tasks at 4, so a fifth task is one past it.
+        (
+            [("a", 1), ("b", 1), ("c", 1), ("d", 1), ("e", 1)],
+            "task plan is empty or exceeds max_tasks",
+        ),
+        ([("a", 1), ("a", 1)], "task IDs must be unique"),
+    ],
+)
+async def test_malformed_task_plan_fails_closed_before_dispatch(plan, message):
+    runtime = FakeRuntime()
+
+    async def planned(snapshot, context):
+        return [
+            TaskAssignment(task_id=task_id, attempt=attempt, objective="research")
+            for task_id, attempt in plan
+        ]
+
+    with pytest.raises(ValueError, match=message):
+        await RootOrchestrator(
+            runtime,
+            acquire_context=_acquire,
+            decompose=planned,
+            plan_repairs=_repairs,
+            aggregate=_aggregate,
+        ).execute(_snapshot(), {})
+
+    # Nothing was dispatched, so there is no durable child to cancel.
+    assert not runtime.cancelled
+
+
 def test_verifier_must_be_independent_of_every_worker():
     snapshot = _snapshot()
     raw = snapshot.model_dump()
@@ -606,6 +698,26 @@ def test_verifier_must_be_read_only():
     raw = snapshot.model_dump()
     raw["verifier"] = snapshot.verifier.model_dump() | {"read_only": False}
     with pytest.raises(ValueError, match="verifier must be read-only"):
+        RootExecutionSnapshot.model_validate(raw)
+
+
+def test_authority_hashes_and_worker_pin_uniqueness_fail_closed():
+    """Rules/policies the caller swapped under a pinned authority hash are rejected."""
+    snapshot = _snapshot()
+
+    raw = snapshot.model_dump()
+    raw["business_rules"] = {"version": 1, "rules": [{"x": 1}]}
+    with pytest.raises(ValueError, match="business rules do not match"):
+        RootExecutionSnapshot.model_validate(raw)
+
+    raw = snapshot.model_dump()
+    raw["policies"] = {"dispatchMode": "sequential"}
+    with pytest.raises(ValueError, match="policies do not match"):
+        RootExecutionSnapshot.model_validate(raw)
+
+    raw = snapshot.model_dump()
+    raw["workers"] = [snapshot.workers[0].model_dump()] * 2
+    with pytest.raises(ValueError, match="worker pins must be unique"):
         RootExecutionSnapshot.model_validate(raw)
 
 
@@ -720,6 +832,102 @@ async def test_context_acquisition_is_bounded_before_decomposition():
     assert len(
         [item for item in result.audit if item["event_type"] == "context_assessed"]
     ) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminally_insufficient_context_fails_instead_of_waiting_for_input():
+    """`terminal=True` means the authority already closed the question."""
+    runtime = FakeRuntime()
+    decomposed = False
+
+    async def terminally_insufficient(snapshot, context, context_round):
+        return ContextAcquisition(
+            ready=False,
+            context=context,
+            missing=["required document", "signed contract"],
+            terminal=True,
+        )
+
+    async def should_not_run(snapshot, context):
+        nonlocal decomposed
+        decomposed = True
+        return []
+
+    result = await RootOrchestrator(
+        runtime,
+        acquire_context=terminally_insufficient,
+        decompose=should_not_run,
+        plan_repairs=_repairs,
+        aggregate=_aggregate,
+    ).execute(_snapshot(), {})
+
+    assert result.status == "failed"
+    assert result.limitations == [
+        "context is terminally insufficient: required document, signed contract"
+    ]
+    # A terminal insufficiency never asks the caller for input it cannot use.
+    assert result.clarification == []
+    assert not decomposed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "context_round, status, limitations",
+    [
+        (0, "failed", ["context round budget exhausted"]),
+        # _snapshot() fixes max_context_rounds at 2.
+        (2, "completed", []),
+        (3, "failed", ["context round budget exhausted"]),
+    ],
+)
+async def test_context_round_boundary_at_and_beyond_max_context_rounds(
+    context_round, status, limitations
+):
+    result = await RootOrchestrator(
+        FakeRuntime(),
+        acquire_context=_acquire,
+        decompose=_decompose,
+        plan_repairs=_repairs,
+        aggregate=_aggregate,
+    ).execute(_snapshot(), {"goal": "compare"}, context_round=context_round)
+
+    assert result.status == status
+    assert result.limitations == limitations
+    # An out-of-budget round is rejected before any context is acquired.
+    assert len(
+        [item for item in result.audit if item["event_type"] == "context_assessed"]
+    ) == (1 if status == "completed" else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overflow, status, limitations",
+    [(0, "completed", []), (1, "failed", ["context byte budget exhausted"])],
+)
+async def test_context_byte_budget_accepts_the_limit_and_rejects_one_byte_over(
+    overflow, status, limitations
+):
+    # The charge against the token ledger happens first, so the byte budget is
+    # only reachable with a token budget that comfortably covers the payload.
+    snapshot = _snapshot(token_budget=1_000_000)
+    size = snapshot.context_byte_budget + overflow
+    # {"blob":"…"} costs 11 bytes around the padding value.
+    payload = {"blob": "x" * (size - 11)}
+    assert _json_size(payload) == size
+
+    async def sized(snap, context, context_round):
+        return ContextAcquisition(ready=True, context=payload)
+
+    result = await RootOrchestrator(
+        FakeRuntime(),
+        acquire_context=sized,
+        decompose=_decompose,
+        plan_repairs=_repairs,
+        aggregate=_aggregate,
+    ).execute(snapshot, {"goal": "compare"})
+
+    assert result.status == status
+    assert result.limitations == limitations
 
 
 def _provenance(context_key: str) -> ContextProvenance:

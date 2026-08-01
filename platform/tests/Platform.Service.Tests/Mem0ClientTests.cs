@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Platform.Service.Options;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -23,6 +24,18 @@ public sealed class Mem0ClientTests
         var result = await client.RecallAsync("u1", "查詢");
 
         Assert.Equal("- 喜歡貓\n- 住台北\n", result);
+    }
+
+    // 集合大小邊界:恰好 1 筆(另一半 0 筆見 Recall_EmptyOrNullResults_ReturnsEmpty)。
+    // 迴圈每筆都補一個 "\n",單筆時不得少一個換行、也不得多出分隔符。
+    [Fact]
+    public async Task Recall_SingleResult_FormatsOneBullet()
+    {
+        var stub = new StubHttpMessageHandler(_ =>
+            TestHttp.Json(HttpStatusCode.OK, "{\"results\":[{\"memory\":\"喜歡貓\"}]}"));
+        var client = Build(stub);
+
+        Assert.Equal("- 喜歡貓\n", await client.RecallAsync("u1", "查詢"));
     }
 
     /// <summary>依 kind 造出失敗的下游:狀態碼錯誤 / 完全沒有回應 / HttpClient 自身逾時。</summary>
@@ -57,9 +70,35 @@ public sealed class Mem0ClientTests
         Assert.Equal(string.Empty, await client.RecallAsync("u1", "查詢"));
     }
 
-    // RememberAsync 是獨立方法、獨立 catch;"timeout" 同樣釘住「非呼叫端取消要吞掉」那一半。
+    // RememberAsync 的成功那一半:200 OK 正常結束,且請求形狀符合 mem0 /memories 契約
+    // (user_id + user/assistant 兩則訊息);只驗失敗被吞掉等於沒驗這個 client 到底送了什麼。
+    [Fact]
+    public async Task Remember_Success_PostsUserAndAssistantMessages()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, "{}"));
+        var client = Build(stub);
+
+        await client.RememberAsync("u1", "使用者訊息", "AI 回覆");
+
+        Assert.Equal("http://mem0/memories", stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
+
+        using var doc = JsonDocument.Parse(stub.LastBody!);
+        Assert.Equal("u1", doc.RootElement.GetProperty("user_id").GetString());
+        var messages = doc.RootElement.GetProperty("messages");
+        Assert.Equal(2, messages.GetArrayLength());
+        Assert.Equal("user", messages[0].GetProperty("role").GetString());
+        Assert.Equal("使用者訊息", messages[0].GetProperty("content").GetString());
+        Assert.Equal("assistant", messages[1].GetProperty("role").GetString());
+        Assert.Equal("AI 回覆", messages[1].GetProperty("content").GetString());
+    }
+
+    // RememberAsync 是獨立方法、獨立 catch,三種失敗都要跟 Recall 一樣被吞掉:
+    // "transport" 是「完全沒有回應」那個等價類(HttpRequestException,不是狀態碼錯誤),
+    // "timeout" 則釘住「非呼叫端取消要吞掉」那一半。
     [Theory]
     [InlineData("server-error")]
+    [InlineData("transport")]
     [InlineData("timeout")]
     public async Task Remember_Failure_DoesNotThrow(string kind)
     {

@@ -214,6 +214,16 @@ def test_custom_catalog_without_positive_persisted_revision_is_not_bindable(
     assert body["quarterly-qa"]["bindable"] is False
 
 
+def test_custom_catalog_with_smallest_positive_revision_is_bindable(backend, fake_deps):
+    """`revision > 0` 門檻的另一半：1 是最小合法值（上題測的 0 是緊鄰的非法值）。"""
+    backend({"demo-a": [row("quarterly-qa", QUARTERLY_QA, revision=1)]})
+
+    body = {item["name"]: item for item in client.get("/skills", headers=_headers()).json()}
+
+    assert body["quarterly-qa"]["revision"] == 1
+    assert body["quarterly-qa"]["bindable"] is True
+
+
 def test_custom_catalog_declares_flow_and_agentic_kind(backend, fake_deps):
     backend(
         {
@@ -449,6 +459,26 @@ def test_invoke_custom_skill_with_broken_definition_returns_500(backend, fake_de
 
     assert resp.status_code == 500
     assert resp.json()["detail"]["error"] == "workflow_execution_failed"
+
+
+def test_invoke_custom_skill_with_unrecognized_kind_fails_closed(backend, fake_deps):
+    """kind 既不是 flow 也不是 agentic（backend 資料損毀／新值未支援）→ 預設拒絕。
+
+    不猜、不嗅探 definition（這份 definition 外觀就是合法 flow），受控 500 而非 404 或誤執行。
+    """
+    backend({"demo-a": [row("weird-skill", QUARTERLY_QA, kind="bogus")]})
+
+    resp = client.post(
+        "/skills/weird-skill/invoke",
+        json={"input": {"query": "x"}},
+        headers=_headers(),
+    )
+
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert detail["error"] == "workflow_execution_failed"
+    assert "'bogus'" in detail["message"]  # 訊息點名那個無效 kind
+    assert fake_deps.audit_repo.saved == []  # 沒有真的跑起來
 
 
 def test_invoke_custom_skill_reserved_keys_cannot_be_forged(backend, fake_deps):

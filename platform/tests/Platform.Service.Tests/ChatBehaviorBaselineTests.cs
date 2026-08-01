@@ -120,6 +120,31 @@ public sealed class ChatBehaviorBaselineTests
         Assert.Equal("已如實轉達錯誤的摘要", reply.Reply);
     }
 
+    // 傳輸維度的另一半:同樣的 skill invoke 失敗走串流時,InvokeSkillToolAsync 的 catch 把錯誤轉成
+    // 一段文字塞進摘要訊息,串流照常吐完摘要——不冒泡、不掛住(斷言面同 A04:對外可觀察的回覆內容,
+    // 外加「錯誤文字確實進了送給摘要 LLM 的 message 清單」這個 Contains)。
+    [Theory]
+    [MemberData(nameof(SkillInvokeFailureErrors))]
+    public async Task A04_StreamChatAsync_SingleSkillFailure_DoesNotThrow_StillStreamsSummary(Exception error)
+    {
+        var agent = new FakeLlmAgent();
+        agent.Responses.Enqueue("kb-query");                        // 路由命中(CompleteAsync)
+        agent.Chunks = new[] { "已如實", "轉達錯誤的摘要" };          // 摘要串流(StreamAsync)
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SingleSkillCatalog), ThrowOnSkillInvoke = error };
+        var svc = Build(agent, wf);
+
+        var chunks = new List<string>();
+        await foreach (var chunk in svc.StreamChatAsync("這季毛利率多少?", "u1", "c1", UserA))
+        {
+            chunks.Add(chunk);
+        }
+
+        Assert.Equal(new[] { "已如實", "轉達錯誤的摘要" }, chunks);
+        // 工具失敗被轉成文字交給摘要 LLM 照實轉述(SkillRoutingAgent.InvokeSkillToolAsync 的 catch),
+        // 而不是讓例外穿過串流。
+        Assert.Contains(agent.LastMessages!, m => m.Content.Contains("Skill kb-query 呼叫失敗"));
+    }
+
     // ================================================================
     // A-05:角色過濾 — USER 看不到/呼叫不到 ADMIN skill,ADMIN 看得到/呼叫得到
     // ================================================================
@@ -375,6 +400,9 @@ public sealed class ChatBehaviorBaselineTests
     {
         new object[] { true, false },  // (a) RecallAsync 擲例外
         new object[] { false, true },  // (b) RememberAsync 擲例外
+        // (c) 同一輪兩者皆擲例外:recall(ChatContextProvider)與 remember(ChatTurnRecorder)是兩個
+        // 各自獨立的 try/catch,兩邊同時倒不會互相掩蓋,聊天仍須完成。
+        new object[] { true, true },
     };
 
     // mem0 best-effort 是 pipeline 不變式:就算替換實作違反原本的「不拋例外」契約,聊天仍須正常完成。

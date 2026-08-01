@@ -14,13 +14,24 @@ trace 投影原本對七案例各自的 _GOLDEN_TRACE 做全欄位逐鍵比對�
 原本 golden trace 全比對真正在守的東西）加上案例特有的局部斷言（重試三案例驗
 retrieval_planner 在 trace 中的重複次數＝迴圈實際跑的輪數；blank_query 案例驗 skipped
 節點集合）。業務層斷言（各測試函式開頭那幾行）完全不動。
+
+七個 AT 案例只覆蓋 {SINGLE_VALUE_LOOKUP, TABLE_LOOKUP, COMPARISON}×{PASS, RETRY}
+與 max_retrieval_attempts 的 2／3；檔尾另有四個補洞案例（CALCULATION 的計算複驗、
+PERFORMANCE_ANALYSIS 走 structured 來源、CAUSE_ANALYSIS 的無數值證據、
+max_retrieval_attempts 下界 1），沿用同一組 helper 與斷言風格。
 """
 
 import asyncio
 
 from app import skills
 from app.engine import compiler
-from app.nodes.kbquery.models import AnswerMode, IssueLabel, VerificationResult
+from app.nodes.kbquery.models import (
+    AnswerMode,
+    IntentType,
+    IssueLabel,
+    SourceResult,
+    VerificationResult,
+)
 from tests.kbquery_fakes import (
     TABLE_2025,
     TEXT_2025Q2,
@@ -31,6 +42,41 @@ from tests.kbquery_fakes import (
 )
 
 QUERY_2025Q3 = "2025Q3 稅後淨利是多少？"
+
+# 本檔專用語料：共用語料庫（tests/kbquery_fakes.py）只有 text／table 兩種來源，缺
+# structured 來源，也缺「命中指標詞但整句無數值」的文字段落——這兩種形狀各自打開一條
+# 別的案例走不到的定位／驗證路徑（structured 免頁碼的可追溯性、摘錄型 candidate_answer）。
+STRUCTURED_2025Q3 = SourceResult(
+    source_id="fin-2025q3#s1",
+    document_id="doc-fin-2025q3",
+    document_title="2025Q3 財務季報",
+    version="v1.0",
+    page=None,
+    source_type="structured",
+    retrieval_method="structured",
+    original_score=0.7,
+    metadata={
+        "record": {
+            "metric": "稅後淨利",
+            "period": "2025Q3",
+            "value": 1234.0,
+            "unit": "百萬元",
+            "query_conditions": {"legal_entity": "TW"},
+        }
+    },
+)
+
+TEXT_CAUSE_2025Q3 = SourceResult(
+    source_id="fin-2025q3#c9",
+    document_id="doc-fin-2025q3",
+    document_title="2025Q3 財務季報",
+    version="v1.0",
+    page=9,
+    source_type="text",
+    retrieval_method="vector",
+    original_score=0.7,
+    metadata={"content": "2025Q3 稅後淨利下降主因為市場波動。"},
+)
 
 # TraceEntry 內的牆鐘欄位；其餘（node_name/status/input_summary/output_summary/
 # error_code/component_version）皆為確定性，一律比對
@@ -279,3 +325,101 @@ def test_skill_e2e_blank_query_fatal_short_circuit():
         "data_locator",
         "evidence_verification",
     } <= skipped
+
+
+# ---------------------------------------------------------------------------
+# 七個 AT 案例之外的補洞案例（見模組 docstring）
+# ---------------------------------------------------------------------------
+
+
+def test_skill_e2e_calculation_growth_rate_success():
+    """CALCULATION 意圖成功：requires_calculation 打開 evidence_verification 的計算複驗。
+
+    複驗做兩件 AT2-21~27 都碰不到的事：以 calculator 重算公式比對 trace.result，
+    以及要求每個輸入值都能對回某筆證據的 exact_value；兩者都過才 PASS。
+    """
+    deps = make_deps({"vector": FakeSearch(lambda q, f: [TEXT_2025Q3, TEXT_2025Q2])})
+    result = run_skill_graph(deps, "2025Q2 到 2025Q3 稅後淨利成長率")
+
+    assert result["intent_type"] == IntentType.CALCULATION
+    assert result["requires_calculation"] is True
+    assert result["verification_result"] == VerificationResult.PASS
+    assert result["answer_mode"] == AnswerMode.ANSWER
+    trace = result["calculation_trace"]
+    assert trace.formula == "(a - b) / b * 100"
+    assert trace.inputs == {"a": 1234.0, "b": 1100.0}  # a=較晚期間、b=較早期間
+    assert trace.input_sources == [TEXT_2025Q2.source_id, TEXT_2025Q3.source_id]
+    # candidate_answer 只留 round(…, 4) 的顯示值，複驗以 _DISPLAY_EPS 容差放行
+    assert result["final_answer"].startswith("【結論】稅後淨利成長率為 12.1818%")
+    assert "【計算】(a - b) / b * 100" in result["final_answer"]
+    _assert_audit_landed(deps, result)
+    _assert_audit_trail_structure(result)
+    assert _count_node_runs(result, "retrieval_planner") == 1  # 一次就 PASS，不進重試
+
+
+def test_skill_e2e_structured_record_lookup_success():
+    """structured 來源成功：StructuredDataLocator 定位資料列，無頁碼仍通過可追溯性。
+
+    PERFORMANCE_ANALYSIS 的檢索計畫含 structured 方法；證據以「查詢條件 JSON」當
+    row_identifier，可追溯性檢查對 structured 免頁碼（其餘來源缺頁碼即 NOT_TRACEABLE）。
+    """
+    deps = make_deps({"structured": FakeSearch(lambda q, f: [STRUCTURED_2025Q3])})
+    result = run_skill_graph(deps, "2025Q3 稅後淨利的達成率如何？")
+
+    assert result["intent_type"] == IntentType.PERFORMANCE_ANALYSIS
+    assert result["verification_result"] == VerificationResult.PASS
+    assert result["answer_mode"] == AnswerMode.ANSWER
+    evidence = result["selected_evidence"][0]
+    assert evidence.source_type == "structured"
+    assert evidence.page_number is None
+    citation = result["source_citations"][0]
+    assert citation.page is None
+    assert citation.row == '{"legal_entity": "TW"}'
+    assert result["confidence"] == 0.95
+    assert "1234.0" in result["final_answer"]
+    _assert_audit_landed(deps, result)
+    _assert_audit_trail_structure(result)
+
+
+def test_skill_e2e_cause_analysis_excerpt_answer_success():
+    """CAUSE_ANALYSIS 意圖成功：證據無精確數值，以原文摘錄成稿仍 PASS。
+
+    數值一致性檢查對「沒有數字的候選答案」不得誤判（期間 token 已被遮罩），
+    可追溯性靠 exact_excerpt + 頁碼成立。
+    """
+    deps = make_deps({"vector": FakeSearch(lambda q, f: [TEXT_CAUSE_2025Q3])})
+    result = run_skill_graph(deps, "為什麼 2025Q3 稅後淨利下降？")
+
+    assert result["intent_type"] == IntentType.CAUSE_ANALYSIS
+    assert result["verification_result"] == VerificationResult.PASS
+    assert result["answer_mode"] == AnswerMode.ANSWER
+    evidence = result["selected_evidence"][0]
+    assert evidence.exact_value == ""
+    assert evidence.locator_score == 0.3  # 無數值文字證據的固定分數
+    assert result["confidence"] == 0.3
+    assert result["final_answer"].startswith("【結論】2025Q3 稅後淨利下降主因為市場波動")
+    assert result["source_citations"][0].page == 9
+    _assert_audit_landed(deps, result)
+    _assert_audit_trail_structure(result)
+
+
+def test_skill_e2e_max_attempts_one_disallows_any_retry():
+    """max_retrieval_attempts=1（業務上限下界）：第一輪就達上限，RETRY 也不再重試。
+
+    對照 AT2-25（上限 2，可重試一次）：同樣的干擾語料在上限 1 時，verification_result
+    停在 RETRY 就收斂，計畫只留一份且不含任何重試調整。
+    """
+    deps = make_deps(
+        {"vector": FakeSearch(lambda q, f: [TEXT_WRONG_PERIOD])}, max_attempts=1
+    )
+    result = run_skill_graph(deps, QUERY_2025Q3)
+
+    assert result["retrieval_attempt"] == 1  # == max_retrieval_attempts
+    assert result["verification_result"] == VerificationResult.RETRY  # 未收斂即被上限截停
+    assert result["answer_mode"] == AnswerMode.ABSTAIN
+    assert len(result["retrieval_plans"]) == 1
+    assert result["retrieval_plans"][0].adjustment_reason == ""  # 沒有第二輪可調整
+    assert result["issue_label"] == IssueLabel.RETRIEVAL_MISS
+    _assert_audit_landed(deps, result)
+    _assert_audit_trail_structure(result)
+    assert _count_node_runs(result, "retrieval_planner") == 1  # 迴圈只跑一輪

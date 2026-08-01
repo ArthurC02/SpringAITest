@@ -46,6 +46,29 @@ function advancedSummary(page: Page) {
   return page.getByText('進階設定（slug、')
 }
 
+/**
+ * Smallest catalog that still lets an author build a rule (one pre-action fact, one operator,
+ * one action). Deliberately carries no `limits`: tests that care about nesting depth spread
+ * their own in, and the one that exercises the fail-safe fallback uses it as-is.
+ */
+const ruleFactsCatalog = {
+  version: 1,
+  gates: ['pre-action'],
+  facts: [
+    {
+      name: 'context.confidence', type: 'number', provenance: 'system', trustTier: 'trusted',
+      gates: ['pre-action'], operators: ['lt'], visibleValue: true,
+    },
+  ],
+  operators: [
+    { name: 'lt', compatibleFactTypes: ['number'], value: { kind: 'scalar', types: ['number'] } },
+  ],
+}
+
+const ruleActionsCatalog = {
+  actions: [{ name: 'deny', decision: 'deny', precedence: 100, parameters: [] }],
+}
+
 test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog keyboard behavior', async ({
   page,
 }) => {
@@ -453,6 +476,117 @@ test('catalog-provided rule limits drive nesting depth instead of a hardcoded co
   await expect(page.getByLabel('rules[0].when.all[0].all[0] 類型')).toHaveCount(1)
 })
 
+// The fail-safe the comment above only describes: a catalog that omits `limits` entirely must
+// fall back to the built-in 3, which is stricter than the 5 granted above — so the same two
+// nesting steps now land on the ceiling instead of one level short of it.
+test('a rule-fact catalog without limits falls back to the built-in depth of 3', async ({
+  page,
+}) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'fallback-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, agent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    // No `limits` key at all — neither relaxed nor tightened, simply absent.
+    if (path === '/api/agents/catalog/rule-facts') return json(route, ruleFactsCatalog)
+    if (path === '/api/agents/catalog/rule-actions') return json(route, ruleActionsCatalog)
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
+  await page.getByRole('button', { name: '＋ 新增空白規則' }).click()
+
+  await page.getByLabel('rules[0].when 類型').selectOption('all')
+  await page.getByLabel('rules[0].when.all[0] 類型').selectOption('all')
+  await expect(page.getByLabel('rules[0].when.all[0] 群組類型')).toHaveCount(1)
+  // Depth 3 == the fallback limit, so this leaf is a dead end (the maxDepth=5 catalog above
+  // still offers a selector at exactly this path).
+  await expect(page.getByLabel('rules[0].when.all[0].all[0] 類型')).toHaveCount(0)
+})
+
+// Depth is a boundary, not a hint, and the two tests above only ever land *under* the limit.
+// Server data can also arrive already nested, so both sides of `depth >= maxDepth` matter: the
+// leaf sitting exactly at the limit loses its kind selector, and the group sitting exactly at
+// the limit says so out loud — while a leaf one level below still offers nesting.
+test('nesting stops exactly at the catalog maxDepth', async ({ page }) => {
+  const leaf = { fact: 'context.confidence', op: 'lt', value: 0.7 }
+  const rule = (id: string, when: unknown) => ({
+    id,
+    name: id,
+    enabled: true,
+    priority: 100,
+    when,
+    then: [{ action: 'deny' }],
+  })
+  const nestedAgent = {
+    ...agent,
+    draft: {
+      ...agent.draft,
+      business_rules: {
+        version: 1,
+        rules: [rule('nested', { all: [leaf, { any: [leaf] }] }), rule('flat', leaf)],
+      },
+    },
+  }
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'boundary-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [nestedAgent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, nestedAgent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') {
+      return json(route, { ...ruleFactsCatalog, limits: { maxDepth: 2, maxNodes: 256, maxRules: 100 } })
+    }
+    if (path === '/api/agents/catalog/rule-actions') return json(route, ruleActionsCatalog)
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
+
+  // Positive controls first: the root group renders, and the depth-1 leaf of the second rule
+  // (one below the limit) still offers nesting — so the negatives below are about depth, not
+  // about an unrendered tree.
+  await expect(page.getByLabel('rules[0].when 群組類型')).toHaveCount(1)
+  await expect(page.getByLabel('rules[1].when 類型')).toHaveCount(1)
+  // Depth 2 === maxDepth 2: no kind selector, and the group there declares the ceiling.
+  await expect(page.getByLabel('rules[0].when.all[0] 類型')).toHaveCount(0)
+  await expect(page.locator('[data-rule-path="rules[0].when.all[1]"]')).toContainText(
+    '已達 UI 巢狀上限（2 層）。',
+  )
+})
+
 test('Business Rule editor round-trips canonical AST and uses server validation/simulation', async ({
   page,
 }) => {
@@ -677,4 +811,348 @@ test('Business Rule editor round-trips canonical AST and uses server validation/
   await expect.poll(() => savedRuleSet).not.toBeNull()
   expect(savedRuleSet).toEqual(currentAgent.draft.business_rules)
   await expect(page.getByLabel('Business Rules canonical JSON')).toContainText('"all"')
+})
+
+// Every test above enters through 編輯 on an existing Agent, so the creation wizard — the only
+// caller of createAgent(), the only mode where slug is editable, and the only write that
+// deliberately carries no If-Match — was never exercised.
+test('the creation wizard posts without If-Match and only once name and slug are filled', async ({
+  page,
+}) => {
+  let createIfMatch: string | null = null
+  let createdSlug: string | null = null
+  let createdAudience: string[] | null = null
+  const createdAgent = { ...agent, name: 'New Agent', slug: 'new-agent' }
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'create-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'POST') {
+      const draft = request.postDataJSON() as { slug: string; audience: string[] }
+      createIfMatch = request.headers()['if-match'] ?? null
+      createdSlug = draft.slug
+      createdAudience = draft.audience
+      return json(route, createdAgent)
+    }
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, createdAgent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '＋ 建立 Agent' }).click()
+
+  // Creation has no ETag and therefore no draft/validate/publish actions — one write only.
+  const create = page.getByRole('button', { name: '建立 Agent', exact: true })
+  await expect(create).toBeDisabled()
+  await expect(page.getByRole('button', { name: '驗證', exact: true })).toHaveCount(0)
+  // A name alone is not enough: slug is the stable API identifier and lives in the advanced group.
+  await page.getByLabel('名稱').fill('New Agent')
+  await expect(create).toBeDisabled()
+  await advancedSummary(page).click()
+  await page.getByLabel('slug').fill('new-agent')
+  await expect(create).toBeEnabled()
+  await create.click()
+
+  // Success hands the new id back to the list, which re-enters in edit mode to pick up an ETag.
+  await expect(page.getByRole('button', { name: '儲存草稿' })).toBeVisible()
+  await expect.poll(() => createdSlug).toBe('new-agent')
+  expect(createIfMatch).toBeNull()
+  expect(createdAudience).toEqual(['role:USER', 'role:ADMIN'])
+})
+
+// Optimistic locking is only as good as the token: a response without an ETag must fail closed
+// rather than let a blind write clobber whoever did have the current version.
+test('an agent response without an ETag locks every write action', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'no-etag-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    // Same payload as everywhere else, minus the ETag header.
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') return json(route, agent)
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+
+  await expect(page.getByText('回應缺少 ETag')).toBeVisible()
+  // The draft is clean here, so the missing token is the only thing that can disable 驗證 —
+  // its title names exactly that reason.
+  const validate = page.getByRole('button', { name: '驗證', exact: true })
+  await expect(validate).toBeDisabled()
+  await expect(validate).toHaveAttribute('title', '缺少 ETag，請重新載入')
+  await expect(page.getByRole('button', { name: '發布預覽' })).toBeDisabled()
+  // Editing still works (the lock is on writes, not on the form), but the write stays shut.
+  await page.getByLabel('名稱').fill('Changed name')
+  await expect(page.getByRole('button', { name: '儲存草稿' })).toBeDisabled()
+})
+
+// Catalogs are governed and can shrink under a draft. Both stale references are only ever
+// tested in their "still present" state, yet either one alone must block publish — and a draft
+// can easily carry both at once after a Skill is retired and a tool is revoked.
+test('a draft referencing a retired Skill and a revoked tool cannot be published', async ({
+  page,
+}) => {
+  const staleAgent = {
+    ...agent,
+    draft: {
+      ...agent.draft,
+      skill_bindings: [{ skill: 'retired-skill' }],
+      allowed_tools: ['retired_tool'],
+    },
+  }
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'stale-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [staleAgent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, staleAgent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    // Neither referenced artifact is in its catalog any more.
+    if (path === '/api/skills/catalog') {
+      return json(route, [
+        {
+          name: 'tenant-review',
+          description: 'Tenant persisted Skill',
+          required_role: 'USER',
+          source: 'custom',
+          revision: 3,
+          bindable: true,
+          kind: 'agentic',
+        },
+      ])
+    }
+    if (path === '/api/tools') {
+      return json(route, [
+        { name: 'retrieve', kind: 'http', description: 'Search knowledge', risk: 'read', returns: 'passages' },
+      ])
+    }
+    if (path === `/api/agents/${agentId}/validate`) return json(route, { valid: true, errors: [] })
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+
+  const staleSkill = page.locator('.field-error', { hasText: 'retired-skill' })
+  const staleTool = page.locator('.field-error', { hasText: 'retired_tool' })
+  await expect(staleSkill).toContainText('已失效、停用或不可固定 revision')
+  await expect(staleTool).toContainText('不在目前 Tool Catalog')
+  // The tool error lives inside the advanced group, so it also has to force it open.
+  await expect(page.getByLabel('slug')).toBeVisible()
+
+  // Server validation passing is not enough: the two stale references still hold publish shut.
+  await page.getByRole('button', { name: '驗證', exact: true }).click()
+  await expect(page.getByText('驗證通過,可以發布。')).toBeVisible()
+  await expect(page.getByRole('button', { name: '發布預覽' })).toBeDisabled()
+
+  await staleSkill.getByRole('button', { name: '移除' }).click()
+  await staleTool.getByRole('button', { name: '移除' }).click()
+  await expect(staleSkill).toHaveCount(0)
+  await expect(staleTool).toHaveCount(0)
+})
+
+// switchKind has three group branches and every other test picks AND. OR keeps a sibling list
+// (and its ＋ 新增條件 affordance); NOT collapses to exactly one child and drops both.
+test('a condition group can be switched to OR and then to NOT', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'kind-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, agent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') return json(route, ruleFactsCatalog)
+    if (path === '/api/agents/catalog/rule-actions') return json(route, ruleActionsCatalog)
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
+  await page.getByRole('button', { name: '＋ 新增空白規則' }).click()
+
+  await page.getByLabel('rules[0].when 類型').selectOption('any')
+  await expect(page.locator('.rule-condition--group legend')).toHaveText('任一成立（OR）')
+  await expect(page.getByLabel('rules[0].when.any[0] 類型')).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '＋ 新增條件' })).toHaveCount(1)
+
+  // NOT reuses the first child of the group it replaces, then offers no way to add a sibling
+  // and no way to remove the only child.
+  await page.getByLabel('rules[0].when 群組類型').selectOption('not')
+  await expect(page.locator('.rule-condition--group legend')).toHaveText('不成立（NOT）')
+  await expect(page.getByLabel('rules[0].when.not 類型')).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '＋ 新增條件' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '移除條件' })).toHaveCount(0)
+
+  await page.getByText('進階：唯讀 canonical JSON').click()
+  await expect(page.getByLabel('Business Rules canonical JSON')).toContainText('"not"')
+})
+
+// The round-trip test above only proves the two ways a canonical result is *discarded* (echoed
+// unchanged, or superseded by a mid-flight edit). This is the branch that actually rewrites the
+// form: the server's canonicalization is authoritative and lands in the editor.
+test('a differing canonical rule set from the validator replaces the authored form', async ({
+  page,
+}) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'canonical-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, agent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') return json(route, ruleFactsCatalog)
+    if (path === '/api/agents/catalog/rule-actions') return json(route, ruleActionsCatalog)
+    if (path === '/api/agents/rules/validate') {
+      const body = request.postDataJSON()
+      return json(route, {
+        valid: true,
+        canonicalRuleSet: {
+          ...body.ruleSet,
+          rules: body.ruleSet.rules.map((rule: Record<string, unknown>) => ({
+            ...rule,
+            name: '伺服器正規化名稱',
+          })),
+        },
+        errors: [],
+      })
+    }
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
+  await page.getByRole('button', { name: '＋ 新增空白規則' }).click()
+
+  const ruleName = page.locator('.rule-card').first().locator('.rule-card__identity input').first()
+  await expect(ruleName).toHaveValue('規則 1')
+  await page.getByRole('button', { name: '以正式 Validator 驗證' }).click()
+
+  // The author did not touch anything mid-flight, so the canonical result is applied — and the
+  // pass notice survives it (applying canonical is not treated as a new local edit).
+  await expect(ruleName).toHaveValue('伺服器正規化名稱')
+  await expect(page.getByText('Business Rules 驗證通過。')).toBeVisible()
+  await page.getByText('進階：唯讀 canonical JSON').click()
+  await expect(page.getByLabel('Business Rules canonical JSON')).toContainText('伺服器正規化名稱')
+})
+
+// Both rule endpoints are only ever mocked as 200s, so a failing validator or evaluator would
+// currently look like "nothing happened". The server message must reach the author instead.
+test('failed rule validation and simulation surface the server message', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'rule-error-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, agent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === '/api/agents/catalog/rule-facts') return json(route, ruleFactsCatalog)
+    if (path === '/api/agents/catalog/rule-actions') return json(route, ruleActionsCatalog)
+    if (path === '/api/agents/rules/validate' || path === '/api/agents/rules/simulate') {
+      const simulating = path.endsWith('/simulate')
+      return route.fulfill({
+        status: simulating ? 503 : 500,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          timestamp: '2026-07-24T00:00:00Z',
+          status: simulating ? 503 : 500,
+          message: simulating ? '模擬服務暫時無法使用。' : '規則驗證服務暫時無法使用。',
+          fieldErrors: {},
+        }),
+      })
+    }
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
+
+  const ruleError = page.locator('.business-rules .error-text')
+  await page.getByRole('button', { name: '以正式 Validator 驗證' }).click()
+  await expect(ruleError).toHaveText('規則驗證服務暫時無法使用。')
+  // A failed validate leaves no verdict behind — the editor must not imply "passed".
+  await expect(page.getByText('Business Rules 驗證通過。')).toHaveCount(0)
+
+  await page.getByText('Simulator（使用正式 evaluator，不會呼叫真實工具）').click()
+  await page.getByRole('button', { name: '執行模擬' }).click()
+  await expect(ruleError).toHaveText('模擬服務暫時無法使用。')
+  await expect(page.locator('.rule-simulation-result')).toHaveCount(0)
 })

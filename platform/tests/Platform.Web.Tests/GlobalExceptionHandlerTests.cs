@@ -73,6 +73,41 @@ public sealed class GlobalExceptionHandlerTests
         Assert.Equal("Business Rule request is too large", body["message"]!.GetValue<string>());
     }
 
+    // FieldErrorsOf 的非 default 那一臂:只有這兩種例外帶得動欄位級錯誤,必須原樣穿到 body —
+    // 錯誤碼/欄位名被吞掉的話,前端編輯器就指不出是哪一條規則、哪個欄位出錯。
+    // 兩者同屬「fieldErrors 有值」等價類,只是各自映射到不同的 4xx。
+    public static IEnumerable<object[]> FieldErrorCarryingExceptions() => new[]
+    {
+        new object[]
+        {
+            new WorkflowBadInputException("輸入不符規範")
+            {
+                FieldErrors = new Dictionary<string, string> { ["title"] = "不得空白" },
+            },
+            400, "title", "不得空白",
+        },
+        new object[]
+        {
+            new SkillValidationFailedException("Skill 定義未通過驗證")
+            {
+                FieldErrors = new Dictionary<string, string> { ["unknown_node"] = "節點 x 未註冊" },
+            },
+            422, "unknown_node", "節點 x 未註冊",
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(FieldErrorCarryingExceptions))]
+    public async Task FieldErrorCarrying_4xx_PassesThroughFieldErrors(
+        Exception ex, int expectedStatus, string fieldKey, string fieldMessage)
+    {
+        var (status, body) = await Handle(ex);
+
+        Assert.Equal(expectedStatus, status);
+        Assert.Equal(ex.Message, body["message"]!.GetValue<string>());
+        Assert.Equal(fieldMessage, body["fieldErrors"]![fieldKey]!.GetValue<string>());
+    }
+
     // 防禦分支:回應已開始寫出(串流途中)時不得再改寫 body —— 回 false 交還給呼叫端,
     // 已送出的位元組原封不動(改寫會產生「半段 SSE + 一段 JSON」的畸形回應)。
     [Fact]

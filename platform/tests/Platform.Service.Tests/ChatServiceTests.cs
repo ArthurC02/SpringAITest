@@ -399,6 +399,45 @@ public sealed class ChatServiceTests
         Assert.Equal("寵物守則對貓的規定?", workflows.SkillInvokes[1].Input["question"].GetString());
     }
 
+    // 上一案只走「兜底本身也成功」那條;兜底 skill 自己沒有可取答案鍵(agentic fatal run,輸出只剩
+    // trace/fatal_error 這類內部欄位)是另一個等價類:仍須回「誠實標註 + 固定友善訊息」的串接字串,
+    // 由工具正常回傳(不是拋例外炸掉整輪,更不是把 rag-qa 的內部欄位倒給聊天模型改寫)。
+    [Fact]
+    public async Task KbQuerySkill_Abstains_FallbackRagQaHasNoAnswerKey_ReturnsHonestLabelWithFriendlyMessage()
+    {
+        var agent = new FakeLlmAgent();
+        var workflows = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat(BuiltinCatalog),
+            SkillOutputByName = new()
+            {
+                ["kb-query"] = JsonSerializer.SerializeToElement(new
+                {
+                    skill = "kb-query",
+                    output = new { answer_mode = "ABSTAIN", final_answer = "【無法提供答案】證據不足" },
+                }),
+                ["rag-qa"] = JsonSerializer.SerializeToElement(new
+                {
+                    skill = "rag-qa",
+                    output = new { trace = new[] { "n1" }, fatal_error = "RecursionError" },
+                }),
+            },
+        };
+        var (_, routing) = BuildRouting(agent, new FakeMem0Client(), new FakeConversationStore(), workflows: workflows);
+
+        var tools = await routing.BuildToolsAsync(UserA, CancellationToken.None);
+        var tool = tools!.Single(t => t.Name == "kb-query");
+
+        var result = await tool.InvokeAsync("寵物守則對貓的規定?", CancellationToken.None);
+
+        // 誠實標註逐字保留,答案位置換成 ExtractSkillAnswer 的 fatal 友善訊息(內部欄位名一個都不外洩)。
+        Assert.Equal(
+            "嚴格稽核查詢因證據不足而棄答;以下是一般知識庫檢索(不含稽核保證)的結果:回覆過程發生錯誤，請稍後再試",
+            result);
+        // 友善訊息確實來自兜底那一刀,不是 kb-query 自己的 final_answer 蒙混過關。
+        Assert.Equal(new[] { "kb-query", "rag-qa" }, workflows.SkillInvokes.Select(i => i.Name).ToArray());
+    }
+
     // ANSWER 不兜底(棄答邏輯的 off-point)由 ChatBehaviorBaselineTests.A12 覆蓋;
     // 目錄取得失敗仍正常回覆由 ChatSkillRoutingTests.CatalogFailure_ToolsEmpty_ChatDoesNotThrow(4 種例外)覆蓋。
 

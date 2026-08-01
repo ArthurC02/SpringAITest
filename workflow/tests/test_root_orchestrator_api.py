@@ -64,6 +64,53 @@ def test_authenticated_incomplete_backend_snapshot_never_reaches_dispatch(
     assert supervisor.calls == []
 
 
+@pytest.mark.parametrize("context", [[], "ctx", 1])
+def test_strict_mode_rejects_non_dict_context_before_dispatch(monkeypatch, context):
+    supervisor = Supervisor()
+    client = _install(monkeypatch, supervisor)
+
+    response = client.post(
+        f"/orchestrator-runs/{RUN_ID}/dispatch",
+        headers=auth_headers(),
+        json={"command_id": COMMAND_ID, "context": context},
+    )
+
+    assert response.status_code == 422
+    assert [error["loc"] for error in response.json()["detail"]] == [
+        ["body", "context"]
+    ]
+    assert supervisor.calls == []
+
+
+@pytest.mark.parametrize(
+    "command_id, status",
+    [
+        ("", 422),
+        ("c", 202),
+        ("c" * 128, 202),
+        ("c" * 129, 422),
+    ],
+)
+def test_command_id_length_bounds_gate_dispatch(monkeypatch, command_id, status):
+    supervisor = Supervisor()
+    client = _install(monkeypatch, supervisor)
+
+    response = client.post(
+        f"/orchestrator-runs/{RUN_ID}/dispatch",
+        headers=auth_headers(),
+        json={"command_id": command_id, "context": {}},
+    )
+
+    assert response.status_code == status
+    if status == 202:
+        assert [call[1] for call in supervisor.calls] == [command_id]
+    else:
+        assert [error["loc"] for error in response.json()["detail"]] == [
+            ["body", "command_id"]
+        ]
+        assert supervisor.calls == []
+
+
 def test_dispatch_accepts_platform_wire_and_schedules_without_waiting(monkeypatch):
     supervisor = Supervisor()
     client = _install(monkeypatch, supervisor)
@@ -124,6 +171,28 @@ def test_dispatch_requires_token_and_nonblank_identity(
 
     assert response.status_code == status
     assert response.json()["detail"]["error"] == error
+    assert supervisor.calls == []
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        auth_headers(user_id=None),
+        auth_headers(role="   "),
+    ],
+)
+def test_dispatch_rejects_missing_user_id_and_blank_role(monkeypatch, headers):
+    supervisor = Supervisor()
+    client = _install(monkeypatch, supervisor)
+
+    response = client.post(
+        f"/orchestrator-runs/{RUN_ID}/dispatch",
+        headers=headers,
+        json={"command_id": COMMAND_ID, "context": {}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "missing_context"
     assert supervisor.calls == []
 
 

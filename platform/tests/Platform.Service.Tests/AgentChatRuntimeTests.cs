@@ -161,6 +161,24 @@ public sealed class AgentChatRuntimeTests
             backend.Requests.Select(x => x.Path));
     }
 
+    // 明確指定的 Orchestrator 正好就是 active root 那一個:仍算「相同選擇」,只輪詢,
+    // 絕不當成切換去 cancel,也不重新 resolve/allocate。
+    [Fact]
+    public async Task ActiveRunningRoot_ExplicitSameOrchestrator_PollsWithoutCancelOrAllocate()
+    {
+        var backend = new QueueHandler(
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "running", "{}")),
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "completed", """{"aggregate":{"answer":"done"}}""")));
+
+        var result = await Build(backend, Enabled())
+            .RunAsync("next turn", "c1", Orchestrator, Identity());
+
+        Assert.Equal("done", result!.Text);
+        Assert.Equal(
+            ["/api/chat-runs/active", $"/api/chat-runs/{Run:D}"],
+            backend.Requests.Select(x => x.Path));
+    }
+
     [Fact]
     public async Task ExplicitResolver404_DoesNotFallbackOrAllocate()
     {
@@ -226,6 +244,28 @@ public sealed class AgentChatRuntimeTests
         Assert.Equal($"/api/chat-runs/{Run:D}/resume", backend.Requests[5].Path);
         Assert.Contains("\"input\":\"Taiwan\"", backend.Requests[5].Body);
         Assert.Equal(2, workflow.Requests.Count);
+    }
+
+    // 同上但 active root 停在 waiting_input:明確指定同一個 Orchestrator 走 resume 分支,
+    // 一樣不得被誤判成切換(不 cancel、不 resolve、不 allocate)。
+    [Fact]
+    public async Task WaitingRoot_ExplicitSameOrchestrator_ResumesSameRunWithoutCancelOrAllocate()
+    {
+        var backend = new QueueHandler(
+            TestHttp.Json(HttpStatusCode.OK, Active(Orchestrator, "waiting_input", """{"clarification":["Which region?"]}""")),
+            TestHttp.Json(HttpStatusCode.Accepted, Accepted()),
+            TestHttp.Json(HttpStatusCode.OK,
+                """{"run":{"status":"completed","result":{"aggregate":{"answer":"resumed"}}}}"""));
+        var workflow = new QueueHandler(TestHttp.Json(HttpStatusCode.Accepted, "{}"));
+
+        var answer = await Build(backend, Enabled(), workflow)
+            .RunAsync("Taiwan", "c1", Orchestrator, Identity());
+
+        Assert.Equal("resumed", answer!.Text);
+        Assert.Equal(
+            ["/api/chat-runs/active", $"/api/chat-runs/{Run:D}/resume", $"/api/chat-runs/{Run:D}"],
+            backend.Requests.Select(x => x.Path));
+        Assert.Contains("\"input\":\"Taiwan\"", backend.Requests[1].Body);
     }
 
     [Fact]
@@ -359,6 +399,30 @@ public sealed class AgentChatRuntimeTests
         Assert.Equal(["/api/chat-runs/replay", $"/api/chat-runs/{Run:D}"], backend.Requests.Select(x => x.Path));
     }
 
+    // 首輪重試的真實形狀:resume 鍵沒有紀錄(404),chat 鍵才命中 —— fallback 的成功分支
+    // 必須認得那筆既有 run 並直接觀察它,不得因為第一個鍵 miss 就重新 allocate。
+    [Fact]
+    public async Task LogicalAttemptRetry_ResumeKeyMisses_FallsBackToChatKeyReplay()
+    {
+        var completed = Active(Orchestrator, "completed", """{"aggregate":{"answer":"replayed"}}""");
+        var backend = new QueueHandler(
+            TestHttp.Json(HttpStatusCode.NotFound, """{"message":"none"}"""),
+            TestHttp.Json(HttpStatusCode.OK, completed),
+            TestHttp.Json(HttpStatusCode.OK, completed));
+        var workflow = new QueueHandler();
+
+        var result = await Build(backend, Enabled(), workflow).RunAsync(
+            "same turn", "c1", null, Identity(), "retry-token");
+
+        Assert.Equal("replayed", result!.Text);
+        Assert.Equal(
+            ["/api/chat-runs/replay", "/api/chat-runs/replay", $"/api/chat-runs/{Run:D}"],
+            backend.Requests.Select(x => x.Path));
+        AssertOpaqueKey(backend.Requests[0].IdempotencyKey, "resume");
+        AssertOpaqueKey(backend.Requests[1].IdempotencyKey, "chat");
+        Assert.Empty(workflow.Requests);
+    }
+
     [Fact]
     public async Task LogicalAttemptRetry_RekicksOnlyItsMatchedQueuedCommand()
     {
@@ -429,6 +493,8 @@ public sealed class AgentChatRuntimeTests
     [Theory]
     [InlineData("""{"aggregate":"plain text"}""", "\"plain text\"")]          // aggregate 非 object
     [InlineData("""{"answer":"no aggregate"}""", """{"answer":"no aggregate"}""")]  // 完全沒有 aggregate
+    [InlineData("""{"aggregate":{"other":1}}""", """{"other":1}""")]         // aggregate 是 object 但沒有 answer
+    [InlineData("""{"aggregate":{"answer":123}}""", """{"answer":123}""")]   // answer 存在但不是字串
     public async Task Poll_CompletedWithoutAggregateAnswer_RendersRawResult(string result, string expected)
     {
         var backend = new QueueHandler(
@@ -465,6 +531,21 @@ public sealed class AgentChatRuntimeTests
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(
             () => Build(backend, Enabled()).RunAsync("same turn", "c1", null, Identity(), "retry-token"));
+    }
+
+    // clarification 前段是空白字串:跳過無效項後回傳第一個真正能問的問題(不是回空白、也不是拋例外)。
+    [Fact]
+    public async Task Poll_WaitingWithBlankClarificationEntries_RendersFirstNonBlankQuestion()
+    {
+        var waiting = Active(Orchestrator, "waiting_input", """{"clarification":["","  ","Which region?"]}""");
+        var backend = new QueueHandler(
+            TestHttp.Json(HttpStatusCode.OK, waiting),
+            TestHttp.Json(HttpStatusCode.OK, waiting));
+
+        var result = await Build(backend, Enabled())
+            .RunAsync("same turn", "c1", null, Identity(), "retry-token");
+
+        Assert.Equal("Which region?", result!.Text);
     }
 
     // 呼叫端(瀏覽器)斷線:停止輪詢並原樣傳播取消,但絕不對 durable run 送出 cancel 命令

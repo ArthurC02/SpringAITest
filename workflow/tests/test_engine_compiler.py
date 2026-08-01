@@ -1,4 +1,4 @@
-"""Compiler 測試（AT2-15 ~ AT2-19、AT2-28、AT-GOV-01）。
+"""Compiler 測試（AT2-15 ~ AT2-19、AT2-28、AT-GOV-01、AT-GOV-02）。
 
 用一組 throwaway 節點（測試結束即從 registry 移除）驗證控制流本身：sequence 順序、
 branch then/else、loop 的兩種離開方式、編譯快取，以及「稽核節點強制附加」這條
@@ -822,6 +822,74 @@ def test_compile_cache_false_does_not_evict_cached_entries():
         compiler.compile(probe, deps, cache=False)
 
     assert compiler.compile(cached_skill, deps) is cached_first  # 仍命中，沒被擠掉
+
+
+# ---------------------------------------------------------------------------
+# 編譯期靜態拒編（治理硬規則：繞過 POST /skills/validate 直接 compile() 也要擋）
+# Skill.model_validate 只認 list[dict]，這些形狀在 schema 層全部合法 ——
+# compile() 是最後一道關卡，這裡驗它真的擋得住。
+# ---------------------------------------------------------------------------
+
+
+def _compile_error(flow: list[dict]) -> str:
+    """直接編譯一條 flow，回傳 SkillCompileError 的訊息（沒 raise 就是治理破口）。"""
+    skill = Skill.model_validate({"name": "probe-skill", "flow": flow})
+
+    with pytest.raises(compiler.SkillCompileError) as exc:
+        compiler.compile(skill, _deps())
+
+    return str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "loop_body",
+    [
+        {"body": [{"node": "t_a"}]},
+        {"max_iterations": "3", "body": [{"node": "t_a"}]},
+        {"max_iterations": True, "body": [{"node": "t_a"}]},
+    ],
+    ids=["absent", "str", "bool"],
+)
+def test_compile_rejects_loop_without_int_max_iterations(loop_body):
+    """【AT-GOV-02】max_iterations 缺漏或非 int → 拒編（無界迴圈不得進到執行期）。
+
+    bool 那格不是湊數：True 是 int 的子型別、且 `LOOP_MIN <= True <= LOOP_MAX` 成立，
+    少了 `isinstance(n, bool)` 這個特判就會被當成「上限 1 的迴圈」默默放行。
+    """
+    assert "缺少 max_iterations" in _compile_error([{"loop": loop_body}])
+
+
+@pytest.mark.parametrize(
+    "max_iterations",
+    [skill_mod.LOOP_MIN - 1, skill_mod.LOOP_MAX + 1],
+    ids=["below-min", "above-max"],
+)
+def test_compile_rejects_loop_max_iterations_outside_bounds(max_iterations):
+    """【AT-GOV-02】上限區間的無效側邊界（0 與 11）→ 拒編。
+
+    有效側（1 與 10）由 AT2-18 的參數化涵蓋；兩者合起來才是完整的邊界。
+    """
+    message = _compile_error(
+        [{"loop": {"max_iterations": max_iterations, "body": [{"node": "t_a"}]}}]
+    )
+
+    assert f"max_iterations={max_iterations} 超出允許範圍" in message
+
+
+@pytest.mark.parametrize(
+    "branch_body",
+    [
+        {"when": "state.x == 'go'", "then": []},
+        {"when": "state.x == 'go'"},
+    ],
+    ids=["empty-list", "absent"],
+)
+def test_compile_rejects_branch_with_empty_then(branch_body):
+    """branch 的 then 為空或缺漏 → 拒編（when 為真時會走進一條沒有任何節點的路徑）。
+
+    then 非空的正常形狀由上面 AT2-16／AT2-17 那組分支測試涵蓋。
+    """
+    assert "then 不可為空" in _compile_error([{"branch": branch_body}])
 
 
 def test_compile_rejects_empty_flow():

@@ -71,6 +71,23 @@ def test_flow_folder_name_not_equal_to_frontmatter_name_rejected():
     assert ei.value.errors[0].code == package.FOLDER_NAME_MISMATCH
 
 
+@pytest.mark.parametrize(
+    "md",
+    [
+        skill_md().replace("name: sales-helper\n", "", 1),
+        skill_md().replace("name: sales-helper", "name: 123", 1),
+    ],
+    ids=["missing", "non-string"],
+)
+def test_prefix_with_missing_or_non_string_name_falls_through_to_frontmatter_error(md):
+    # §0 資料夾名比對只在 name 是字串時成立；缺漏/非字串不得被報成 folder_name_mismatch，
+    # 而是落到 frontmatter 驗證器那條更精準的錯（釘住現行分工）。
+    with pytest.raises(PackageError) as ei:
+        package.parse_package(make_zip({f"{NAME}/SKILL.md": md}), NAME)
+    assert ei.value.errors[0].code == package.INVALID_FRONTMATTER
+    assert "name 為必填字串" in ei.value.errors[0].message
+
+
 def test_multiple_top_level_entries_without_root_skill_md_still_rejected():
     raw = make_zip({f"{NAME}/SKILL.md": skill_md(), "docs/guide.md": b"x"})
     with pytest.raises(PackageError) as ei:
@@ -206,6 +223,19 @@ def test_prefixed_file_count_off_point_rejects():
         package.parse_package(prefixed_agentic_zip(extra=extra), NAME)
     assert ei.value.errors[0].code == package.INVALID_PACKAGE
     assert "entry 數" in ei.value.errors[0].message
+
+
+def test_prefixed_single_file_on_point_accepts():
+    # 單檔上限同樣以解壓 bytes 計算，與相對路徑呈現無關 → 恰好上限仍應通過。
+    raw = make_zip(
+        [
+            (f"{NAME}/SKILL.md", skill_md()),
+            (f"{NAME}/assets/big.bin", b"\0" * LIMITS.max_single_file_bytes),
+        ],
+        zipfile.ZIP_STORED,
+    )
+    parsed = package.parse_package(raw, NAME)
+    assert "assets/big.bin" in parsed.entries  # 剝除後的相對路徑
 
 
 def test_prefixed_single_file_off_point_rejects():

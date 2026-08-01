@@ -68,6 +68,21 @@ public sealed class AuthServiceTests
         Assert.Equal("使用者名稱已存在：user-a", ex.Message);
     }
 
+    // 2xx 但沒有可用 body 的等價類:backend 回 JSON null(走 onEmptyBody)或整包沒有 body(反序列化擲
+    // JsonException → WrapTransport),兩者都必須收斂成帶「認證服務呼叫失敗：」前綴的 BackendCallException
+    // (對外 500),不得被當成註冊成功而回一個欄位全空的 AuthResult。
+    [Theory]
+    [InlineData("null", "認證服務呼叫失敗：回應內容為空")]
+    [InlineData("", "認證服務呼叫失敗：")]
+    public async Task Register_Backend2xxWithoutUsableBody_ThrowsBackendCall(string body, string expectedPrefix)
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.Created, body)));
+
+        var ex = await Assert.ThrowsAsync<BackendCallException>(() =>
+            svc.RegisterAsync(new RegisterRequest("newbie", "password123", "demo-a", "demo-a-invite")));
+        Assert.StartsWith(expectedPrefix, ex.Message);
+    }
+
     // ---- login ----
 
     [Fact]
@@ -108,5 +123,19 @@ public sealed class AuthServiceTests
         var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)));
 
         await Assert.ThrowsAsync<BackendCallException>(() => svc.LoginAsync(new LoginRequest("user-a", "password123")));
+    }
+
+    // 「backend 沒有回應」與「backend 回了 500」是兩條不同的程式路徑(WrapTransport vs MapErrorAsync),
+    // 對外同為 BackendCallException(500):傳輸層例外必須被包起來(保留原例外),不得讓
+    // HttpRequestException 逸出成未處理例外。
+    [Fact]
+    public async Task Login_TransportFailure_ThrowsBackendCall_WrappingOriginal()
+    {
+        var svc = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("backend 不可達")));
+
+        var ex = await Assert.ThrowsAsync<BackendCallException>(() =>
+            svc.LoginAsync(new LoginRequest("user-a", "password123")));
+        Assert.StartsWith("認證服務呼叫失敗：", ex.Message);
+        Assert.NotNull(ex.InnerException);
     }
 }

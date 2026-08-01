@@ -59,13 +59,19 @@ public sealed class PromptCompositionTests
     // Resolver:manifest 選定與替換
     // ============================================================================
 
-    [Fact]
-    public async Task Resolver_Anonymous_UsesConstants_WithoutTouchingBackend()
+    // 匿名(null)與「有身分但租戶碼空白」是同一個等價類:沒有租戶設定可讀 → constants,連 backend 都不打。
+    // 三個代表值釘住的是 IsNullOrWhiteSpace 這道 guard —— 若收窄成 null-only 檢查,後兩者會帶著空白
+    // X-Tenant-Id 去打 backend。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Resolver_AnonymousOrBlankTenant_UsesConstants_WithoutTouchingBackend(string? tenant)
     {
         var backend = new FakeBackendCalls();
         var resolver = Resolver(backend);
 
-        var prompts = await resolver.ResolveAsync(tenant: null, transportPersona: null);
+        var prompts = await resolver.ResolveAsync(tenant, transportPersona: null);
 
         Assert.Equal(PromptComposition.Defaults(null), prompts);
         Assert.Empty(backend.Paths);
@@ -209,14 +215,17 @@ public sealed class PromptCompositionTests
     // 負向快取,同一個不可變 revision 不再重打 backend。
     // ============================================================================
 
-    // 驗證失敗的等價類:component content SHA 不符、manifest_sha256 形狀不合法、schema drift、revision 不符
-    // ——每一種都是給定同一個不可變 revision 絕不會自己變好,故 Warning + 負向快取。
+    // 驗證失敗的等價類:component content SHA 不符、manifest_sha256 形狀不合法、schema drift、revision 不符、
+    // 空白 content、沒有任何 component、重複 kind ——每一種都是給定同一個不可變 revision 絕不會自己變好,
+    // 故 Warning + 負向快取。
     [Theory]
     [InlineData("bad-component-sha")]
     [InlineData("bad-manifest-sha")]
     [InlineData("schema-drift")]
     [InlineData("revision-mismatch")]
     [InlineData("blank-content")]
+    [InlineData("no-components")]
+    [InlineData("duplicate-kind")]
     public async Task Resolver_VerificationFailure_FailsClosedToConstants_LogsWarning_AndNegativeCachesRevision(
         string flavour)
     {
@@ -224,6 +233,11 @@ public sealed class PromptCompositionTests
         {
             // 空白護欄若被靜默套用,數字護欄就消失了 —— 必須 fail closed。
             "blank-content" => ManifestJson(7, new[] { ("guard", "   ") }),
+            // 一個 component 都沒有的 manifest:沒有任何槽位可套,是下游或發佈流程壞掉的訊號,不是
+            // 「等同 constants」的正常情形(那條路徑另有 governance_frame-only 的 warning 測試)。
+            "no-components" => ManifestJson(7, Array.Empty<(string, string)>()),
+            // 同一個 kind 出現兩次:哪一份生效取決於陣列順序,語義不確定 → 一律拒收,不取第一份也不取最後一份。
+            "duplicate-kind" => ManifestJson(7, new[] { ("guard", "護欄-A"), ("guard", "護欄-B") }),
             "bad-component-sha" => ManifestJson(
                 7, new[] { ("guard", "護欄-manifest") }, componentShaOverride: new string('a', 64)),
             "bad-manifest-sha" => ManifestJson(7, new[] { ("guard", "護欄-manifest") }, manifestSha: "not-a-sha"),
@@ -274,6 +288,27 @@ public sealed class PromptCompositionTests
         // t0+61s:距「第一次失敗」61s、超過 60s TTL。若命中曾經續期(舊 bug,failedAt 被推到 t0+30s),
         // 此時只過了 31s,仍會誤判為快取有效、不重試;修好後 failedAt 停在 t0,61s 已過期 → 重新打 backend。
         time.Advance(TimeSpan.FromSeconds(31));
+        await resolver.ResolveAsync(Tenant, null);
+        Assert.Equal(2, backend.Paths.Count(p => p == "/api/prompt-manifests/7/resolved"));
+    }
+
+    // TTL 比較的 on-point 邊界:`elapsed < NegativeCacheTtl` 是嚴格小於,elapsed 恰好 60s 已算過期 → 重打 backend。
+    // 上面的測試只走 30s(未過期)與 61s(已過期)兩個安全內部值,把 `<` 寫成 `<=` 不會被任何斷言抓到。
+    [Fact]
+    public async Task Resolver_NegativeCacheExactlyAtTtl_IsExpired_AndRetries()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-30T00:00:00Z"));
+        var backend = new FakeBackendCalls
+        {
+            ConfigValue = "7",
+            ManifestBody = ManifestJson(7, new[] { ("guard", "護欄-manifest") }, schemaVersion: 2),
+        };
+        var resolver = Resolver(backend, timeProvider: time);
+
+        await resolver.ResolveAsync(Tenant, null);
+        Assert.Single(backend.Paths, p => p == "/api/prompt-manifests/7/resolved");
+
+        time.Advance(TimeSpan.FromSeconds(60));
         await resolver.ResolveAsync(Tenant, null);
         Assert.Equal(2, backend.Paths.Count(p => p == "/api/prompt-manifests/7/resolved"));
     }
@@ -397,6 +432,26 @@ public sealed class PromptCompositionTests
         Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning);
         Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Error);
         Assert.DoesNotContain(backend.Paths, p => p.StartsWith("/api/prompt-manifests", StringComparison.Ordinal));
+    }
+
+    // `revision > 0` 的 on-point 邊界:上面的 Theory 用 "0" 釘住不合法側,這裡釘住相鄰的最小合法值。
+    // 若條件被寫成 `revision > 1`,revision=1 的租戶會被誤判成設定錯誤、整批退回 constants 而只留一條 Warning。
+    [Fact]
+    public async Task Resolver_SmallestPositiveRevision_IsAccepted_AndReplacesSlots()
+    {
+        var backend = new FakeBackendCalls
+        {
+            ConfigValue = "1",
+            ManifestBody = ManifestJson(1, new[] { ("guard", "護欄-manifest") }),
+        };
+        var logger = new RecordingLogger<PromptCompositionResolver>();
+        var resolver = Resolver(backend, logger: logger);
+
+        var prompts = await resolver.ResolveAsync(Tenant, null);
+
+        Assert.Equal("護欄-manifest", prompts.Guard);
+        Assert.Single(backend.Paths, p => p == "/api/prompt-manifests/1/resolved");
+        Assert.DoesNotContain(logger.Entries, e => e.Level >= LogLevel.Warning);
     }
 
     // 低10:manifest 驗證通過但不含任何 platform 使用的槽位(只有 workflow 專用的 governance_frame)——

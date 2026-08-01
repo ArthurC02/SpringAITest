@@ -129,6 +129,72 @@ def test_eval_run_unknown_skill_returns_404(monkeypatch) -> None:
     assert response.status_code == 404
 
 
+def test_eval_run_blank_candidate_ref_name_rejected_with_422() -> None:
+    """candidate.ref 沒有可用的名稱字串(null／空白)→ 請求層級 422,不查 backend。"""
+    for blank in (None, "   "):
+        response = _run(_suite([], skill_name=blank))
+        assert response.status_code == 422
+        assert response.json()["detail"]["error"] == "workflow_eval_invalid_candidate"
+
+
+def test_eval_run_hidden_internal_skill_candidate_returns_404() -> None:
+    """Root runtime 內部 skill 不是可評測資產:比照 invoke 的前置隱藏檢查回 404。"""
+    response = _run(_suite([], skill_name="context-enrichment"))
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Not Found"  # 不洩漏 workflow_not_found 細節
+
+
+def test_eval_run_backend_unavailable_during_candidate_load_returns_500(
+    monkeypatch,
+) -> None:
+    """名稱不是內建 skill 且 backend 不可達時受控失敗(500),不偽裝成 404。"""
+
+    def _unreachable(url, headers):
+        raise httpx.ConnectError("backend down")
+
+    install_fake_get(monkeypatch, _unreachable)
+    response = _run(_suite([], skill_name="does-not-exist"))
+    assert response.status_code == 500
+    assert response.json()["detail"]["error"] == "workflow_execution_failed"
+
+
+def test_eval_run_non_admin_caller_against_admin_skill_returns_403() -> None:
+    """analyze-report 是 ADMIN-only skill:USER 呼叫端在跑任何 case 之前就被擋。"""
+    response = client.post(
+        "/evals/run",
+        headers=auth_headers(role="USER"),
+        json=_suite([], skill_name="analyze-report"),
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"] == "workflow_forbidden"
+
+
+def test_eval_run_role_gate_passes_for_matching_caller_and_skill_roles() -> None:
+    """角色決策表的另一半:USER×USER-required 與 ADMIN×ADMIN-required 都應放行。"""
+    user_on_user_skill = client.post(
+        "/evals/run",
+        headers=auth_headers(role="USER"),
+        json=_suite([], skill_name="triage"),
+    )
+    admin_on_admin_skill = _run(_suite([], skill_name="analyze-report"))
+
+    for response in (user_on_user_skill, admin_on_admin_skill):
+        assert response.status_code == 200
+        assert response.json()["cases"] == []
+
+
+def test_eval_run_replay_mode_executes_like_deterministic_with_own_identity() -> None:
+    """replay 與 deterministic 共用同一套 fixture 執行機制(runner 不讀 mode),但 mode
+    進 canonical_identity,所以兩者是不同身分。"""
+    replay_case = _pass_case("c-mode")
+    replay_case["mode"] = "replay"
+    replay = _run(_suite([replay_case])).json()["cases"][0]
+    deterministic = _run(_suite([_pass_case("c-mode")])).json()["cases"][0]
+
+    assert replay["verdict"] == deterministic["verdict"] == "PASS"
+    assert replay["canonical_identity"] != deterministic["canonical_identity"]
+
+
 def test_eval_run_deterministic_case_passes_with_valid_fixtures_and_input() -> None:
     response = _run(_suite([_pass_case()]))
     assert response.status_code == 200
@@ -198,6 +264,17 @@ def test_eval_suite_cases_over_max_length_rejected() -> None:
     cases = [_pass_case(f"c{i}") for i in range(201)]
     with pytest.raises(ValidationError):
         EvalSuite.model_validate({"suite_id": "s", "revision": 1, "cases": cases})
+
+
+def test_eval_run_empty_cases_returns_200_with_no_case_results() -> None:
+    """長度下界 0:合法 suite 只是沒有 case,整條請求仍成功(不是錯誤輸入)。"""
+    response = _run(_suite([], skill_name="triage"))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cases"] == []
+    assert body["runner_version"] == "eval-runner/1"
+    assert body["suite_id"] == "csr-eval-001"
+    assert body["revision"] == 1
 
 
 # ---------------------------------------------------------------------------

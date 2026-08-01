@@ -33,7 +33,11 @@ from app.runtime.checkpoints import (
 from app.runtime.graph import build_context, compile_runtime_graph, initial_state
 from app.runtime.events import MAX_EVENT_PAYLOAD_JSON_BYTES, runtime_event
 from app.runtime.facts import ProposedAction, caller_envelopes
-from app.runtime.manager import RuntimeManagerConflict, RuntimeRunManager
+from app.runtime.manager import (
+    RuntimeLineageInvalid,
+    RuntimeManagerConflict,
+    RuntimeRunManager,
+)
 from app.runtime.artifacts import RevisionArtifactReader
 from app.runtime.model import ModelTurn
 from app.runtime.models import (
@@ -45,6 +49,7 @@ from app.runtime.models import (
     canonical_json_sha256,
     parse_json_preserving_numbers,
 )
+from app.security import RequestContext
 from app.settings import settings
 from app.runtime.policy import PreActionPolicy
 from tests.test_agent_runtime import (
@@ -2020,4 +2025,681 @@ async def test_timeout_uses_durable_failed_terminal_cleanup() -> None:
         item["event_type"] == "run_terminal"
         for item in state.values["events"]
     ) == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_reads_back_consumed_claim_then_fails_bad_lineage() -> None:
+    """dispatch_command 自己的兩條分支：命令已被別人吃掉 ⇒ 只回讀狀態,不改任何東西;
+    自己的 lineage 例外 ⇒ 由本路徑（而非 recover_once）把命令收斂成 failed 並 ack。"""
+    run_snapshot = snapshot()
+    command = RecoveryCommand(
+        command_id="resume-no-pin",
+        run_id=run_snapshot.run_id,
+        command_type="resume",
+        # 缺 expected_checkpoint_ref ⇒ _recover_resume_locked 立刻 RuntimeLineageInvalid。
+        input={"message": "must not be injected", "expected_checkpoint_version": 1},
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        role=run_snapshot.caller.role,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        run_status="running",
+        state_version=0,
+        lease_generation=2,
+        checkpoint_generation=2,
+        checkpoint_version=1,
+        lease_token="lease-g2",
+        claim_token="claim-g2",
+        claim_expires_at="2099-01-01T00:00:00Z",
+        dispatch_attempt=1,
+    )
+    backend = CommandBackend(run_snapshot, command)
+    backend.token = command.lease_token
+    backend.record = backend.record.model_copy(
+        update={"status": "running", "lease_generation": 2}
+    )
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+    )
+
+    consumed = await manager.dispatch_command(
+        run_snapshot.run_id, "already-consumed", request_context()
+    )
+
+    assert consumed.status == "running"
+    assert consumed.checkpoint_version == backend.record.checkpoint_version
+    assert backend.claims == ["already-consumed"]
+    assert backend.transition_calls == 0
+    assert backend.completed_commands == []
+
+    failed = await manager.dispatch_command(
+        run_snapshot.run_id, command.command_id, request_context()
+    )
+
+    assert failed.status == "failed"
+    assert failed.message == "Resume checkpoint lineage was rejected."
+    assert failed.checkpoint_version == command.checkpoint_version + 1
+    assert backend.record.status == "failed"
+    assert backend.completed_commands == [command.command_id]
+    assert [
+        event["payload"]
+        for event in backend.events.values()
+        if event["event_type"] == "run_terminal"
+    ] == [{"status": "failed", "error_code": "resume_lineage_invalid"}]
+    assert backend.transition_payloads[-1]["error_code"] == "resume_lineage_invalid"
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejects_stale_state_version_then_terminalizes_without_handle() -> None:
+    """cancel 的兩條自有分支：CAS 版本不符必須拒絕;本行程沒有 handle 時仍要自行取租約收尾。"""
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+    backend.record = backend.record.model_copy(
+        update={"status": "running", "state_version": 3}
+    )
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+    )
+
+    with pytest.raises(RuntimeManagerConflict, match="state version changed"):
+        await manager.cancel(
+            run_snapshot.run_id, request_context(), expected_state_version=2
+        )
+    assert backend.transition_calls == 0
+    assert backend.events == {}
+    assert backend.record.status == "running"
+
+    cancelled = await manager.cancel(
+        run_snapshot.run_id, request_context(), expected_state_version=3
+    )
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.checkpoint_version == 1
+    assert backend.record.status == "cancelled"
+    assert [
+        event["event_type"] for event in backend.events.values()
+    ] == ["run_cancelled"]
+    assert run_snapshot.run_id not in manager._handles
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("record_override", "expected_error", "match"),
+    [
+        (
+            {"snapshot_hash": "0" * 64},
+            RuntimeManagerConflict,
+            "snapshot authority changed",
+        ),
+        (
+            {"checkpoint_ref": None},
+            RuntimeManagerConflict,
+            "Backend checkpoint pin changed",
+        ),
+        ({"status": "completed"}, RuntimeManagerConflict, "run is not executable"),
+        ({}, RuntimeLineageInvalid, "no durable checkpoint"),
+    ],
+    ids=[
+        "snapshot-authority-changed",
+        "backend-pin-changed",
+        "run-not-executable",
+        "pinned-checkpoint-missing",
+    ],
+)
+async def test_recovered_resume_guards_reject_changed_authority(
+    record_override: dict[str, Any],
+    expected_error: type[Exception],
+    match: str,
+) -> None:
+    """Backend 是權威：快照、checkpoint pin、可執行狀態與durable checkpoint 任一不符即拒絕重播。"""
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+    thread_id = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        lease_generation=2,
+    )["configurable"]["thread_id"]
+    pinned_ref = f"v2:2:{thread_id}:{uuid.UUID(int=11)}"
+    backend.record = backend.record.model_copy(
+        update={
+            "status": "running",
+            "state_version": 5,
+            "lease_generation": 2,
+            "checkpoint_generation": 2,
+            "checkpoint_ref": pinned_ref,
+            "checkpoint_version": 3,
+            **record_override,
+        }
+    )
+    canonical = canonical_json_bytes(
+        run_snapshot.model_dump(mode="json", exclude={"snapshot_hash"})
+    )
+    command = RecoveryCommand(
+        command_id="resume-guard",
+        run_id=run_snapshot.run_id,
+        command_type="resume",
+        input={
+            "message": "2025",
+            "expected_checkpoint_version": 3,
+            "expected_checkpoint_ref": pinned_ref,
+        },
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        role=run_snapshot.caller.role,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        run_status="running",
+        state_version=5,
+        lease_generation=2,
+        checkpoint_generation=2,
+        checkpoint_ref=pinned_ref,
+        checkpoint_version=3,
+        lease_token="lease-g2",
+        snapshot={
+            "snapshot_hash": run_snapshot.snapshot_hash,
+            "snapshot_canonical_base64": base64.b64encode(canonical).decode("ascii"),
+        },
+        claim_token="claim-guard",
+        claim_expires_at="2099-01-01T00:00:00Z",
+        dispatch_attempt=1,
+    )
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+    )
+
+    with pytest.raises(expected_error, match=match):
+        await manager._recover_resume_locked(command, request_context())
+
+    assert backend.transition_calls == 0
+    assert backend.events == {}
+    assert run_snapshot.run_id not in manager._handles
+    await manager.close()
+
+
+class ParentChainGraph:
+    """一條線性父鏈的假圖：只有 aget_state,用來壓走訪跳數上限（不需要真的 checkpointer）。"""
+
+    def __init__(self, thread_id: str, length: int) -> None:
+        self.thread_id = thread_id
+        self.ids = [str(uuid.UUID(int=index + 1)) for index in range(length)]
+
+    def config_at(self, index: int) -> dict[str, Any]:
+        return {
+            "configurable": {
+                "thread_id": self.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": self.ids[index],
+            }
+        }
+
+    def ref_at(self, index: int) -> str:
+        return f"v2:1:{self.thread_id}:{self.ids[index]}"
+
+    def state_at(self, index: int) -> Any:
+        return SimpleNamespace(
+            config=self.config_at(index),
+            parent_config=(
+                self.config_at(index + 1) if index + 1 < len(self.ids) else None
+            ),
+            values={"status": "running"},
+            next=(),
+            interrupts=(),
+        )
+
+    async def aget_state(self, requested):
+        return self.state_at(
+            self.ids.index(requested["configurable"]["checkpoint_id"])
+        )
+
+
+def chain_thread_id(run_snapshot, ctx: RequestContext) -> str:
+    return checkpoint_config(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        lease_generation=1,
+    )["configurable"]["thread_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hops", "expected"),
+    [(199, True), (200, None)],
+    ids=["last-hop-inside-cap", "one-hop-past-cap"],
+)
+async def test_lineage_progress_stops_at_the_200_expansion_cap(
+    hops: int, expected: bool | None
+) -> None:
+    """走訪上限是 200 次展開：第 200 次仍可命中,再多一跳就 fail closed 回 None（不得無限繞）。"""
+    run_snapshot = snapshot()
+    ctx = request_context()
+    graph = ParentChainGraph(chain_thread_id(run_snapshot, ctx), hops + 1)
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=FakeBackend(run_snapshot),
+        model=FakeModel([]),
+    )
+    manager.graph = graph  # type: ignore[assignment]
+
+    progress = await manager._lineage_progress(
+        graph.state_at(0),
+        graph.ref_at(0),
+        graph.ref_at(hops),
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        ctx=ctx,
+    )
+
+    assert progress is expected
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hops", "expected"),
+    [(1_000, True), (1_001, False)],
+    ids=["last-ancestor-inside-cap", "one-ancestor-past-cap"],
+)
+async def test_checkpoint_ancestor_walk_stops_at_the_1000_hop_cap(
+    hops: int, expected: bool
+) -> None:
+    """祖先鏈只走 1000 跳：第 1000 跳仍算祖先,更遠的一律當作無血緣（False）。"""
+    run_snapshot = snapshot()
+    ctx = request_context()
+    graph = ParentChainGraph(chain_thread_id(run_snapshot, ctx), hops + 1)
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=FakeBackend(run_snapshot),
+        model=FakeModel([]),
+    )
+    manager.graph = graph  # type: ignore[assignment]
+
+    found = await manager._checkpoint_is_ancestor(
+        graph.state_at(0), graph.ref_at(hops), lease_generation=1
+    )
+
+    assert found is expected
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_claimed_command_from_a_different_authority(
+    monkeypatch,
+) -> None:
+    """同一個 run 已有 in-flight worker 時,換身分或換快照都不得接管,且不得動到原 handle。"""
+    monkeypatch.setattr(settings, "runtime_cancel_grace_seconds", 0.05)
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+    model = BlockingModel()
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=model,
+    )
+    await manager.start(run_snapshot, "begin", request_context())
+    await asyncio.wait_for(model.started.wait(), timeout=1)
+    transitions_before = backend.transition_calls
+    intruder = RequestContext(
+        tenant_id="tenant-乙", user_id="intruder-1", role="ADMIN"
+    )
+
+    with pytest.raises(RuntimeManagerConflict, match="different authority"):
+        await manager.start(run_snapshot, "begin", intruder)
+
+    # 已認領的命令跳過 replay 去重,由 _launch 自己擋下換了快照權威的接管。
+    other_snapshot = snapshot(tools=["runtime.write_evidence"])
+    assert other_snapshot.snapshot_hash != run_snapshot.snapshot_hash
+    backend.record = backend.record.model_copy(
+        update={"snapshot_hash": other_snapshot.snapshot_hash}
+    )
+    command = RecoveryCommand(
+        command_id="start-other-snapshot",
+        run_id=run_snapshot.run_id,
+        command_type="start",
+        input={"message": "begin"},
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        role=run_snapshot.caller.role,
+        snapshot_hash=other_snapshot.snapshot_hash,
+        run_status="running",
+        state_version=backend.record.state_version,
+        lease_generation=2,
+        checkpoint_generation=0,
+        checkpoint_version=backend.record.checkpoint_version,
+        lease_token="lease-other",
+        claim_token="claim-other",
+        claim_expires_at="2099-01-01T00:00:00Z",
+        dispatch_attempt=1,
+    )
+
+    with pytest.raises(RuntimeManagerConflict, match="different authority"):
+        await manager._start_locked(
+            other_snapshot, "begin", request_context(), claimed_command=command
+        )
+
+    handle = manager._handles[run_snapshot.run_id]
+    assert handle.ctx == request_context()
+    assert handle.snapshot.snapshot_hash == run_snapshot.snapshot_hash
+    assert handle.lease_lost is False
+    assert backend.transition_calls == transitions_before
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_fenced_cancel_clones_the_pinned_checkpoint_into_its_generation() -> None:
+    """被 fence 的 cancel 也走跨代 clone：新一代留下清乾淨的終局,舊代的私有 checkpoint 不被就地改寫。"""
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+    backend.token = "lease-g3"
+    backend.record = backend.record.model_copy(
+        update={
+            "status": "running",
+            "state_version": 9,
+            "lease_generation": 3,
+            "checkpoint_generation": 2,
+            "cancel_requested": True,
+        }
+    )
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+    )
+    source_config = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        lease_generation=2,
+    )
+    seeded = initial_state(run_snapshot, "private input")
+    seeded["active_skill_scope"] = {
+        "name": "private",
+        "revision": 1,
+        "kind": "agentic",
+        "definition_sha256": "0" * 64,
+        "instruction_sha256": "1" * 64,
+        "effective_tools": [],
+        "resource_paths": [],
+    }
+    seeded["pending_input"] = {"question": "private question"}
+    await manager.graph.aupdate_state(source_config, seeded, as_node="preflight")
+    source_ref = checkpoint_ref(
+        (await manager.graph.aget_state(source_config)).config, lease_generation=2
+    )
+    assert source_ref is not None and source_ref.startswith("v2:2:")
+
+    command = RecoveryCommand(
+        command_id="cancel-g3",
+        run_id=run_snapshot.run_id,
+        command_type="cancel",
+        input={"reason": "user"},
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        role=run_snapshot.caller.role,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        run_status="running",
+        state_version=9,
+        lease_generation=3,
+        checkpoint_generation=2,
+        checkpoint_ref=source_ref,
+        checkpoint_version=5,
+        event_ack_cursor=2,
+        lease_token=backend.token,
+        claim_token="claim-cancel-g3",
+        claim_expires_at="2099-01-01T00:00:00Z",
+        dispatch_attempt=1,
+    )
+
+    await manager._cleanup_claimed_command(command, request_context())
+
+    assert backend.record.status == "cancelled"
+    terminal = backend.transition_payloads[-1]
+    assert terminal["checkpoint_ref"].startswith("v2:3:")
+    assert terminal["checkpoint_version"] == 6
+    assert terminal["error_code"] is None
+    assert [
+        event["event_type"] for event in backend.events.values()
+    ] == ["run_cancelled"]
+    cloned = await manager.graph.aget_state(
+        checkpoint_config(
+            tenant_id=run_snapshot.caller.tenant_id,
+            user_id=run_snapshot.caller.user_id,
+            run_id=run_snapshot.run_id,
+            snapshot_hash=run_snapshot.snapshot_hash,
+            lease_generation=3,
+        )
+    )
+    assert cloned.values["status"] == "cancelled"
+    assert cloned.values["messages"] == []
+    assert cloned.values.get("active_skill_scope") is None
+    assert cloned.values.get("pending_input") is None
+    source = await manager.graph.aget_state(source_config)
+    assert source.values["status"] == "running"
+    assert source.values["pending_input"] == {"question": "private question"}
+    await manager.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pin", ["generation-head", "unrelated-checkpoint"])
+async def test_claimed_start_clones_across_generations_only_for_a_related_pin(
+    pin: str,
+) -> None:
+    """跨代接管：pin 指到上一代 head 才可 clone 續跑,與該代 head 無血緣時必須 fail closed。"""
+    run_snapshot = snapshot()
+    backend = FakeBackend(run_snapshot)
+    backend.record = backend.record.model_copy(update={"lease_generation": 1})
+    model = FakeModel([RuntimeCommand(kind="request_input", content="Which year?")])
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=model,
+    )
+    g1 = RecoveryCommand(
+        command_id="start-g1",
+        run_id=run_snapshot.run_id,
+        command_type="start",
+        input={"message": "begin"},
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        role=run_snapshot.caller.role,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        run_status="queued",
+        state_version=backend.record.state_version,
+        lease_generation=1,
+        checkpoint_generation=0,
+        checkpoint_version=0,
+        lease_token="lease-g1",
+        claim_token="claim-g1",
+        claim_expires_at="2099-01-01T00:00:00Z",
+        dispatch_attempt=1,
+    )
+    backend.token = g1.lease_token
+    await manager._start_locked(
+        run_snapshot, "begin", request_context(), claimed_command=g1
+    )
+    await wait_status(backend, "waiting_input")
+    await manager.wait(run_snapshot.run_id)
+    g1_ref = backend.record.checkpoint_ref
+    assert g1_ref is not None and g1_ref.startswith("v2:1:")
+    g1_thread = g1_ref.split(":")[2]
+
+    # Backend 在下一代接管前把 run 推回 running（前一代 worker 已失去租約）。
+    backend.record = backend.record.model_copy(
+        update={"status": "running", "lease_generation": 2}
+    )
+    g2 = g1.model_copy(
+        update={
+            "command_id": "start-g2",
+            "run_status": "running",
+            "state_version": backend.record.state_version,
+            "lease_generation": 2,
+            "checkpoint_generation": 1,
+            "checkpoint_ref": (
+                g1_ref
+                if pin == "generation-head"
+                else f"v2:1:{g1_thread}:{uuid.UUID(int=99)}"
+            ),
+            "checkpoint_version": backend.record.checkpoint_version,
+            "event_ack_cursor": backend.record.event_ack_cursor,
+            "lease_token": "lease-g2",
+            "claim_token": "claim-g2",
+        }
+    )
+    backend.token = g2.lease_token
+    transitions_before = len(backend.transition_payloads)
+    g2_config = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        lease_generation=2,
+    )
+
+    if pin == "unrelated-checkpoint":
+        with pytest.raises(RuntimeLineageInvalid, match="generation head is unrelated"):
+            await manager._start_locked(
+                run_snapshot, "begin", request_context(), claimed_command=g2
+            )
+        assert len(backend.transition_payloads) == transitions_before
+        assert backend.record.status == "running"
+        assert not (await manager.graph.aget_state(g2_config)).values
+        await manager.close()
+        return
+
+    await manager._start_locked(
+        run_snapshot, "begin", request_context(), claimed_command=g2
+    )
+
+    promoted = backend.transition_payloads[transitions_before]
+    assert promoted["to_status"] == "running"
+    assert promoted["checkpoint_ref"].startswith("v2:2:")
+    # 純換代的 clone 不遞增邏輯 checkpoint 版本,否則仍有效的等待中 interrupt 會被誤判成過期。
+    assert promoted["checkpoint_version"] == g2.checkpoint_version
+    await wait_status(backend, "waiting_input")
+    await manager.wait(run_snapshot.run_id)
+    cloned = await manager.graph.aget_state(g2_config)
+    assert cloned.interrupts
+    assert cloned.values["pending_input"]["question"] == "Which year?"
+    # 接管只是換代,不得重跑模型（否則會多算一次 token 並可能改寫已定的問題）。
+    assert len(model.seen) == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_approved_write_dead_letters_terminal_run_and_fails_when_tool_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """兩條尚未覆蓋的 D7 分支：run 已終局 ⇒ 不 consume、直接 dead letter;
+    工具本身失敗 ⇒ effect 記為失敗、run 轉 failed,執行認領以「非 dead letter」ack 讓它不再重試。"""
+    run_snapshot = snapshot(tools=["runtime.write_evidence"])
+    monkeypatch.setattr(settings, "agent_write_tools_enabled", True)
+    monkeypatch.setattr(
+        settings, "agent_write_tools_allowlist", "runtime.write_evidence"
+    )
+    monkeypatch.setattr(
+        settings,
+        "agent_write_tools_tenant_allowlist",
+        run_snapshot.caller.tenant_id,
+    )
+
+    class FailingSink:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def write(self, ctx, record_id, value, *, effect_id=None):
+            self.calls += 1
+            raise RuntimeError("evidence store unavailable")
+
+    sink = FailingSink()
+    backend = FakeBackend(run_snapshot)
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(serde=strict_serializer()),
+        backend=backend,
+        model=FakeModel([]),
+        deps=SimpleNamespace(write_evidence_sink=sink),
+    )
+    config = checkpoint_config(
+        tenant_id=run_snapshot.caller.tenant_id,
+        user_id=run_snapshot.caller.user_id,
+        run_id=run_snapshot.run_id,
+        snapshot_hash=run_snapshot.snapshot_hash,
+        lease_generation=2,
+    )
+    command = RuntimeCommand(
+        kind="tool_call",
+        name="runtime.write_evidence",
+        arguments={"record_id": "refund-2", "value": "approved"},
+    )
+    await manager.graph.aupdate_state(
+        config,
+        {
+            "run_id": run_snapshot.run_id,
+            "snapshot_hash": run_snapshot.snapshot_hash,
+            "status": "waiting_approval",
+            "pending_approval": {
+                "required_role": "ADMIN",
+                "action_fingerprint": "e" * 64,
+                "command": command.model_dump(mode="json"),
+                "active_skill_scope": None,
+            },
+        },
+        as_node="finalize",
+    )
+    seeded = await manager.graph.aget_state(config)
+    reference = checkpoint_ref(seeded.config, lease_generation=2)
+    assert reference is not None
+    approval_backend = ApprovalBackend(run_snapshot, reference, ["granted"])
+    manager.backend = approval_backend  # type: ignore[assignment]
+    approval_id = "3f8b2f5e-6c42-4abc-8def-0123456789ab"
+
+    # run 已經是終局：核准執行不得再取租約、不得 consume,直接變成死信。
+    approval_backend.record = approval_backend.record.model_copy(
+        update={"status": "completed"}
+    )
+    terminal = await manager.execute_approved_write(
+        run_snapshot.run_id,
+        approval_id,
+        request_context(),
+        execution_claim_token="claim-terminal",
+    )
+
+    assert terminal.status == "completed"
+    assert approval_backend.consumed == []
+    assert approval_backend.execution_acks == [("claim-terminal", True)]
+    assert approval_backend.transition_calls == 0
+    assert sink.calls == 0
+
+    approval_backend.record = approval_backend.record.model_copy(
+        update={"status": "queued"}
+    )
+    failed = await manager.execute_approved_write(
+        run_snapshot.run_id,
+        approval_id,
+        request_context(),
+        execution_claim_token="claim-boom",
+    )
+
+    assert failed.status == "failed"
+    assert failed.checkpoint_version == 5
+    assert sink.calls == 1
+    assert approval_backend.consumed == ["e" * 64]
+    assert approval_backend.effects == [False]
+    assert approval_backend.execution_acks[-1] == ("claim-boom", False)
+    assert approval_backend.record.status == "failed"
+    assert (
+        approval_backend.transition_payloads[-1]["error_code"]
+        == "approved_write_failed"
+    )
+    assert approval_backend.last_write_status() is None
     await manager.close()

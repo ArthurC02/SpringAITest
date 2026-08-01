@@ -27,7 +27,8 @@ test('an initial list response completing after logout cannot restart polling', 
   await page.getByTestId('auth-password').fill('password123')
   await page.getByTestId('auth-submit').click()
   await expect.poll(() => listCalls).toBe(2)
-  await page.getByTestId('logout-button').click()
+  // dispatchEvent instead of click: CopilotKit's dev inspector overlay covers the top bar.
+  await page.getByTestId('logout-button').dispatchEvent('click')
   releaseList()
   await expect(page.getByTestId('auth-username')).toBeVisible()
   await page.waitForTimeout(2500)

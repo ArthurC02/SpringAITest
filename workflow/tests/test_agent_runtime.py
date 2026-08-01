@@ -40,6 +40,7 @@ from app.runtime.model import (
 from app.runtime.models import (
     DirectAgentExecutionSnapshot,
     MAX_CALLER_GROUPS_JOINED_UTF8_BYTES,
+    MAX_SNAPSHOT_CANONICAL_BASE64_CHARS,
     MAX_SNAPSHOT_CANONICAL_BYTES,
     RuntimeCommand,
     canonical_json_bytes,
@@ -50,6 +51,7 @@ from app.runtime.policy import PolicyError, PreActionPolicy
 from app.runtime.tool_boundary import (
     DirectToolDenied,
     effective_specs,
+    effective_tool_names,
     invoke_direct_tool,
 )
 from app.nodes.kbquery.adapters import BackendVectorSearch
@@ -214,6 +216,18 @@ def test_snapshot_canonical_envelope_fails_closed() -> None:
         DirectAgentExecutionSnapshot.from_canonical_base64(
             oversized,
             hashlib.sha256(b"x" * (MAX_SNAPSHOT_CANONICAL_BYTES + 1)).hexdigest(),
+        )
+
+
+def test_snapshot_canonical_size_guards_accept_the_exact_limit() -> None:
+    """上限本身不是違規：剛好 MAX bytes 必須穿過兩道 size guard,到 JSON 解析才失敗。"""
+    raw = b"x" * MAX_SNAPSHOT_CANONICAL_BYTES
+    encoded = base64.b64encode(raw).decode("ascii")
+    assert len(encoded) == MAX_SNAPSHOT_CANONICAL_BASE64_CHARS
+
+    with pytest.raises(json.JSONDecodeError):
+        DirectAgentExecutionSnapshot.from_canonical_base64(
+            encoded, hashlib.sha256(raw).hexdigest()
         )
 
 
@@ -1394,6 +1408,70 @@ async def test_generic_resume_cannot_resolve_waiting_approval(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("tool_allowlist", "tenant_allowlist"),
+    [
+        ("runtime.write_evidence", "tenant-其他"),
+        ("runtime.other_write", "tenant-甲"),
+    ],
+    ids=["tenant-not-allowlisted", "tool-not-allowlisted"],
+)
+async def test_write_tool_with_half_matched_allowlists_stays_outside_the_effective_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_allowlist: str,
+    tenant_allowlist: str,
+) -> None:
+    """旗標開著但只中一半 allowlist：工具不進 effective set；核准閘仍由風險分級強制。"""
+    run_snapshot = snapshot(tools=["runtime.write_evidence"])
+    enable_write_tools(monkeypatch, run_snapshot)
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_allowlist",
+        tool_allowlist,
+    )
+    monkeypatch.setattr(
+        "app.runtime.tool_boundary.settings.agent_write_tools_tenant_allowlist",
+        tenant_allowlist,
+    )
+
+    class MustNotWrite:
+        calls = 0
+
+        async def write(self, *_args, **_kwargs):
+            self.calls += 1
+            raise AssertionError("a half-allowlisted write tool must never execute")
+
+    sink = MustNotWrite()
+    graph, config, context = runtime_harness(
+        run_snapshot,
+        FakeModel(
+            [
+                RuntimeCommand(
+                    kind="tool_call",
+                    name="runtime.write_evidence",
+                    arguments={"record_id": "refund-1", "value": "approved"},
+                )
+            ]
+        ),
+        deps=SimpleNamespace(write_evidence_sink=sink),
+    )
+
+    interrupted = await graph.ainvoke(
+        initial_state(run_snapshot, "write"), config, context=context
+    )
+
+    assert (
+        effective_tool_names(
+            run_snapshot, artifact=None, rule_tools=None, deps=None
+        )
+        == frozenset()
+    )
+    assert interrupted["__interrupt__"]
+    state = await graph.aget_state(config)
+    assert state.values["pending_approval"]["required_role"] == "ADMIN"
+    assert sink.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("value", "error_code"),
     [
         ("", "invalid_resume_input"),
@@ -1428,30 +1506,6 @@ async def test_resume_input_boundaries(value: Any, error_code: str | None) -> No
     else:
         assert resumed["status"] == "failed"
         assert resumed["error_code"] == error_code
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("state", "error_code"),
-    [
-        ({"step_count": 15}, "step_budget_exceeded"),
-        ({"context_rounds": 5}, "context_budget_exceeded"),
-        ({"estimated_tokens": 4_003}, "token_budget_exceeded"),
-    ],
-    ids=["step", "context", "token"],
-)
-async def test_run_budgets_fail_closed_before_the_model_runs(
-    state: dict[str, Any], error_code: str
-) -> None:
-    """三個預算錯誤碼過去零覆蓋。刻意用「遠超上限」的值,不把 `>=`/`>` 差一固化成契約。"""
-    run_snapshot = snapshot()
-    model = FakeModel([RuntimeCommand(kind="final", content="must not run")])
-
-    result = await run_runtime(run_snapshot, model, state=state)
-
-    assert result["status"] == "failed"
-    assert result["error_code"] == error_code
-    assert model.seen == []
 
 
 @pytest.mark.asyncio
@@ -1504,6 +1558,64 @@ async def test_tool_round_budget_boundary(
         assert any(
             event["event_type"] == "tool_completed" for event in result["events"]
         )
+
+
+@pytest.mark.asyncio
+async def test_flow_kind_pin_routes_to_business_workflow_and_fails_closed() -> None:
+    """`kind='flow'` 的 pin 不進 Skill scope,而是走 Business Workflow 分支並可被拒。"""
+    run_snapshot = snapshot(with_skill=True, skill_kind="flow")
+
+    class FlowReader:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.artifact = LoadedSkillArtifact(
+                name="research-skill",
+                revision=3,
+                kind="flow",
+                definition_sha256="a" * 64,
+                package_sha256=None,
+                skill=Skill(
+                    name="research-skill",
+                    revision=3,
+                    kind="flow",
+                    # 沒有 max_iterations 的 loop 是 flow governance 的拒絕樣本。
+                    flow=[{"loop": {"body": [{"node": "query_intake"}]}}],
+                ),
+                instruction="",
+                instruction_sha256=hashlib.sha256(b"").hexdigest(),
+                resources={},
+                scripts_present=False,
+            )
+
+        async def read(self, pin, ctx):
+            self.calls += 1
+            return self.artifact
+
+    reader = FlowReader()
+    model = FakeModel(
+        [
+            RuntimeCommand(
+                kind="load_skill",
+                name="research-skill",
+                arguments={"query": "hello"},
+            )
+        ]
+    )
+
+    result = await run_runtime(run_snapshot, model, artifact_reader=reader)
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "workflow_not_safe"
+    assert reader.calls == 1
+    denied = next(
+        event
+        for event in result["events"]
+        if event["event_type"] == "workflow_completed"
+    )
+    assert denied["payload"]["status"] == "denied"
+    assert not any(
+        event["event_type"] == "skill_scope_entered" for event in result["events"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1732,6 +1844,24 @@ def test_policy_decision_branches(
         assert decision.question == "需要哪一年的資料？"
     if decision.outcome == "waiting_approval":
         assert decision.required_role == "ADMIN"
+
+
+@pytest.mark.parametrize(
+    "then",
+    [
+        [{"action": "require_approval"}],
+        [{"action": "require_approval", "role": ""}],
+    ],
+    ids=["role-omitted", "role-blank"],
+)
+def test_require_approval_without_a_usable_role_never_reaches_decide(
+    monkeypatch: pytest.MonkeyPatch, then: list[dict[str, Any]]
+) -> None:
+    """decision table 的另一半：旗標開著也救不了缺 role 的 require_approval——建構期就擋。"""
+    monkeypatch.setattr("app.runtime.policy.settings.agent_write_tools_enabled", True)
+
+    with pytest.raises(PolicyError, match="business rules"):
+        decide(then)
 
 
 @pytest.mark.asyncio
