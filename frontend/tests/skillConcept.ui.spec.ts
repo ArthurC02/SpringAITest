@@ -420,6 +420,8 @@ test('blocking server validation refuses a simple save and keeps the run panel l
 
 test('advanced handoff carries the composed definition into create mode and surfaces its 409', async ({ page }) => {
   await openSimpleCreate(page, (route) => json(route, [templateEntry('template-retrieval', 'retrieval-marker')]))
+  // 進階編輯器左欄的節點目錄要拿到陣列;openSimpleCreate 的 catch-all 回物件會讓它整頁崩掉。
+  await page.route('**/api/nodes', (route) => json(route, []))
   let createRequests = 0
   await page.route('**/api/business-workflows', async (route) => {
     if (route.request().method() !== 'POST') return json(route, [])
