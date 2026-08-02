@@ -19,9 +19,6 @@ public sealed class RabbitDocumentQueue : IDocumentQueue, IAsyncDisposable
     /// <summary>文件處理佇列名稱(durable)。</summary>
     public const string QueueName = "documents.process";
 
-    // 與 backend 消費者共用契約:Web 預設(camelCase、大小寫不敏感)。
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
-
     private readonly RabbitMqOptions _options;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
@@ -32,7 +29,7 @@ public sealed class RabbitDocumentQueue : IDocumentQueue, IAsyncDisposable
 
     public async Task PublishAsync(DocumentMessage message, CancellationToken ct = default)
     {
-        var body = JsonSerializer.SerializeToUtf8Bytes(message, JsonOpts);
+        var body = JsonSerializer.SerializeToUtf8Bytes(message, InternalRequest.Web);
 
         await _gate.WaitAsync(ct);
         try

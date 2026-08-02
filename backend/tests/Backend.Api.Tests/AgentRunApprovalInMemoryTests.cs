@@ -1,3 +1,4 @@
+using System.Threading;
 using Backend.Api.Agents;
 using Backend.Api.AgentRuns;
 using Backend.Api.Data.InMemory;
@@ -439,6 +440,138 @@ public sealed class AgentRunApprovalInMemoryTests
         Assert.Equal("written", accepted.Response!.Outcome);
     }
 
+    // F2 回歸測試:WriteEvidenceAsync 的 preflight 快照(liveRun.CancelRequested)與實際落地寫入之間
+    // 原本是 check-then-act —— 中間沒有任何鎖護住。用實作 IAgentRunCancellationFence 的測試 fake,
+    // 讓鎖內的原子重新檢查回報「已取消」,而 preflight 仍讀到真實、未取消的狀態,精準命中這個窗口
+    // ——不靠 sleep/執行緒競速,也不需要生產碼後門。
+    [Fact]
+    public async Task WriteEvidence_RejectsWrite_WhenCancelCommitsAfterThePreflightSnapshot()
+    {
+        var (fixture, fence) = await FenceFixtureAsync("d7-evidence-race");
+        var runId = fixture.Running.Run.Id;
+        var fingerprint = new string('a', 64);
+        var approval = (await CreateApprovalAsync(fixture, fingerprint)).Approval!;
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval.Id, true, "approve", null, default)).Status);
+        var write = await ResumeRunningAsync(fixture);
+        var effect = await fixture.Approvals.ConsumeAsync("demo-a", runId, approval.Id,
+            new AgentRunApprovalConsumeRequest(fingerprint, write.Token, write.Generation), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, effect.Status);
+
+        // preflight 的 liveRun.CancelRequested 讀的是真實、未取消的 run;只有鎖內原子重新檢查
+        // (fence.IsCancelRequested)被 fake 蓋成「已取消」,精準模擬 F2 修復前完全沒有鎖護住的那個窗口。
+        fence.ForceCancelRequested = true;
+
+        var result = await fixture.Approvals.WriteEvidenceAsync("demo-a", runId, effect.Response!.EffectId,
+            new AgentRunWriteEvidenceRequest("must-not-write", "raced"), default);
+
+        Assert.Equal(AgentRunApprovalWriteStatus.InvalidState, result.Status);
+        Assert.Equal("run cancellation was requested", result.Message);
+
+        // 沒有留下半截寫入:若 effect 真的被寫成 completed,同一 effect 用不同內容重試會回
+        // Conflict("write effect payload changed");這裡預期仍是 InvalidState,證明 effect 沒被動過。
+        var retry = await fixture.Approvals.WriteEvidenceAsync("demo-a", runId, effect.Response!.EffectId,
+            new AgentRunWriteEvidenceRequest("different-record", "different-value"), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.InvalidState, retry.Status);
+    }
+
+    // ABBA 回歸測試:ConsumeAsync 的既有鎖序是 Approval._gate(外)→ AgentRun gate(內,
+    // HasActiveApprovalLease 自鎖)。WriteEvidenceAsync 的鎖序必須與它一致,否則兩個併發請求
+    // (即使是不同 run)會互卡且 lock 不吃 CancellationToken,永久掛住並耗盡 thread pool。
+    // 用測試持有 AgentRun gate 逼 WriteEvidenceAsync 先卡在它的第一把鎖、空手等待,再讓
+    // ConsumeAsync 拿到 Approval._gate 之後也卡在同一把 AgentRun gate 上,兩者同時互等時放手——
+    // 鎖序一致就只是排隊,鎖序相反就是死循環等待。
+    [Fact]
+    public async Task ConsumeAndWriteEvidence_UnderLockContention_CompleteWithoutDeadlock()
+    {
+        var (fixture, fence) = await FenceFixtureAsync("d7-lock-order");
+        var runId = fixture.Running.Run.Id;
+
+        // Effect #1:已 reserved,交給併發的 WriteEvidenceAsync。
+        var fingerprint1 = new string('a', 64);
+        var approval1 = (await CreateApprovalAsync(fixture, fingerprint1)).Approval!;
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval1.Id, true, "approve-1", null, default)).Status);
+        var write1 = await ResumeRunningAsync(fixture);
+        var effect1 = await fixture.Approvals.ConsumeAsync("demo-a", runId, approval1.Id,
+            new AgentRunApprovalConsumeRequest(fingerprint1, write1.Token, write1.Generation), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, effect1.Status);
+
+        // Approval #2:已核准但尚未 consume,帶著自己的新 write lease,交給併發的 ConsumeAsync。
+        var fingerprint2 = new string('b', 64);
+        // checkpoint_version ratchets monotonically for the whole run (not per lease generation):
+        // approval #1's create already promoted it to 1, so approval #2 must advance to 2.
+        var afterConsume = await fixture.Runs.GetAsync("demo-a", "admin-a", runId, default);
+        var approval2Result = await fixture.Approvals.CreateAsync("demo-a", "admin-a", runId,
+            new AgentRunApprovalCreateRequest(afterConsume!.StateVersion, write1.Token, write1.Generation,
+                Checkpoint(write1.Generation), 2, "USER", fingerprint2, fixture.Clock.GetUtcNow().UtcDateTime.AddMinutes(5)), default);
+        Assert.True(approval2Result.Status == AgentRunApprovalWriteStatus.Success, $"approval2 create failed: {approval2Result.Status} {approval2Result.Message}");
+        var approval2 = approval2Result.Approval!;
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval2.Id, true, "approve-2", null, default)).Status);
+        var write2 = await ResumeRunningAsync(fixture);
+
+        var agentRunGate = fixture.Runs.ReferenceSyncRoot;
+        var approvalGate = fixture.Approvals.ReferenceSyncRoot;
+
+        // fence.SyncRoot 的求值(見 FakeCancellationFence)恰好落在 WriteEvidenceAsync 已取得
+        // Approval._gate、尚未嘗試取得 AgentRun gate 的那一刻。用兩段式交握把它卡在那裡,讓測試能在
+        // WriteEvidenceAsync 真正搶 AgentRun gate 之前先取得它 —— 更早取得會連 preflight 的
+        // GetAsync(同一把 AgentRun gate,瞬間持有)都卡住,交握訊號永遠不會發出。
+        var writeEvidenceReady = new ManualResetEventSlim();
+        var writeEvidenceGo = new ManualResetEventSlim();
+        fence.BeforeSyncRootAcquired = () =>
+        {
+            writeEvidenceReady.Set();
+            writeEvidenceGo.Wait(TimeSpan.FromSeconds(5));
+        };
+
+        var writeTask = Task.Run(() => fixture.Approvals.WriteEvidenceAsync(
+            "demo-a", runId, effect1.Response!.EffectId, new AgentRunWriteEvidenceRequest("record-1", "value-1"), default));
+        Assert.True(writeEvidenceReady.Wait(TimeSpan.FromSeconds(5)), "WriteEvidenceAsync never reached its critical section");
+
+        Task<(AgentRunApprovalWriteStatus Status, AgentRunApprovalConsumeResponse? Response, string? Message)>? consumeTask = null;
+
+        // 這整段(Enter 到 Exit)刻意不含任何 await:Lock.Exit 必須在同一條
+        // thread 上呼叫,await 之後的續行可能換一條 threadpool thread,會直接讓 Exit 拋例外。
+        agentRunGate.Enter();
+        try
+        {
+            // Release WriteEvidenceAsync; it will now take its first lock (Approval's own _gate --
+            // uncontested) then try the AgentRun gate this test still holds, and block there.
+            writeEvidenceGo.Set();
+            // 鉤子放行之後,給那條路徑時間真的執行到第一道 lock 敘述式,把呼叫端排進
+            // agentRunGate 的等待佇列(這條 thread 目前持有它)。
+            Thread.Sleep(100);
+
+            consumeTask = Task.Run(() => fixture.Approvals.ConsumeAsync("demo-a", runId, approval2.Id,
+                new AgentRunApprovalConsumeRequest(fingerprint2, write2.Token, write2.Generation), default));
+            // ConsumeAsync 立刻拿到 Approval._gate(沒人跟它搶),再卡進 HasActiveApprovalLease
+            // 的 agentRunGate;輪詢直到能確認 Approval._gate 目前確實被別人持有。
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (approvalGate.TryEnter())
+            {
+                approvalGate.Exit();
+                Assert.True(DateTime.UtcNow < deadline, "ConsumeAsync never acquired the Approval gate");
+                Thread.Sleep(5);
+            }
+        }
+        finally
+        {
+            agentRunGate.Exit();
+        }
+
+        var all = Task.WhenAll(writeTask!, consumeTask!);
+        var winner = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(5)));
+        fence.BeforeSyncRootAcquired = null;
+
+        Assert.True(ReferenceEquals(winner, all), "ConsumeAsync/WriteEvidenceAsync deadlocked under concurrent lock contention");
+        var writeResult = await writeTask!;
+        var consumeResult = await consumeTask!;
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, writeResult.Status);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, consumeResult.Status);
+    }
+
     // 被遺棄的 execute claim 必須被回收(否則已核准的寫入永遠不會發生);而一旦 run 被要求取消,
     // 同一個 execution 要轉 dead_letter 且**不再**被任何 recovery 撿起來。
     [Fact]
@@ -656,6 +789,51 @@ public sealed class AgentRunApprovalInMemoryTests
         public Task<AgentRunRecoveryClaimResponse> ClaimRecoveryAsync(AgentRunRecoveryClaimRequest a, CancellationToken b) => throw new NotSupportedException();
     }
 
+    /// <summary>
+    /// 裝飾一個真正的 <see cref="InMemoryAgentRunRepository"/>:除了 <see cref="IAgentRunCancellationFence"/>
+    /// 這一個接縫可由測試控制,其餘一律轉發給底層真實倉儲,讓 setup(建立 run、lease、核准、
+    /// consume...)行為與生產碼一致。取代已移除的生產碼測試後門鉤子。
+    /// </summary>
+    private sealed class FakeCancellationFence(InMemoryAgentRunRepository inner)
+        : IAgentRunRepository, IAgentRunApprovalDecisionTransition, IAgentRunApprovalLeaseVerifier, IAgentRunCancellationFence
+    {
+        private readonly IAgentRunCancellationFence _fence = inner;
+
+        /// <summary>鎖內原子重新檢查一律回報「已取消」,不理會底層真實狀態。</summary>
+        public bool ForceCancelRequested;
+
+        /// <summary>求值 <see cref="SyncRoot"/>(取得 AgentRun gate 之前)時呼叫一次,供測試卡時機用。</summary>
+        public Action? BeforeSyncRootAcquired;
+
+        public Lock SyncRoot
+        {
+            get
+            {
+                BeforeSyncRootAcquired?.Invoke();
+                return _fence.SyncRoot;
+            }
+        }
+
+        public bool IsCancelRequested(string tenantId, string userId, Guid runId)
+            => ForceCancelRequested || _fence.IsCancelRequested(tenantId, userId, runId);
+
+        public Task<AgentRunWriteResult> CreateDirectAsync(string a, string b, string c, IReadOnlyCollection<string> d, IReadOnlyCollection<string> e, Guid f, string g, string h, CancellationToken i) => inner.CreateDirectAsync(a, b, c, d, e, f, g, h, i);
+        public Task<AgentRunResponse?> GetAsync(string a, string b, Guid c, CancellationToken d) => inner.GetAsync(a, b, c, d);
+        public Task<string?> GetExecutionArtifactAsync(string a, string b, Guid c, CancellationToken d) => inner.GetExecutionArtifactAsync(a, b, c, d);
+        public Task<AgentRunEventsResponse?> GetEventsAsync(string a, string b, Guid c, long d, int e, CancellationToken f) => inner.GetEventsAsync(a, b, c, d, e, f);
+        public Task<AgentRunWriteResult> ResumeAsync(string a, string b, Guid c, string d, long e, string f, CancellationToken g) => inner.ResumeAsync(a, b, c, d, e, f, g);
+        public Task<AgentRunWriteResult> CancelAsync(string a, string b, Guid c, string? d, string e, CancellationToken f) => inner.CancelAsync(a, b, c, d, e, f);
+        public Task<AgentRunWriteResult> TransitionAsync(string a, string b, Guid c, AgentRunTransitionRequest d, CancellationToken e) => inner.TransitionAsync(a, b, c, d, e);
+        public Task<AgentRunWriteResult> AppendEventsAsync(string a, string b, Guid c, AgentRunEventsAppendRequest d, CancellationToken e) => inner.AppendEventsAsync(a, b, c, d, e);
+        public Task<AgentRunLeaseResult> ClaimLeaseAsync(string a, string b, Guid c, AgentRunLeaseRequest d, CancellationToken e) => inner.ClaimLeaseAsync(a, b, c, d, e);
+        public Task<AgentRunCommandClaimResult> ClaimCommandAsync(string a, string b, Guid c, Guid d, AgentRunCommandClaimRequest e, CancellationToken f) => inner.ClaimCommandAsync(a, b, c, d, e, f);
+        public Task<AgentRunDispatchCompleteStatus> CompleteDispatchAsync(string a, string b, Guid c, Guid d, string e, CancellationToken f) => inner.CompleteDispatchAsync(a, b, c, d, e, f);
+        public Task<AgentRunRecoveryClaimResponse> ClaimRecoveryAsync(AgentRunRecoveryClaimRequest a, CancellationToken b) => inner.ClaimRecoveryAsync(a, b);
+        public Task<AgentRunWriteResult> ResolveApprovalAsync(string a, string b, Guid c, long d, bool e, CancellationToken f) => inner.ResolveApprovalAsync(a, b, c, d, e, f);
+        public Task FailApprovalRunAsync(string a, string b, Guid c, AgentRunApprovalFailure d, CancellationToken e) => inner.FailApprovalRunAsync(a, b, c, d, e);
+        public bool HasActiveApprovalLease(string a, string b, Guid c, string d, long e) => inner.HasActiveApprovalLease(a, b, c, d, e);
+    }
+
     private sealed record ApprovalFixture(
         InMemoryAgentRunRepository Runs,
         InMemoryAgentRunApprovalRepository Approvals,
@@ -669,6 +847,22 @@ public sealed class AgentRunApprovalInMemoryTests
         var runs = new InMemoryAgentRunRepository(agents, skills, clock);
         var approvals = new InMemoryAgentRunApprovalRepository(runs, clock);
         return new ApprovalFixture(runs, approvals, await StartRunningAsync(runs, agent.Id), clock);
+    }
+
+    /// <summary>
+    /// 同 <see cref="FixtureAsync"/>,但 Approvals 的 <c>IAgentRunRepository</c> 是
+    /// <see cref="FakeCancellationFence"/>,讓測試能控制 D7 write-evidence 的取消重新檢查時機,
+    /// 不需要生產碼測試後門。
+    /// </summary>
+    private static async Task<(ApprovalFixture Fixture, FakeCancellationFence Fence)> FenceFixtureAsync(string slug)
+    {
+        var clock = new ManualTimeProvider(new DateTimeOffset(2026, 7, 25, 0, 0, 0, TimeSpan.Zero));
+        var (agents, skills, agent) = await PublishedAgentAsync(slug + "-" + Guid.NewGuid().ToString("N"));
+        var runs = new InMemoryAgentRunRepository(agents, skills, clock);
+        var fence = new FakeCancellationFence(runs);
+        var approvals = new InMemoryAgentRunApprovalRepository(fence, clock);
+        var fixture = new ApprovalFixture(runs, approvals, await StartRunningAsync(runs, agent.Id), clock);
+        return (fixture, fence);
     }
 
     /// <summary>核准後 run 回到 queued 且原 lease 已作廢:重新取得寫入 lease 並轉回 running(consume 的前置)。</summary>

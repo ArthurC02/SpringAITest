@@ -10,13 +10,18 @@ using Platform.Service.Dtos;
 namespace Platform.Web.Tests;
 
 [Collection("EngineCalls")]
-public sealed class RunApprovalApiTests
+public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.EnabledApprovalFixture>
 {
     private const string RunId = FakeAgentRunService.RunIdText;
     private const string ApprovalId = "66666666-6666-4666-8666-666666666666";
 
+    private readonly EnabledApprovalFixture _factory;
+
+    public RunApprovalApiTests(EnabledApprovalFixture factory) => _factory = factory;
+
     // D7 的旗標獨立於 D3:即使 Agent 測試台(builder + testRun)整組打開,
     // AGENT_WRITE_TOOLS_ENABLED 關閉仍必須在認證之前 404。
+    // 兩個資料點的旗標組合彼此不同(false/false vs true/true),無法併入共用 fixture,維持各自 factory。
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -34,24 +39,20 @@ public sealed class RunApprovalApiTests
         Assert.Equal(before, FakeAgentRunService.Calls.Count);
     }
 
-    /// <summary>
-    /// 這個 factory 刻意只打開 agentWriteToolsEnabled,<c>agentTestRunEnabled</c> 維持關閉 ——
-    /// 因此本測試同時證明了 D3 gate(Program.cs 的 <c>!agentTestRunEnabled</c> 中介軟體)對 approval 路徑的
-    /// <c>isApprovalRoute</c> 例外真的生效:商務審批者不會因為 ADMIN 專用的 D3 測試台被關掉而看不到待審項目。
-    /// 若有人「簡化」這裡的 factory 參數(例如順手把 agentTestRunEnabled 也打開),這個覆蓋會靜默消失。
-    /// </summary>
+    // 下面共用 EnabledApprovalFixture 的測試都只斷言「自己這次呼叫」(Contains 特定字串,或緊接在
+    // 自己請求後讀 LastContext/delta count),不依賴 FakeAgentRunService.Calls 只含自己那筆或固定順序,
+    // 故共用同一份 host 是安全的(旗標組合的風險注記見 EnabledApprovalFixture)。
+
     [Theory]
     [InlineData(null, HttpStatusCode.Unauthorized)]
     [InlineData("USER", HttpStatusCode.OK)]
     [InlineData("ADMIN", HttpStatusCode.OK)]
     public async Task EnabledApprovalList_RequiresAuthenticationButNotAdmin(string? role, HttpStatusCode expected)
     {
-        using var factory = new TestWebAppFactory(
-            agentWriteToolsEnabled: true, agentTestRunEnabled: false);
-        var client = factory.CreateClient();
+        var client = _factory.CreateClient();
         if (role is not null)
         {
-            client = client.WithToken(factory.IssueToken("business-approver", role, "tenant-x"));
+            client = client.WithToken(_factory.IssueToken("business-approver", role, "tenant-x"));
         }
 
         var response = await client.GetAsync($"/api/runs/{RunId}/approvals");
@@ -72,13 +73,12 @@ public sealed class RunApprovalApiTests
     [InlineData("reject", "False")]
     public async Task Decision_RequiresAuthenticationButNotAdmin(string action, string approve)
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
         var path = $"/api/runs/{RunId}/approvals/{ApprovalId}/{action}";
 
-        var anonymous = await factory.CreateClient().PostAsJsonAsync(path, new { reason = "r" });
+        var anonymous = await _factory.CreateClient().PostAsJsonAsync(path, new { reason = "r" });
         Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
 
-        var admin = factory.CreateClient().WithToken(factory.IssueToken("boss", "ADMIN", "tenant-x"));
+        var admin = _factory.CreateClient().WithToken(_factory.IssueToken("boss", "ADMIN", "tenant-x"));
         var response = await admin.PostAsJsonAsync(path, new { reason = "r" });
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
@@ -88,8 +88,7 @@ public sealed class RunApprovalApiTests
     [Fact]
     public async Task Decision_ForwardsOnlySignedIdentityReasonAndIdempotencyKey()
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
-        var client = factory.CreateClient().WithToken(factory.IssueToken("approver", "USER", "tenant-x"));
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken("approver", "USER", "tenant-x"));
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/runs/{RunId}/approvals/{ApprovalId}/approve")
         {
             Content = JsonContent.Create(new { reason = "reviewed" }),
@@ -108,8 +107,7 @@ public sealed class RunApprovalApiTests
     [Fact]
     public async Task Decision_EmptyIdempotencyKeyHeader_IsAcceptedAndForwardsNoKey()
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
-        var client = factory.CreateClient().WithToken(factory.IssueToken("approver", "USER", "tenant-x"));
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken("approver", "USER", "tenant-x"));
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/runs/{RunId}/approvals/{ApprovalId}/approve")
         {
             Content = JsonContent.Create(new { reason = "reviewed" }),
@@ -128,8 +126,7 @@ public sealed class RunApprovalApiTests
     [Fact]
     public async Task Reject_Returns202_WithApproveFalse_AndNoIdempotencyKey()
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
-        var client = factory.CreateClient().WithToken(factory.IssueToken("approver", "USER", "tenant-x"));
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken("approver", "USER", "tenant-x"));
 
         var response = await client.PostAsJsonAsync(
             $"/api/runs/{RunId}/approvals/{ApprovalId}/reject", new { reason = "不符政策" });
@@ -143,8 +140,7 @@ public sealed class RunApprovalApiTests
     [Fact]
     public async Task Approve_WithoutBody_IsAccepted_AndForwardsNullReason()
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
-        var client = factory.CreateClient().WithToken(factory.IssueToken("approver", "USER", "tenant-x"));
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken("approver", "USER", "tenant-x"));
 
         var response = await client.PostAsync(
             $"/api/runs/{RunId}/approvals/{ApprovalId}/approve", content: null);
@@ -155,6 +151,8 @@ public sealed class RunApprovalApiTests
 
     // 決策權在 Backend:SoD 衝突(403)、已過期/不存在(404)、非 waiting 或 fingerprint 不符(409)
     // 必須原樣穿透,platform 不得改寫狀態碼或 ApiError body。
+    // RejectingFactory 換掉 IAgentRunService 的實作(見下),與 EnabledApprovalFixture 共用的
+    // FakeAgentRunService.Calls 無關,不能併入共用 fixture;三個狀態碼各自需要獨立實例。
     [Theory]
     [InlineData(403)]
     [InlineData(404)]
@@ -221,6 +219,20 @@ public sealed class RunApprovalApiTests
                 services.RemoveAll<IAgentRunService>();
                 services.AddScoped<IAgentRunService>(_ => new RejectingRunService(status));
             });
+        }
+    }
+
+    /// <summary>
+    /// G4:List/decide 各案共用同一份 host。刻意只打開 agentWriteToolsEnabled,agentTestRunEnabled
+    /// 維持關閉——這同時證明了 D3 gate(Program.cs 的 <c>!agentTestRunEnabled</c> 中介軟體)對 approval 路徑的
+    /// <c>isApprovalRoute</c> 例外真的生效:商務審批者不會因為 ADMIN 專用的 D3 測試台被關掉而看不到待審項目。
+    /// 若有人「簡化」這裡的建構參數(例如順手把 agentTestRunEnabled 也打開,或省略這個本來就是預設值的顯式參數),
+    /// 這個覆蓋語意會靜默消失,故 agentTestRunEnabled: false 即使等於建構子預設值也保留顯式寫法。
+    /// </summary>
+    public sealed class EnabledApprovalFixture : TestWebAppFactory
+    {
+        public EnabledApprovalFixture() : base(agentWriteToolsEnabled: true, agentTestRunEnabled: false)
+        {
         }
     }
 }

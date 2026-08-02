@@ -12,6 +12,12 @@ namespace Backend.Api.Common;
 internal static class InternalWorkflowClient
 {
     /// <summary>
+    /// 這群出站呼叫端共用的 <see cref="JsonSerializerOptions"/>(Web 命名慣例);集中一份避免各
+    /// Workflow*Client 各自重複宣告同一份設定。
+    /// </summary>
+    public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
+
+    /// <summary>
     /// 帶上內部信任邊界所需的四個 header,並強制 HTTP/1.1
     /// (避免下游 uvicorn 在 h2c 升級時掉 body;與 platform 對 workflow 的呼叫一致)。
     /// </summary>

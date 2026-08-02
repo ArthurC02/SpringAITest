@@ -507,6 +507,27 @@ public sealed class ContextRepositoryTests(PostgresFixture fixture) : IAsyncLife
         Assert.Equal(1, outcomes.Count(x => x == "rejected"));
     }
 
+    [Fact]
+    public async Task InMemory_ConcurrentCallsAcrossMethods_CompleteWithoutDeadlock()
+    {
+        // SemaphoreSlim is not reentrant. Concurrent revision reads and writes must not re-enter
+        // the repository gate.
+        IContextRepository repository = new InMemoryContextRepository();
+        var contextId = Guid.NewGuid();
+        var all = Task.WhenAll(Enumerable.Range(0, 8).Select(async i =>
+        {
+            for (var round = 0; round < 25; round++)
+            {
+                await repository.CreateRevisionAsync("demo-a", "operator", contextId, ParityRequest($"r{i}-{round}"), default);
+                await repository.GetActivePolicyAsync("demo-a", default);
+                await repository.GetRevisionAsync("demo-a", contextId, 1, default);
+                await repository.GetLatestReadyForRunAsync("demo-a", "operator", Guid.NewGuid(), default);
+            }
+        }));
+        var winner = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.True(ReferenceEquals(winner, all), "concurrent calls across InMemoryContextRepository methods did not complete within 5s -- suspected deadlock");
+    }
+
     private async Task<(IContextRepository Repository, Func<Task> AddSecondActivePolicy)> ProviderAsync(string provider)
     {
         if (provider == "inmemory")

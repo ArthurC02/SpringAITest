@@ -1,5 +1,7 @@
 # Harness 包覆 Business Workflow（動態編譯）
 
+> **Historical delivery record (2026-08-02):** P1–P4 已落地；本系列不再是待執行計畫。未來 artifact/API/chat/schema 收斂由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 負責，不得依本文件重建已刪除的 legacy 模組。
+
 > 狀態：Planning（2026-07-30）
 
 ## 1. 現狀分析

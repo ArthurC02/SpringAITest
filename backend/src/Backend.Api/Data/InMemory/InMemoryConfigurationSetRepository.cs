@@ -16,6 +16,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
         Dictionary<string, object> Values, string CreatedBy, DateTime CreatedAt, DateTime UpdatedAt);
 
     private readonly Dictionary<Guid, Entry> _store = new();
+    private readonly Lock _gate = new();
 
     private static DateTime Now() => DateTime.UtcNow;
 
@@ -24,7 +25,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
 
     public Task<IReadOnlyList<ConfigurationSetInfo>> ListAsync(string tenantId, CancellationToken ct)
     {
-        lock (_store)
+        lock (_gate)
         {
             return Task.FromResult<IReadOnlyList<ConfigurationSetInfo>>(
                 _store.Values.Where(e => e.Tenant == tenantId).OrderBy(e => e.Name, StringComparer.Ordinal)
@@ -35,7 +36,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
 
     public Task<ConfigurationSet?> GetAsync(string tenantId, Guid id, CancellationToken ct)
     {
-        lock (_store)
+        lock (_gate)
         {
             var e = _store.GetValueOrDefault(id);
             return Task.FromResult(e is not null && e.Tenant == tenantId ? ToDto(e) : null);
@@ -44,7 +45,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
 
     public Task<ConfigurationSet?> GetActiveAsync(string tenantId, CancellationToken ct)
     {
-        lock (_store)
+        lock (_gate)
         {
             var e = _store.Values.FirstOrDefault(x => x.Tenant == tenantId && x.IsActive);
             return Task.FromResult(e is not null ? ToDto(e) : null);
@@ -54,7 +55,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
     public Task<ConfigurationSet?> CreateAsync(
         string tenantId, string name, IReadOnlyDictionary<string, object> values, string createdBy, CancellationToken ct)
     {
-        lock (_store)
+        lock (_gate)
         {
             if (_store.Values.Any(e => e.Tenant == tenantId && e.Name == name))
             {
@@ -73,7 +74,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
     public Task<ConfigurationSet?> UpdateAsync(
         string tenantId, Guid id, string name, IReadOnlyDictionary<string, object> values, CancellationToken ct)
     {
-        lock (_store)
+        lock (_gate)
         {
             if (!_store.TryGetValue(id, out var e) || e.Tenant != tenantId)
             {
@@ -93,7 +94,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
 
     public Task<bool> DeleteAsync(string tenantId, Guid id, CancellationToken ct)
     {
-        lock (_store)
+        lock (_gate)
         {
             if (_store.TryGetValue(id, out var e) && e.Tenant == tenantId)
             {
@@ -107,7 +108,7 @@ public sealed class InMemoryConfigurationSetRepository : IConfigurationSetReposi
 
     public Task<ConfigurationSet?> ActivateAsync(string tenantId, Guid id, CancellationToken ct)
     {
-        lock (_store)
+        lock (_gate)
         {
             if (!_store.TryGetValue(id, out var target) || target.Tenant != tenantId)
             {

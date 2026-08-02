@@ -4,7 +4,7 @@ namespace Backend.Api.OperationsGovernance;
 /// idempotency and immutability semantics as <see cref="EvalRepository"/>.</summary>
 public sealed class InMemoryEvalRepository : IEvalRepository
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly Dictionary<(string Tenant, string SuiteId), SuiteState> _suites = new();
     private readonly Dictionary<(string Tenant, Guid RunId), RunState> _runs = new();
     private readonly Dictionary<(string Tenant, string KeyHash), Guid> _byIdempotencyKey = new();

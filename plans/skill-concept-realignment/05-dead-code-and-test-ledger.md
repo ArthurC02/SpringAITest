@@ -1,5 +1,7 @@
 # Skill 概念重整 — 死碼與測試帳本
 
+> **Superseded P5 ledger policy (2026-08-02):** 本帳本的雙軌退場時點已由 [Architecture Hard Reset deletion and migration ledger](../architecture-hard-reset/05-deletion-and-migration-ledger.md) 取代；既有盤點保留為歷史證據。新 ledger 尚未執行。
+
 > 狀態：執行中（2026-07-30，基準 HEAD `49ead70`）。P0 的 `node_shell.py` 與 `WorkflowEngineClient` 正名已落地；其餘項目仍以各 Phase 驗收 gate 為準。本帳本是 01-plan §5 的完整展開，也是 06-cleanup C8 gate 的證據基礎：每一項死碼/重複碼/孤兒測試都登記位置、死亡 Phase、處置與風險。**執行規則：每個 Phase 的 PR 必須對照本帳本勾銷該 Phase 到期的項目；「死亡時點未到」的項目嚴禁提前刪除（雙軌期依賴它們）。P5 不得因雙軌路由已存在而勾銷：必須先有新面流量承接、舊面 flow-write usage `= 0`、rollback window 結束、deletion evidence 與人工簽核。**
 
 ## 1. workflow（Python）

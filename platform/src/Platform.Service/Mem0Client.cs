@@ -1,6 +1,5 @@
 using System.Net.Http.Json;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 using Platform.Service.Abstractions;
 using Platform.Service.Options;
@@ -13,8 +12,6 @@ namespace Platform.Service;
 /// </summary>
 public sealed class Mem0Client : IMem0Client
 {
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
-
     private readonly HttpClient _http;
     private readonly Mem0Options _options;
     private readonly ILogger<Mem0Client> _logger;
@@ -34,10 +31,10 @@ public sealed class Mem0Client : IMem0Client
         {
             // POST {base}/search  body: { query, user_id, top_k: 5 }
             var body = new { query, user_id = userId, top_k = 5 };
-            using var resp = await _http.PostAsJsonAsync($"{BaseUrl}/search", body, JsonOpts, ct);
+            using var resp = await _http.PostAsJsonAsync($"{BaseUrl}/search", body, InternalRequest.Web, ct);
             resp.EnsureSuccessStatusCode();
 
-            var doc = await resp.Content.ReadFromJsonAsync<Mem0SearchResponse>(JsonOpts, ct);
+            var doc = await resp.Content.ReadFromJsonAsync<Mem0SearchResponse>(InternalRequest.Web, ct);
             if (doc?.Results is null || doc.Results.Count == 0)
             {
                 return string.Empty;
@@ -78,7 +75,7 @@ public sealed class Mem0Client : IMem0Client
                     new { role = "assistant", content = aiReply },
                 },
             };
-            using var resp = await _http.PostAsJsonAsync($"{BaseUrl}/memories", body, JsonOpts, ct);
+            using var resp = await _http.PostAsJsonAsync($"{BaseUrl}/memories", body, InternalRequest.Web, ct);
             resp.EnsureSuccessStatusCode();
             // 回應忽略。
         }

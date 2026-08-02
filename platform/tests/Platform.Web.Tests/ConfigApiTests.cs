@@ -75,7 +75,7 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("權限不足，無法修改系統組態", body["message"]!.GetValue<string>());
     }
 
-    // NotBlank 的三個等價類:欄位缺漏(null)、空字串、全空白 —— 內建 Required 只擋前者。
+    // NotBlank 的三個等價類:欄位缺漏(null)、空字串、全空白。
     [Theory]
     [InlineData(null)]
     [InlineData("")]

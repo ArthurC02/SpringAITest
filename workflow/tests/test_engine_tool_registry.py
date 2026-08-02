@@ -8,7 +8,6 @@ tests/kbquery_fakes.py 的假依賴（FakeSearch…），不打網路、不新�
 """
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
@@ -26,8 +25,8 @@ from app.engine.tool_registry import ToolContext, ToolNotAllowed, ToolTraceEntry
 # import 觸發節點與 4 個初始 tool 的註冊
 from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
 from app import tools as _tools  # noqa: F401
-from app.nodes.kbquery.adapters import StaticGlossary
-from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch, RecordingAuditRepo
+from tests.conftest import default_engine_deps, run_flow
+from tests.kbquery_fakes import TEXT_2025Q3, FakeSearch
 
 PROBE_TOOL = "local.probe"
 
@@ -52,24 +51,6 @@ def _register_probe_tool():
 def probe_calls(_register_probe_tool):
     _register_probe_tool.clear()
     return _register_probe_tool
-
-
-def _deps(**extra):
-    return SimpleNamespace(
-        audit_repo=RecordingAuditRepo(),
-        llm=None,
-        glossary=StaticGlossary(),
-        max_retrieval_attempts=2,
-        **extra,
-    )
-
-
-def _run(definition: dict, state: dict | None = None, deps=None) -> dict:
-    skill = Skill.model_validate({"name": "probe-skill", **definition})
-    graph = compiler.compile(skill, deps or _deps())
-    return compiler.public_output(
-        asyncio.run(graph.ainvoke({"tenant_id": "t-test", **(state or {})}))
-    )
 
 
 def _tool_entries(result: dict) -> list[ToolTraceEntry]:
@@ -154,16 +135,14 @@ def test_all_production_tools_have_explicit_expected_kind_and_risk():
 def test_tool_call_enters_trace_without_arg_values():
     """【AT3-15】local.calculator(expression="1+1") → trace 有 tool/duration_ms/status，
     但 "1+1" 不得出現在 trace 的任何角落（只允許 args 鍵名摘要）。"""
-    result = _run(
-        {
-            "flow": [
-                {
-                    "tool": "local.calculator",
-                    "args": {"expression": "1+1"},
-                    "save_as": "calc_result",
-                }
-            ]
-        }
+    result = run_flow(
+        [
+            {
+                "tool": "local.calculator",
+                "args": {"expression": "1+1"},
+                "save_as": "calc_result",
+            }
+        ]
     )
 
     assert result["calc_result"] == 2.0
@@ -197,22 +176,20 @@ def test_tool_step_cannot_save_into_runtime_authority_channel():
     )
 
     with pytest.raises(compiler.SkillCompileError, match="save_as"):
-        compiler.compile(skill, _deps())
+        compiler.compile(skill, default_engine_deps())
 
 
 def test_tool_arg_values_absent_from_audit_trail():
     """稽核紀錄（含 node_trace）落地成 JSON 後也不得含 args 的值。"""
-    deps = _deps()
-    _run(
-        {
-            "flow": [
-                {
-                    "tool": "local.calculator",
-                    "args": {"expression": "1+1"},
-                    "save_as": "calc_result",
-                }
-            ]
-        },
+    deps = default_engine_deps()
+    run_flow(
+        [
+            {
+                "tool": "local.calculator",
+                "args": {"expression": "1+1"},
+                "save_as": "calc_result",
+            }
+        ],
         deps=deps,
     )
 
@@ -223,16 +200,14 @@ def test_tool_arg_values_absent_from_audit_trail():
 
 def test_failed_tool_call_is_traced_as_error():
     """tool 失敗一樣入 trace（status=error + 錯誤類別），並走 Node Shell 的 fatal 短路。"""
-    result = _run(
-        {
-            "flow": [
-                {
-                    "tool": "local.calculator",
-                    "args": {"expression": "1/0"},
-                    "save_as": "calc_result",
-                }
-            ]
-        }
+    result = run_flow(
+        [
+            {
+                "tool": "local.calculator",
+                "args": {"expression": "1/0"},
+                "save_as": "calc_result",
+            }
+        ]
     )
 
     entry = _tool_entries(result)[0]
@@ -244,18 +219,16 @@ def test_failed_tool_call_is_traced_as_error():
 
 def test_tool_args_accept_state_references():
     """args 的 `$state.<key>` 引用在執行期解析成 state 的值（規格 §3.2）。"""
-    result = _run(
-        {
-            "input_schema": {"formula": {"type": "str", "required": True}},
-            "flow": [
-                {
-                    "tool": "local.calculator",
-                    "args": {"expression": "$state.formula"},
-                    "save_as": "calc_result",
-                }
-            ],
-        },
+    result = run_flow(
+        [
+            {
+                "tool": "local.calculator",
+                "args": {"expression": "$state.formula"},
+                "save_as": "calc_result",
+            }
+        ],
         {"formula": "2 * 21"},
+        input_schema={"formula": {"type": "str", "required": True}},
     )
 
     assert result["calc_result"] == 42.0
@@ -263,19 +236,17 @@ def test_tool_args_accept_state_references():
 
 def test_tool_call_from_script_enters_trace():
     """script 內的 tools.call 一樣入 trace（一段 script 可以呼叫 N 次 → N 筆 entry）。"""
-    result = _run(
-        {
-            "uses_tools": ["local.calculator"],
-            "flow": [
-                {
-                    "script": (
-                        "a = tools.call('local.calculator', expression='1+1')\n"
-                        "b = tools.call('local.calculator', expression='2+2')\n"
-                        "state['total'] = a + b\n"
-                    )
-                }
-            ],
-        }
+    result = run_flow(
+        [
+            {
+                "script": (
+                    "a = tools.call('local.calculator', expression='1+1')\n"
+                    "b = tools.call('local.calculator', expression='2+2')\n"
+                    "state['total'] = a + b\n"
+                )
+            }
+        ],
+        uses_tools=["local.calculator"],
     )
 
     assert result["total"] == 6.0
@@ -293,13 +264,9 @@ def test_failed_tool_call_from_script_is_traced_as_error():
     runner（→ Node Shell 的 fatal 短路），但「呼叫過誰、失敗在哪」得先入 trace，
     且 args 的值一樣不落。
     """
-    result = _run(
-        {
-            "uses_tools": ["local.calculator"],
-            "flow": [
-                {"script": "state['x'] = tools.call('local.calculator', expression='1/0')\n"}
-            ],
-        }
+    result = run_flow(
+        [{"script": "state['x'] = tools.call('local.calculator', expression='1/0')\n"}],
+        uses_tools=["local.calculator"],
     )
 
     entries = _tool_entries(result)
@@ -323,7 +290,7 @@ def test_tool_trace_args_keys_summary_stops_at_200_chars():
 
     def args_keys_for(key_length: int) -> str:
         args = {letter * key_length: 1 for letter in "abc"}
-        result = _run({"flow": [{"tool": PROBE_TOOL, "args": args, "save_as": "out"}]})
+        result = run_flow([{"tool": PROBE_TOOL, "args": args, "save_as": "out"}])
         return _tool_entries(result)[0].args_keys
 
     on_point = args_keys_for(66)
@@ -362,18 +329,16 @@ def test_script_calling_tool_outside_uses_tools_is_rejected_at_run_time(probe_ca
     這一案是 uses_tools 存在的理由：靜態掃描看得見的呼叫在存檔就擋掉了，
     白名單真正要防的是這種執行期才決定名字的呼叫。
     """
-    result = _run(
-        {
-            "uses_tools": ["local.calculator"],
-            "flow": [
-                {
-                    "script": (
-                        f"name = '{PROBE_TOOL}'\n"
-                        "state['out'] = tools.call(name, x=1)\n"
-                    )
-                }
-            ],
-        }
+    result = run_flow(
+        [
+            {
+                "script": (
+                    f"name = '{PROBE_TOOL}'\n"
+                    "state['out'] = tools.call(name, x=1)\n"
+                )
+            }
+        ],
+        uses_tools=["local.calculator"],
     )
 
     assert probe_calls == []  # tool 函式一次都沒被執行到
@@ -436,7 +401,7 @@ def test_tool_call_exceeding_script_timeout_becomes_script_timeout():
 
 def test_tool_declared_in_flow_is_allowed_without_uses_tools(probe_calls):
     """決策表另一半：`tool:` 步驟宣告在 flow 裡就是白名單的一部分（flow 是靜態可稽核的）。"""
-    result = _run({"flow": [{"tool": PROBE_TOOL, "args": {"x": 1}, "save_as": "out"}]})
+    result = run_flow([{"tool": PROBE_TOOL, "args": {"x": 1}, "save_as": "out"}])
 
     assert result["out"] == {"called": True}
     assert probe_calls == [{"x": 1}]
@@ -504,7 +469,7 @@ def test_compiler_rejects_unknown_tool_even_without_api_validation():
     )
 
     with pytest.raises(compiler.SkillCompileError) as exc:
-        compiler.compile(skill, _deps())
+        compiler.compile(skill, default_engine_deps())
 
     assert "no_such_tool" in str(exc.value)
 
@@ -591,20 +556,20 @@ def test_http_tool_passes_tenant_from_context_not_from_args():
                 query, filters=filters, top_k=top_k, tenant_id=tenant_id
             )
 
-    deps = _deps(searchers={"vector": RecordingSearch(lambda q, f: [TEXT_2025Q3])})
-    result = _run(
-        {
-            "input_schema": {"query": {"type": "str", "required": True}},
-            "flow": [
-                {
-                    "tool": "backend.retrieval_search",
-                    "args": {"query": "$state.query", "top_k": 3},
-                    "save_as": "chunks",
-                }
-            ],
-        },
+    deps = default_engine_deps(
+        searchers={"vector": RecordingSearch(lambda q, f: [TEXT_2025Q3])}
+    )
+    result = run_flow(
+        [
+            {
+                "tool": "backend.retrieval_search",
+                "args": {"query": "$state.query", "top_k": 3},
+                "save_as": "chunks",
+            }
+        ],
         {"query": "2025Q3 稅後淨利"},
         deps=deps,
+        input_schema={"query": {"type": "str", "required": True}},
     )
 
     assert seen == ["t-test"]  # ctx.tenant_id，不是 args 帶進來的
@@ -628,18 +593,16 @@ def test_tool_step_receives_nonempty_identity_after_reads_hardening():
         return {"ok": True}
 
     try:
-        _run(
-            {
-                "input_schema": {"formula": {"type": "str", "required": True}},
-                "flow": [
-                    {
-                        "tool": "local.identity_probe",
-                        "args": {"formula": "$state.formula"},
-                        "save_as": "probe_out",
-                    }
-                ],
-            },
+        run_flow(
+            [
+                {
+                    "tool": "local.identity_probe",
+                    "args": {"formula": "$state.formula"},
+                    "save_as": "probe_out",
+                }
+            ],
             {"formula": "2 * 21"},
+            input_schema={"formula": {"type": "str", "required": True}},
         )
     finally:
         tool_registry._REGISTRY.pop("local.identity_probe", None)
@@ -653,7 +616,7 @@ def test_local_glossary_tool_wraps_existing_port():
     out = asyncio.run(
         tool_registry.invoke(
             "local.glossary",
-            ToolContext(tenant_id="t1", deps=_deps()),
+            ToolContext(tenant_id="t1", deps=default_engine_deps()),
             {"local.glossary"},
             {"text": "2025Q3 稅後淨利是多少"},
         )
@@ -667,7 +630,7 @@ def test_local_rerank_tool_wraps_existing_port():
     """local.rerank 只是既有 RerankerPort 的包裝。"""
     from app.nodes.kbquery.adapters import ScoreReranker
 
-    deps = _deps(reranker=ScoreReranker())
+    deps = default_engine_deps(reranker=ScoreReranker())
     out = asyncio.run(
         tool_registry.invoke(
             "local.rerank",

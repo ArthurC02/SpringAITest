@@ -1,5 +1,7 @@
 # Skill 概念重整（Concept Realignment）— 計畫
 
+> **Superseded P5 policy (2026-08-02):** P5 的雙軌、410 與 C8 gate 已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 的直接 schema/API cutover 取代；P0–P4 與本文件的歷史理由保留。現行程式仍是 P0–P4 狀態，直到 hard-reset P3 實作並通過 gate。
+
 > 狀態：執行中（2026-07-30）。P0 正名已落地；P1–P4 依各自驗收 gate 推進。P5 **未完成**，且不得在 cleanup C8 的流量、usage、rollback 與簽核證據齊備前宣告完成。本計畫是概念/命名/API 邊界的重整，不是新功能；現況以程式碼為準。
 
 ## 1. 動機：Re-Architecture 後的概念漂移

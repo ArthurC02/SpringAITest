@@ -6,8 +6,6 @@ triage_classify 節點內就正規化，因此邊界案例改對 triage_classify
 """
 
 import asyncio
-import dataclasses
-from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +20,7 @@ from app.nodes.triage import (
     make_triage_deep_answer_node,
     make_triage_quick_answer_node,
 )
-from tests.conftest import auth_headers, invoke_builtin
+from tests.conftest import auth_headers, invoke_builtin, swap_skill
 from tests.kbquery_fakes import FakeStructuredLLM, RecordingLLM, make_deps
 
 client = TestClient(app)
@@ -142,7 +140,6 @@ def test_triage_skill_complex_branch_runs_deep_answer_only():
 
 
 def test_triage_invoke_api_level_simple_branch():
-    original = skills.get("triage")
     llm = FakeStructuredLLM(
         outputs={
             _TriageClassifyOutput: _TriageClassifyOutput(category="SIMPLE"),
@@ -150,16 +147,8 @@ def test_triage_invoke_api_level_simple_branch():
         }
     )
     deps = make_deps({}, llm=llm)
-    skills._SKILLS["triage"] = original.__class__(
-        skill=original.skill,
-        graph=compiler.compile(original.skill, deps),
-        input_model=original.input_model,
-        deps=deps,
-        recursion_limit=original.recursion_limit,
-        source=original.source,
-        definition=original.definition,
-    )
-    try:
+    original = skills.get("triage")
+    with swap_skill("triage", graph=compiler.compile(original.skill, deps), deps=deps):
         resp = client.post(
             "/skills/triage/invoke",
             json={"input": {"question": "今天天氣如何？"}},
@@ -171,26 +160,6 @@ def test_triage_invoke_api_level_simple_branch():
         assert body["skill"] == "triage"
         assert body["output"]["category"] == "SIMPLE"
         assert body["output"]["answer"] == "API 簡答"
-    finally:
-        skills._SKILLS["triage"] = original
-
-
-@contextmanager
-def _triage_with_fake_llm(llm):
-    """暫時把已載入的 triage 換成假 LLM 編出的圖（API 級測試不打真 LLM），離開時還原。
-
-    只換 graph/deps，definition 與 definition_sha256 原樣保留 —— flow 治理包裝會比對
-    定義雜湊，換掉會變成 definition hash mismatch 而不是真的走完圖。
-    """
-    original = skills.get("triage")
-    deps = make_deps({}, llm=llm)
-    skills._SKILLS["triage"] = dataclasses.replace(
-        original, graph=compiler.compile(original.skill, deps), deps=deps
-    )
-    try:
-        yield
-    finally:
-        skills._SKILLS["triage"] = original
 
 
 def test_triage_invoke_api_level_complex_branch():
@@ -200,7 +169,9 @@ def test_triage_invoke_api_level_complex_branch():
             _TriageAnswerOutput: _TriageAnswerOutput(answer="API 深答"),
         }
     )
-    with _triage_with_fake_llm(llm):
+    deps = make_deps({}, llm=llm)
+    original = skills.get("triage")
+    with swap_skill("triage", graph=compiler.compile(original.skill, deps), deps=deps):
         resp = client.post(
             "/skills/triage/invoke",
             json={"input": {"question": "請推導廣義相對論場方程"}},
@@ -224,7 +195,9 @@ def test_triage_invoke_api_level_accepts_one_char_question():
             _TriageAnswerOutput: _TriageAnswerOutput(answer="一個字也答得出來"),
         }
     )
-    with _triage_with_fake_llm(llm):
+    deps = make_deps({}, llm=llm)
+    original = skills.get("triage")
+    with swap_skill("triage", graph=compiler.compile(original.skill, deps), deps=deps):
         resp = client.post(
             "/skills/triage/invoke",
             json={"input": {"question": "嗨"}},

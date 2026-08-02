@@ -1,5 +1,7 @@
 # Agent 平台重整 — 遷移與發布
 
+> **Superseded retirement policy (2026-08-02):** R6 的共存、流量門檻與 rollback-window 退場策略已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 取代；原文保留為歷史理由。現行程式仍遵守本文件，直到 hard-reset 對應 phase 實作並通過 gate。
+
 > 狀態：D1–D7 已完成產品交付與 D7 hybrid cross-service e2e 驗證。本檔仍定義 coexistence、feature flag、觀測、rollback 與 legacy 退場門檻；R6 的 legacy 移除尚未執行。
 
 ## 1. 遷移目標

@@ -9,8 +9,23 @@ using Platform.Service;
 
 namespace Platform.Web.Tests;
 
+// G4:ProxyFixture 與 DownstreamStatusFixture 各自共用一份 host。兩者分開的理由是 CapturingBackendHandler
+// 只記錄「最近一次」請求/回應狀態(見該類別 XML doc)——DownstreamStatus_* 會呼叫 Handler.Reset 把回應
+// 狀態碼改成非 200 且從不還原,若與其餘只斷言「自己這次請求」且預期固定 200/"{}" 回應的測試共用同一顆
+// Handler,會依測試執行順序讓那些測試讀到殘留的非 200 狀態(order-dependent 壞法),故獨立成另一組。
 public sealed class OperationsGovernanceApiTests
+    : IClassFixture<OperationsGovernanceApiTests.ProxyFixture>,
+        IClassFixture<OperationsGovernanceApiTests.DownstreamStatusFixture>
 {
+    private readonly ProxyFixture _proxy;
+    private readonly DownstreamStatusFixture _downstreamStatus;
+
+    public OperationsGovernanceApiTests(ProxyFixture proxy, DownstreamStatusFixture downstreamStatus)
+    {
+        _proxy = proxy;
+        _downstreamStatus = downstreamStatus;
+    }
+
     [Fact]
     public async Task FeatureOff_HidesOperationsBeforeAuthentication()
     {
@@ -43,9 +58,8 @@ public sealed class OperationsGovernanceApiTests
     [InlineData("GET", "eval-runs/00000000-0000-0000-0000-000000000001")]
     public async Task RedactedRoutes_ForwardVerbAndPath_WithoutIdempotencyKey(string method, string suffix)
     {
-        using var factory = new Factory();
-        using var client = factory.CreateClient().WithToken(
-            factory.IssueToken(capabilities: ["workflow.manage"]));
+        using var client = _proxy.CreateClient().WithToken(
+            _proxy.IssueToken(capabilities: ["workflow.manage"]));
         using var request = new HttpRequestMessage(new HttpMethod(method), "/api/admin/operations/" + suffix);
         if (method is "POST" or "PUT")
         {
@@ -56,9 +70,9 @@ public sealed class OperationsGovernanceApiTests
         var response = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(method, factory.Handler.Method);
-        Assert.Equal("/api/admin/operations/" + suffix, factory.Handler.Path);
-        Assert.Null(factory.Handler.Header("Idempotency-Key"));
+        Assert.Equal(method, _proxy.Handler.Method);
+        Assert.Equal("/api/admin/operations/" + suffix, _proxy.Handler.Path);
+        Assert.Null(_proxy.Handler.Header("Idempotency-Key"));
     }
 
     // Regression 端點的 body 是 [FromBody] object(無 typed DTO),原樣序列化轉發;eval_run_id 這個
@@ -66,9 +80,8 @@ public sealed class OperationsGovernanceApiTests
     [Fact]
     public async Task Regressions_ForwardsEvalRunIdFieldVerbatim()
     {
-        using var factory = new Factory();
-        using var client = factory.CreateClient().WithToken(
-            factory.IssueToken(capabilities: ["workflow.manage"]));
+        using var client = _proxy.CreateClient().WithToken(
+            _proxy.IssueToken(capabilities: ["workflow.manage"]));
         var evalRunId = Guid.NewGuid();
 
         var response = await client.PostAsJsonAsync(
@@ -76,11 +89,12 @@ public sealed class OperationsGovernanceApiTests
             new { suite = "gate-suite", passed = true, evidence_ref = "e", eval_run_id = evalRunId });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var forwardedBody = System.Text.Encoding.UTF8.GetString(factory.Handler.Body!);
+        var forwardedBody = System.Text.Encoding.UTF8.GetString(_proxy.Handler.Body!);
         Assert.Contains(evalRunId.ToString(), forwardedBody, StringComparison.OrdinalIgnoreCase);
     }
 
     // backend 4xx(例如迴歸未通過 → 阻擋 rollout)是治理決策,原樣穿透;>= 500 收斂成受控 502 且不外洩 body。
+    // 獨立於 ProxyFixture:每格都改寫 Handler 的回應狀態碼且從不還原(見本檔頂部 XML doc)。
     [Theory]
     [InlineData(409, 409, "regression gate blocked")]
     [InlineData(500, 502, null)]
@@ -88,12 +102,11 @@ public sealed class OperationsGovernanceApiTests
     public async Task DownstreamStatus_PassesThrough4xx_AndCollapses5xxWithoutLeakingBody(
         int downstream, int expected, string? expectedMessage)
     {
-        using var factory = new Factory();
-        factory.Handler.Reset(
+        _downstreamStatus.Handler.Reset(
             (HttpStatusCode)downstream,
             "{\"status\":" + downstream + ",\"message\":\"regression gate blocked\",\"detail\":\"internal-secret\"}");
-        using var client = factory.CreateClient().WithToken(
-            factory.IssueToken(capabilities: ["workflow.manage"]));
+        using var client = _downstreamStatus.CreateClient().WithToken(
+            _downstreamStatus.IssueToken(capabilities: ["workflow.manage"]));
 
         var response = await client.PutAsync(
             "/api/admin/operations/rollout",
@@ -116,21 +129,20 @@ public sealed class OperationsGovernanceApiTests
     [Fact]
     public async Task CapabilityAndFlagGate_ForwardOnlyAuthenticatedIdentityAndOverrideKey()
     {
-        using var factory = new Factory();
-        using var denied = factory.CreateClient().WithToken(factory.IssueToken(role: "ADMIN"));
+        using var denied = _proxy.CreateClient().WithToken(_proxy.IssueToken(role: "ADMIN"));
         Assert.Equal(HttpStatusCode.Forbidden, (await denied.GetAsync("/api/admin/operations/metrics")).StatusCode);
 
-        using var client = factory.CreateClient().WithToken(factory.IssueToken(username: "operator-a", tenantCode: "tenant-a", capabilities: ["workflow.manage"]));
+        using var client = _proxy.CreateClient().WithToken(_proxy.IssueToken(username: "operator-a", tenantCode: "tenant-a", capabilities: ["workflow.manage"]));
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/operations/regression-overrides") { Content = new StringContent("{\"reason\":\"break glass\"}", Encoding.UTF8, "application/json") };
         request.Headers.Add("Idempotency-Key", "override-logical-attempt");
         var response = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("/api/admin/operations/regression-overrides", factory.Handler.Path);
-        Assert.Equal("override-logical-attempt", factory.Handler.Header("Idempotency-Key"));
-        Assert.Equal("tenant-a", factory.Handler.Header("X-Tenant-Id"));
-        Assert.Equal("operator-a", factory.Handler.Header("X-User-Id"));
-        Assert.Equal("workflow.manage", factory.Handler.Header("X-User-Capabilities"));
+        Assert.Equal("/api/admin/operations/regression-overrides", _proxy.Handler.Path);
+        Assert.Equal("override-logical-attempt", _proxy.Handler.Header("Idempotency-Key"));
+        Assert.Equal("tenant-a", _proxy.Handler.Header("X-Tenant-Id"));
+        Assert.Equal("operator-a", _proxy.Handler.Header("X-User-Id"));
+        Assert.Equal("workflow.manage", _proxy.Handler.Header("X-User-Capabilities"));
     }
 
     // regression-overrides 與 eval-runs 是 OperationsGovernanceController 裡僅有的兩條 key:true
@@ -140,9 +152,8 @@ public sealed class OperationsGovernanceApiTests
     [InlineData("eval-runs")]
     public async Task KeyRoutes_ForwardIdempotencyKeyHeader(string suffix)
     {
-        using var factory = new Factory();
-        using var client = factory.CreateClient().WithToken(
-            factory.IssueToken(capabilities: ["workflow.manage"]));
+        using var client = _proxy.CreateClient().WithToken(
+            _proxy.IssueToken(capabilities: ["workflow.manage"]));
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/operations/" + suffix)
         {
             Content = new StringContent("{\"k\":1}", Encoding.UTF8, "application/json"),
@@ -152,13 +163,14 @@ public sealed class OperationsGovernanceApiTests
         var response = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("key-forward-check", factory.Handler.Header("Idempotency-Key"));
+        Assert.Equal("key-forward-check", _proxy.Handler.Header("Idempotency-Key"));
     }
 
-    private sealed class Factory : TestWebAppFactory
+    /// <summary>保留真 BackendClient,只把最下游換成可斷言的攔截 handler(預設固定回應 200/"{}")。</summary>
+    public class ProxyFixture : TestWebAppFactory
     {
         public CapturingBackendHandler Handler { get; } = new();
-        public Factory() : base(agentWriteToolsEnabled: true) { }
+        public ProxyFixture() : base(agentWriteToolsEnabled: true) { }
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             base.ConfigureWebHost(builder);
@@ -168,5 +180,11 @@ public sealed class OperationsGovernanceApiTests
                 services.AddHttpClient<BackendClient>().ConfigurePrimaryHttpMessageHandler(() => Handler);
             });
         }
+    }
+
+    /// <summary>與 <see cref="ProxyFixture"/> 同型但自己一份 Handler:DownstreamStatus_* 逐格改寫回應
+    /// 狀態碼,不得與預期固定 200 回應的測試共用同一顆 CapturingBackendHandler 實例。</summary>
+    public sealed class DownstreamStatusFixture : ProxyFixture
+    {
     }
 }

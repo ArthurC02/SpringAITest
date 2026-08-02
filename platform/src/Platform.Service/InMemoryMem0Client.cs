@@ -15,7 +15,7 @@ public sealed class InMemoryMem0Client : IMem0Client
 
     // ponytail: 全部存取都在 _lock 下,普通 Dictionary 即執行緒安全,不需 ConcurrentDictionary。
     private readonly Dictionary<string, List<(string UserMsg, string AiReply)>> _memories = new();
-    private readonly object _lock = new();
+    private readonly Lock _lock = new();
 
     public Task<string> RecallAsync(string userId, string query, CancellationToken ct = default)
     {

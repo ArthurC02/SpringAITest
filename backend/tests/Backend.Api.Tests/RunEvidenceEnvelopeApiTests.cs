@@ -15,10 +15,20 @@ namespace Backend.Api.Tests;
 /// tenant/run/snapshot fail-closed and the reconcile endpoint need a real <c>agent_run</c> row and
 /// are covered by <see cref="RunEvidenceEnvelopePostgresApiTests"/>.
 /// </summary>
-public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactory>
+public sealed class RunEvidenceEnvelopeApiTests :
+    IClassFixture<TestWebAppFactory>, IClassFixture<RunEvidenceEnvelopeApiTests.RunEvidenceEnabledFactory>
 {
     private readonly TestWebAppFactory _factory;
-    public RunEvidenceEnvelopeApiTests(TestWebAppFactory factory) => _factory = factory;
+    // Shared: every test below asserts against store.Telemetry/store.Evidence with an
+    // `x.Tenant == "..."` predicate, and every test uses its own unique "e1-*" tenant, so a shared
+    // InMemoryOperationsGovernanceRepository never lets one test's rows answer another's assertion.
+    private readonly RunEvidenceEnabledFactory _enabledFactory;
+
+    public RunEvidenceEnvelopeApiTests(TestWebAppFactory factory, RunEvidenceEnabledFactory enabledFactory)
+    {
+        _factory = factory;
+        _enabledFactory = enabledFactory;
+    }
 
     [Fact]
     public async Task FlagOff_WritesNoEnvelope_AndLeavesLegacyMetricPathUnchanged()
@@ -44,8 +54,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     {
         // Evidence shape is validated *before* the legacy metric write: a 400 here must mean
         // nothing at all was written -- not "metric landed, envelope rejected".
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-malformed").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-malformed").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -53,7 +62,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
         });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(_enabledFactory.Fake<IOperationsGovernanceRepository>());
         Assert.DoesNotContain(store.Telemetry, x => x.Tenant == "e1-malformed");
     }
 
@@ -63,8 +72,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     [InlineData("System.Net.Http.HttpRequestException\n", HttpStatusCode.BadRequest)] // trailing newline: proves \A...\z (not ^...$) is enforced
     public async Task FlagOn_ErrorClassShape_AcceptsTokenForm_RejectsNonTokenAndControlCharacters(string errorClass, HttpStatusCode expected)
     {
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-error-class").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-error-class").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -80,8 +88,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     [InlineData(201, HttpStatusCode.BadRequest)] // off-point
     public async Task FlagOn_ErrorClassLength_OnOffPointOfTheTwoHundredCharCap(int length, HttpStatusCode expected)
     {
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-error-class-length").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-error-class-length").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -96,8 +103,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     {
         // The message proves *which* branch rejected: observation_quality has its own enum check,
         // separate from outcome's -- both are only ever 400 to the caller.
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-quality-invalid").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-quality-invalid").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -117,8 +123,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     public async Task FlagOn_EvidenceStringFields_EnforceTheirOwnLengthAndControlCharacterLimits(
         string field, int length, string suffix, HttpStatusCode expected)
     {
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-evidence-strings").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-evidence-strings").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -137,8 +142,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     [InlineData("tool_revision", 0, HttpStatusCode.BadRequest)]
     public async Task FlagOn_EvidenceRevisionBounds_OnOffPointOfOneToOneMillion(string field, int revision, HttpStatusCode expected)
     {
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-revision-bounds").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-revision-bounds").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -153,8 +157,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     public async Task FlagOn_EvidenceRevisionFields_AreCarriedIntoTheEnvelope()
     {
         // Distinct values on purpose: a crossed mapping in BuildEnvelope cannot pass this.
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-revisions").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-revisions").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -167,7 +170,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(_enabledFactory.Fake<IOperationsGovernanceRepository>());
         var envelope = Assert.Single(store.Evidence, x => x.Tenant == "e1-revisions").Value;
         Assert.Equal(5, envelope.OrchestratorRevision);
         Assert.Equal(6, envelope.ContextRevision);
@@ -180,8 +183,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     {
         // The whole nested object is optional: SafeEvidence(null) passes and BuildEnvelope fills in
         // the defaults -- outcome "unknown", quality "measured" because usage *was* observed.
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-no-evidence").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-no-evidence").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -189,7 +191,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(_enabledFactory.Fake<IOperationsGovernanceRepository>());
         var envelope = Assert.Single(store.Evidence, x => x.Tenant == "e1-no-evidence").Value;
         Assert.Equal("unknown", envelope.Outcome);
         Assert.Equal("measured", envelope.ObservationQuality);
@@ -200,8 +202,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     {
         // usage/cost/latency all absent: the caller may claim "measured", the envelope still says
         // unknown -- and the aggregate must not zero-fill it into the measured sum.
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-quality").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-quality").WithUser("workflow").WithRole("SYSTEM");
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -209,7 +210,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(_enabledFactory.Fake<IOperationsGovernanceRepository>());
         Assert.Equal("unknown", Assert.Single(store.Evidence, x => x.Tenant == "e1-quality").Value.ObservationQuality);
 
         var reconcile = await store.GetEvidenceReconcileAsync("e1-quality", default);
@@ -220,8 +221,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
     [Fact]
     public async Task FlagOn_DuplicateEventIdReplay_DoesNotDoubleWriteTheEnvelope()
     {
-        using var factory = new RunEvidenceEnabledFactory();
-        using var client = factory.CreateInternalClient().WithTenant("e1-dup").WithUser("workflow").WithRole("SYSTEM");
+        using var client = _enabledFactory.CreateInternalClient().WithTenant("e1-dup").WithUser("workflow").WithRole("SYSTEM");
         var body = new
         {
             run_id = Guid.NewGuid(), event_id = Guid.NewGuid(), kind = "model", node_id = "model_step",
@@ -231,7 +231,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/operations/telemetry", body)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/operations/telemetry", body)).StatusCode);
 
-        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(factory.Fake<IOperationsGovernanceRepository>());
+        var store = Assert.IsType<InMemoryOperationsGovernanceRepository>(_enabledFactory.Fake<IOperationsGovernanceRepository>());
         Assert.Single(store.Evidence, x => x.Tenant == "e1-dup");
         var reconcile = await store.GetEvidenceReconcileAsync("e1-dup", default);
         Assert.Equal(1, reconcile.EnvelopeEventCount);
@@ -291,7 +291,7 @@ public sealed class RunEvidenceEnvelopeApiTests : IClassFixture<TestWebAppFactor
         Assert.Equal(10, reconcile.MeasuredUsageUnitsSum);
     }
 
-    private sealed class RunEvidenceEnabledFactory : TestWebAppFactory
+    public sealed class RunEvidenceEnabledFactory : TestWebAppFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

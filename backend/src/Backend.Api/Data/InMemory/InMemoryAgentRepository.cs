@@ -14,7 +14,7 @@ namespace Backend.Api.Data.InMemory;
 /// </summary>
 public sealed class InMemoryAgentRepository : IAgentRepository
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly List<Entry> _agents = new();
     private readonly InMemorySkillRepository _skills;
 
@@ -28,8 +28,8 @@ public sealed class InMemoryAgentRepository : IAgentRepository
 
     private static DateTime Now() => DateTime.UtcNow;
 
-    internal object RunSnapshotSyncRoot => _skills.ReferenceSyncRoot;
-    internal object OrchestratorReferenceSyncRoot => _gate;
+    internal Lock RunSnapshotSyncRoot => _skills.ReferenceSyncRoot;
+    internal Lock OrchestratorReferenceSyncRoot => _gate;
 
     internal bool AgentExistsUnsafe(string tenantId, Guid id)
     {

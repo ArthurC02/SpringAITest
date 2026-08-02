@@ -12,13 +12,13 @@ namespace Backend.Api.Data.InMemory;
 public sealed class InMemorySkillRepository : ISkillRepository
 {
     private readonly ConcurrentDictionary<(string Tenant, string Name), Skill> _store = new();
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
 
     /// <summary>
     /// Agent publish 在 Lite 模式必須把「解析 current revision」與「寫入 Agent pin」放在同一個
     /// critical section。只供同 assembly 的 InMemoryAgentRepository 協調，不是公開 repository 契約。
     /// </summary>
-    internal object ReferenceSyncRoot => _gate;
+    internal Lock ReferenceSyncRoot => _gate;
 
     /// <summary>稽核表:只增不減(軟刪不動它)。</summary>
     private readonly List<(string Tenant, string Name, StoredSkillRevision Row)> _revisions = new();

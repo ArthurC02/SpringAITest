@@ -3,6 +3,7 @@ using Backend.Api.RuntimeDiscovery;
 using Backend.Api.Skills;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json.Serialization;
+using static Backend.Api.Common.ApiErrors;
 
 namespace Backend.Api.OperationsGovernance;
 
@@ -91,12 +92,6 @@ public sealed class OperationsGovernanceController(
 
     private void RequireManage() => Request.RequireCapability("workflow.manage");
     private string Key() => Request.RequireIdempotencyKey();
-    private static string Required(string? value, string field, int max)
-    {
-        value = value?.Trim();
-        if (string.IsNullOrWhiteSpace(value) || value.Length > max || value.Any(char.IsControl)) throw new ApiException(400, $"{field} is required");
-        return value;
-    }
     private static ReleaseGateResponse Public(RegressionGate gate) => new(gate.Passed, gate.OverrideActive, gate.AuditEntries);
 }
 

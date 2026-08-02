@@ -4,7 +4,7 @@ using Platform.Service.Dtos;
 namespace Platform.Service.Abstractions;
 
 /// <summary>整個 Workflow Python 引擎的 client：承載 Skill/Business Workflow 執行與驗證、
-/// Business Rules、node/tool catalog；轉發 4 個 X-* header 並轉譯下游狀態碼。
+/// Business Rules、node/tool catalog；轉發內部身分 headers 並轉譯下游狀態碼。
 /// 公開 artifact CRUD 不在此介面 — 那是 backend 的職責。</summary>
 public interface IWorkflowEngineClient
 {

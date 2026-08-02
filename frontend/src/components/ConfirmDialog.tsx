@@ -2,11 +2,11 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useRef,
   useState,
   type ReactNode,
 } from 'react'
+import Modal from './Modal'
 
 interface ConfirmOpts {
   danger?: boolean
@@ -30,18 +30,15 @@ interface Pending extends ConfirmOpts {
 /**
  * 自製確認對話框，取代 window.confirm。比照 Toast 的 context provider 模式：
  * useConfirm() 回傳 (message, opts?) => Promise<boolean>，同一 provider 內渲染宿主。
- * 一次只顯示一個（破壞性操作皆為單點觸發，不需佇列）。
+ * 一次只顯示一個（破壞性操作皆為單點觸發，不需佇列）。底層用 Modal（原生 <dialog>），
+ * focus-trap／Escape 關閉／觸發焦點還原都交給 Modal。
  */
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<Pending | null>(null)
   const resolveRef = useRef<((v: boolean) => void) | null>(null)
-  const triggerRef = useRef<HTMLElement | null>(null)
   const cancelRef = useRef<HTMLButtonElement | null>(null)
-  const confirmRef = useRef<HTMLButtonElement | null>(null)
 
   const confirm = useCallback<ConfirmFn>((message, opts) => {
-    // 在重繪前先記住觸發元素，關閉後把焦點還原回去。
-    triggerRef.current = document.activeElement as HTMLElement | null
     return new Promise<boolean>((resolve) => {
       resolveRef.current = resolve
       setPending({ message, ...opts })
@@ -52,51 +49,29 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     resolveRef.current?.(result)
     resolveRef.current = null
     setPending(null)
-    triggerRef.current?.focus?.()
-    triggerRef.current = null
   }, [])
 
-  // 開啟時把焦點移到「取消」鈕（Enter 不會誤觸確認）；Escape = 取消。
-  // 焦點循環見 onKeyDown：Tab/Shift+Tab 只在取消／確認兩鈕之間繞，不外洩到背景。
-  useEffect(() => {
-    if (!pending) return
-    cancelRef.current?.focus()
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        settle(false)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [pending, settle])
+  // memo 化：Modal 的原生 cancel/close listener 以 onClose 為依賴，行內箭頭會讓它每次重繪都解綁重綁。
+  const dismiss = useCallback(() => settle(false), [settle])
 
   return (
     <ConfirmContext.Provider value={confirm}>
       {children}
-      {pending && (
-        <div className="confirm-overlay" onClick={() => settle(false)}>
-          <div
-            className="confirm-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label="確認操作"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              // 最小 focus-trap：只有兩顆鈕，Tab/Shift+Tab 在兩者間循環，不讓焦點離開對話框。
-              if (e.key !== 'Tab') return
-              e.preventDefault()
-              const next = document.activeElement === cancelRef.current ? confirmRef : cancelRef
-              next.current?.focus()
-            }}
-          >
+      <Modal
+        open={!!pending}
+        onClose={dismiss}
+        initialFocusRef={cancelRef}
+        className="modal-host"
+        aria-label="確認操作"
+      >
+        {pending && (
+          <div className="confirm-dialog">
             <p className="confirm-dialog__message">{pending.message}</p>
             <div className="confirm-dialog__actions">
               <button ref={cancelRef} className="btn" onClick={() => settle(false)}>
                 取消
               </button>
               <button
-                ref={confirmRef}
                 className={`btn ${pending.danger ? 'confirm-dialog__confirm--danger' : 'btn--primary'}`}
                 onClick={() => settle(true)}
               >
@@ -104,8 +79,8 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
     </ConfirmContext.Provider>
   )
 }

@@ -11,20 +11,9 @@ namespace Backend.Api.OperationsGovernance;
 /// failure -- backend must never durably record eval results computed from a half-understood
 /// response, so every such case maps to 502 (same posture as WorkflowSkillValidator).
 /// </summary>
-public sealed class WorkflowEvalRunner : IEvalRunner
+public sealed class WorkflowEvalRunner(HttpClient http, string baseUrl, string internalToken) : IEvalRunner
 {
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
-
-    private readonly HttpClient _http;
-    private readonly string _baseUrl;
-    private readonly string _internalToken;
-
-    public WorkflowEvalRunner(HttpClient http, string baseUrl, string internalToken)
-    {
-        _http = http;
-        _baseUrl = baseUrl.TrimEnd('/');
-        _internalToken = internalToken;
-    }
+    private readonly string _baseUrl = baseUrl.TrimEnd('/');
 
     public async Task<EvalRunResponseWire> RunAsync(
         string suiteId,
@@ -46,11 +35,11 @@ public sealed class WorkflowEvalRunner : IEvalRunner
 
         using var request = new HttpRequestMessage(HttpMethod.Post, _baseUrl + "/evals/run")
         {
-            Content = JsonContent.Create(payload, options: JsonOpts),
+            Content = JsonContent.Create(payload, options: InternalWorkflowClient.Options),
         };
-        request.UseInternalIdentity(_internalToken, tenantId, userId, role);
+        request.UseInternalIdentity(internalToken, tenantId, userId, role);
 
-        var body = await _http.SendJsonAsync<EvalRunResponseWire>(request, Failure, JsonOpts, ct);
+        var body = await http.SendJsonAsync<EvalRunResponseWire>(request, Failure, InternalWorkflowClient.Options, ct);
         if (string.IsNullOrWhiteSpace(body.RunnerVersion) || body.Cases is null)
         {
             throw Failure("回應缺少 runner_version 或 cases");

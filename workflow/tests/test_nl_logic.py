@@ -24,7 +24,7 @@ from app.engine import skill as skill_mod
 from app.engine.node_registry import get as get_node
 from app.main import app
 from app.nodes.nl_logic import _NlLogicOutput, make_nl_logic_node
-from tests.conftest import auth_headers
+from tests.conftest import auth_headers, swap_skill
 from tests.kbquery_fakes import FakeStructuredLLM, make_deps
 
 client = TestClient(app)
@@ -182,14 +182,15 @@ def test_nl_logic_end_to_end_trace_has_component_version():
     )
     skill = skill_mod.parse_source(definition)
     original = skills.get("kb-query")
-    skills._SKILLS["__nl_e2e__"] = original.__class__(
+    with swap_skill(
+        "__nl_e2e__",
+        base=original,
         skill=skill,
         graph=compiler.compile(skill, deps),
         input_model=skill_mod.build_input_model(skill),
         deps=deps,
         recursion_limit=compiler.recursion_limit(skill),
-    )
-    try:
+    ) as loaded:
         resp = client.post(
             "/skills/__nl_e2e__/invoke",
             json={"input": {"query": "問題"}},
@@ -200,7 +201,7 @@ def test_nl_logic_end_to_end_trace_has_component_version():
         assert output["business_result"] == "最終"
         assert "trace" not in output
         internal = asyncio.run(
-            skills._SKILLS["__nl_e2e__"].graph.ainvoke(
+            loaded.graph.ainvoke(
                 {"tenant_id": "t", "user_id": "u", "role": "USER", "query": "問題"},
                 config={"recursion_limit": compiler.recursion_limit(skill)},
             )
@@ -210,5 +211,3 @@ def test_nl_logic_end_to_end_trace_has_component_version():
         assert nl_entries[0].status == "ok"
         # deps 含 llm → compiler 在 trace 記 LLM 版本(非空)
         assert nl_entries[0].component_version == "fake-llm-v1"
-    finally:
-        skills._SKILLS.pop("__nl_e2e__", None)

@@ -5,10 +5,10 @@ namespace Backend.Api.Data.InMemory;
 /// <summary>Lite/test parity implementation for the Workflow draft/revision aggregate.</summary>
 public sealed class InMemoryWorkflowRepository : IWorkflowRepository
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly List<Entry> _entries = new();
     private static DateTime Now() => DateTime.UtcNow;
-    internal object ReferenceSyncRoot => _gate;
+    internal Lock ReferenceSyncRoot => _gate;
     internal bool HasActivePublishedUnsafe(string tenant, Guid id, int revision)
     { var e = Find(tenant, id); return e is not null && e.Kind == "orchestrator" && e.Enabled && e.Published == revision && e.Revisions.Any(r => r.Number == revision && r.Status == "published"); }
     internal (string Definition, string Contract)? GetVisibleAgentRuntimeRevisionUnsafe(string tenant, Guid id, int revision)

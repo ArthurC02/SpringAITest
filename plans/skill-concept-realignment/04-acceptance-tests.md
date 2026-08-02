@@ -1,5 +1,7 @@
 # Skill 概念重整 — 驗收案例
 
+> **Superseded P5 policy (2026-08-02):** P5/C8 舊驗收 gate 已由 [Architecture Hard Reset acceptance tests](../architecture-hard-reset/04-acceptance-tests.md) 取代；P0–P4 歷史驗收仍保留。新 gate 尚未執行。
+
 > 狀態：規劃中。每階段的可驗證退出條件；「命令」欄為驗證入口，細部斷言寫在對應測試檔。
 
 ## P0 正名（零行為變更）

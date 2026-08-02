@@ -11,8 +11,6 @@ namespace Platform.Service;
 /// </summary>
 internal static class RunCommandRedaction
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-
     public static string StripCommandId(string json, string failurePrefix)
     {
         try
@@ -23,7 +21,7 @@ internal static class RunCommandRedaction
             }
 
             run.Remove("command_id");
-            return run.ToJsonString(Json);
+            return run.ToJsonString(InternalRequest.Web);
         }
         catch (JsonException ex)
         {

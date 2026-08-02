@@ -3,7 +3,7 @@ using Platform.Service.Dtos;
 
 namespace Platform.Service.Abstractions;
 
-/// <summary>文件服務:代理下游 Python。轉發 4 個 X-* header 並轉譯下游狀態碼。</summary>
+/// <summary>文件服務:代理 backend。轉發內部身分 headers 並轉譯下游狀態碼。</summary>
 public interface IDocumentService
 {
     /// <summary>受理文件(生成 id、發佈到佇列非同步處理,回 id/title/status=processing)。</summary>

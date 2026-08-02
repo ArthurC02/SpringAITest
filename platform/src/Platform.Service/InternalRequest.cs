@@ -9,11 +9,15 @@ namespace Platform.Service;
 /// <summary>
 /// 呼叫內部下游(backend :8002 / workflow :8001)的共用請求樣板:內部憑證 + 身分 header 名稱常數、
 /// 組請求(強制 HTTP/1.1、X-Internal-Token + 需要時的身分 headers、可選 JSON body)、傳輸層 catch。
-/// BackendClient 與 WorkflowEngineClient 都走它 — 這四個 header 字串與 HTTP/1.1 強制只有這一份事實。
+/// BackendClient 與 WorkflowEngineClient 都走它 — 這些 header 字串與 HTTP/1.1 強制只有這一份事實。
 /// 狀態碼→例外的映射仍由各呼叫端自理(不同端點對外語意不同)。
 /// </summary>
 public static class InternalRequest
 {
+    /// <summary>下游/內部 JSON 的共用設定(camelCase、大小寫不敏感);snake_case 欄位靠 DTO 上的
+    /// JsonPropertyName 對應。全 platform 唯一一份 <c>JsonSerializerDefaults.Web</c> 宣告。</summary>
+    public static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
+
     /// <summary>內部信任邊界的憑證 header;後續是上游如實轉發的身分 header。</summary>
     public const string InternalTokenHeader = "X-Internal-Token";
     public const string TenantIdHeader = "X-Tenant-Id";
@@ -28,11 +32,11 @@ public static class InternalRequest
     public const string UserGroupsHeader = "X-User-Groups";
 
     /// <summary>
-    /// 組一個帶 X-Internal-Token 的下游請求;<paramref name="ctx"/> 非 null 時再帶 3 個身分 header;可選 JSON body。
+    /// 組一個帶 X-Internal-Token 的下游請求;<paramref name="ctx"/> 非 null 時再帶身分 header;可選 JSON body。
     /// 強制 HTTP/1.1(不開 h2c;避免下游 uvicorn 在 h2c 升級時掉 body)。
     /// </summary>
     public static HttpRequestMessage Build(
-        HttpMethod method, string url, string internalToken, UserContext? ctx, object? body, JsonSerializerOptions json)
+        HttpMethod method, string url, string internalToken, UserContext? ctx, object? body)
     {
         var req = new HttpRequestMessage(method, url)
         {
@@ -63,7 +67,7 @@ public static class InternalRequest
 
         if (body is not null)
         {
-            req.Content = JsonContent.Create(body, options: json);
+            req.Content = JsonContent.Create(body, options: Web);
         }
 
         return req;
@@ -103,14 +107,13 @@ public static class InternalRequest
         string internalToken,
         UserContext ctx,
         object body,
-        JsonSerializerOptions json,
         ILogger logger,
         string label,
         CancellationToken ct)
     {
         try
         {
-            using var request = Build(HttpMethod.Post, url, internalToken, ctx, body, json);
+            using var request = Build(HttpMethod.Post, url, internalToken, ctx, body);
             using var response = await client.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode)
             {

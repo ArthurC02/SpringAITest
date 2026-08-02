@@ -16,6 +16,7 @@ from app.main import app
 from app.settings import settings
 from app.skills import custom
 from tests.conftest import auth_headers as _headers
+from tests.conftest import swap_skill
 
 client = TestClient(app)
 
@@ -237,13 +238,14 @@ def test_invoke_admin_skill_forbidden_for_user_role():
     """required_role: ADMIN 的 skill 被 USER 呼叫 → 403（順序上先於 422：input 是空的）。"""
     loaded = skills.get("kb-query")
     admin_skill = loaded.skill.model_copy(update={"required_role": "ADMIN"})
-    skills._SKILLS["__admin-probe__"] = loaded.__class__(
+    with swap_skill(
+        "__admin-probe__",
+        base=loaded,
         skill=admin_skill.model_copy(update={"name": "admin-probe"}),
         graph=loaded.graph,
         input_model=loaded.input_model,
         deps=loaded.deps,
-    )
-    try:
+    ):
         resp = client.post(
             "/skills/__admin-probe__/invoke", json={"input": {}}, headers=_headers()
         )
@@ -256,8 +258,6 @@ def test_invoke_admin_skill_forbidden_for_user_role():
             headers=_headers(role="ADMIN"),
         )
         assert ok.status_code == 422  # ADMIN 過了角色關卡，才輪到 input 驗證
-    finally:
-        skills._SKILLS.pop("__admin-probe__", None)
 
 
 def test_agentic_invoke_timeout_returns_504(monkeypatch):
@@ -269,21 +269,20 @@ def test_agentic_invoke_timeout_returns_504(monkeypatch):
             await asyncio.sleep(0.5)
             return {}
 
-    skills._SKILLS["__slow-probe__"] = original.__class__(
+    monkeypatch.setattr(settings, "workflow_timeout_seconds", 0.05)
+    with swap_skill(
+        "__slow-probe__",
+        base=original,
         skill=Skill.model_validate({"name": "slow-probe", "flow": [{"node": "t"}]}),
         graph=_SlowGraph(),
         input_model=None,
         deps=None,
-    )
-    monkeypatch.setattr(settings, "workflow_timeout_seconds", 0.05)
-    try:
+    ):
         resp = client.post(
             "/skills/__slow-probe__/invoke", json={"input": {}}, headers=_headers()
         )
         assert resp.status_code == 504
         assert resp.json()["detail"]["error"] == "workflow_timeout"
-    finally:
-        skills._SKILLS.pop("__slow-probe__", None)
 
 
 def test_agentic_invoke_unexpected_exception_returns_500():
@@ -293,20 +292,19 @@ def test_agentic_invoke_unexpected_exception_returns_500():
         async def ainvoke(self, state, config=None):
             raise RuntimeError("boom")
 
-    skills._SKILLS["__boom-probe__"] = original.__class__(
+    with swap_skill(
+        "__boom-probe__",
+        base=original,
         skill=Skill.model_validate({"name": "boom-probe", "flow": [{"node": "t"}]}),
         graph=_BoomGraph(),
         input_model=None,
         deps=None,
-    )
-    try:
+    ):
         resp = client.post(
             "/skills/__boom-probe__/invoke", json={"input": {}}, headers=_headers()
         )
         assert resp.status_code == 500
         assert resp.json()["detail"]["error"] == "workflow_execution_failed"
-    finally:
-        skills._SKILLS.pop("__boom-probe__", None)
 
 
 def test_invoke_reserved_input_keys_cannot_override_caller_tenant(monkeypatch):
@@ -319,13 +317,14 @@ def test_invoke_reserved_input_keys_cannot_override_caller_tenant(monkeypatch):
             captured.update(state)
             return {**state, "__loop_0_count": 1}
 
-    skills._SKILLS["__capture-probe__"] = original.__class__(
+    with swap_skill(
+        "__capture-probe__",
+        base=original,
         skill=Skill.model_validate({"name": "capture-probe", "flow": [{"node": "t"}]}),
         graph=_CaptureGraph(),
         input_model=None,
         deps=None,
-    )
-    try:
+    ):
         resp = client.post(
             "/skills/__capture-probe__/invoke",
             json={"input": {"query": "x", "tenant_id": "evil-tenant", "role": "ADMIN"}},
@@ -340,8 +339,6 @@ def test_invoke_reserved_input_keys_cannot_override_caller_tenant(monkeypatch):
         assert captured["user_id"] == "alice"
         # 引擎內部鍵不外洩到 API 回應
         assert "__loop_0_count" not in resp.json()["output"]
-    finally:
-        skills._SKILLS.pop("__capture-probe__", None)
 
 
 def test_invoke_cannot_forge_reserved_audit_keys():
@@ -364,14 +361,15 @@ def test_invoke_cannot_forge_reserved_audit_keys():
         }
     )
     original = skills.get("kb-query")
-    skills._SKILLS["__forge-probe__"] = original.__class__(
+    with swap_skill(
+        "__forge-probe__",
+        base=original,
         skill=skill,
         graph=compiler.compile(skill, deps),
         input_model=None,
         deps=deps,
         recursion_limit=compiler.recursion_limit(skill),
-    )
-    try:
+    ):
         resp = client.post(
             "/skills/__forge-probe__/invoke",
             json={
@@ -394,8 +392,6 @@ def test_invoke_cannot_forge_reserved_audit_keys():
         output = resp.json()["output"]
         assert output.get("query_id") != "FORGED-ID"
         assert output.get("original_query") != "無害的問題"
-    finally:
-        skills._SKILLS.pop("__forge-probe__", None)
 
 
 def test_invoke_kb_query_definition_happy_path_returns_output():
@@ -410,13 +406,14 @@ def test_invoke_kb_query_definition_happy_path_returns_output():
 
     original = skills.get("kb-query")
     deps = make_deps({"vector": FakeSearch(lambda q, f: [TEXT_2025Q3])})
-    skills._SKILLS["__kb_probe__"] = original.__class__(
+    with swap_skill(
+        "__kb_probe__",
+        base=original,
         skill=original.skill,
         graph=compiler.compile(original.skill, deps),
         input_model=original.input_model,
         deps=deps,
-    )
-    try:
+    ):
         resp = client.post(
             "/skills/__kb_probe__/invoke",
             json={"input": {"query": "2025Q3 稅後淨利是多少？"}},
@@ -431,8 +428,6 @@ def test_invoke_kb_query_definition_happy_path_returns_output():
         assert "trace" not in body["output"]
         assert len(deps.audit_repo.saved) == 1
         assert not any(k.startswith("__") for k in body["output"])
-    finally:
-        skills._SKILLS.pop("__kb_probe__", None)
 
 
 def test_invoke_seeds_tool_context_with_caller_identity():
@@ -466,22 +461,23 @@ def test_invoke_seeds_tool_context_with_caller_identity():
         }
     )
     original = skills.get("kb-query")
-    skills._SKILLS["__ctx_probe__"] = original.__class__(
-        skill=skill,
-        graph=compiler.compile(skill, deps),
-        input_model=None,
-        deps=deps,
-        recursion_limit=compiler.recursion_limit(skill),
-    )
     try:
-        resp = client.post(
-            "/skills/__ctx_probe__/invoke",
-            json={"input": {}},
-            headers=_headers(tenant_id="demo-a", user_id="alice", role="ADMIN"),
-        )
+        with swap_skill(
+            "__ctx_probe__",
+            base=original,
+            skill=skill,
+            graph=compiler.compile(skill, deps),
+            input_model=None,
+            deps=deps,
+            recursion_limit=compiler.recursion_limit(skill),
+        ):
+            resp = client.post(
+                "/skills/__ctx_probe__/invoke",
+                json={"input": {}},
+                headers=_headers(tenant_id="demo-a", user_id="alice", role="ADMIN"),
+            )
 
-        assert resp.status_code == 200
-        assert captured == {"role": "ADMIN", "user_id": "alice", "tenant_id": "demo-a"}
+            assert resp.status_code == 200
+            assert captured == {"role": "ADMIN", "user_id": "alice", "tenant_id": "demo-a"}
     finally:
-        skills._SKILLS.pop("__ctx_probe__", None)
         tool_registry._REGISTRY.pop("__ctx_probe_tool__", None)

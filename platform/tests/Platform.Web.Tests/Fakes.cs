@@ -22,10 +22,11 @@ internal static class FakeJson
 public sealed class FakeCallScope
 {
     private readonly HashSet<object> _owned = new();
+    private readonly Lock _gate = new();
 
     public void Own(params System.Collections.IList[] collections)
     {
-        lock (_owned)
+        lock (_gate)
         {
             foreach (var collection in collections)
             {

@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
@@ -13,9 +14,6 @@ namespace Platform.Service;
 /// </summary>
 public sealed class BackendClient
 {
-    // backend JSON 用 Web 預設(camelCase、大小寫不敏感);snake_case 欄位靠 DTO 上的 JsonPropertyName 對應。
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
-
     private readonly HttpClient _http;
     private readonly BackendOptions _options;
 
@@ -26,11 +24,11 @@ public sealed class BackendClient
     }
 
     /// <summary>供各服務反序列化 backend 回應用的 JSON 設定。</summary>
-    public JsonSerializerOptions Json => JsonOpts;
+    public JsonSerializerOptions Json => InternalRequest.Web;
 
-    /// <summary>組一個帶 X-Internal-Token 的 backend 請求;ctx 非 null 時再帶 3 個身分 header;可選 JSON body。</summary>
+    /// <summary>組一個帶 X-Internal-Token 的 backend 請求;ctx 非 null 時再帶身分 header;可選 JSON body。</summary>
     public HttpRequestMessage BuildRequest(HttpMethod method, string path, UserContext? ctx = null, object? body = null)
-        => InternalRequest.Build(method, _options.BaseUrl.TrimEnd('/') + path, _options.InternalToken, ctx, body, JsonOpts);
+        => InternalRequest.Build(method, _options.BaseUrl.TrimEnd('/') + path, _options.InternalToken, ctx, body);
 
     /// <summary>
     /// 送出請求;傳輸層錯誤與逾時經 <paramref name="wrapTransportError"/> 轉成呼叫端要的例外
@@ -54,7 +52,7 @@ public sealed class BackendClient
         using var resp = await SendCheckedAsync(req, wrap, mapError, ct);
         try
         {
-            return await resp.Content.ReadFromJsonAsync<T>(JsonOpts, ct) ?? throw onEmptyBody();
+            return await resp.Content.ReadFromJsonAsync<T>(InternalRequest.Web, ct) ?? throw onEmptyBody();
         }
         catch (JsonException ex)
         {
@@ -70,7 +68,7 @@ public sealed class BackendClient
         CancellationToken ct)
     {
         using var resp = await SendCheckedAsync(req, wrap, mapError, ct);
-        return await resp.Content.ReadFromJsonAsync<List<T>>(JsonOpts, ct) ?? new List<T>();
+        return await resp.Content.ReadFromJsonAsync<List<T>>(InternalRequest.Web, ct) ?? new List<T>();
     }
 
     /// <summary>
@@ -126,6 +124,31 @@ public sealed class BackendClient
         }
     }
 
+    /// <summary>
+    /// <see cref="AgentService"/>/<see cref="WorkflowAdminService"/>/<see cref="Platform.Web.Controllers.OperationsGovernanceController"/>
+    /// 共用的透明代理樣板:組請求 → 有 <paramref name="extraHeader"/> 才加 → <see cref="SendForProxyAsync"/> →
+    /// 包成 <see cref="AgentProxyResponse"/>。要不要帶哪個 header(If-Match / Idempotency-Key)以及它的值,
+    /// 仍是呼叫端的決策 —— 本方法只收斂機械執行的四步驟。
+    /// </summary>
+    public async Task<AgentProxyResponse> SendForAgentProxyAsync(
+        HttpMethod method,
+        string path,
+        UserContext? ctx,
+        object? body,
+        string failurePrefix,
+        (string Name, string Value)? extraHeader,
+        CancellationToken ct)
+    {
+        var req = BuildRequest(method, path, ctx, body);
+        if (extraHeader is { } header)
+        {
+            req.Headers.TryAddWithoutValidation(header.Name, header.Value);
+        }
+
+        var (status, content, etag) = await SendForProxyAsync(req, failurePrefix, ct);
+        return new AgentProxyResponse(status, content, etag);
+    }
+
     /// <summary>送出並只確認成功(不讀 body,如 DELETE);非 2xx 以 <paramref name="mapError"/> 轉例外拋出。</summary>
     public async Task SendExpectSuccessAsync(
         HttpRequestMessage req,
@@ -167,7 +190,7 @@ public sealed class BackendClient
     {
         try
         {
-            return await resp.Content.ReadFromJsonAsync<BackendErrorBody>(JsonOpts, ct) ?? EmptyError;
+            return await resp.Content.ReadFromJsonAsync<BackendErrorBody>(InternalRequest.Web, ct) ?? EmptyError;
         }
         catch
         {

@@ -34,7 +34,7 @@ public sealed class InMemoryAuthRepository : IAuthRepository
             "user-b", Password123, "USER", "demo-b", GroupsJson: """["analysts"]"""),
     };
 
-    private readonly object _lockObj = new();
+    private readonly Lock _lockObj = new();
 
     public Task<TenantRow?> FindTenantByCodeAsync(string code, CancellationToken ct)
         => Task.FromResult(_tenants.GetValueOrDefault(code));

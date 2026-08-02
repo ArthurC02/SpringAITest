@@ -17,8 +17,6 @@ public sealed class AgentRunService : IAgentRunService
 {
     private const string FailurePrefix = "Agent 執行服務失敗：";
     private const string BackendFailurePrefix = FailurePrefix + "Backend ";
-    private static readonly JsonSerializerOptions JsonOpts =
-        new(JsonSerializerDefaults.Web);
 
     private readonly BackendClient _backend;
     private readonly HttpClient _workflow;
@@ -259,7 +257,6 @@ public sealed class AgentRunService : IAgentRunService
             _workflowOptions.InternalToken,
             ctx,
             new { command_id = commandId },
-            JsonOpts,
             _logger,
             $"Agent run Workflow kick for command {commandId:D}",
             ct);
@@ -271,7 +268,6 @@ public sealed class AgentRunService : IAgentRunService
             _workflowOptions.InternalToken,
             ctx,
             new { },
-            JsonOpts,
             _logger,
             $"Approved write Workflow kick for approval {approvalId:D}",
             ct);

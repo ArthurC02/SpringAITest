@@ -25,7 +25,7 @@ public sealed class InMemoryRagRepository : IRagRepository
     }
 
     private readonly ConcurrentDictionary<string, Doc> _docs = new();
-    private readonly object _lockObj = new();
+    private readonly Lock _lockObj = new();
 
     public Task<string?> GetDocumentStatusAsync(string documentId, string tenantId, CancellationToken ct)
         => Task.FromResult(_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId ? d.Status : null);
@@ -63,9 +63,12 @@ public sealed class InMemoryRagRepository : IRagRepository
 
     public Task MarkFailedAsync(string documentId, string tenantId, CancellationToken ct)
     {
-        if (_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId)
+        lock (_lockObj)
         {
-            d.Status = "failed";
+            if (_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId)
+            {
+                d.Status = "failed";
+            }
         }
 
         return Task.CompletedTask;

@@ -1,4 +1,4 @@
-"""Agent Skill 圖工廠：用統一 invoke 面執行能力包的 legacy bridge。
+"""Agent Skill 圖工廠：用統一 invoke 面執行能力包的相容橋接層。
 
 Agent Skill 不是 Business Workflow；這張單節點圖只是為了維持
 ``/skills/{name}/invoke`` 的統一 ``{skill, output}`` 契約。執行仍經 Node Shell

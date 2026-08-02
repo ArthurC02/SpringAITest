@@ -23,7 +23,6 @@ public sealed class AgentChatRuntime(
     AgentChatOptions options,
     ILogger<AgentChatRuntime> logger) : IAgentChatRuntime
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
 
     public async Task<AgentResponse?> RunAsync(
@@ -301,7 +300,6 @@ public sealed class AgentChatRuntime(
             workflowOptions.InternalToken,
             user,
             new { command_id = commandId.ToString("D"), context = new { } },
-            Json,
             logger,
             $"D6 Root Workflow dispatch for run {runId:D}",
             ct);

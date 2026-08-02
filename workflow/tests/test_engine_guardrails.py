@@ -13,10 +13,8 @@
 """
 
 import ast
-import asyncio
 import io
 import zipfile
-from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,15 +22,12 @@ from fastapi.testclient import TestClient
 from app.engine import compiler, expressions, script_runner
 from app.engine import tool_registry
 from app.engine.node_shell import RUNTIME_AUTHORITY_KEYS
-from app.engine.skill import Skill
 from app.engine.tool_registry import ToolContext
 from app.main import app
-from app.nodes.kbquery.adapters import StaticGlossary
 
 # import 觸發 kb_query 節點註冊（compiler 強制附加的 audit_feedback 來自這裡）
 from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
-from tests.conftest import auth_headers
-from tests.kbquery_fakes import RecordingAuditRepo
+from tests.conftest import auth_headers, run_flow
 
 PROBE_TOOL = "local.authority-probe"
 
@@ -71,23 +66,6 @@ def probe_contexts(_register_probe_tool):
     return _register_probe_tool
 
 
-def _deps():
-    return SimpleNamespace(
-        audit_repo=RecordingAuditRepo(),
-        llm=None,
-        glossary=StaticGlossary(),
-        max_retrieval_attempts=2,
-    )
-
-
-def _run(flow: list[dict], state: dict | None = None) -> dict:
-    skill = Skill.model_validate({"name": "probe-skill", "flow": flow})
-    graph = compiler.compile(skill, _deps())
-    return compiler.public_output(
-        asyncio.run(graph.ainvoke({"tenant_id": "t-test", **(state or {})}))
-    )
-
-
 def _authority_state() -> dict:
     return {key: authentic for key, (authentic, _) in AUTHORITY_VALUES.items()}
 
@@ -103,7 +81,7 @@ def test_script_cannot_forge_runtime_authority_keys(key):
     assert set(AUTHORITY_VALUES) == set(RUNTIME_AUTHORITY_KEYS)
     authentic, forged = AUTHORITY_VALUES[key]
 
-    result = _run(
+    result = run_flow(
         [{"script": f"state[{key!r}] = {forged!r}\nstate['ran'] = True"}],
         _authority_state(),
     )
@@ -119,7 +97,7 @@ def test_script_cannot_disable_data_scope_for_a_later_tool_step(probe_contexts):
     因此「script 寫得進 state」等於「同一個 Skill 內、script 之後的每個 tool 呼叫都在
     未強制資料範圍、且知識來源被放寬成 all 的授權下執行」。
     """
-    result = _run(
+    result = run_flow(
         [
             {
                 "script": (

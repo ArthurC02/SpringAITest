@@ -153,7 +153,7 @@ public sealed class SkillPackageMigrationTests
         var migrated = SkillPackageMigration.Rewrite(package, Name, "flow");
 
         var entries = ReadZip(migrated.Bytes);
-        Assert.Equal(1, entries.Count);
+        Assert.Single(entries);
         var skillMd = entries["legacy-name/SKILL.md"]; // 沒有這個 key 就是被搬走了
         Assert.Contains($"name: {Name}\n", skillMd);
         Assert.DoesNotContain("sales_helper", skillMd);

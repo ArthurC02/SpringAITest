@@ -399,6 +399,185 @@ public sealed class OrchestratorRunRepositoryTests
         await Assert.ThrowsAsync<ArgumentException>(() => ChildAsync(oversizedFixture, oversizedRoot.Run.Id, "worker-task"));
     }
 
+    // F1 回歸測試:Dapper 的取消級聯對 agent_run 用三態 WHERE(queued/running/waiting_input) —— 但
+    // InMemory 的 Child.Status 只在 GetChildAsync 同步時才反映真正的 D3 狀態,取消迴圈原本只濾
+    // queued/running,漏掉已進入 waiting_input(HITL)且被同步過一次的子執行,永遠不呼叫
+    // agentRuns.CancelAsync,底層 D3 run 因此永遠不會被取消。
+    [Fact]
+    public async Task Cancel_CascadesToChild_EvenWhenCachedStatusIsWaitingInput()
+    {
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(agentRuns: childRuns);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "cancel-waiting", "plan", "cancel-waiting-key", default);
+        var child = await ChildAsync(fixture, created.Run!.Id, "task-1");
+        Assert.NotNull(child);
+
+        // 讓子執行進入 waiting_input,並經 GetChildAsync 把它同步進 Child.Status 快取欄位。
+        childRuns.EnterWaitingInput();
+        var synced = await fixture.Runs.GetChildAsync("t", "u", created.Run.Id, child!.Id, default);
+        Assert.Equal("waiting_input", synced!.Status);
+
+        var cancelled = await fixture.Runs.CancelAsync("t", "u", created.Run.Id, "stop", "cancel-waiting-1", default);
+
+        Assert.Equal(OrchestratorRunWriteStatus.Success, cancelled.Status);
+        Assert.True(childRuns.CancelCalled);
+        Assert.Equal("cancelled", (await fixture.Runs.GetChildAsync("t", "u", created.Run.Id, child.Id, default))!.Status);
+    }
+
+    // F3 回歸測試:私有 static Expire() 沒有 agentRuns 依賴,root 逾時只把本地 Child.Status 鏡射欄位
+    // 撥成 cancelled,完全不呼叫 agentRuns.CancelAsync -- 底層 D3 agent_run 永遠不知道要取消。斷言必須
+    // 讀 childRuns.CancelCalled/GetAsync(真正的 D3 run 狀態),Child.Status 鏡射欄位在修好之前就已經是
+    // "cancelled" 了,測不出這個問題。三態(queued/running/waiting_input)都要覆蓋,對齊 Dapper 版
+    // ExpireDeadlineAsync 對 agent_run 的三態 WHERE。
+    [Theory]
+    [InlineData("queued")]
+    [InlineData("running")]
+    [InlineData("waiting_input")]
+    public async Task Expire_CascadesToUnderlyingAgentRun_ForEachActiveChildStatus(string childStatus)
+    {
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(agentRuns: childRuns);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "expire-" + childStatus, "plan", "expire-key-" + childStatus, default);
+        var child = await ChildAsync(fixture, created.Run!.Id, "task-1");
+        Assert.NotNull(child);
+
+        if (childStatus == "running") childRuns.EnterRunning();
+        else if (childStatus == "waiting_input") childRuns.EnterWaitingInput();
+        if (childStatus != "queued")
+        {
+            var synced = await fixture.Runs.GetChildAsync("t", "u", created.Run.Id, child!.Id, default);
+            Assert.Equal(childStatus, synced!.Status);
+        }
+
+        SetDeadline(fixture.Runs, created.Run.Id, DateTime.UtcNow.AddSeconds(-1));
+        IOrchestratorRunRepository durable = fixture.Runs;
+        var recovery = await durable.ClaimRecoveryAsync("scrubber", 10, 30, default);
+        Assert.Empty(recovery.Items);
+
+        var timedOut = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        Assert.Equal("timed_out", timedOut!.Status);
+        // 真正的 D3 run 狀態(不是鏡射欄位)必須真的被通知取消。
+        Assert.True(childRuns.CancelCalled);
+        Assert.Equal("cancelled", (await childRuns.GetAsync("t", "u", child!.AgentRunId, default))!.Status);
+    }
+
+    // F3 死鎖回歸測試:Expire() 現在改成在持有 OrchestratorRunRepository._gate 期間呼叫
+    // agentRuns.CancelAsync(取得 AgentRun 端自己的鎖)-- 跟 CancelAsync/CreateChildAsync/GetChildAsync
+    // 既有的鎖序完全一致(orchestrator gate 外、AgentRun gate 內),而且 InMemoryAgentRunRepository
+    // 完全不持有回指 orchestrator repository 的參照,所以這個方向不可能反過來。這裡用多次疊代 +
+    // 逾時保護逼出真實鎖爭用:多個 recovery scrubber 同時觸發多筆 root 的 Expire() cascade,
+    // 同時有外部執行緒直接打 agentRuns 自己的鎖(GetAsync/CancelAsync),全部包在 timeout 裡,
+    // 卡住就會逾時失敗而不是把整個測試回合吊死。
+    [Fact]
+    public async Task Expire_UnderConcurrentAgentRunLockContention_CompletesWithoutDeadlock()
+    {
+        for (var iteration = 0; iteration < 20; iteration++)
+        {
+            var childRuns = new ScriptedChildAgentRuns();
+            var fixture = await FixtureAsync(maxChildRuns: 3, maxConcurrency: 3, agentRuns: childRuns);
+            var created = await fixture.Runs.CreateAsync(
+                "t", "u", "ADMIN", [], [], fixture.OrchestratorId, $"deadlock-{iteration}", "plan", $"deadlock-key-{iteration}", default);
+            var child = await ChildAsync(fixture, created.Run!.Id, "task-1");
+            Assert.NotNull(child);
+            childRuns.EnterWaitingInput();
+            Assert.Equal("waiting_input", (await fixture.Runs.GetChildAsync("t", "u", created.Run.Id, child!.Id, default))!.Status);
+            SetDeadline(fixture.Runs, created.Run.Id, DateTime.UtcNow.AddSeconds(-1));
+            IOrchestratorRunRepository durable = fixture.Runs;
+
+            using var cts = new CancellationTokenSource();
+            var hammerTasks = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    await childRuns.GetAsync("t", "u", child.AgentRunId, cts.Token);
+                }
+            })).ToArray();
+
+            var recoveryTask = durable.ClaimRecoveryAsync($"scrubber-{iteration}", 10, 30, default);
+            var completed = await Task.WhenAny(recoveryTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            cts.Cancel();
+            await Task.WhenAll(hammerTasks);
+            Assert.True(ReferenceEquals(completed, recoveryTask), $"iteration {iteration}: Expire() cascade did not complete within 5s -- suspected deadlock");
+
+            var timedOut = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+            Assert.Equal("timed_out", timedOut!.Status);
+            Assert.True(childRuns.CancelCalled);
+        }
+    }
+
+    // Expire all-or-nothing 回歸測試:單一 child 取消失敗時,root 必須維持非終局(對齊
+    // OrchestratorRunRepository.ExpireDeadlineAsync 的單一交易語意 —— 任一 child 失敗整段回滾,
+    // root 完全不會被標記),而不是把例外吞掉後仍然標成 timed_out。若標了,方法開頭的早退保護
+    // 會讓這個 root 永遠不再被任何未來的 scrub 檢視,那個取消失敗的 child 就再也不會被重試。
+    [Fact]
+    public async Task Expire_WhenChildCancelFails_RootStaysNonTerminal_AndNextScrubRetries()
+    {
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(maxChildRuns: 3, maxConcurrency: 3, agentRuns: childRuns);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "expire-partial-fail", "plan", "expire-partial-fail-key", default);
+        var child = await ChildAsync(fixture, created.Run!.Id, "task-1");
+        Assert.NotNull(child);
+        childRuns.EnterWaitingInput();
+        Assert.Equal("waiting_input", (await fixture.Runs.GetChildAsync("t", "u", created.Run.Id, child!.Id, default))!.Status);
+        SetDeadline(fixture.Runs, created.Run.Id, DateTime.UtcNow.AddSeconds(-1));
+        IOrchestratorRunRepository durable = fixture.Runs;
+
+        childRuns.FailCancel = true;
+        await durable.ClaimRecoveryAsync("scrubber-1", 10, 30, default);
+
+        // Not terminal -- ClaimRecoveryAsync's claim phase (same call, after the failed scrub) is
+        // free to reclaim the still-uncompleted command and move queued -> running; that is a
+        // separate, expected concern from Expire's own all-or-nothing contract asserted below.
+        var afterFailedCascade = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        Assert.NotEqual("timed_out", afterFailedCascade!.Status);
+        Assert.False(childRuns.CancelCalled);
+        var events = await fixture.Runs.EventsAsync("t", "u", created.Run.Id, 0, 50, default);
+        var incomplete = Assert.Single(events!.Events, x => x.EventType == "root_timeout_cascade_incomplete");
+        Assert.Equal(child!.Id.ToString(), incomplete.Payload.GetProperty("failed_children")[0].GetProperty("child_id").GetString(), ignoreCase: true);
+
+        // 下一次 scrub 仍把它當候選再試一次:這次 child 取消成功,root 才真的終局。
+        childRuns.FailCancel = false;
+        await durable.ClaimRecoveryAsync("scrubber-2", 10, 30, default);
+
+        var afterRetry = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        Assert.Equal("timed_out", afterRetry!.Status);
+        Assert.True(childRuns.CancelCalled);
+    }
+
+    // SemaphoreSlim is not reentrant like the System.Threading.Lock this repository used to use.
+    // ClaimRecoveryAsync internally claims each candidate via ClaimCommandLocked (not the public,
+    // gate-acquiring ClaimCommandAsync) specifically to avoid re-entering _gate, and the explicit
+    // IOrchestratorRunRepository.ClaimRecoveryAsync scrub loop calls ExpireLockedAsync (not Expire
+    // via a re-locking wrapper) for the same reason. This hammers every public method concurrently
+    // -- including both ClaimRecoveryAsync entry points -- to prove those structural fixes hold
+    // under real concurrency, not just single-threaded review.
+    [Fact]
+    public async Task InMemory_ConcurrentCallsAcrossMethods_CompleteWithoutDeadlock()
+    {
+        var fixture = await FixtureAsync();
+        IOrchestratorRunRepository durable = fixture.Runs;
+        var all = Task.WhenAll(Enumerable.Range(0, 8).Select(async i =>
+        {
+            for (var round = 0; round < 10; round++)
+            {
+                var created = await fixture.Runs.CreateAsync("t", "u", "ADMIN", [], [], fixture.OrchestratorId,
+                    $"conv-{i}-{round}", "work", $"key-{i}-{round}", default);
+                if (created.Status != OrchestratorRunWriteStatus.Success) continue;
+                var runId = created.Run!.Id;
+                await fixture.Runs.GetAsync("t", "u", runId, default);
+                await fixture.Runs.EventsAsync("t", "u", runId, 0, 10, default);
+                await fixture.Runs.ClaimCommandAsync("t", "u", runId, created.Dispatch!.CommandId, $"worker-{i}", 30, default);
+                await durable.ClaimRecoveryAsync($"scrubber-{i}", 10, 30, default);
+                await fixture.Runs.CancelAsync("t", "u", runId, "stop", $"cancel-{i}-{round}", default);
+            }
+        }));
+        var winner = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.True(ReferenceEquals(winner, all), "concurrent calls across InMemoryOrchestratorRunRepository methods did not complete within 5s -- suspected deadlock");
+    }
+
     // child 狀態是從 D3 run 鏡射過來的:轉終局時必須恰好補一筆 child_terminal 事件(連呼兩次不得重複),
     // 並把 result 裡的 citations 抽出來。重複事件會讓 root 的聚合把同一個 child 算兩次。
     [Fact]
@@ -607,6 +786,10 @@ public sealed class OrchestratorRunRepositoryTests
     /// </summary>
     private sealed class ScriptedChildAgentRuns : IAgentRunRepository, IOrchestratorChildRunRepository
     {
+        // F3 死鎖回歸測試用:真正的 InMemoryAgentRunRepository 有自己的 _gate,
+        // orchestrator 端的 cascade 呼叫進來時會短暫取得它。這裡加一把等價的鎖,讓併發測試能
+        // 真的製造鎖爭用(而不是測一個沒上鎖、天生不會卡住的假物件)。
+        private readonly Lock _gate = new();
         private AgentRunResponse? _run;
 
         /// <summary>The exact canonical envelope the orchestrator persists on the child (same value
@@ -619,15 +802,18 @@ public sealed class OrchestratorRunRepositoryTests
             WorkflowSnapshotSource workflow, OrchestratorChildSnapshotProvenance provenance,
             string runKind, int tokenCap, JsonElement taskEnvelope, string idempotencyKey, CancellationToken ct)
         {
-            DispatchedEnvelope = taskEnvelope.Clone();
-            _run = new AgentRunResponse(
-                Guid.NewGuid(), provenance.RootRunId, provenance.RootRunId, provenance.TaskId, runKind,
-                agent.AgentId, agent.Revision, workflow.WorkflowId, workflow.Revision, agent.DefinitionSha256,
-                "queued", 1, 0, 0, null, 0, 0, false, null, null, null, null, 0, null,
-                DateTime.UtcNow, DateTime.UtcNow.AddMinutes(10), DateTime.UtcNow, null, [],
-                JsonDocument.Parse("{}").RootElement.Clone());
-            return Task.FromResult(new AgentRunWriteResult(
-                AgentRunWriteStatus.Success, _run, Dispatch: new AgentRunCommandDispatch(Guid.NewGuid(), "claim", DateTime.UtcNow.AddSeconds(30), 1)));
+            lock (_gate)
+            {
+                DispatchedEnvelope = taskEnvelope.Clone();
+                _run = new AgentRunResponse(
+                    Guid.NewGuid(), provenance.RootRunId, provenance.RootRunId, provenance.TaskId, runKind,
+                    agent.AgentId, agent.Revision, workflow.WorkflowId, workflow.Revision, agent.DefinitionSha256,
+                    "queued", 1, 0, 0, null, 0, 0, false, null, null, null, null, 0, null,
+                    DateTime.UtcNow, DateTime.UtcNow.AddMinutes(10), DateTime.UtcNow, null, [],
+                    JsonDocument.Parse("{}").RootElement.Clone());
+                return Task.FromResult(new AgentRunWriteResult(
+                    AgentRunWriteStatus.Success, _run, Dispatch: new AgentRunCommandDispatch(Guid.NewGuid(), "claim", DateTime.UtcNow.AddSeconds(30), 1)));
+            }
         }
 
         public void Complete(string resultJson) => _run = _run! with
@@ -636,14 +822,41 @@ public sealed class OrchestratorRunRepositoryTests
             Result = JsonDocument.Parse(resultJson).RootElement.Clone(),
         };
 
+        /// <summary>F1 回歸測試用:讓子執行進入 D3 的 waiting_input 狀態,之後才由 GetChildAsync 同步進
+        /// orchestrator 端的 Child.Status 快取欄位。</summary>
+        public void EnterWaitingInput() => _run = _run! with { Status = "waiting_input" };
+
+        /// <summary>F3 回歸測試用:讓子執行進入 D3 的 running 狀態(同步流程與 EnterWaitingInput 相同)。</summary>
+        public void EnterRunning() => _run = _run! with { Status = "running" };
+
+        /// <summary>是否曾被要求取消(F1 迴歸斷言:waiting_input 子執行的取消是否真的傳到這裡)。</summary>
+        public bool CancelCalled { get; private set; }
+
+        /// <summary>Expire all-or-nothing 回歸測試用:讓 CancelAsync 丟例外而不是成功,模擬單一
+        /// child 取消失敗,藉此驗證 root 因此保持非終局(留給下次 scrub 重試),而不是被吞掉後
+        /// 仍然標成 timed_out。</summary>
+        public bool FailCancel { get; set; }
+
         public Task<AgentRunResponse?> GetAsync(string t, string u, Guid id, CancellationToken ct)
-            => Task.FromResult(_run is not null && _run.Id == id ? _run : null);
+        {
+            lock (_gate) return Task.FromResult(_run is not null && _run.Id == id ? _run : null);
+        }
 
         public Task<AgentRunWriteResult> CreateDirectAsync(string a, string b, string c, IReadOnlyCollection<string> d, IReadOnlyCollection<string> e, Guid f, string g, string h, CancellationToken i) => throw new NotSupportedException();
         public Task<string?> GetExecutionArtifactAsync(string a, string b, Guid c, CancellationToken d) => throw new NotSupportedException();
         public Task<AgentRunEventsResponse?> GetEventsAsync(string a, string b, Guid c, long d, int e, CancellationToken f) => throw new NotSupportedException();
         public Task<AgentRunWriteResult> ResumeAsync(string a, string b, Guid c, string d, long e, string f, CancellationToken g) => throw new NotSupportedException();
-        public Task<AgentRunWriteResult> CancelAsync(string a, string b, Guid c, string? d, string e, CancellationToken f) => throw new NotSupportedException();
+        public Task<AgentRunWriteResult> CancelAsync(string tenant, string user, Guid id, string? reason, string key, CancellationToken ct)
+        {
+            lock (_gate)
+            {
+                if (_run is null || _run.Id != id) throw new NotSupportedException();
+                if (FailCancel) throw new InvalidOperationException("scripted cancel failure");
+                CancelCalled = true;
+                _run = _run with { Status = "cancelled" };
+                return Task.FromResult(new AgentRunWriteResult(AgentRunWriteStatus.Success, _run));
+            }
+        }
         public Task<AgentRunWriteResult> TransitionAsync(string a, string b, Guid c, AgentRunTransitionRequest d, CancellationToken e) => throw new NotSupportedException();
         public Task<AgentRunWriteResult> AppendEventsAsync(string a, string b, Guid c, AgentRunEventsAppendRequest d, CancellationToken e) => throw new NotSupportedException();
         public Task<AgentRunLeaseResult> ClaimLeaseAsync(string a, string b, Guid c, AgentRunLeaseRequest d, CancellationToken e) => throw new NotSupportedException();

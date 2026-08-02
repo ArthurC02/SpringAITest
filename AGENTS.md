@@ -32,6 +32,8 @@ Only trivial work (typo-level edits, quick Q&A) stays in the main loop.
 
 **Every subagent definition must pin all four knobs in its frontmatter:** `model`, `tools`, `hooks`, and MCP access (MCP tools are granted as `mcp__<server>__<tool>` entries inside `tools`). Where one is deliberately absent (e.g. no hooks for a docs-only agent), record that as a YAML comment in the frontmatter — omission must be a decision, never an oversight. New agents follow the same rule.
 
+**Spot-check subagent completion reports, especially three claim types**: (a) lock/concurrency structure ("this ordering is safe"), (b) dead code ("nothing calls this"), (c) artifact/workspace state ("temp files deleted", "workspace clean"). Verify with grep/Read yourself, don't take the report at face value — real case: an agent once reported "deleted temp tests, `git status` clean" while two files remained on disk; two different agents in turn claimed the same lock ordering was safe before an ABBA deadlock was caught only by code review. Conversely, when a spec hands a subagent a blanket hard rule, be ready for it not to apply — real case: a spec said "never call across repositories while holding a lock," but the file's three existing methods all did exactly that with no ABBA, and the agent pushed back with that counterexample and was right to refuse. Give rules the specific risk they guard against so the agent can judge applicability instead of following blindly.
+
 ## Cross-Service Contracts
 
 These facts span two or more areas — changing one side silently breaks the other, so they live here, not in the area files:

@@ -13,10 +13,24 @@ namespace Backend.Api.Tests;
 /// the InMemory repositories (same implementation Lite mode uses); the Dapper projections are the
 /// same shape and are exercised by the Agent publish path there.
 /// </summary>
-public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
+public sealed class PromptArtifactsApiTests :
+    IClassFixture<TestWebAppFactory>, IClassFixture<PromptArtifactsApiTests.PromptArtifactsEnabledFactory>
 {
     private readonly TestWebAppFactory _factory;
-    public PromptArtifactsApiTests(TestWebAppFactory factory) => _factory = factory;
+    // Shared only by tests below that use a tenant unique to that one test and never assert an
+    // absolute/incremental revision number that depends on a clean tenant-wide counter -- see the
+    // per-test comments. Tests that publish under the shared default "demo-a" tenant (Admin(factory)
+    // with no explicit tenant) or assert exact revision counts keep their own `new
+    // PromptArtifactsEnabledFactory()` instance instead, because PublishComponentAsync/CreateManifestAsync
+    // (Data/InMemory/InMemoryPromptArtifactRepository.cs) key the manifest revision counter by tenant
+    // alone, so two such tests sharing one host would corrupt each other's "revision starts at 1" math.
+    private readonly PromptArtifactsEnabledFactory _enabledFactory;
+
+    public PromptArtifactsApiTests(TestWebAppFactory factory, PromptArtifactsEnabledFactory enabledFactory)
+    {
+        _factory = factory;
+        _enabledFactory = enabledFactory;
+    }
 
     [Theory]
     [InlineData("GET", "/api/prompt-components")]
@@ -71,15 +85,15 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Component_RejectsUnknownKind_AndCrossTenantReadIsNotFound()
     {
-        using var factory = new PromptArtifactsEnabledFactory();
-        var owner = Admin(factory, "prompt-a");
+        // Shared _enabledFactory: tenants "prompt-a"/"prompt-b" are unique to this test.
+        var owner = Admin(_enabledFactory, "prompt-a");
         await PublishComponentAsync(owner, "persona", "PERSONA-A");
 
         var unknownKind = await owner.PostAsJsonAsync(
             "/api/prompt-components", new JsonObject { ["kind"] = "system_prompt", ["content"] = "x" });
         Assert.Equal(HttpStatusCode.BadRequest, unknownKind.StatusCode);
 
-        var other = Admin(factory, "prompt-b");
+        var other = Admin(_enabledFactory, "prompt-b");
         Assert.Equal(HttpStatusCode.NotFound, (await other.GetAsync("/api/prompt-components/persona/1")).StatusCode);
         Assert.Empty((await (await other.GetAsync("/api/prompt-components")).ReadJsonAsync()).AsArray());
     }
@@ -183,8 +197,8 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Manifest_FailsClosed_OnMissingReference_CrossTenant_SchemaDrift_AndLatest()
     {
-        using var factory = new PromptArtifactsEnabledFactory();
-        var owner = Admin(factory, "manifest-a");
+        // Shared _enabledFactory: tenants "manifest-a"/"manifest-b" are unique to this test.
+        var owner = Admin(_enabledFactory, "manifest-a");
         await PublishComponentAsync(owner, "guard", "GUARD");
 
         // Existing tenant component (on-point schema_version) is the control: it succeeds.
@@ -196,7 +210,7 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
             (await PostManifestAsync(owner, new JsonObject { ["guard"] = 2 })).StatusCode);
 
         // Cross-tenant reference: tenant B cannot borrow tenant A's component revision.
-        var other = Admin(factory, "manifest-b");
+        var other = Admin(_enabledFactory, "manifest-b");
         Assert.Equal(
             HttpStatusCode.UnprocessableEntity,
             (await PostManifestAsync(other, new JsonObject { ["guard"] = 1 })).StatusCode);
@@ -356,12 +370,12 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
         // Deliberate divergence (plan 03 §3 / backend/AGENTS.md): every other prompt-* route is
         // ADMIN-only Builder management; the resolved route is called at execution time by
         // Platform/Workflow assemblers, so it must stay reachable with only a tenant header.
-        using var factory = new PromptArtifactsEnabledFactory();
-        var owner = Admin(factory, "resolved-nonadmin");
+        // Shared _enabledFactory: tenant "resolved-nonadmin" is unique to this test.
+        var owner = Admin(_enabledFactory, "resolved-nonadmin");
         await PublishComponentAsync(owner, "guard", "GUARD");
         await CreateManifestAsync(owner, new JsonObject { ["guard"] = 1 });
 
-        var nonAdmin = factory.CreateInternalClient()
+        var nonAdmin = _enabledFactory.CreateInternalClient()
             .WithTenant("resolved-nonadmin")
             .WithRole("USER")
             .WithUser("caller");
@@ -384,8 +398,9 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("/api/prompt-manifests")]
     public async Task WriteRoutes_RejectNonAdmin_AndWriteNothing(string path)
     {
-        using var factory = new PromptArtifactsEnabledFactory();
-        var nonAdmin = factory.CreateInternalClient()
+        // Shared _enabledFactory: tenant "write-nonadmin" is unique to this test, and the forbidden
+        // write never persists anything for either theory row to collide over.
+        var nonAdmin = _enabledFactory.CreateInternalClient()
             .WithTenant("write-nonadmin")
             .WithRole("USER")
             .WithUser("caller");
@@ -398,14 +413,14 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
 
         // Nothing reached the tenant's store (read back as the ADMIN of that same tenant).
         Assert.Empty(
-            (await (await Admin(factory, "write-nonadmin").GetAsync(path)).ReadJsonAsync()).AsArray());
+            (await (await Admin(_enabledFactory, "write-nonadmin").GetAsync(path)).ReadJsonAsync()).AsArray());
     }
 
     [Fact]
     public async Task ResolvedManifest_UnknownRevision_AndCrossTenant_AreNotFound()
     {
-        using var factory = new PromptArtifactsEnabledFactory();
-        var owner = Admin(factory, "resolved-a");
+        // Shared _enabledFactory: tenants "resolved-a"/"resolved-b" are unique to this test.
+        var owner = Admin(_enabledFactory, "resolved-a");
         await PublishComponentAsync(owner, "guard", "GUARD");
         await CreateManifestAsync(owner, new JsonObject { ["guard"] = 1 });
 
@@ -413,7 +428,7 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
             HttpStatusCode.NotFound,
             (await owner.GetAsync("/api/prompt-manifests/999/resolved")).StatusCode);
 
-        var other = Admin(factory, "resolved-b");
+        var other = Admin(_enabledFactory, "resolved-b");
         Assert.Equal(
             HttpStatusCode.NotFound,
             (await other.GetAsync("/api/prompt-manifests/1/resolved")).StatusCode);
@@ -599,7 +614,7 @@ public sealed class PromptArtifactsApiTests : IClassFixture<TestWebAppFactory>
         return (id, (await (await client.GetAsync($"/api/agents/{id}/revisions")).ReadJsonAsync()).AsArray());
     }
 
-    private sealed class PromptArtifactsEnabledFactory : TestWebAppFactory
+    public sealed class PromptArtifactsEnabledFactory : TestWebAppFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

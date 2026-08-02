@@ -12,7 +12,7 @@ from app import skills
 from app.engine import compiler, node_registry
 from app.engine.skill import Skill, clean_invoke_input
 from app.main import _clean_skill_input, app
-from tests.conftest import auth_headers
+from tests.conftest import auth_headers, swap_skill
 
 client = TestClient(app)
 
@@ -68,13 +68,14 @@ def test_invoke_input_engine_keys_are_stripped_from_state():
             captured.update(state)
             return {**state, "ran": True}
 
-    skills._SKILLS["__engine-probe__"] = original.__class__(
+    with swap_skill(
+        "__engine-probe__",
+        base=original,
         skill=Skill.model_validate({"name": "engine-probe", "flow": [{"node": "t"}]}),
         graph=_CaptureGraph(),
         input_model=None,
         deps=None,
-    )
-    try:
+    ):
         resp = client.post(
             "/skills/__engine-probe__/invoke",
             json={
@@ -93,8 +94,6 @@ def test_invoke_input_engine_keys_are_stripped_from_state():
         assert "fatal_error" not in captured
         assert "trace" not in captured
         assert "errors" not in captured
-    finally:
-        skills._SKILLS.pop("__engine-probe__", None)
 
 
 def test_invoke_input_engine_keys_do_not_break_real_kb_query_graph():
@@ -107,13 +106,14 @@ def test_invoke_input_engine_keys_do_not_break_real_kb_query_graph():
 
     original = skills.get("kb-query")
     deps = make_deps({"vector": FakeSearch(lambda q, f: [TEXT_2025Q3])})
-    skills._SKILLS["__kb_engine-probe__"] = original.__class__(
+    with swap_skill(
+        "__kb_engine-probe__",
+        base=original,
         skill=original.skill,
         graph=compiler.compile(original.skill, deps),
         input_model=original.input_model,
         deps=deps,
-    )
-    try:
+    ):
         resp = client.post(
             "/skills/__kb_engine-probe__/invoke",
             json={
@@ -131,5 +131,3 @@ def test_invoke_input_engine_keys_do_not_break_real_kb_query_graph():
         body = resp.json()
         assert body["output"]["answer_mode"] == "ANSWER"  # fatal_error 沒把全圖 skip 掉
         assert "1,234" in body["output"]["final_answer"]
-    finally:
-        skills._SKILLS.pop("__kb_engine-probe__", None)

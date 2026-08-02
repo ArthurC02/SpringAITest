@@ -10,7 +10,7 @@ public sealed class InMemoryConversationRepository : IConversationRepository
 {
     private readonly List<(string Tenant, string User, ConversationItem Item)> _items = new();
     private long _seq;
-    private readonly object _lockObj = new();
+    private readonly Lock _lockObj = new();
 
     public Task<ConversationCreated> AddAsync(string tenantId, string userId, string prompt, string reply, CancellationToken ct)
     {

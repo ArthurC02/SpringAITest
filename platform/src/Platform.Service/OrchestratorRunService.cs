@@ -17,7 +17,6 @@ public sealed class OrchestratorRunService(
     ILogger<OrchestratorRunService> logger) : IOrchestratorRunService
 {
     private const string FailurePrefix = "Orchestrator run ";
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     /// <summary>Root input is deliberately only the Backend-canonicalised message + observed_at:
     /// caller context is not a recoverable authority and never enters root dispatch, so the public
@@ -146,7 +145,6 @@ public sealed class OrchestratorRunService(
             workflowOptions.InternalToken,
             ctx,
             new { command_id = commandId.ToString("D"), context = new { } },
-            Json,
             logger,
             $"Root Workflow dispatch for run {runId:D}",
             ct);

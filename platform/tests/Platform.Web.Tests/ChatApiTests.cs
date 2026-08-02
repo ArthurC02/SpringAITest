@@ -137,7 +137,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(expected, bytes);
     }
 
-    // M5 + A-24:空字串與全空白都是 NotBlank 該擋的等價類(全空白正是 NotBlank 存在的唯一理由),
+    // M5 + A-24:空字串與全空白都是 NotBlank 該擋的等價類,
     // 阻塞與串流兩條路徑皆 400 + ApiError 四鍵齊全;串流端點在寫任何 SSE bytes 之前就回 JSON。
     [Theory]
     [InlineData("/api/chat", "")]

@@ -8,15 +8,12 @@ using Platform.Service.Options;
 namespace Platform.Service;
 
 /// <summary>
-/// Skill 引擎服務:代理下游 Python。角色把關在 Python 端,本服務只轉發 X-User-Role 並轉譯狀態碼:
+/// Skill 引擎服務:代理下游 Python。角色把關在 Python 端,本服務只轉發內部身分 headers 並轉譯狀態碼:
 /// 404 → NotFound、403 → Forbidden、422 → BadInput(對外變 400)、其他 → Invocation(對外 502)。
 /// </summary>
 public sealed class WorkflowEngineClient : IWorkflowEngineClient
 {
     private const string FailurePrefix = "工作流服務呼叫失敗：";
-
-    // 下游 JSON 用 Web 預設(camelCase、大小寫不敏感);snake_case 欄位靠 DTO 上的 JsonPropertyName 對應。
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
 
     private readonly HttpClient _http;
     private readonly WorkflowOptions _options;
@@ -29,9 +26,9 @@ public sealed class WorkflowEngineClient : IWorkflowEngineClient
 
     private string BaseUrl => _options.BaseUrl.TrimEnd('/');
 
-    /// <summary>組一個帶 4 個內部 header 的下游請求(委由 <see cref="InternalRequest"/>);可選 JSON body。</summary>
+    /// <summary>組一個帶內部身分 header 的下游請求(委由 <see cref="InternalRequest"/>);可選 JSON body。</summary>
     private HttpRequestMessage BuildRequest(HttpMethod method, string url, UserContext ctx, object? body = null)
-        => InternalRequest.Build(method, url, _options.InternalToken, ctx, body, JsonOpts);
+        => InternalRequest.Build(method, url, _options.InternalToken, ctx, body);
 
     /// <summary>送出請求;網路錯誤與逾時統一轉成 WorkflowInvocationException(前綴由呼叫端指定)。</summary>
     private Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, string failurePrefix, CancellationToken ct)

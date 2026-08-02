@@ -44,14 +44,13 @@ public sealed class OrchestratorRunServiceTests
     [Fact]
     public async Task Start_AllocatesAtBackendFirst_ThenDispatchesOnlyCommandIdAndEmptyContext()
     {
-        var backendCalls = new List<(string Path, string Method, string? Key, string? Body)>();
+        var backendCalls = new List<(string Path, string Method, string? Key)>();
         var backend = new StubHttpMessageHandler(request =>
         {
             backendCalls.Add((
                 request.RequestUri!.AbsolutePath,
                 request.Method.Method,
-                request.Headers.TryGetValues("Idempotency-Key", out var values) ? values.Single() : null,
-                request.Content?.ReadAsStringAsync().GetAwaiter().GetResult()));
+                request.Headers.TryGetValues("Idempotency-Key", out var values) ? values.Single() : null));
             return Run(HttpStatusCode.Accepted);
         });
         var workflowCallsBeforeBackend = 0;
@@ -69,7 +68,7 @@ public sealed class OrchestratorRunServiceTests
         Assert.Equal($"/api/admin/orchestrators/{OrchestratorIdText}/runs", allocation.Path);
         Assert.Equal("POST", allocation.Method);
         Assert.Equal("root-key", allocation.Key);
-        using (var sentToBackend = JsonDocument.Parse(allocation.Body!))
+        using (var sentToBackend = JsonDocument.Parse(backend.LastBody!))
         {
             Assert.Equal(
                 new[] { "message", "conversation_id" },

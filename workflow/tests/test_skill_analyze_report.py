@@ -5,7 +5,6 @@
 """
 
 import asyncio
-import dataclasses
 
 from fastapi.testclient import TestClient
 
@@ -18,7 +17,7 @@ from app.nodes.analyze_report import (
     make_doc_insights_node,
     make_report_synthesize_node,
 )
-from tests.conftest import auth_headers, invoke_builtin, patch_retrieve
+from tests.conftest import auth_headers, invoke_builtin, patch_retrieve, swap_skill
 from tests.kbquery_fakes import FakeStructuredLLM, RecordingLLM, make_deps
 
 client = TestClient(app)
@@ -141,7 +140,6 @@ def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
         [{"document_id": "d1", "title": "季報", "content": "營收成長", "score": 0.8}],
     )
 
-    original = skills.get("analyze-report")
     llm = FakeStructuredLLM(
         outputs={
             _DocInsightsOutput: _DocInsightsOutput(insights="要點"),
@@ -149,16 +147,10 @@ def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
         }
     )
     deps = make_deps({}, llm=llm)
-    skills._SKILLS["analyze-report"] = original.__class__(
-        skill=original.skill,
-        graph=compiler.compile(original.skill, deps),
-        input_model=original.input_model,
-        deps=deps,
-        recursion_limit=original.recursion_limit,
-        source=original.source,
-        definition=original.definition,
-    )
-    try:
+    original = skills.get("analyze-report")
+    with swap_skill(
+        "analyze-report", graph=compiler.compile(original.skill, deps), deps=deps
+    ):
         resp = client.post(
             "/skills/analyze-report/invoke",
             json={"input": {"topic": "營收"}},
@@ -169,8 +161,6 @@ def test_analyze_report_invoke_api_level_admin_role(monkeypatch):
         body = resp.json()
         assert body["skill"] == "analyze-report"
         assert body["output"]["report"] == "API 報告"
-    finally:
-        skills._SKILLS["analyze-report"] = original
 
 
 def test_analyze_report_invoke_api_level_admin_role_with_no_docs(monkeypatch):
@@ -185,10 +175,9 @@ def test_analyze_report_invoke_api_level_admin_role_with_no_docs(monkeypatch):
         outputs={_ReportSynthesizeOutput: _ReportSynthesizeOutput(report="API 報告（無資料）")}
     )
     deps = make_deps({}, llm=llm)
-    skills._SKILLS["analyze-report"] = dataclasses.replace(
-        original, graph=compiler.compile(original.skill, deps), deps=deps
-    )
-    try:
+    with swap_skill(
+        "analyze-report", graph=compiler.compile(original.skill, deps), deps=deps
+    ):
         resp = client.post(
             "/skills/analyze-report/invoke",
             json={"input": {"topic": "無資料主題"}},
@@ -199,8 +188,6 @@ def test_analyze_report_invoke_api_level_admin_role_with_no_docs(monkeypatch):
         output = resp.json()["output"]
         assert output["insights"] == "（無資料）"
         assert output["report"] == "API 報告（無資料）"
-    finally:
-        skills._SKILLS["analyze-report"] = original
 
 
 # ---------------------------------------------------------------------------

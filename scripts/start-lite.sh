@@ -1,7 +1,7 @@
 #!/bin/bash
 # 模式 Lite：無容器啟動——四個服務全在主機本機程序跑（backend/workflow/platform/frontend），
 # 外加 uvx 起 LiteLLM 供 mock-gpt 路由。不碰 Docker、不需 PostgreSQL/RabbitMQ/mem0/Langfuse。
-#   backend : DB_PROVIDER=inmemory EMBEDDINGS_PROVIDER=fake  （六個 InMemory repo，無 DbBootstrap）
+#   backend : DB_PROVIDER=inmemory EMBEDDINGS_PROVIDER=fake  （以 InMemory repo 取代 PostgreSQL，無 DbBootstrap；完整清單見 backend/AGENTS.md）
 #   workflow: LLM_MODEL=mock-gpt LANGFUSE_ENABLED=false
 #   platform: MEM0_MODE=inmemory OTEL_MODE=console CHAT_MODEL=mock-gpt
 #   frontend: npm run dev

@@ -12,7 +12,8 @@ public sealed class InMemoryContextRepository(
     private sealed record StoredView(ContextViewResponse Response, byte[] Canonical, string Sha);
     private sealed record Revision(ContextRevisionResponse Response, byte[] Canonical, string Sha, IReadOnlyList<ContextEvidenceInput> Evidence, IReadOnlyList<StoredView> Views);
     private sealed record RootAuthority(byte[] Canonical, string Sha);
-    private readonly object _store = new();
+    // CreateRevisionAsync awaits RAG validation while holding this gate, so a plain `lock` cannot be used.
+    private readonly SemaphoreSlim _store = new(1, 1);
     private readonly Dictionary<(string Tenant, Guid ContextId, int Revision), Revision> _revisions = new();
     private readonly Dictionary<(string Tenant, Guid ViewId), StoredView> _views = new();
     private readonly Dictionary<string, ContextPolicyResponse> _policies = new(StringComparer.Ordinal);
@@ -21,35 +22,48 @@ public sealed class InMemoryContextRepository(
     private readonly IReadOnlyCollection<string> _policyTenants = policyTenants ?? ["demo-a", "demo-b"];
 
     public void RegisterRoot(string tenantId, string userId, Guid rootRunId, string canonicalSnapshot)
-    { lock (_store) { var canonical = Backend.Api.Agents.AgentCanonicalizer.CanonicalizeDefinition(canonicalSnapshot); _rootSnapshots[(tenantId, userId, rootRunId)] = new(System.Text.Encoding.UTF8.GetBytes(canonical), ContextCanonicalizer.Hash(canonical)); } }
+    {
+        _store.Wait();
+        try { var canonical = Backend.Api.Agents.AgentCanonicalizer.CanonicalizeDefinition(canonicalSnapshot); _rootSnapshots[(tenantId, userId, rootRunId)] = new(System.Text.Encoding.UTF8.GetBytes(canonical), ContextCanonicalizer.Hash(canonical)); }
+        finally { _store.Release(); }
+    }
 
     /// <summary>Lite-mode stand-in for the `uq_context_policy_active` partial unique index: a tenant
     /// that already has an active policy rejects a second one instead of silently replacing it.</summary>
     public void SeedActivePolicy(string tenantId, JsonElement values, IReadOnlyList<ContextSourceCatalogEntry> sources)
     {
-        lock (_store)
+        _store.Wait();
+        try
         {
             if (Policy(tenantId) is not null) throw new ArgumentException("tenant already has an active context policy");
             var now = DateTime.UtcNow;
             _policies[tenantId] = new(Guid.NewGuid(), "default", values, now, now, sources);
         }
+        finally { _store.Release(); }
     }
     public void RegisterTaskContext(string tenantId, Guid rootRunId, Guid contextId)
-    { lock (_store) _taskContexts.Add((tenantId, rootRunId, contextId)); }
-
-    public Task<ContextPolicyResponse?> GetActivePolicyAsync(string tenantId, CancellationToken ct)
     {
-        lock (_store) { var policy = Policy(tenantId); if (policy is not null) ReadinessEvaluator.ValidatePolicy(policy.Values); return Task.FromResult(policy); }
+        _store.Wait();
+        try { _taskContexts.Add((tenantId, rootRunId, contextId)); }
+        finally { _store.Release(); }
     }
 
-    public Task<ContextStoredRevision> CreateRevisionAsync(string tenantId, string userId, Guid contextId, ContextRevisionSubmitRequest request, CancellationToken ct)
+    public async Task<ContextPolicyResponse?> GetActivePolicyAsync(string tenantId, CancellationToken ct)
+    {
+        await _store.WaitAsync(ct);
+        try { var policy = Policy(tenantId); if (policy is not null) ReadinessEvaluator.ValidatePolicy(policy.Values); return policy; }
+        finally { _store.Release(); }
+    }
+
+    public async Task<ContextStoredRevision> CreateRevisionAsync(string tenantId, string userId, Guid contextId, ContextRevisionSubmitRequest request, CancellationToken ct)
     {
         var candidateCanonical = ContextCanonicalizer.CanonicalizeDefinition(request.Definition);
         var evidence = request.Evidence ?? Array.Empty<ContextEvidenceInput>();
         ContextCanonicalizer.ValidateEvidence(evidence);
         var views = request.Views ?? Array.Empty<ContextViewInput>();
         if (views.GroupBy(x => x.ViewType, StringComparer.Ordinal).Any(x => string.IsNullOrWhiteSpace(x.Key) || x.Count() != 1)) throw new ArgumentException("context views are invalid");
-        lock (_store)
+        await _store.WaitAsync(ct);
+        try
         {
             var policy = Policy(tenantId) ?? throw new ContextPolicyUnavailableException();
             if (_revisions.Keys.Any(x => x.ContextId == contextId && x.Tenant != tenantId)) throw new ArgumentException("context_id belongs to another tenant");
@@ -73,7 +87,7 @@ public sealed class InMemoryContextRepository(
                 foreach (var item in evidence)
                 {
                     ContextCanonicalizer.ValidateEvidencePin(item, selectedSource.SourceId, selectedSource.AdapterId, selectedSource.EvidenceType);
-                    if (!Guid.TryParseExact(item.SourceId, "D", out var documentId) || !allowed.Contains(item.SourceId!) || !TryContentRef(item.ContentRef!, out var refDocument, out var chunkId) || documentId != refDocument || rag is null || !rag.ContextEvidenceMatchesAsync(tenantId, documentId, chunkId, item.ContentHash!, ct).GetAwaiter().GetResult()) throw new ArgumentException("Context evidence is not authorized by the root snapshot");
+                    if (!Guid.TryParseExact(item.SourceId, "D", out var documentId) || !allowed.Contains(item.SourceId!) || !TryContentRef(item.ContentRef!, out var refDocument, out var chunkId) || documentId != refDocument || rag is null || !await rag.ContextEvidenceMatchesAsync(tenantId, documentId, chunkId, item.ContentHash!, ct)) throw new ArgumentException("Context evidence is not authorized by the root snapshot");
                 }
             }
             var revision = _revisions.Keys.Where(x => x.Tenant == tenantId && x.ContextId == contextId).Select(x => x.Revision).DefaultIfEmpty().Max() + 1;
@@ -93,29 +107,36 @@ public sealed class InMemoryContextRepository(
             var response = new ContextRevisionResponse(contextId, revision, request.RootRunId, decision.Status, decision.Readiness, decision.Unmet, policy.Id, JsonDocument.Parse(canonical).RootElement.Clone(), request.AsOf ?? now, now, request.ExpiresAt, ContextStatuses.IsReady(decision.Status) && readyView is not null ? new(contextId, revision, readyView.Response.ViewId) : null, selectedSource?.SourceId, selectedSource?.AdapterId);
             var stored = new Revision(response, System.Text.Encoding.UTF8.GetBytes(canonical), ContextCanonicalizer.Hash(canonical), evidence.ToList(), storedViews);
             _revisions[(tenantId, contextId, revision)] = stored;
-            return Task.FromResult(ToStored(stored));
+            return ToStored(stored);
         }
+        finally { _store.Release(); }
     }
 
-    public Task<ContextRevisionResponse?> GetRevisionAsync(string tenantId, Guid contextId, int revision, CancellationToken ct)
+    public async Task<ContextRevisionResponse?> GetRevisionAsync(string tenantId, Guid contextId, int revision, CancellationToken ct)
     {
-        lock (_store) { var value = _revisions.GetValueOrDefault((tenantId, contextId, revision)); return Task.FromResult(value is null ? null : ToStored(value).Revision); }
+        await _store.WaitAsync(ct);
+        try { var value = _revisions.GetValueOrDefault((tenantId, contextId, revision)); return value is null ? null : ToStored(value).Revision; }
+        finally { _store.Release(); }
     }
 
-    public Task<ContextViewResponse?> GetViewAsync(string tenantId, Guid viewId, CancellationToken ct)
+    public async Task<ContextViewResponse?> GetViewAsync(string tenantId, Guid viewId, CancellationToken ct)
     {
-        lock (_store) { var value = _views.GetValueOrDefault((tenantId, viewId)); return Task.FromResult(value is null ? null : ReadView(value)); }
+        await _store.WaitAsync(ct);
+        try { var value = _views.GetValueOrDefault((tenantId, viewId)); return value is null ? null : ReadView(value); }
+        finally { _store.Release(); }
     }
 
-    public Task<ContextStoredRevision?> GetLatestReadyForRunAsync(string tenantId, string userId, Guid rootRunId, CancellationToken ct)
+    public async Task<ContextStoredRevision?> GetLatestReadyForRunAsync(string tenantId, string userId, Guid rootRunId, CancellationToken ct)
     {
-        lock (_store)
+        await _store.WaitAsync(ct);
+        try
         {
-            if (!_rootSnapshots.ContainsKey((tenantId, userId, rootRunId))) return Task.FromResult<ContextStoredRevision?>(null);
+            if (!_rootSnapshots.ContainsKey((tenantId, userId, rootRunId))) return null;
             var found = _revisions.Where(x => x.Key.Tenant == tenantId && x.Value.Response.RootRunId == rootRunId && !_taskContexts.Contains((tenantId, rootRunId, x.Key.ContextId)) && ContextStatuses.IsReady(x.Value.Response.Status))
                 .OrderByDescending(x => x.Value.Response.CreatedAt).Select(x => x.Value).FirstOrDefault();
-            return Task.FromResult(found is null ? null : ToStored(found));
+            return found is null ? null : ToStored(found);
         }
+        finally { _store.Release(); }
     }
 
     private ContextPolicyResponse? Policy(string tenant)

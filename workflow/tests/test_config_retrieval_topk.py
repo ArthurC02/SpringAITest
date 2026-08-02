@@ -19,13 +19,10 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import skills
-from app.engine import compiler
-from app.engine import skill as skill_mod
 from app.main import app
 from app.settings import settings
 from app.skills import config_apply, custom
-from tests.conftest import auth_headers, install_fake_get
+from tests.conftest import auth_headers, install_fake_get, register_builtin_skill
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
@@ -134,24 +131,9 @@ def active_backend(monkeypatch):
     return fake
 
 
-def _register_builtin_skill(name, template, base_deps):
-    """把 template 以 source='builtin' 塞進註冊表（模擬啟動預編圖），回清理函式。"""
-    skill = skill_mod.parse_source(template.format(name=name))
-    loaded = skills.LoadedSkill(
-        skill=skill,
-        graph=compiler.compile(skill, base_deps),
-        input_model=skill_mod.build_input_model(skill),
-        deps=base_deps,
-        recursion_limit=compiler.recursion_limit(skill),
-        source="builtin",
-    )
-    skills._SKILLS[name] = loaded
-    return lambda: skills._SKILLS.pop(name, None)
-
-
 @pytest.fixture
 def probe(fake_base_deps):
-    cleanup = _register_builtin_skill("cfg-topk-probe", RETRIEVE_SKILL, fake_base_deps)
+    cleanup = register_builtin_skill("cfg-topk-probe", RETRIEVE_SKILL, fake_base_deps)
     yield "cfg-topk-probe"
     cleanup()
 
@@ -253,7 +235,7 @@ def test_tenant_isolation_topk_not_cross_contaminated(active_backend, fake_base_
     """demo-a=40、demo-b=7（同 updated_at 字串）→ 各收各的，互不污染。"""
     active_backend.set_active("demo-a", {"retrieval.top_k": 40}, updated_at="shared-v")
     active_backend.set_active("demo-b", {"retrieval.top_k": 7}, updated_at="shared-v")
-    cleanup = _register_builtin_skill("cfg-topk-probe", RETRIEVE_SKILL, fake_base_deps)
+    cleanup = register_builtin_skill("cfg-topk-probe", RETRIEVE_SKILL, fake_base_deps)
     try:
         _invoke("cfg-topk-probe", tenant_id="demo-a")
         _invoke("cfg-topk-probe", tenant_id="demo-b")
@@ -295,7 +277,7 @@ def test_script_cannot_tamper_seeded_retrieval_top_k(active_backend, fake_base_d
     還原 bug（FORBIDDEN_WRITE_KEYS 拿掉 CONFIG_SEED_KEYS）→ script 寫入生效 → retrieve 收 999 → 紅。
     """
     active_backend.set_active("demo-a", {"retrieval.top_k": 17})
-    cleanup = _register_builtin_skill("cfg-topk-tamper", TAMPER_SKILL, fake_base_deps)
+    cleanup = register_builtin_skill("cfg-topk-tamper", TAMPER_SKILL, fake_base_deps)
     try:
         _invoke("cfg-topk-tamper")
         assert captured_top_k == [17]

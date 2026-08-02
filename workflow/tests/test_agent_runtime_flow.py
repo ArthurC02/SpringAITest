@@ -70,7 +70,7 @@ def flow_artifact(
     )
 
 
-# legacy flow 的輸出過濾是這個模組最重要的安全邏輯：身分/授權鍵與稽核鍵都不得回流給模型。
+# Flow runtime wrapper 的輸出過濾是這個模組最重要的安全邏輯：身分/授權鍵與稽核鍵都不得回流給模型。
 FORBIDDEN_OUTPUT_KEYS = (
     "tenant_id",
     "user_id",

@@ -29,9 +29,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import create_react_agent
 from pydantic import create_model
 
-# ponytail: create_react_agent 在 LangGraph V1 標記 deprecated（V2 移除，改 langchain.agents.
-# create_agent）。pyproject 釘 langgraph>=1.0,<2.0，故 V2 移除不會在此 pin 內發生；升級時
-# 只換這一個 import + 呼叫點（recursion_limit/timeout 語意由 pinning test 守著，換 API 要重驗）。
+# LangGraph V2 將移除此 API；升級時須一併驗證 recursion_limit 與 timeout 語意。
 
 from app.engine import tool_registry
 from app.engine.node_registry import node

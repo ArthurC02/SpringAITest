@@ -1,5 +1,7 @@
 # Skill 概念重整 — 設計
 
+> **Superseded P5 policy (2026-08-02):** 本文件的 P5 相容收斂設計已由 [Architecture Hard Reset](../architecture-hard-reset/03-design.md) 取代；原文保留為歷史理由。新設計尚未實作。
+
 > 狀態：規劃中。依 02-spec 決策展開各服務實作設計；行號依 `feat/dotnet-backend` HEAD（`49ead70`）。
 
 ## 1. P0 正名與文件（零行為變更）

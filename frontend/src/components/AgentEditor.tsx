@@ -36,6 +36,7 @@ import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useConfirm } from './ConfirmDialog'
+import Modal from './Modal'
 import { runWithToast, useToast } from './Toast'
 import BusinessRuleEditor from './BusinessRuleEditor'
 import AgentTestConsole from './AgentTestConsole'
@@ -290,7 +291,7 @@ function AudienceEditor({
 
 /**
  * Agent Builder 編輯器(建立精靈 + 草稿編輯合一)。負責:身分/System Prompt/工具/知識來源/
- * Skill 綁定表單、ETag 樂觀併發(412 提示重載)、validate(field_errors 定位欄位)、
+ * Skill 綁定表單、ETag 樂觀併發(409 提示重載)、validate(field_errors 定位欄位)、
  * 發布預覽(顯示將被固定的 skill revisions)→ publish、版本歷史 + 回溯。寫入操作僅 ADMIN。
  */
 export default function AgentEditor({
@@ -325,10 +326,7 @@ export default function AgentEditor({
   const [showPreview, setShowPreview] = useState(false)
   /** 使用者一動表單就不再套用後到的系統預設值(避免蓋掉已輸入內容)。 */
   const editedRef = useRef(false)
-  const previewTriggerRef = useRef<HTMLButtonElement | null>(null)
   const previewCancelRef = useRef<HTMLButtonElement | null>(null)
-  const previewConfirmRef = useRef<HTMLButtonElement | null>(null)
-  const restorePreviewFocusRef = useRef(false)
 
   const catalogRes = useResource(listSkillCatalog)
   const catalog: SkillCatalogEntry[] = (catalogRes.data ?? []).filter(
@@ -400,30 +398,8 @@ export default function AgentEditor({
     void fetchAgent(true)
   }, [fetchAgent])
 
-  const closePreview = useCallback(() => {
-    restorePreviewFocusRef.current = true
-    setShowPreview(false)
-  }, [])
-
-  useEffect(() => {
-    if (!showPreview && !busy && restorePreviewFocusRef.current) {
-      restorePreviewFocusRef.current = false
-      previewTriggerRef.current?.focus()
-    }
-  }, [busy, showPreview])
-
-  useEffect(() => {
-    if (!showPreview) return
-    previewCancelRef.current?.focus()
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busy) {
-        event.preventDefault()
-        closePreview()
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [busy, closePreview, showPreview])
+  // 開/關/Escape/Tab 循環/觸發焦點還原都交給 Modal（原生 <dialog>）；這裡只管 show/hide 狀態。
+  const closePreview = useCallback(() => setShowPreview(false), [])
 
   // 任何欄位編輯都讓上次的 validation 失效(規格 §2.2:draft 再修改後必須重新驗證)。
   function patch(p: Partial<AgentDraft>) {
@@ -1206,7 +1182,6 @@ export default function AgentEditor({
                   <button
                     className="btn btn--info"
                     type="button"
-                    ref={previewTriggerRef}
                     onClick={() => setShowPreview(true)}
                     disabled={busy || !canPublish}
                     title={!validatedForCurrent ? '請先儲存並通過驗證' : undefined}
@@ -1229,24 +1204,16 @@ export default function AgentEditor({
       )}
 
       {/* ── 發布預覽：完整顯示 immutable revision 的權限、規則、Skill 與 runtime 摘要。 ── */}
-      {showPreview && (
-        <div className="confirm-overlay" onClick={() => !busy && closePreview()}>
-          <div
-            className="confirm-dialog agent-preview"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="agent-preview-title"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(event) => {
-              if (event.key !== 'Tab') return
-              event.preventDefault()
-              const next =
-                document.activeElement === previewCancelRef.current
-                  ? previewConfirmRef
-                  : previewCancelRef
-              next.current?.focus()
-            }}
-          >
+      <Modal
+        open={showPreview}
+        onClose={closePreview}
+        busy={busy}
+        initialFocusRef={previewCancelRef}
+        className="modal-host"
+        aria-labelledby="agent-preview-title"
+      >
+        {showPreview && (
+          <div className="confirm-dialog agent-preview">
             <h4 id="agent-preview-title" className="agent-block__title">
               發布預覽
             </h4>
@@ -1371,7 +1338,6 @@ export default function AgentEditor({
                 取消
               </button>
               <button
-                ref={previewConfirmRef}
                 className="btn btn--primary"
                 type="button"
                 onClick={() => void onPublish()}
@@ -1381,8 +1347,8 @@ export default function AgentEditor({
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
     </div>
   )
 }

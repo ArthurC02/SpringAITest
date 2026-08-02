@@ -15,7 +15,15 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
     private readonly IAgentRunRepository _agentRuns;
     private readonly IAgentRunApprovalDecisionTransition _transition;
     private readonly TimeProvider _timeProvider;
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
+
+    /// <summary>
+    /// 併發回歸測試專用:讓測試在不重造整支狀態機的前提下,直接對這支 repository 的鎖序做斷言。
+    /// 同 <see cref="InMemorySkillRepository.ReferenceSyncRoot"/> 先例,只供同組件/測試協調,不是公開
+    /// repository 契約。
+    /// </summary>
+    internal Lock ReferenceSyncRoot => _gate;
+
     private readonly Dictionary<Guid, AgentRunApprovalResponse> _items = new();
     private readonly HashSet<(Guid Approval, string Key)> _decisions = new();
     private readonly Dictionary<Guid, (string Tenant, string Owner, string Status)> _runs = new();
@@ -212,21 +220,36 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
         if (liveRun.CancelRequested)
             return (AgentRunApprovalWriteStatus.InvalidState, null, "run cancellation was requested");
 
+        // The snapshot can race with cancellation. Re-check under this gate then the AgentRun gate,
+        // matching ConsumeAsync's lock order; fail closed when atomic inspection is unavailable.
+        if (_agentRuns is not IAgentRunCancellationFence fence)
+        {
+            // An adapter that doesn't implement the cancellation-fence seam cannot be verified
+            // atomically; fail closed rather than trust the earlier snapshot.
+            return (AgentRunApprovalWriteStatus.InvalidState, null, "run cancellation was requested");
+        }
+
         lock (_gate)
         {
-            var entry = _effects.SingleOrDefault(x => x.Value.Id == effectId);
-            if (entry.Key == default || entry.Key.Run != runId || !_runs.TryGetValue(runId, out var storedRun) || storedRun.Tenant != tenantId)
-                return (AgentRunApprovalWriteStatus.NotFound, null, null);
-            if (entry.Value.Status == "completed")
+            lock (fence.SyncRoot)
             {
-                if (entry.Value.RecordId == recordId && entry.Value.Value == request.Value)
-                    return (AgentRunApprovalWriteStatus.Replay, new AgentRunWriteEvidenceResponse(1, "replayed"), null);
-                return (AgentRunApprovalWriteStatus.Conflict, null, "write effect payload changed");
+                if (fence.IsCancelRequested(tenantId, run.Owner, runId))
+                    return (AgentRunApprovalWriteStatus.InvalidState, null, "run cancellation was requested");
+
+                var entry = _effects.SingleOrDefault(x => x.Value.Id == effectId);
+                if (entry.Key == default || entry.Key.Run != runId || !_runs.TryGetValue(runId, out var storedRun) || storedRun.Tenant != tenantId)
+                    return (AgentRunApprovalWriteStatus.NotFound, null, null);
+                if (entry.Value.Status == "completed")
+                {
+                    if (entry.Value.RecordId == recordId && entry.Value.Value == request.Value)
+                        return (AgentRunApprovalWriteStatus.Replay, new AgentRunWriteEvidenceResponse(1, "replayed"), null);
+                    return (AgentRunApprovalWriteStatus.Conflict, null, "write effect payload changed");
+                }
+                if (entry.Value.Status != "reserved") return (AgentRunApprovalWriteStatus.Conflict, null, "write effect is not reservable");
+                _effects[entry.Key] = entry.Value with { Status = "completed", RecordId = recordId, Value = request.Value };
+                _outbox[effectId] = (tenantId, recordId, request.Value);
+                return (AgentRunApprovalWriteStatus.Success, new AgentRunWriteEvidenceResponse(1, "written"), null);
             }
-            if (entry.Value.Status != "reserved") return (AgentRunApprovalWriteStatus.Conflict, null, "write effect is not reservable");
-            _effects[entry.Key] = entry.Value with { Status = "completed", RecordId = recordId, Value = request.Value };
-            _outbox[effectId] = (tenantId, recordId, request.Value);
-            return (AgentRunApprovalWriteStatus.Success, new AgentRunWriteEvidenceResponse(1, "written"), null);
         }
     }
 

@@ -5,8 +5,11 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace Backend.Api.Tests;
 
-public sealed class D7FeatureGateTests
+public sealed class D7FeatureGateTests : IClassFixture<D7FeatureGateTests.DisabledFactory>
 {
+    private readonly DisabledFactory _factory;
+    public D7FeatureGateTests(DisabledFactory factory) => _factory = factory;
+
     public static TheoryData<HttpMethod, string> HiddenRoutes => new()
     {
         { HttpMethod.Get, $"/api/runs/{Guid.NewGuid():D}/approvals" },
@@ -33,17 +36,16 @@ public sealed class D7FeatureGateTests
         HttpMethod method,
         string path)
     {
-        using var factory = new DisabledFactory();
         using var request = new HttpRequestMessage(method, path);
         if (method != HttpMethod.Get)
             request.Content = JsonContent.Create(new { deliberately_invalid = true });
 
-        var response = await factory.CreateClient().SendAsync(request);
+        var response = await _factory.CreateClient().SendAsync(request);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
-    private sealed class DisabledFactory : WebApplicationFactory<Program>
+    public sealed class DisabledFactory : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

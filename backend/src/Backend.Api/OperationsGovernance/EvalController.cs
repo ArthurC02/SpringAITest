@@ -5,6 +5,7 @@ using Backend.Api.Agents;
 using Backend.Api.Common;
 using Backend.Api.Skills;
 using Microsoft.AspNetCore.Mvc;
+using static Backend.Api.Common.ApiErrors;
 
 namespace Backend.Api.OperationsGovernance;
 
@@ -102,7 +103,7 @@ public sealed class EvalController(IEvalRepository evals, IEvalRunner runner) : 
         var budgetMs = request.BudgetMs ?? MaxBudgetMs;
 
         var suiteRevision = await evals.GetSuiteRevisionAsync(tenant, suiteId, revision, ct)
-            ?? throw new ApiException(404, $"找不到 Eval Suite revision：{suiteId}@{revision}");
+            ?? throw ApiErrors.NotFound(" Eval Suite revision", $"{suiteId}@{revision}");
 
         var candidateRefJson = candidateRef.GetRawText();
         var candidatePinsJson = candidate.Pins?.GetRawText();
@@ -180,16 +181,6 @@ public sealed class EvalController(IEvalRepository evals, IEvalRunner runner) : 
     }
 
     private void RequireManage() => Request.RequireCapability("workflow.manage");
-
-    private static string Required(string? value, string field, int max)
-    {
-        value = value?.Trim();
-        if (string.IsNullOrWhiteSpace(value) || value.Length > max || value.Any(char.IsControl))
-        {
-            throw new ApiException(400, $"{field} is required");
-        }
-        return value;
-    }
 
     private static int JsonBytes(JsonElement value) => System.Text.Encoding.UTF8.GetByteCount(value.GetRawText());
 

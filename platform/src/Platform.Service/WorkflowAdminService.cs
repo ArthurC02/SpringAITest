@@ -12,7 +12,7 @@ public sealed class WorkflowAdminService : IWorkflowAdminService
 
     public WorkflowAdminService(BackendClient backend) => _backend = backend;
 
-    public async Task<AgentProxyResponse> SendAsync(
+    public Task<AgentProxyResponse> SendAsync(
         HttpMethod method,
         string resource,
         Guid? id,
@@ -38,18 +38,13 @@ public sealed class WorkflowAdminService : IWorkflowAdminService
             path += "/" + suffix;
         }
 
-        var request = _backend.BuildRequest(
+        return _backend.SendForAgentProxyAsync(
             method,
             path,
             context,
-            body.HasValue ? (object)body.Value : null);
-        if (!string.IsNullOrEmpty(ifMatch))
-        {
-            request.Headers.TryAddWithoutValidation("If-Match", ifMatch);
-        }
-
-        var (status, responseBody, etag) = await _backend.SendForProxyAsync(
-            request, FailurePrefix, cancellationToken);
-        return new AgentProxyResponse(status, responseBody, etag);
+            body.HasValue ? (object)body.Value : null,
+            FailurePrefix,
+            string.IsNullOrEmpty(ifMatch) ? null : ("If-Match", ifMatch),
+            cancellationToken);
     }
 }

@@ -69,18 +69,16 @@ public sealed class AgentService : IAgentService
     /// <summary>
     /// 2xx 與 4xx(含 draft concurrency 的 409/428)一律原樣穿透:body 直接是 backend 的 JSON
     /// (domain snake_case 或 ApiError)，ETag 若有則帶回;5xx 與傳輸失敗由
-    /// <see cref="BackendClient.SendForProxyAsync"/> 收斂成對外 502。
+    /// <see cref="BackendClient.SendForAgentProxyAsync"/> 收斂成對外 502。
     /// </summary>
-    private async Task<AgentProxyResponse> ProxyAsync(
+    private Task<AgentProxyResponse> ProxyAsync(
         HttpMethod method, string path, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct)
-    {
-        var req = _backend.BuildRequest(method, path, ctx, body.HasValue ? (object)body.Value : null);
-        if (!string.IsNullOrEmpty(ifMatch))
-        {
-            req.Headers.TryAddWithoutValidation("If-Match", ifMatch);
-        }
-
-        var (status, content, etag) = await _backend.SendForProxyAsync(req, FailurePrefix, ct);
-        return new AgentProxyResponse(status, content, etag);
-    }
+        => _backend.SendForAgentProxyAsync(
+            method,
+            path,
+            ctx,
+            body.HasValue ? (object)body.Value : null,
+            FailurePrefix,
+            string.IsNullOrEmpty(ifMatch) ? null : ("If-Match", ifMatch),
+            ct);
 }

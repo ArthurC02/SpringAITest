@@ -227,9 +227,7 @@ public sealed class AgentController : ControllerBase
         var tenantId = Request.RequireTenant();
         var agent = await _repo.GetAsync(tenantId, id, ct) ?? throw NotFound(id);
         var sourceDefinition = await _repo.GetRevisionDefinitionAsync(tenantId, id, revision, ct)
-                               ?? throw new ApiException(
-                                   StatusCodes.Status404NotFound,
-                                   $"找不到 Agent revision：{id}#{revision}");
+                               ?? throw ApiErrors.NotFound(" Agent revision", $"{id}#{revision}");
         var lifecycleDefinition =
             AgentCanonicalizer.CanonicalizeForLifecycleWrite(sourceDefinition);
         var definitionErrors =
@@ -255,7 +253,7 @@ public sealed class AgentController : ControllerBase
             ct);
         if (result.Status == AgentWriteStatus.NotFound)
         {
-            throw new ApiException(StatusCodes.Status404NotFound, $"找不到 Agent revision：{id}#{revision}");
+            throw ApiErrors.NotFound(" Agent revision", $"{id}#{revision}");
         }
         if (result.Status == AgentWriteStatus.InvalidReference)
         {

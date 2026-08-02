@@ -112,8 +112,7 @@ public sealed class SkillController : ControllerBase
         var row = await _repo.GetRevisionAsync(Request.RequireTenant(), name, revision, ct);
         if (row is null)
         {
-            throw new ApiException(
-                StatusCodes.Status404NotFound, $"找不到 Skill revision：{name}#{revision}");
+            throw ApiErrors.NotFound(" Skill revision", $"{name}#{revision}");
         }
 
         if (!string.Equals(SkillHash.Sha256(row.Definition), row.DefinitionSha256, StringComparison.Ordinal))
@@ -315,8 +314,7 @@ public sealed class SkillController : ControllerBase
         var target = await _repo.GetRevisionAsync(tenantId, name, revision, ct);
         if (target is null)
         {
-            throw new ApiException(
-                StatusCodes.Status404NotFound, $"找不到 Skill revision：{name}#{revision}");
+            throw ApiErrors.NotFound(" Skill revision", $"{name}#{revision}");
         }
 
         SkillMetadata meta;

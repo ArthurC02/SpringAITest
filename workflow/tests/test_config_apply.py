@@ -19,14 +19,16 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import skills
 from app.engine import compiler
-from app.engine import skill as skill_mod
 from app.main import app
 from app.security import RequestContext
 from app.settings import settings
 from app.skills import config_apply, custom
-from tests.conftest import auth_headers as _headers, install_fake_get
+from tests.conftest import (
+    auth_headers as _headers,
+    install_fake_get,
+    register_builtin_skill,
+)
 from tests.kbquery_fakes import make_deps
 
 client = TestClient(app)
@@ -380,21 +382,6 @@ def build_spy(monkeypatch):
     return calls
 
 
-def _register_builtin_probe(name, base_deps):
-    """把一支 script skill 以 source='builtin' 塞進註冊表（模擬啟動預編圖），回清理函式。"""
-    skill = skill_mod.parse_source(SCRIPT_SKILL.format(name=name))
-    loaded = skills.LoadedSkill(
-        skill=skill,
-        graph=compiler.compile(skill, base_deps),
-        input_model=skill_mod.build_input_model(skill),
-        deps=base_deps,
-        recursion_limit=compiler.recursion_limit(skill),
-        source="builtin",
-    )
-    skills._SKILLS[name] = loaded
-    return lambda: skills._SKILLS.pop(name, None)
-
-
 # ---------------------------------------------------------------------------
 # SSR-P4-018（a）：workflow 直接向 backend 取 active，帶 internal token + 身分頭
 # ---------------------------------------------------------------------------
@@ -458,7 +445,7 @@ def test_resolve_seeds_retrieval_top_k_only_when_explicitly_overridden(
 
 def test_no_active_builtin_uses_startup_graph(backend, fake_base_deps, build_spy):
     """/active 404 → per_config=None → builtin 用啟動預編圖，_build_graph 不被再呼叫。"""
-    cleanup = _register_builtin_probe("cfg-builtin-probe", fake_base_deps)
+    cleanup = register_builtin_skill("cfg-builtin-probe", SCRIPT_SKILL, fake_base_deps)
     try:
         resp = client.post(
             "/skills/cfg-builtin-probe/invoke",
@@ -485,7 +472,7 @@ def test_no_active_builtin_uses_startup_graph(backend, fake_base_deps, build_spy
 def test_active_override_recompiles_builtin_with_per_config(backend, fake_base_deps, build_spy):
     """【SSR-P4-012 / 縫⑤】builtin 有覆寫 → 以 loaded.skill + per_config 重編（非啟動圖），deps 反映覆寫。"""
     backend.set_active("demo-a", FULL_OVERRIDE, updated_at="v1")
-    cleanup = _register_builtin_probe("cfg-builtin-probe", fake_base_deps)
+    cleanup = register_builtin_skill("cfg-builtin-probe", SCRIPT_SKILL, fake_base_deps)
     try:
         resp = client.post(
             "/skills/cfg-builtin-probe/invoke",
@@ -629,7 +616,7 @@ def test_active_failure_builtin_still_uses_startup_graph(
     """
     backend.active_fail = failure
     backend.set_active("demo-a", FULL_OVERRIDE)  # 有設定但取不到 → 不得偷用
-    cleanup = _register_builtin_probe("cfg-builtin-probe", fake_base_deps)
+    cleanup = register_builtin_skill("cfg-builtin-probe", SCRIPT_SKILL, fake_base_deps)
     try:
         resp = client.post(
             "/skills/cfg-builtin-probe/invoke",

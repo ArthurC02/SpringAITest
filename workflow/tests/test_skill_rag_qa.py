@@ -18,6 +18,7 @@ from tests.conftest import (
     auth_headers,
     invoke_builtin,
     patch_retrieve,
+    swap_skill,
 )
 from tests.kbquery_fakes import FakeStructuredLLM, RecordingLLM, make_deps
 
@@ -171,19 +172,12 @@ def test_rag_qa_invoke_api_level_with_docs(monkeypatch):
         [{"document_id": "doc-1", "title": "文件", "content": "內容片段", "score": 0.9}],
     )
 
-    original = skills.get("rag-qa")
     llm = FakeStructuredLLM(outputs={_RagAnswerOutput: _RagAnswerOutput(answer="API 答案")})
     deps = make_deps({}, llm=llm)
-    skills._SKILLS["rag-qa"] = original.__class__(
-        skill=original.skill,
-        graph=compiler.compile(original.skill, deps),
-        input_model=original.input_model,
-        deps=deps,
-        recursion_limit=original.recursion_limit,
-        source=original.source,
-        definition=original.definition,
-    )
-    try:
+    original = skills.get("rag-qa")
+    with swap_skill(
+        "rag-qa", graph=compiler.compile(original.skill, deps), deps=deps
+    ):
         resp = client.post(
             "/skills/rag-qa/invoke",
             json={"input": {"question": "這是什麼？"}},
@@ -198,8 +192,6 @@ def test_rag_qa_invoke_api_level_with_docs(monkeypatch):
             {"document_id": "doc-1", "title": "文件", "snippet": "內容片段"}
         ]
         assert not any(k.startswith("__") for k in body["output"])
-    finally:
-        skills._SKILLS["rag-qa"] = original
 
 
 def test_rag_qa_invoke_api_level_no_docs_returns_fixed_answer(monkeypatch):

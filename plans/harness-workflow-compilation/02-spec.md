@@ -1,5 +1,7 @@
 # Harness 包覆 Business Workflow — 規格書
 
+> **Historical delivery record (2026-08-02):** 本文件保留 P1–P4 的設計理由；未來契約以 [Architecture Hard Reset specification](../architecture-hard-reset/02-spec.md) 為目標，現況仍以程式碼與測試為準。
+
 > 依據 [01-plan.md](01-plan.md)，本文件定義每個 Phase 的精確技術規格。
 
 ---

@@ -235,7 +235,7 @@ class RevisionArtifactReader:
 
 def read_artifact_resource(artifact: LoadedSkillArtifact, path: str) -> str:
     if artifact.kind != "agentic":
-        raise ArtifactError("legacy flow artifacts have no readable package resources")
+        raise ArtifactError("Business Workflow artifacts have no readable package resources")
     if not isinstance(path, str) or not path.strip():
         raise ArtifactError("resource path must not be blank")
     normalized = path.strip().replace("\\", "/")

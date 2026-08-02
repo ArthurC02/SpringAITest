@@ -3,17 +3,27 @@ using static Platform.Web.Tests.ApiTestHelpers;
 
 namespace Platform.Web.Tests;
 
+// G4:FakeWorkflowAdminService 是無狀態的 echo fake(見 Fakes.cs XML doc),沒有靜態呼叫紀錄或計數,
+// 各測試只斷言「自己這次請求」回傳的 body/status/header,故按旗標值分兩組共用 host 是安全的。
 public sealed class WorkflowAdminApiTests
+    : IClassFixture<WorkflowAdminApiTests.DisabledFixture>, IClassFixture<WorkflowAdminApiTests.EnabledFixture>
 {
+    private readonly DisabledFixture _disabled;
+    private readonly EnabledFixture _enabled;
+
+    public WorkflowAdminApiTests(DisabledFixture disabled, EnabledFixture enabled)
+    {
+        _disabled = disabled;
+        _enabled = enabled;
+    }
+
     [Theory]
     [InlineData("/api/admin/workflows")]
     [InlineData("/api/admin/workflows/catalog/nodes")]
     [InlineData("/api/admin/orchestrators")]
     public async Task FlagOff_Returns404BeforeAuthentication(string path)
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: false);
-
-        var response = await factory.CreateClient().GetAsync(path);
+        var response = await _disabled.CreateClient().GetAsync(path);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -22,8 +32,7 @@ public sealed class WorkflowAdminApiTests
     [Fact]
     public async Task FlagOff_Returns404_EvenWithExactCapability()
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: false);
-        var client = factory.CreateClient().WithToken(factory.IssueToken(
+        var client = _disabled.CreateClient().WithToken(_disabled.IssueToken(
             role: "ADMIN", capabilities: new[] { "workflow.manage" }));
 
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/admin/workflows")).StatusCode);
@@ -35,9 +44,7 @@ public sealed class WorkflowAdminApiTests
     [InlineData("/api/admin/orchestrators")]
     public async Task FlagOn_AnonymousReturns401(string path)
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
-
-        var response = await factory.CreateClient().GetAsync(path);
+        var response = await _enabled.CreateClient().GetAsync(path);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
@@ -50,8 +57,7 @@ public sealed class WorkflowAdminApiTests
     [InlineData("ADMIN", "/api/admin/orchestrators")]
     public async Task RoleWithoutWorkflowManageReturns403(string role, string path)
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
-        var client = factory.CreateClient().WithToken(factory.IssueToken(role: role));
+        var client = _enabled.CreateClient().WithToken(_enabled.IssueToken(role: role));
 
         var response = await client.GetAsync(path);
 
@@ -61,8 +67,7 @@ public sealed class WorkflowAdminApiTests
     [Fact]
     public async Task ExactCapabilityAllowsManagementAndForwardsEtag()
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
-        var client = factory.CreateClient().WithToken(factory.IssueToken(
+        var client = _enabled.CreateClient().WithToken(_enabled.IssueToken(
             role: "USER",
             capabilities: new[] { "workflow.manage" }));
         var id = Guid.Parse("11111111-1111-1111-1111-111111111111");
@@ -86,8 +91,7 @@ public sealed class WorkflowAdminApiTests
     [Fact]
     public async Task OrchestratorAdmin_ExactCapability_ForwardsResourceAndIfMatch()
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
-        var client = ManagerClient(factory);
+        var client = ManagerClient(_enabled);
         var id = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
         var response = await client.SendAsync(Request(
@@ -118,8 +122,7 @@ public sealed class WorkflowAdminApiTests
     public async Task SharedActions_AreInheritedByBothResources(
         string method, string relativePath, string expectedSuffix)
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
-        var client = ManagerClient(factory);
+        var client = ManagerClient(_enabled);
 
         foreach (var resource in new[] { "workflows", "orchestrators" })
         {
@@ -144,8 +147,7 @@ public sealed class WorkflowAdminApiTests
     [InlineData("DELETE", "/api/admin/orchestrators/11111111-1111-1111-1111-111111111111")]
     public async Task NonMutatingRoutes_DoNotForwardIfMatch(string method, string path)
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
-        var client = ManagerClient(factory);
+        var client = ManagerClient(_enabled);
 
         var response = await client.SendAsync(Request(method, path, "\"6\""));
 
@@ -156,4 +158,18 @@ public sealed class WorkflowAdminApiTests
     private static HttpClient ManagerClient(TestWebAppFactory factory)
         => factory.CreateClient().WithToken(factory.IssueToken(
             role: "USER", capabilities: new[] { "workflow.manage" }));
+
+    public sealed class DisabledFixture : TestWebAppFactory
+    {
+        public DisabledFixture() : base(workflowDesignerEnabled: false)
+        {
+        }
+    }
+
+    public sealed class EnabledFixture : TestWebAppFactory
+    {
+        public EnabledFixture() : base(workflowDesignerEnabled: true)
+        {
+        }
+    }
 }

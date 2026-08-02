@@ -9,7 +9,7 @@ namespace Backend.Api.PromptArtifacts;
 /// </summary>
 public sealed class InMemoryPromptArtifactRepository : IPromptArtifactRepository
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly Dictionary<(string Tenant, string Kind), List<ComponentEntry>> _components = new();
     private readonly Dictionary<string, List<PromptManifestRecord>> _manifests = new();
 

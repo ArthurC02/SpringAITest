@@ -60,28 +60,42 @@ function DeltaBadge({ status }: { status: EvalCaseDeltaStatus }) {
   return <span className={`chip ${cls}`}>{label}</span>
 }
 
-/** SHA/case count only exist on the detail response — fetched lazily on expand (same
- * drill-down shape as `EvalRunRow` below), never eagerly for every suite in the list. */
-function EvalSuiteRow({ suite }: { suite: EvalSuite }) {
+/** Shared "expand to load" state machine for a drill-down row: fetch only fires on
+ * open, short-circuits if already open/loading, and both row components below use it. */
+function useLazyDetail<T>(fetcher: () => Promise<T>) {
   const [open, setOpen] = useState(false)
-  const [detail, setDetail] = useState<EvalSuiteDetail | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<string | null>(null)
+  const [detail, setDetail] = useState<T | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   async function toggle() {
     const next = !open
     setOpen(next)
-    if (!next || detail || detailLoading) return
-    setDetailLoading(true)
-    setDetailError(null)
+    if (!next || detail || loading) return
+    setLoading(true)
+    setError(null)
     try {
-      setDetail(await getEvalSuite(suite.suiteId))
+      setDetail(await fetcher())
     } catch (e) {
-      setDetailError((e as Error).message)
+      setError((e as Error).message)
     } finally {
-      setDetailLoading(false)
+      setLoading(false)
     }
   }
+
+  return { open, detail, loading, error, toggle }
+}
+
+/** SHA/case count only exist on the detail response — fetched lazily on expand (same
+ * drill-down shape as `EvalRunRow` below), never eagerly for every suite in the list. */
+function EvalSuiteRow({ suite }: { suite: EvalSuite }) {
+  const {
+    open,
+    detail,
+    loading: detailLoading,
+    error: detailError,
+    toggle,
+  } = useLazyDetail<EvalSuiteDetail>(() => getEvalSuite(suite.suiteId))
 
   const current = detail?.revisions.find((r) => r.revision === detail.currentRevision) ?? null
 
@@ -153,25 +167,13 @@ function EvalRunRow({
   run: EvalRun
   onUseForRegressionGate: (runId: string) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [detail, setDetail] = useState<EvalRun | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<string | null>(null)
-
-  async function toggle() {
-    const next = !open
-    setOpen(next)
-    if (!next || detail || detailLoading) return
-    setDetailLoading(true)
-    setDetailError(null)
-    try {
-      setDetail(await getEvalRun(run.id))
-    } catch (e) {
-      setDetailError((e as Error).message)
-    } finally {
-      setDetailLoading(false)
-    }
-  }
+  const {
+    open,
+    detail,
+    loading: detailLoading,
+    error: detailError,
+    toggle,
+  } = useLazyDetail<EvalRun>(() => getEvalRun(run.id))
 
   return (
     <>

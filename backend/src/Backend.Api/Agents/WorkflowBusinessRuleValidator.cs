@@ -10,19 +10,9 @@ namespace Backend.Api.Agents;
 /// is a successful HTTP 200 response. Transport, non-2xx, malformed JSON, or a contract-incomplete valid
 /// response fail closed as 502 so an unavailable engine can never authorize publish.
 /// </summary>
-public sealed class WorkflowBusinessRuleValidator : IBusinessRuleValidator
+public sealed class WorkflowBusinessRuleValidator(HttpClient http, string baseUrl, string internalToken) : IBusinessRuleValidator
 {
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
-    private readonly HttpClient _http;
-    private readonly string _baseUrl;
-    private readonly string _internalToken;
-
-    public WorkflowBusinessRuleValidator(HttpClient http, string baseUrl, string internalToken)
-    {
-        _http = http;
-        _baseUrl = baseUrl.TrimEnd('/');
-        _internalToken = internalToken;
-    }
+    private readonly string _baseUrl = baseUrl.TrimEnd('/');
 
     public async Task<BusinessRuleValidationResult> ValidateAsync(
         string gate,
@@ -36,11 +26,11 @@ public sealed class WorkflowBusinessRuleValidator : IBusinessRuleValidator
         using var request = new HttpRequestMessage(
             HttpMethod.Post, _baseUrl + "/business-rules/validate")
         {
-            Content = JsonContent.Create(new { gate, ruleSet, referenceCatalog }, options: JsonOpts),
+            Content = JsonContent.Create(new { gate, ruleSet, referenceCatalog }, options: InternalWorkflowClient.Options),
         };
-        request.UseInternalIdentity(_internalToken, tenantId, userId, role);
+        request.UseInternalIdentity(internalToken, tenantId, userId, role);
 
-        var body = await _http.SendJsonAsync<ValidateBody>(request, Failure, JsonOpts, ct);
+        var body = await http.SendJsonAsync<ValidateBody>(request, Failure, InternalWorkflowClient.Options, ct);
 
         if (body.Valid
             && (body.CanonicalRuleSet is null

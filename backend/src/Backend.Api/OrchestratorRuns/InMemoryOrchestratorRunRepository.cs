@@ -14,7 +14,9 @@ public sealed class InMemoryOrchestratorRunRepository(
     IAgentRunRepository? agentRuns = null, IContextRepository? contexts = null,
     ContextEnrichmentState? contextState = null) : IOrchestratorRunRepository
 {
-    private readonly object _gate = new();
+    // Several critical sections await other repositories, so a plain `lock` cannot be used.
+    // SemaphoreSlim is not reentrant; helpers invoked while holding this gate must not acquire it again.
+    private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<Guid, Entry> _runs = [];
     private readonly Dictionary<(string Tenant, string User, string Key), (string Hash, Guid Run)> _keys = [];
     private readonly Dictionary<(string Tenant, string User, Guid Run, string Key), OrchestratorRunResponse> _cancelKeys = [];
@@ -61,7 +63,8 @@ public sealed class InMemoryOrchestratorRunRepository(
         }
         if (verifierSource is null || workerSources.Count == 0)
             return new(OrchestratorRunWriteStatus.InvalidState, Message: "Pinned Worker/Verifier revisions are unavailable");
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             if (_keys.TryGetValue((tenant, user, key), out var prior))
                 return prior.Hash == hash ? new(OrchestratorRunWriteStatus.Replay, ToResponse(_runs[prior.Run]), Dispatch: new(_runs[prior.Run].CommandId), Replayed: true) : new(OrchestratorRunWriteStatus.Conflict, Message: "Idempotency-Key was used for a different request");
@@ -79,22 +82,158 @@ public sealed class InMemoryOrchestratorRunRepository(
             if (contexts is IContextAuthorityRegistry registry) registry.RegisterRoot(tenant, user, id, snapshot.StoredSnapshot);
             return new(OrchestratorRunWriteStatus.Success, ToResponse(item), Dispatch: new(item.CommandId));
         }
+        finally { _gate.Release(); }
     }
 
-    public Task<OrchestratorRunResponse?> GetAsync(string tenant, string user, Guid id, CancellationToken ct) { lock (_gate) return Task.FromResult(_runs.TryGetValue(id, out var x) && x.Tenant == tenant && x.User == user ? ToResponse(x) : null); }
-    public Task<OrchestratorRunActiveLookup> FindActiveAsync(string tenant, string user, string conversation, CancellationToken ct) { lock (_gate) { var values = _runs.Values.Where(x => x.Tenant == tenant && x.User == user && x.Conversation == conversation && x.Status is "queued" or "running" or "waiting_input").Take(2).ToArray(); return Task.FromResult(values.Length switch { 1 => new OrchestratorRunActiveLookup(ToResponse(values[0])), > 1 => new OrchestratorRunActiveLookup(null, null, true), _ => new OrchestratorRunActiveLookup(null) }); } }
-    public Task<OrchestratorRunActiveLookup> FindByIdempotencyKeyAsync(string tenant, string user, string key, OrchestratorRunReplayRequest request, CancellationToken ct) { lock (_gate) { var operation = key.Split(':', 2)[0]; if (operation is not ("chat" or "resume" or "switch")) return Task.FromResult(new OrchestratorRunActiveLookup(null, IsMismatch: true)); var values = _runs.Values.Where(x => x.Tenant == tenant && x.User == user && ((_keys.ContainsKey((tenant, user, key)) && _keys[(tenant, user, key)].Run == x.Id) || _resumeKeys.ContainsKey((tenant, user, x.Id, key)))).Take(2).ToArray(); if (values.Length != 1) return Task.FromResult(values.Length > 1 ? new OrchestratorRunActiveLookup(null, null, true) : new OrchestratorRunActiveLookup(null)); var value = values[0]; if (value.Conversation != request.ConversationId || request.OrchestratorId is Guid selected && value.OrchestratorId != selected) return Task.FromResult(new OrchestratorRunActiveLookup(null, IsMismatch: true)); var messageHash = Skills.SkillHash.Sha256(request.Message!); if (operation == "chat" && _keys.TryGetValue((tenant, user, key), out var start) && start.Run == value.Id && start.Hash == Skills.SkillHash.Sha256($"{value.OrchestratorId:D}\0{value.Conversation}\0{request.Message}")) return Task.FromResult(new OrchestratorRunActiveLookup(ToResponse(value), value.CommandId)); if (operation == "resume" && _resumeKeys.TryGetValue((tenant, user, value.Id, key), out var resume) && resume.InputHash == messageHash) return Task.FromResult(new OrchestratorRunActiveLookup(ToResponse(value), resume.CommandId)); return Task.FromResult(new OrchestratorRunActiveLookup(null, IsMismatch: true)); } }
-    public Task<OrchestratorRunEventsResponse?> EventsAsync(string tenant, string user, Guid id, long after, int limit, CancellationToken ct) { lock (_gate) { if (!_runs.TryGetValue(id, out var x) || x.Tenant != tenant || x.User != user) return Task.FromResult<OrchestratorRunEventsResponse?>(null); var events = x.Events.Where(e => e.Sequence > after).Take(limit).Select(e => new OrchestratorRunEventResponse(e.Sequence, e.Type, e.Hash, e.Payload.Clone(), e.At)).ToArray(); return Task.FromResult<OrchestratorRunEventsResponse?>(new(id, events, events.Length == 0 ? after : events[^1].Sequence)); } }
-    public Task<string?> ExecutionArtifactAsync(string tenant, string user, Guid id, CancellationToken ct) { lock (_gate) return Task.FromResult(_runs.TryGetValue(id, out var x) && x.Tenant == tenant && x.User == user ? JsonSerializer.Serialize(new { snapshot_hash = x.Hash, snapshot_canonical_base64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(x.Snapshot)) }) : null); }
-    public Task<OrchestratorRunWriteResult> ResumeAsync(string tenant, string user, Guid id, string input, string key, CancellationToken ct) { lock (_gate) { if (!_runs.TryGetValue(id, out var x) || x.Tenant != tenant || x.User != user) return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound)); var inputHash = Skills.SkillHash.Sha256(input); if (_resumeKeys.TryGetValue((tenant, user, id, key), out var replay)) return Task.FromResult(string.Equals(replay.InputHash, inputHash, StringComparison.Ordinal) ? new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Replay, ToResponse(x), Dispatch: new(replay.CommandId), Replayed: true) : new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Conflict, Message: "Idempotency-Key was already used with different resume input")); if (x.Status != "waiting_input" || string.IsNullOrWhiteSpace(x.CheckpointRef) || x.CheckpointVersion < 1) return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, Message: "Root run is not waiting for input")); x.Status = "queued"; x.Version++; x.Updated = DateTime.UtcNow; x.ResumeInput = input; x.CommandId = Guid.NewGuid(); x.CommandCompleted = false; _resumeKeys[(tenant, user, id, key)] = (x.CommandId, inputHash); x.Events.Add(new(x.Events.Count + 1, "root_resumed", x.Hash, JsonDocument.Parse(JsonSerializer.Serialize(new { input })).RootElement.Clone(), x.Updated)); return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Success, ToResponse(x), Dispatch: new(x.CommandId))); } }
-    public Task<OrchestratorRunCommandClaim?> ClaimCommandAsync(string tenant, string user, Guid runId, Guid commandId, string workerId, int leaseSeconds, CancellationToken ct)
-    { lock (_gate) { if (!_runs.TryGetValue(runId, out var x) || x.Tenant != tenant || x.User != user || x.CommandId != commandId || x.CommandCompleted || x.ClaimExpiresAt > DateTime.UtcNow || string.IsNullOrWhiteSpace(workerId) || leaseSeconds is < 1 or > 300) return Task.FromResult<OrchestratorRunCommandClaim?>(null); var token = Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)); x.ClaimTokenHash = Skills.SkillHash.Sha256(token); x.ClaimExpiresAt = DateTime.UtcNow.AddSeconds(leaseSeconds); x.LeaseGeneration++; x.Status = x.Status == "queued" ? "running" : x.Status; x.Version++; x.Updated = DateTime.UtcNow; var resume = x.ResumeInput is not null; return Task.FromResult<OrchestratorRunCommandClaim?>(new(commandId, runId, resume ? "resume" : "start", token, x.ClaimExpiresAt, x.LeaseGeneration, x.Hash, Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(x.Snapshot)), resume ? x.ResumeInput : null, resume ? x.CheckpointRef : null, resume ? x.CheckpointVersion : null)); } }
-    public Task<OrchestratorRunCommandClaim?> RenewCommandAsync(string tenant, string user, Guid runId, Guid commandId, string claimToken, long leaseGeneration, int leaseSeconds, CancellationToken ct)
-    { lock (_gate) { if (string.IsNullOrWhiteSpace(claimToken) || !_runs.TryGetValue(runId, out var x) || x.Tenant != tenant || x.User != user || x.CommandId != commandId || x.CommandCompleted || leaseSeconds is < 1 or > 300 || x.LeaseGeneration != leaseGeneration || x.ClaimExpiresAt <= DateTime.UtcNow || !string.Equals(x.ClaimTokenHash, Skills.SkillHash.Sha256(claimToken), StringComparison.Ordinal)) return Task.FromResult<OrchestratorRunCommandClaim?>(null); x.ClaimExpiresAt = DateTime.UtcNow.AddSeconds(leaseSeconds); var resume = x.ResumeInput is not null; return Task.FromResult<OrchestratorRunCommandClaim?>(new(commandId, runId, resume ? "resume" : "start", claimToken, x.ClaimExpiresAt, leaseGeneration, x.Hash, Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(x.Snapshot)), resume ? x.ResumeInput : null, resume ? x.CheckpointRef : null, resume ? x.CheckpointVersion : null)); } }
-    public Task<OrchestratorRunDispatchCompleteStatus> CompleteDispatchAsync(string tenant, string user, Guid runId, Guid commandId, string claimToken, CancellationToken ct)
-    { lock (_gate) { if (!_runs.TryGetValue(runId, out var x) || x.Tenant != tenant || x.User != user || x.CommandId != commandId) return Task.FromResult(OrchestratorRunDispatchCompleteStatus.NotFound); if (x.CommandCompleted || x.ClaimExpiresAt <= DateTime.UtcNow || !string.Equals(x.ClaimTokenHash, Skills.SkillHash.Sha256(claimToken ?? ""), StringComparison.Ordinal)) return Task.FromResult(OrchestratorRunDispatchCompleteStatus.Conflict); x.DispatchCompleted = true; return Task.FromResult(OrchestratorRunDispatchCompleteStatus.Success); } }
-    public Task<OrchestratorRunRecoveryResponse> ClaimRecoveryAsync(string workerId, int limit, int leaseSeconds, CancellationToken ct)
-    { lock (_gate) { if (string.IsNullOrWhiteSpace(workerId) || limit is < 1 or > 100 || leaseSeconds is < 1 or > 300) throw new ArgumentOutOfRangeException(nameof(workerId)); var candidates = _runs.Values.Where(x => !x.CommandCompleted && x.ClaimExpiresAt <= DateTime.UtcNow && (x.Status is "queued" or "running")).OrderBy(x => x.Created).Take(limit + 1).ToArray(); var items = new List<OrchestratorRunRecoveryItem>(); foreach (var x in candidates.Take(limit)) { var claim = ClaimCommandAsync(x.Tenant, x.User, x.Id, x.CommandId, workerId, leaseSeconds, ct).GetAwaiter().GetResult(); if (claim is not null) items.Add(new(x.Tenant, x.User, "ADMIN", claim)); } return Task.FromResult(new OrchestratorRunRecoveryResponse(items, candidates.Length > limit)); } }
+    public async Task<OrchestratorRunResponse?> GetAsync(string tenant, string user, Guid id, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try { return _runs.TryGetValue(id, out var x) && x.Tenant == tenant && x.User == user ? ToResponse(x) : null; }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunActiveLookup> FindActiveAsync(string tenant, string user, string conversation, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var values = _runs.Values.Where(x => x.Tenant == tenant && x.User == user && x.Conversation == conversation && x.Status is "queued" or "running" or "waiting_input").Take(2).ToArray();
+            return values.Length switch { 1 => new OrchestratorRunActiveLookup(ToResponse(values[0])), > 1 => new OrchestratorRunActiveLookup(null, null, true), _ => new OrchestratorRunActiveLookup(null) };
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunActiveLookup> FindByIdempotencyKeyAsync(string tenant, string user, string key, OrchestratorRunReplayRequest request, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var operation = key.Split(':', 2)[0];
+            if (operation is not ("chat" or "resume" or "switch")) return new OrchestratorRunActiveLookup(null, IsMismatch: true);
+            var values = _runs.Values.Where(x => x.Tenant == tenant && x.User == user && ((_keys.ContainsKey((tenant, user, key)) && _keys[(tenant, user, key)].Run == x.Id) || _resumeKeys.ContainsKey((tenant, user, x.Id, key)))).Take(2).ToArray();
+            if (values.Length != 1) return values.Length > 1 ? new OrchestratorRunActiveLookup(null, null, true) : new OrchestratorRunActiveLookup(null);
+            var value = values[0];
+            if (value.Conversation != request.ConversationId || request.OrchestratorId is Guid selected && value.OrchestratorId != selected) return new OrchestratorRunActiveLookup(null, IsMismatch: true);
+            var messageHash = Skills.SkillHash.Sha256(request.Message!);
+            if (operation == "chat" && _keys.TryGetValue((tenant, user, key), out var start) && start.Run == value.Id && start.Hash == Skills.SkillHash.Sha256($"{value.OrchestratorId:D}\0{value.Conversation}\0{request.Message}")) return new OrchestratorRunActiveLookup(ToResponse(value), value.CommandId);
+            if (operation == "resume" && _resumeKeys.TryGetValue((tenant, user, value.Id, key), out var resume) && resume.InputHash == messageHash) return new OrchestratorRunActiveLookup(ToResponse(value), resume.CommandId);
+            return new OrchestratorRunActiveLookup(null, IsMismatch: true);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunEventsResponse?> EventsAsync(string tenant, string user, Guid id, long after, int limit, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (!_runs.TryGetValue(id, out var x) || x.Tenant != tenant || x.User != user) return null;
+            var events = x.Events.Where(e => e.Sequence > after).Take(limit).Select(e => new OrchestratorRunEventResponse(e.Sequence, e.Type, e.Hash, e.Payload.Clone(), e.At)).ToArray();
+            return new(id, events, events.Length == 0 ? after : events[^1].Sequence);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<string?> ExecutionArtifactAsync(string tenant, string user, Guid id, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            return _runs.TryGetValue(id, out var x) && x.Tenant == tenant && x.User == user
+                ? JsonSerializer.Serialize(new { snapshot_hash = x.Hash, snapshot_canonical_base64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(x.Snapshot)) })
+                : null;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunWriteResult> ResumeAsync(string tenant, string user, Guid id, string input, string key, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (!_runs.TryGetValue(id, out var x) || x.Tenant != tenant || x.User != user) return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound);
+            var inputHash = Skills.SkillHash.Sha256(input);
+            if (_resumeKeys.TryGetValue((tenant, user, id, key), out var replay))
+                return string.Equals(replay.InputHash, inputHash, StringComparison.Ordinal)
+                    ? new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Replay, ToResponse(x), Dispatch: new(replay.CommandId), Replayed: true)
+                    : new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Conflict, Message: "Idempotency-Key was already used with different resume input");
+            if (x.Status != "waiting_input" || string.IsNullOrWhiteSpace(x.CheckpointRef) || x.CheckpointVersion < 1)
+                return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, Message: "Root run is not waiting for input");
+            x.Status = "queued"; x.Version++; x.Updated = DateTime.UtcNow; x.ResumeInput = input; x.CommandId = Guid.NewGuid(); x.CommandCompleted = false;
+            _resumeKeys[(tenant, user, id, key)] = (x.CommandId, inputHash);
+            x.Events.Add(new(x.Events.Count + 1, "root_resumed", x.Hash, JsonDocument.Parse(JsonSerializer.Serialize(new { input })).RootElement.Clone(), x.Updated));
+            return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Success, ToResponse(x), Dispatch: new(x.CommandId));
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>Claims while <see cref="_gate"/> is held, so recovery does not re-enter its non-reentrant semaphore.</summary>
+    private OrchestratorRunCommandClaim? ClaimCommandLocked(string tenant, string user, Guid runId, Guid commandId, string workerId, int leaseSeconds)
+    {
+        if (!_runs.TryGetValue(runId, out var x) || x.Tenant != tenant || x.User != user || x.CommandId != commandId || x.CommandCompleted || x.ClaimExpiresAt > DateTime.UtcNow || string.IsNullOrWhiteSpace(workerId) || leaseSeconds is < 1 or > 300) return null;
+        var token = Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        x.ClaimTokenHash = Skills.SkillHash.Sha256(token);
+        x.ClaimExpiresAt = DateTime.UtcNow.AddSeconds(leaseSeconds);
+        x.LeaseGeneration++;
+        x.Status = x.Status == "queued" ? "running" : x.Status;
+        x.Version++;
+        x.Updated = DateTime.UtcNow;
+        var resume = x.ResumeInput is not null;
+        return new(commandId, runId, resume ? "resume" : "start", token, x.ClaimExpiresAt, x.LeaseGeneration, x.Hash, Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(x.Snapshot)), resume ? x.ResumeInput : null, resume ? x.CheckpointRef : null, resume ? x.CheckpointVersion : null);
+    }
+
+    public async Task<OrchestratorRunCommandClaim?> ClaimCommandAsync(string tenant, string user, Guid runId, Guid commandId, string workerId, int leaseSeconds, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try { return ClaimCommandLocked(tenant, user, runId, commandId, workerId, leaseSeconds); }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunCommandClaim?> RenewCommandAsync(string tenant, string user, Guid runId, Guid commandId, string claimToken, long leaseGeneration, int leaseSeconds, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (string.IsNullOrWhiteSpace(claimToken) || !_runs.TryGetValue(runId, out var x) || x.Tenant != tenant || x.User != user || x.CommandId != commandId || x.CommandCompleted || leaseSeconds is < 1 or > 300 || x.LeaseGeneration != leaseGeneration || x.ClaimExpiresAt <= DateTime.UtcNow || !string.Equals(x.ClaimTokenHash, Skills.SkillHash.Sha256(claimToken), StringComparison.Ordinal)) return null;
+            x.ClaimExpiresAt = DateTime.UtcNow.AddSeconds(leaseSeconds);
+            var resume = x.ResumeInput is not null;
+            return new(commandId, runId, resume ? "resume" : "start", claimToken, x.ClaimExpiresAt, leaseGeneration, x.Hash, Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(x.Snapshot)), resume ? x.ResumeInput : null, resume ? x.CheckpointRef : null, resume ? x.CheckpointVersion : null);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunDispatchCompleteStatus> CompleteDispatchAsync(string tenant, string user, Guid runId, Guid commandId, string claimToken, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (!_runs.TryGetValue(runId, out var x) || x.Tenant != tenant || x.User != user || x.CommandId != commandId) return OrchestratorRunDispatchCompleteStatus.NotFound;
+            if (x.CommandCompleted || x.ClaimExpiresAt <= DateTime.UtcNow || !string.Equals(x.ClaimTokenHash, Skills.SkillHash.Sha256(claimToken ?? ""), StringComparison.Ordinal)) return OrchestratorRunDispatchCompleteStatus.Conflict;
+            x.DispatchCompleted = true;
+            return OrchestratorRunDispatchCompleteStatus.Success;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunRecoveryResponse> ClaimRecoveryAsync(string workerId, int limit, int leaseSeconds, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (string.IsNullOrWhiteSpace(workerId) || limit is < 1 or > 100 || leaseSeconds is < 1 or > 300) throw new ArgumentOutOfRangeException(nameof(workerId));
+            var candidates = _runs.Values.Where(x => !x.CommandCompleted && x.ClaimExpiresAt <= DateTime.UtcNow && (x.Status is "queued" or "running")).OrderBy(x => x.Created).Take(limit + 1).ToArray();
+            var items = new List<OrchestratorRunRecoveryItem>();
+            // ClaimCommandLocked, not ClaimCommandAsync: _gate is already held here.
+            foreach (var x in candidates.Take(limit))
+            {
+                var claim = ClaimCommandLocked(x.Tenant, x.User, x.Id, x.CommandId, workerId, leaseSeconds);
+                if (claim is not null) items.Add(new(x.Tenant, x.User, "ADMIN", claim));
+            }
+            return new OrchestratorRunRecoveryResponse(items, candidates.Length > limit);
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<OrchestratorChildResponse?> CreateChildAsync(string tenant, string user, Guid rootRunId, OrchestratorChildCreateRequest request, CancellationToken ct)
     {
         if (contextState?.Enabled is true && contexts is not null)
@@ -108,7 +247,8 @@ public sealed class InMemoryOrchestratorRunRepository(
         using var canonicalDocument = JsonDocument.Parse(envelope.Canonical);
         var canonicalEnvelope = canonicalDocument.RootElement.Clone();
         var source = agentRuns is null ? null : await ResolveChildSourceAsync(tenant, request.AgentId, request.AgentRevision, ct);
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || root.Status is not ("queued" or "running")) return null;
             using var doc = JsonDocument.Parse(root.Snapshot); var pin = OrchestratorRunSnapshotProjection.FindPin(doc.RootElement, runKind, request.AgentId, request.AgentRevision);
@@ -121,80 +261,117 @@ public sealed class InMemoryOrchestratorRunRepository(
                 if (agentRuns is not IOrchestratorChildRunRepository childRuns || source is null) return null;
                 var caller = doc.RootElement.GetProperty("caller");
                 var caps = Strings(caller.GetProperty("tool_grants")).Select(x => "tool.use:" + x).Concat(Strings(caller.GetProperty("knowledge_grants")).Select(x => "knowledge.read:" + x)).ToArray();
-                var started = childRuns.CreateOrchestratorChildAsync(tenant, user, root.Role, Strings(caller.GetProperty("groups")), caps, source.Value.Agent, source.Value.Workflow, new OrchestratorChildSnapshotProvenance(rootRunId, taskId, request.Attempt), runKind, pin.Value.TokenCap, canonicalEnvelope, $"orchestrator-child:{rootRunId:D}:{taskId}:{request.Attempt}:{runKind}", ct).GetAwaiter().GetResult();
+                var started = await childRuns.CreateOrchestratorChildAsync(tenant, user, root.Role, Strings(caller.GetProperty("groups")), caps, source.Value.Agent, source.Value.Workflow, new OrchestratorChildSnapshotProvenance(rootRunId, taskId, request.Attempt), runKind, pin.Value.TokenCap, canonicalEnvelope, $"orchestrator-child:{rootRunId:D}:{taskId}:{request.Attempt}:{runKind}", ct);
                 if (started.Status is not (AgentRunWriteStatus.Success or AgentRunWriteStatus.Replay) || started.Run is null || started.Dispatch is null) return null;
                 agentRunId = started.Run.Id; commandId = started.Dispatch.CommandId;
             }
             var commandInput = JsonSerializer.SerializeToElement(new { message = envelope.Objective, task_envelope = canonicalEnvelope });
             var artifact = JsonSerializer.SerializeToElement(new { orchestrator_root_run_id = rootRunId, task_id = taskId, attempt = request.Attempt, run_kind = runKind, root_snapshot_hash = root.Hash, agent_snapshot_hash = pin.Value.Hash, agent_run_id = agentRunId, command_id = commandId, command_input = commandInput });
-            var child = new Child(Guid.NewGuid(), taskId, request.Attempt, runKind, request.AgentId, request.AgentRevision, pin.Value.WorkflowId, pin.Value.WorkflowRevision, pin.Value.Hash, agentRunId, commandId, canonicalEnvelope, artifact); root.Children.Add(child); root.Events.Add(new(root.Events.Count + 1, "child_created", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildCreated(child.Id, agentRunId, child.Task, child.Attempt, child.Kind)).RootElement.Clone(), DateTime.UtcNow)); return new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.Status, child.AgentRunId, child.CommandId);
+            var child = new Child(Guid.NewGuid(), taskId, request.Attempt, runKind, request.AgentId, request.AgentRevision, pin.Value.WorkflowId, pin.Value.WorkflowRevision, pin.Value.Hash, agentRunId, commandId, canonicalEnvelope, artifact);
+            root.Children.Add(child);
+            root.Events.Add(new(root.Events.Count + 1, "child_created", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildCreated(child.Id, agentRunId, child.Task, child.Attempt, child.Kind)).RootElement.Clone(), DateTime.UtcNow));
+            return new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.Status, child.AgentRunId, child.CommandId);
         }
+        finally { _gate.Release(); }
     }
-    public Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
+
+    public async Task<OrchestratorContextRequestResponse?> GetOrCreateContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
-            if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult<OrchestratorContextRequestResponse?>(null);
+            if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return null;
             var child = root.Children.SingleOrDefault(x => x.Id == childId);
-            if (child is null) return Task.FromResult<OrchestratorContextRequestResponse?>(null);
+            if (child is null) return null;
             var created = child.ContextRequest is null;
             child.ContextRequest ??= TaskContextRequest.Create(child);
             var request = child.ContextRequest;
             if (created && contexts is IContextTaskLocalRegistry taskContexts) taskContexts.RegisterTaskContext(tenant, rootRunId, request.ContextId);
             if (created) root.Events.Add(new(root.Events.Count + 1, "context.requested", root.Hash, JsonSerializer.SerializeToElement(new { context_request_id = request.Id, child_id = child.Id, task_id = child.Task, role = request.Role }), DateTime.UtcNow));
-            return Task.FromResult<OrchestratorContextRequestResponse?>(request.ToResponse(rootRunId, child));
+            return request.ToResponse(rootRunId, child);
         }
+        finally { _gate.Release(); }
     }
-    public Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, CancellationToken ct)
+
+    public async Task<OrchestratorContextRequestResponse?> GetContextRequestAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
-            if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult<OrchestratorContextRequestResponse?>(null);
+            if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return null;
             var child = root.Children.SingleOrDefault(x => x.Id == childId);
-            return Task.FromResult(child?.ContextRequest is { } request && request.Id == requestId ? request.ToResponse(rootRunId, child) : null);
+            return child?.ContextRequest is { } request && request.Id == requestId ? request.ToResponse(rootRunId, child) : null;
         }
+        finally { _gate.Release(); }
     }
-    public Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, long expectedVersion, OrchestratorContextDeltaRequest delta, CancellationToken ct)
+
+    public async Task<OrchestratorContextDeltaResult> AppendContextDeltaAsync(string tenant, string user, Guid rootRunId, Guid childId, Guid requestId, long expectedVersion, OrchestratorContextDeltaRequest delta, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             if (contextState?.Enabled is not true || !_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || root.Children.SingleOrDefault(x => x.Id == childId) is not { } child || child.ContextRequest is not { } request || request.Id != requestId)
-                return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.NotFound));
-            if (request.Version != expectedVersion) return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Conflict));
+                return new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.NotFound);
+            if (request.Version != expectedVersion) return new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Conflict);
             var views = delta.Views ?? Array.Empty<ContextViewInput>();
             if (views.Count != 1 || views[0].ViewType != request.Role) throw new ArgumentException("Context delta must contain exactly the task role view");
-            var stored = (contexts?.CreateRevisionAsync(tenant, user, request.ContextId,
-                new ContextRevisionSubmitRequest(rootRunId, delta.Definition, delta.Evidence, views, delta.Measurements, delta.AsOf, delta.ExpiresAt), ct)
-                ?? throw new ArgumentException("Context store is unavailable")).GetAwaiter().GetResult();
+            var stored = contexts is null
+                ? throw new ArgumentException("Context store is unavailable")
+                : await contexts.CreateRevisionAsync(tenant, user, request.ContextId,
+                    new ContextRevisionSubmitRequest(rootRunId, delta.Definition, delta.Evidence, views, delta.Measurements, delta.AsOf, delta.ExpiresAt), ct);
             request.Current = stored.Revision.ContextRef;
             request.Version++;
             request.Updated = DateTime.UtcNow;
             root.Events.Add(new(root.Events.Count + 1, "context.delta_applied", root.Hash, JsonSerializer.SerializeToElement(new { context_request_id = request.Id, child_id = child.Id, task_id = child.Task, revision = stored.Revision.Revision, status = stored.Revision.Status, readiness = stored.Revision.Readiness }), request.Updated));
-            return Task.FromResult(new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Success, stored.Revision, request.Version));
+            return new OrchestratorContextDeltaResult(OrchestratorContextDeltaStatus.Success, stored.Revision, request.Version);
         }
+        finally { _gate.Release(); }
     }
-    public Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
-    { lock (_gate) { if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return Task.FromResult<OrchestratorChildStatusResponse?>(null); var child = root.Children.SingleOrDefault(x => x.Id == childId); if (child is null) return Task.FromResult<OrchestratorChildStatusResponse?>(null); AgentRunResponse? run = agentRuns?.GetAsync(tenant, user, child.AgentRunId, ct).GetAwaiter().GetResult(); if (run is not null) { var prior = child.Status; child.Status = run.Status; if (prior != child.Status && child.Status is "completed" or "failed" or "cancelled") root.Events.Add(new(root.Events.Count + 1, "child_terminal", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildTerminal(child.Id, child.AgentRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.Hash, child.Status, run.Result, run.ErrorCode)).RootElement.Clone(), DateTime.UtcNow)); } var output = run?.Result ?? JsonDocument.Parse("{}").RootElement.Clone(); var citations = output.ValueKind == JsonValueKind.Object && output.TryGetProperty("citations", out var cits) && cits.ValueKind == JsonValueKind.Array ? cits.Clone() : JsonDocument.Parse("[]").RootElement.Clone(); return Task.FromResult<OrchestratorChildStatusResponse?>(new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.AgentRunId, child.Status, output, citations, run?.ErrorCode, run?.ErrorMessage)); } }
-    public Task<OrchestratorRunWriteResult> TransitionAsync(string tenant, string user, Guid rootRunId, OrchestratorRootTransitionRequest request, CancellationToken ct)
+
+    public async Task<OrchestratorChildStatusResponse?> GetChildAsync(string tenant, string user, Guid rootRunId, Guid childId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user) return null;
+            var child = root.Children.SingleOrDefault(x => x.Id == childId);
+            if (child is null) return null;
+            AgentRunResponse? run = agentRuns is null ? null : await agentRuns.GetAsync(tenant, user, child.AgentRunId, ct);
+            if (run is not null)
+            {
+                var prior = child.Status;
+                child.Status = run.Status;
+                if (prior != child.Status && child.Status is "completed" or "failed" or "cancelled")
+                    root.Events.Add(new(root.Events.Count + 1, "child_terminal", root.Hash, JsonDocument.Parse(OrchestratorRunEvents.ChildTerminal(child.Id, child.AgentRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.Hash, child.Status, run.Result, run.ErrorCode)).RootElement.Clone(), DateTime.UtcNow));
+            }
+            var output = run?.Result ?? JsonDocument.Parse("{}").RootElement.Clone();
+            var citations = output.ValueKind == JsonValueKind.Object && output.TryGetProperty("citations", out var cits) && cits.ValueKind == JsonValueKind.Array ? cits.Clone() : JsonDocument.Parse("[]").RootElement.Clone();
+            return new(child.Id, rootRunId, child.Task, child.Attempt, child.Kind, child.AgentId, child.AgentRevision, child.WorkflowId, child.WorkflowRevision, child.Hash, child.AgentRunId, child.Status, output, citations, run?.ErrorCode, run?.ErrorMessage);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<OrchestratorRunWriteResult> TransitionAsync(string tenant, string user, Guid rootRunId, OrchestratorRootTransitionRequest request, CancellationToken ct)
     {
         if (!OrchestratorRootTransitionPolicy.IsValid(request))
-            return Task.FromResult(new OrchestratorRunWriteResult(
+            return new OrchestratorRunWriteResult(
                 OrchestratorRunWriteStatus.InvalidState,
-                Message: "Invalid root transition"));
+                Message: "Invalid root transition");
 
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user)
-                return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound));
+                return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound);
             if (root.Status is "completed" or "failed" or "cancelled"
                 || root.Version != request.ExpectedStateVersion
                 || root.LeaseGeneration != request.LeaseGeneration
                 || !string.Equals(root.ClaimTokenHash, Skills.SkillHash.Sha256(request.ClaimToken!), StringComparison.Ordinal)
                 || root.ClaimExpiresAt <= DateTime.UtcNow)
-                return Task.FromResult(new OrchestratorRunWriteResult(
+                return new OrchestratorRunWriteResult(
                     OrchestratorRunWriteStatus.Conflict,
                     ToResponse(root),
-                    "Root command lease changed"));
+                    "Root command lease changed");
 
             root.Status = request.ToStatus!;
             if (root.Status == "waiting_input")
@@ -215,59 +392,69 @@ public sealed class InMemoryOrchestratorRunRepository(
                 root.Hash,
                 JsonDocument.Parse(OrchestratorRunEvents.RootTerminal(root.Status)).RootElement.Clone(),
                 root.Updated));
-            return Task.FromResult(new OrchestratorRunWriteResult(
+            return new OrchestratorRunWriteResult(
                 OrchestratorRunWriteStatus.Success,
-                ToResponse(root)));
+                ToResponse(root));
         }
+        finally { _gate.Release(); }
     }
-    public Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenant, string user, Guid rootRunId, OrchestratorContextAcquireRequest request, CancellationToken ct)
+
+    public async Task<OrchestratorContextAcquireResponse?> AcquireContextAsync(string tenant, string user, Guid rootRunId, OrchestratorContextAcquireRequest request, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             if (!_runs.TryGetValue(rootRunId, out var root) || root.Tenant != tenant || root.User != user || request.ContextRound < 1
                 || request.CurrentContext is not { ValueKind: JsonValueKind.Object } || JsonUtf8.ByteCount(request.CurrentContext.Value) > 65_536)
-                return Task.FromResult<OrchestratorContextAcquireResponse?>(null);
+                return null;
             using var snapshot = JsonDocument.Parse(root.Snapshot); var authority = snapshot.RootElement.GetProperty("authority");
             var tools = authority.GetProperty("context_tools").EnumerateArray().Select(x => x.GetString()!).OrderBy(x => x, StringComparer.Ordinal);
             var knowledge = authority.GetProperty("knowledge_sources").EnumerateArray().Select(x => x.GetString()!).OrderBy(x => x, StringComparer.Ordinal);
             if (!tools.SequenceEqual((request.AllowedTools ?? []).OrderBy(x => x, StringComparer.Ordinal)) || !knowledge.SequenceEqual((request.AllowedKnowledgeSources ?? []).OrderBy(x => x, StringComparer.Ordinal)))
-                return Task.FromResult<OrchestratorContextAcquireResponse?>(null);
+                return null;
             var missing = tools.Select(x => "context-tool:" + x).Concat(knowledge.Select(x => "knowledge-source:" + x)).DefaultIfEmpty("context-adapter-unavailable").ToArray();
             var clarified = request.CurrentContext.Value.TryGetProperty("user_input", out var input) && input.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(input.GetString());
             // Flag off is the pre-E1 contract verbatim, clarification short circuit included.
             if (contextState?.Enabled is not true)
-                return Task.FromResult<OrchestratorContextAcquireResponse?>(clarified
+                return clarified
                     ? new(true, request.CurrentContext.Value.Clone(), [], [])
-                    : new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], missing));
-            if (clarified) return Task.FromResult<OrchestratorContextAcquireResponse?>(new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], ["clarification-revision-required"]));
-            var stored = contexts?.GetLatestReadyForRunAsync(tenant, user, rootRunId, ct).GetAwaiter().GetResult();
-            if (stored is not null && ContextAcquireProjection.Build(stored) is { } projection) return Task.FromResult<OrchestratorContextAcquireResponse?>(projection);
-            return Task.FromResult<OrchestratorContextAcquireResponse?>(new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], missing));
+                    : new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], missing);
+            if (clarified) return new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], ["clarification-revision-required"]);
+            var stored = contexts is null ? null : await contexts.GetLatestReadyForRunAsync(tenant, user, rootRunId, ct);
+            if (stored is not null && ContextAcquireProjection.Build(stored) is { } projection) return projection;
+            return new(false, JsonDocument.Parse("{}").RootElement.Clone(), [], missing);
         }
+        finally { _gate.Release(); }
     }
-    public Task<OrchestratorRunWriteResult> CancelAsync(string tenant, string user, Guid id, string? reason, string key, CancellationToken ct)
+
+    public async Task<OrchestratorRunWriteResult> CancelAsync(string tenant, string user, Guid id, string? reason, string key, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             if (!_runs.TryGetValue(id, out var x) || x.Tenant != tenant || x.User != user)
-                return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound));
+                return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.NotFound);
 
             // Expiry never creates a cancel idempotency record.  Do not let a late request
             // turn a deadline terminal state into a replay or append a cancellation event.
             if (x.Status == "timed_out")
-                return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, Message: "Run is terminal"));
+                return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, Message: "Run is terminal");
 
             if (_cancelKeys.TryGetValue((tenant, user, id, key), out var replay))
-                return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Replay, replay, Replayed: true));
+                return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Replay, replay, Replayed: true);
 
             if (x.Status is "completed" or "failed" or "cancelled" or "timed_out")
-                return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, Message: "Run is terminal"));
+                return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, Message: "Run is terminal");
 
             x.Status = "cancelled";
-            foreach (var child in x.Children.Where(child => child.Status is "queued" or "running"))
+            // Dapper cascades the agent_run cancel with a three-state WHERE
+            // (queued/running/waiting_input) -- Child.Status only mirrors the real D3 status when
+            // GetChildAsync last synced it, so a child parked in waiting_input must still be
+            // included or its underlying agent run is never told to cancel.
+            foreach (var child in x.Children.Where(child => child.Status is "queued" or "running" or "waiting_input"))
             {
                 if (agentRuns is not null)
-                    agentRuns.CancelAsync(tenant, user, child.AgentRunId, reason, $"orchestrator-cancel:{id:D}:{child.AgentRunId:D}", ct).GetAwaiter().GetResult();
+                    await agentRuns.CancelAsync(tenant, user, child.AgentRunId, reason, $"orchestrator-cancel:{id:D}:{child.AgentRunId:D}", ct);
                 child.Status = "cancelled";
             }
             x.CancelRequested = true;
@@ -276,49 +463,113 @@ public sealed class InMemoryOrchestratorRunRepository(
             x.Events.Add(new(x.Events.Count + 1, "run_cancelled", x.Hash, JsonDocument.Parse(JsonSerializer.Serialize(new { reason })).RootElement.Clone(), x.Updated));
             var response = ToResponse(x);
             _cancelKeys[(tenant, user, id, key)] = response;
-            return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Success, response));
+            return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.Success, response);
         }
+        finally { _gate.Release(); }
     }
     private static OrchestratorRunResponse ToResponse(Entry x) { using var d = JsonDocument.Parse(x.Snapshot); return new(x.Id, x.OrchestratorId, x.OrchestratorRevision, x.Conversation, x.WorkflowId, x.WorkflowRevision, x.Hash, x.Status, x.CancelRequested, x.Version, x.Deadline, OrchestratorRunSnapshotProjection.Budgets(d.RootElement), x.Created, x.Updated, ErrorCode: x.ErrorCode, ErrorMessage: x.ErrorMessage); }
     private async Task<(PublishedAgentSnapshotSource Agent, WorkflowSnapshotSource Workflow)?> ResolveChildSourceAsync(string tenant, Guid agentId, int revision, CancellationToken ct)
     { var agent = await agents.GetAsync(tenant, agentId, ct); var definition = await agents.GetRevisionDefinitionAsync(tenant, agentId, revision, ct); var info = (await agents.ListRevisionsAsync(tenant, agentId, ct)).SingleOrDefault(x => x.Revision == revision); if (agent is null || definition is null || info is null || !agent.Enabled || agent.PublishedRevision != revision || info.RuntimeWorkflowId is not Guid workflowId || info.RuntimeWorkflowRevision is not int workflowRevision) return null; var workflow = await workflows.GetRevisionAsync(tenant, workflowId, workflowRevision, ct); if (workflow is null) return null; return (new(agentId, agent.Name, revision, definition, info.DefinitionSha256, workflowId, workflowRevision, info.SkillBindings, info.PromptManifestRevision, info.PromptManifestSha256), new(workflowId, workflowRevision, 1, workflow.Value.Definition, WorkflowCanonicalizer.Hash(workflow.Value.Definition), WorkflowCompilerContracts.Current)); }
     private static IReadOnlyCollection<string> Strings(JsonElement value) => value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray() : Array.Empty<string>();
-    Task<OrchestratorRunWriteResult> IOrchestratorRunRepository.ResumeAsync(string tenant, string user, Guid id, string input, string key, CancellationToken ct)
+
+    async Task<OrchestratorRunWriteResult> IOrchestratorRunRepository.ResumeAsync(string tenant, string user, Guid id, string input, string key, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             if (_runs.TryGetValue(id, out var run) && run.Tenant == tenant && run.User == user && run.Deadline <= DateTime.UtcNow)
-            { Expire(run); return Task.FromResult(new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, ToResponse(run), "Root run deadline has expired")); }
+            {
+                await ExpireLockedAsync(run, ct);
+                return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, ToResponse(run), "Root run deadline has expired");
+            }
         }
-        return ResumeAsync(tenant, user, id, input, key, ct);
+        finally { _gate.Release(); }
+        return await ResumeAsync(tenant, user, id, input, key, ct);
     }
+
     async Task<OrchestratorRunCommandClaim?> IOrchestratorRunRepository.ClaimCommandAsync(string tenant, string user, Guid runId, Guid commandId, string workerId, int leaseSeconds, CancellationToken ct)
     {
         Entry? run;
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             _runs.TryGetValue(runId, out run);
             if (run is not null && run.Tenant == tenant && run.User == user && run.Deadline <= DateTime.UtcNow)
             {
-                Expire(run);
+                await ExpireLockedAsync(run, ct);
                 return null;
             }
         }
+        finally { _gate.Release(); }
         var claim = await ClaimCommandAsync(tenant, user, runId, commandId, workerId, leaseSeconds, ct);
         return claim is null || run is null ? claim : claim with { DeadlineAt = run.Deadline };
     }
-    Task<OrchestratorRunRecoveryResponse> IOrchestratorRunRepository.ClaimRecoveryAsync(string workerId, int limit, int leaseSeconds, CancellationToken ct)
+
+    async Task<OrchestratorRunRecoveryResponse> IOrchestratorRunRepository.ClaimRecoveryAsync(string workerId, int limit, int leaseSeconds, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             foreach (var run in _runs.Values.Where(x => !x.CommandCompleted && x.Deadline <= DateTime.UtcNow && (x.Status is "queued" or "running" or "waiting_input")))
             {
-                Expire(run);
+                await ExpireLockedAsync(run, ct);
             }
         }
-        return ClaimRecoveryAsync(workerId, limit, leaseSeconds, ct);
+        finally { _gate.Release(); }
+        return await ClaimRecoveryAsync(workerId, limit, leaseSeconds, ct);
     }
-    private static void Expire(Entry run) { if (run.Status is "completed" or "failed" or "cancelled" or "timed_out") return; run.Status = "timed_out"; run.ErrorCode = "deadline_exceeded"; run.ErrorMessage = "Root run deadline expired"; run.CommandCompleted = true; run.ClaimTokenHash = null; run.ClaimExpiresAt = DateTime.MinValue; run.Version++; run.Updated = DateTime.UtcNow; foreach (var child in run.Children.Where(x => x.Status is "queued" or "running")) child.Status = "cancelled"; run.Events.Add(new(run.Events.Count + 1, "root_timed_out", run.Hash, JsonDocument.Parse("{}").RootElement.Clone(), run.Updated)); }
+
+    // Called with _gate held. Cascades every cancellable child before committing root timeout state.
+    // All-or-nothing, deliberately matching the Dapper authority's single transaction
+    // (OrchestratorRunRepository.ExpireDeadlineAsync): the root is marked "timed_out" (with its
+    // root_timed_out event) only when every child cancel succeeds. If any child fails, the root is
+    // left exactly as it was -- not terminal -- so the early-return guard above does NOT skip it on
+    // a future scrub, and that same scrub will retry the still-uncancelled children. A partial
+    // failure is not silent: it is recorded as a non-terminal "root_timeout_cascade_incomplete"
+    // event carrying the failed child ids and error messages, since lite mode has no ILogger here
+    // and the Dapper side would only ever surface this as a rolled-back transaction in server logs.
+    // Accepted consequence (same one the Dapper transaction already has): a child that can never be
+    // cancelled makes this root retry forever without becoming terminal.
+    //
+    // Do not call another gate-acquiring member here: SemaphoreSlim is not reentrant.
+    private async Task ExpireLockedAsync(Entry run, CancellationToken ct)
+    {
+        if (run.Status is "completed" or "failed" or "cancelled" or "timed_out") return;
+        List<(Guid ChildId, string Error)>? failures = null;
+        foreach (var child in run.Children.Where(x => x.Status is "queued" or "running" or "waiting_input"))
+        {
+            if (agentRuns is null) { child.Status = "cancelled"; continue; }
+            try
+            {
+                await agentRuns.CancelAsync(run.Tenant, run.User, child.AgentRunId, "deadline", $"orchestrator-deadline:{run.Id:D}:{child.AgentRunId:D}", ct);
+                child.Status = "cancelled";
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                (failures ??= []).Add((child.Id, ex.Message));
+            }
+        }
+        if (failures is { Count: > 0 })
+        {
+            run.Events.Add(new(run.Events.Count + 1, "root_timeout_cascade_incomplete", run.Hash,
+                JsonSerializer.SerializeToElement(new { failed_children = failures.Select(f => new { child_id = f.ChildId, error = f.Error }) }),
+                DateTime.UtcNow));
+            return;
+        }
+        run.Status = "timed_out";
+        run.ErrorCode = "deadline_exceeded";
+        run.ErrorMessage = "Root run deadline expired";
+        run.CommandCompleted = true;
+        run.ClaimTokenHash = null;
+        run.ClaimExpiresAt = DateTime.MinValue;
+        run.Version++;
+        run.Updated = DateTime.UtcNow;
+        run.Events.Add(new(run.Events.Count + 1, "root_timed_out", run.Hash, JsonDocument.Parse("{}").RootElement.Clone(), run.Updated));
+    }
     private sealed class Entry(Guid id, Guid commandId, string tenant, string user, string role, Guid oid, int orev, string conversation, Guid wid, int wrev, string snapshot, string hash, DateTime deadline, DateTime now) { public Guid Id = id, CommandId = commandId; public string Tenant = tenant, User = user, Role = role, Conversation = conversation, Snapshot = snapshot, Hash = hash, Status = "queued"; public Guid OrchestratorId = oid, WorkflowId = wid; public int OrchestratorRevision = orev, WorkflowRevision = wrev; public long Version = 1, LeaseGeneration, CheckpointVersion; public bool CancelRequested, CommandCompleted, DispatchCompleted; public string? ClaimTokenHash, ResumeInput, CheckpointRef, ErrorCode, ErrorMessage; public DateTime ClaimExpiresAt = DateTime.MinValue; public DateTime Deadline = deadline, Created = now, Updated = now; public List<E> Events = []; public List<Child> Children = []; }
     private sealed class Child(Guid id, string task, int attempt, string kind, Guid agentId, int agentRevision, Guid workflowId, int workflowRevision, string hash, Guid agentRunId, Guid commandId, JsonElement taskEnvelope, JsonElement dispatchArtifact) { public Guid Id = id, AgentId = agentId, WorkflowId = workflowId, AgentRunId = agentRunId, CommandId = commandId; public string Task = task, Kind = kind, Hash = hash, Status = "queued"; public int Attempt = attempt, AgentRevision = agentRevision, WorkflowRevision = workflowRevision; public JsonElement TaskEnvelope = taskEnvelope.Clone(), DispatchArtifact = dispatchArtifact.Clone(); public TaskContextRequest? ContextRequest; }
     private sealed class TaskContextRequest(Guid id, Guid contextId, string role, ContextRef? baseContext, DateTime now)

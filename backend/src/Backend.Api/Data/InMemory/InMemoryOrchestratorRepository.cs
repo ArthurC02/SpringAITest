@@ -6,7 +6,7 @@ namespace Backend.Api.Data.InMemory;
 
 public sealed class InMemoryOrchestratorRepository : IOrchestratorRepository
 {
-    private readonly object _gate = new(); private readonly List<E> _items = []; private readonly InMemoryWorkflowRepository _workflows; private readonly InMemoryAgentRepository _agents; private static DateTime Now() => DateTime.UtcNow;
+    private readonly Lock _gate = new(); private readonly List<E> _items = []; private readonly InMemoryWorkflowRepository _workflows; private readonly InMemoryAgentRepository _agents; private static DateTime Now() => DateTime.UtcNow;
     public InMemoryOrchestratorRepository(IWorkflowRepository workflows, IAgentRepository agents) { _workflows = (InMemoryWorkflowRepository)workflows; _agents = (InMemoryAgentRepository)agents; }
     public Task<IReadOnlyList<OrchestratorInfo>> ListAsync(string t, CancellationToken ct) { lock (_gate) return Task.FromResult<IReadOnlyList<OrchestratorInfo>>(_items.Where(x => x.Tenant == t).Select(x => x.Info()).ToArray()); }
     public Task<Orchestrator?> GetAsync(string t, Guid id, CancellationToken ct) { lock (_gate) return Task.FromResult(Find(t, id)?.Model()); }

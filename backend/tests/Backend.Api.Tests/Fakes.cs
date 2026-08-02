@@ -61,10 +61,12 @@ public sealed class FakeSkillValidator : ISkillValidator
 
     public List<Call> Calls { get; } = new();
 
+    private readonly Lock _gate = new();
+
     public Task<SkillValidationResult> ValidateAsync(
         string definition, string tenantId, string? userId, string? role, CancellationToken ct)
     {
-        lock (Calls)
+        lock (_gate)
         {
             Calls.Add(new Call(definition, tenantId, userId, role));
         }
@@ -129,6 +131,7 @@ public sealed class FakeBusinessRuleValidator : IBusinessRuleValidator
         string? Role);
 
     public List<Call> Calls { get; } = new();
+    private readonly Lock _gate = new();
     private int _invalidOnPublishCalls;
     private int _invalidOnRestoreCalls;
     private int _engineDownOnRestoreCalls;
@@ -159,7 +162,7 @@ public sealed class FakeBusinessRuleValidator : IBusinessRuleValidator
         string? role,
         CancellationToken ct)
     {
-        lock (Calls)
+        lock (_gate)
         {
             Calls.Add(new Call(gate, ruleSet.Clone(), referenceCatalog, tenantId, userId, role));
         }
@@ -315,12 +318,13 @@ public sealed class FakeSkillPackageValidator : ISkillPackageValidator
 
     private readonly Dictionary<string, Func<byte[], SkillPackageValidationResult>> _scripts = new();
     private readonly HashSet<string> _unreachable = new();
+    private readonly Lock _gate = new();
     private const string DerivedNameKey = "\0server-derived";
 
     /// <summary>腳本化某 name 的驗證結果(依上傳 bytes 動態產生,便於 flow round-trip 回傳解出的 skill.yaml)。</summary>
     public void Setup(string expectedName, Func<byte[], SkillPackageValidationResult> responder)
     {
-        lock (_scripts)
+        lock (_gate)
         {
             _scripts[expectedName] = responder;
         }
@@ -332,7 +336,7 @@ public sealed class FakeSkillPackageValidator : ISkillPackageValidator
     /// <summary>模擬引擎不可達 / 5xx / timeout:validator 一律拋 ApiException(502)。</summary>
     public void SetupUnreachable(string expectedName)
     {
-        lock (_unreachable)
+        lock (_gate)
         {
             _unreachable.Add(expectedName);
         }
@@ -342,12 +346,12 @@ public sealed class FakeSkillPackageValidator : ISkillPackageValidator
         byte[] package, string fileName, string? expectedName,
         string tenantId, string? userId, string? role, CancellationToken ct)
     {
-        lock (Calls)
+        lock (_gate)
         {
             Calls.Add(new Call(expectedName, tenantId, userId, role, package));
         }
 
-        lock (_unreachable)
+        lock (_gate)
         {
             if (_unreachable.Contains(expectedName ?? DerivedNameKey))
             {
@@ -356,7 +360,7 @@ public sealed class FakeSkillPackageValidator : ISkillPackageValidator
         }
 
         Func<byte[], SkillPackageValidationResult>? responder;
-        lock (_scripts)
+        lock (_gate)
         {
             _scripts.TryGetValue(expectedName ?? DerivedNameKey, out responder);
         }
@@ -382,6 +386,7 @@ public sealed class FakeEvalRunner : IEvalRunner
 
     public List<Call> Calls { get; } = new();
 
+    private readonly Lock _gate = new();
     private Func<string, int, JsonElement, EvalRunResponseWire>? _script;
     private bool _unreachable;
 
@@ -399,7 +404,7 @@ public sealed class FakeEvalRunner : IEvalRunner
         string suiteId, int revision, JsonElement cases, string candidateKind, JsonElement candidateRef,
         JsonElement? candidatePins, int? budgetMs, string tenantId, string? userId, string? role, CancellationToken ct)
     {
-        lock (Calls)
+        lock (_gate)
         {
             Calls.Add(new Call(suiteId, revision, candidateKind, tenantId, budgetMs));
         }

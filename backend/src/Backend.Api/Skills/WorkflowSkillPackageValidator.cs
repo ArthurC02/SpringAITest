@@ -1,6 +1,5 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 using Backend.Api.BusinessWorkflows;
 using System.Collections;
@@ -18,21 +17,11 @@ namespace Backend.Api.Skills;
 /// 契約同 flow validate:一律回 200,結果在 body({valid, errors, skill, canonical_definition, package_manifest})。
 /// 因此任何非 200 或傳輸失敗都是「驗證服務故障」→ 502,絕不放行未驗證的 package。
 /// </summary>
-public sealed class WorkflowSkillPackageValidator : ISkillPackageValidator
+public sealed class WorkflowSkillPackageValidator(HttpClient http, string baseUrl, string internalToken) : ISkillPackageValidator
 {
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
     private static readonly IDeserializer Yaml = new DeserializerBuilder().Build();
 
-    private readonly HttpClient _http;
-    private readonly string _baseUrl;
-    private readonly string _internalToken;
-
-    public WorkflowSkillPackageValidator(HttpClient http, string baseUrl, string internalToken)
-    {
-        _http = http;
-        _baseUrl = baseUrl.TrimEnd('/');
-        _internalToken = internalToken;
-    }
+    private readonly string _baseUrl = baseUrl.TrimEnd('/');
 
     public async Task<SkillPackageValidationResult> ValidatePackageAsync(
         byte[] package, string fileName, string? expectedName,
@@ -54,9 +43,9 @@ public sealed class WorkflowSkillPackageValidator : ISkillPackageValidator
         {
             Content = form,
         };
-        req.UseInternalIdentity(_internalToken, tenantId, userId, role);
+        req.UseInternalIdentity(internalToken, tenantId, userId, role);
 
-        var body = await _http.SendJsonAsync<ValidatePackageBody>(req, Failure, JsonOpts, ct);
+        var body = await http.SendJsonAsync<ValidatePackageBody>(req, Failure, InternalWorkflowClient.Options, ct);
 
         if (!body.Valid)
         {

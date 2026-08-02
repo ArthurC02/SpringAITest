@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 
 namespace Platform.Web.Tests;
 
+[Collection("EngineCalls")]
 public sealed class BusinessWorkflowApiTests : IClassFixture<TestWebAppFactory>
 {
     private readonly TestWebAppFactory _factory;

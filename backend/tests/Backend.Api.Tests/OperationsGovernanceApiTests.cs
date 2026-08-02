@@ -195,6 +195,32 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
     }
 
     [Fact]
+    public async Task InMemory_ConcurrentCallsAcrossMethods_CompleteWithoutDeadlock()
+    {
+        // SemaphoreSlim is not reentrant like the System.Threading.Lock this repository used to
+        // use. This proves plain concurrent access to several *different* gate-acquiring methods
+        // at once still completes -- i.e. nothing here accidentally re-enters _gate from inside
+        // itself (ApplyRolloutAsync's await into bindings.PutAsync included).
+        var store = new InMemoryOperationsGovernanceRepository();
+        var binding = new Backend.Api.RuntimeDiscovery.TenantRuntimeBinding(false, null, null, []);
+        var all = Task.WhenAll(Enumerable.Range(0, 8).Select(async i =>
+        {
+            var tenant = $"concurrency-gate-{i}";
+            for (var round = 0; round < 25; round++)
+            {
+                await store.RecordTelemetryAsync(tenant, new(Guid.NewGuid(), Guid.NewGuid(), "model", "model_step", null, null, null, null, null, null, null, 1), default);
+                var gate = await store.RecordRegressionAsync(tenant, "suite", true, "evidence", "actor", default);
+                await store.GetCurrentGateAsync(tenant, default);
+                await store.GetMetricsAsync(tenant, default);
+                await store.ApplyRolloutAsync(tenant, binding, "actor", default);
+                await store.CreateOverrideAsync(tenant, gate.Id, $"key-{i}-{round}", "reason", "actor", default);
+            }
+        }));
+        var winner = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.True(ReferenceEquals(winner, all), "concurrent calls across InMemoryOperationsGovernanceRepository methods did not complete within 5s -- suspected deadlock");
+    }
+
+    [Fact]
     public async Task FailedRegression_BlocksRollout_UntilDurableAuditedOverride_AndIsTenantScoped()
     {
         using var admin = Client("ops-a", "operator-a", manage: true);

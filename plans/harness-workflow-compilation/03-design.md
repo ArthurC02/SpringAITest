@@ -1,5 +1,7 @@
 # Harness 包覆 Business Workflow — 設計文件
 
+> **Historical delivery record (2026-08-02):** 本文件描述已交付演進；未來結構調整以 [Architecture Hard Reset design](../architecture-hard-reset/03-design.md) 為準。
+
 > 依據 [01-plan.md](01-plan.md) 和 [02-spec.md](02-spec.md)。
 
 ---

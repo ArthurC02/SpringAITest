@@ -33,12 +33,12 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     private static JsonObject Body(string definition) => new() { ["definition"] = definition };
 
     /// <summary>直接塞進 fake repository(繞過 validate),讓 definition 內容不受 CRUD 驗證限制。</summary>
-    private void Seed(string tenant, string name, string definition, string description = "季報問答")
+    private Task Seed(string tenant, string name, string definition, string description = "季報問答")
         => Repo.CreateAsync(
             tenant,
             new Skill(name, description, definition, "USER", true, 0, default, default),
             "admin-a",
-            CancellationToken.None).GetAwaiter().GetResult();
+            CancellationToken.None);
 
     private static Dictionary<string, byte[]> ReadZip(byte[] zip)
     {
@@ -93,7 +93,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     public async Task Export_TopLevelFolder_EqualsSkillNameAndFrontmatterName()
     {
         const string name = "year-compare";
-        Seed("demo-a", name, Yaml(name));
+        await Seed("demo-a", name, Yaml(name));
 
         var entries = await ExportZipAsync(Admin(), name);
 
@@ -153,7 +153,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
         // 未閉合括號 + 隨機符號 → 完全不是合法 YAML;同時含 tab 縮排、中文、CRLF/LF 混用、
         // 控制字元、無結尾換行 —— 繞過 validate 直接塞進 repo。
         var definition = "{[this is not: yaml\t@@@ \x01 未閉合\r\ndescription: 有\ttab <>&\"'\nflow:\n\t- node: x  # 無結尾換行";
-        Seed("demo-a", "at218_skill", definition);
+        await Seed("demo-a", "at218_skill", definition);
 
         var entries = await ExportZipAsync(Admin(), "at218_skill");
         var block = ExtractYamlBlock(Encoding.UTF8.GetString(entries["at218_skill/SKILL.md"]));
@@ -207,7 +207,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     [InlineData("007")] // 數字起手式(前導零八進位/hex/binary 同一分支)
     public async Task Export_SkillMd_QuotesYamlImplicitTypedName(string name)
     {
-        Seed("demo-a", name, Yaml(name));
+        await Seed("demo-a", name, Yaml(name));
 
         var entries = await ExportZipAsync(Admin(), name);
         var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
@@ -246,7 +246,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     public async Task Export_BlankDescription_ProducesRoundTrippableFrontmatter()
     {
         const string name = "at221-blank-desc";
-        Seed("demo-a", name, Yaml(name), description: string.Empty);
+        await Seed("demo-a", name, Yaml(name), description: string.Empty);
 
         var entries = await ExportZipAsync(Admin(), name);
         var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
@@ -264,7 +264,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     {
         const string name = "at221-roundtrip";
         var definition = Yaml(name, description: "\"\"");
-        Seed("demo-a", name, definition, description: string.Empty);
+        await Seed("demo-a", name, definition, description: string.Empty);
 
         var exported = await Admin().GetAsync($"/api/skills/{name}/export");
         var zip = await exported.Content.ReadAsByteArrayAsync();
@@ -319,7 +319,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     public async Task Export_SkillMd_EscapesDescriptionWithSpecialChars()
     {
         // 含冒號與雙引號 → 不是 plain-safe → 必須以雙引號包裹並逃脫(舊 POC 未逃脫會產生非法 YAML)。
-        Seed("demo-a", "at220_escape", Yaml("at220_escape"), description: "營收: 100 \"高\"");
+        await Seed("demo-a", "at220_escape", Yaml("at220_escape"), description: "營收: 100 \"高\"");
 
         var entries = await ExportZipAsync(Admin(), "at220_escape");
         var md = Encoding.UTF8.GetString(entries["at220_escape/SKILL.md"]);
@@ -345,7 +345,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     public async Task Export_SkillMd_QuotesDescriptionWithLeadingIndicatorOrEdgeWhitespace(
         string name, string description)
     {
-        Seed("demo-a", name, Yaml(name), description);
+        await Seed("demo-a", name, Yaml(name), description);
 
         var entries = await ExportZipAsync(Admin(), name);
         var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);
@@ -362,7 +362,7 @@ public sealed class SkillExportTests : IClassFixture<TestWebAppFactory>
     public async Task Export_SkillMd_EscapesBackslashNewlineTabInDescription()
     {
         const string name = "at222-escape-ctrl";
-        Seed("demo-a", name, Yaml(name), "第一行\n第二行\ttab\\slash\r尾\u0001");
+        await Seed("demo-a", name, Yaml(name), "第一行\n第二行\ttab\\slash\r尾\u0001");
 
         var entries = await ExportZipAsync(Admin(), name);
         var md = Encoding.UTF8.GetString(entries[$"{name}/SKILL.md"]);

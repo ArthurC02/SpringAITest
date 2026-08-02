@@ -1,4 +1,4 @@
-"""app/runtime/bounded_json.py 抽出 legacy_flow/tool_boundary 共用的序列化＋截斷邏輯。
+"""app/runtime/bounded_json.py 集中 flow_harness/tool_boundary 共用的序列化與截斷邏輯。
 
 兩處呼叫端唯一的差異是失敗回退策略與截斷後綴，因此測試聚焦在：截斷邊界
 （on-point/off-point）、成功路徑不受影響、以及兩種失敗回退策略都保留原本語意。
@@ -45,7 +45,7 @@ def test_truncation_without_suffix_appends_nothing() -> None:
     assert text == _SERIALIZED[:-1]
 
 
-def test_unserializable_fallback_can_raise_like_legacy_flow_does() -> None:
+def test_unserializable_fallback_can_raise_like_flow_harness_does() -> None:
     class Denied(RuntimeError):
         pass
 

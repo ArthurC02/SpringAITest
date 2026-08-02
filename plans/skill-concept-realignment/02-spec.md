@@ -1,5 +1,7 @@
 # Skill 概念重整 — 規格
 
+> **Superseded P5 policy (2026-08-02):** 本文件的雙軌與 alias 保留規格已由 [Architecture Hard Reset](../architecture-hard-reset/02-spec.md) 取代；原文保留為現況與歷史理由。新契約尚未實作。
+
 > 狀態：規劃中。名詞、決策與契約形狀的權威文件；實作細節見 03-design。
 
 ## 1. 名詞定義（正式詞彙表）

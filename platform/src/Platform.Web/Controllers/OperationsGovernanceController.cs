@@ -1,7 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Platform.Service;
-using Platform.Service.Abstractions;
 using Platform.Web.Auth;
 
 namespace Platform.Web.Controllers;
@@ -24,9 +23,14 @@ public sealed class OperationsGovernanceController(BackendClient backend) : Prox
     [HttpGet("eval-runs/{runId}")] public Task<IActionResult> GetEvalRun(string runId, CancellationToken ct) => Send(HttpMethod.Get, "eval-runs/" + runId, null, ct);
     private async Task<IActionResult> Send(HttpMethod method, string suffix, object? body, CancellationToken ct, bool key = false)
     {
-        var request = backend.BuildRequest(method, "/api/admin/operations/" + suffix, User.ToUserContext(), body);
-        if (key && IdempotencyKey is { } idempotencyKey) request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
-        var (status, responseBody, etag) = await backend.SendForProxyAsync(request, "Operations backend ", ct);
-        return Write(new AgentProxyResponse(status, responseBody, etag));
+        var response = await backend.SendForAgentProxyAsync(
+            method,
+            "/api/admin/operations/" + suffix,
+            User.ToUserContext(),
+            body,
+            "Operations backend ",
+            key && IdempotencyKey is { } idempotencyKey ? ("Idempotency-Key", idempotencyKey) : null,
+            ct);
+        return Write(response);
     }
 }

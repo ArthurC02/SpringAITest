@@ -7,73 +7,94 @@ namespace Backend.Api.OperationsGovernance;
 public sealed class InMemoryOperationsGovernanceRepository(
     IRuntimeBindingRepository? bindings = null) : IOperationsGovernanceRepository
 {
-    private readonly object _gate = new();
+    // ApplyRolloutAsync awaits binding persistence while holding this gate, so a plain `lock` cannot be used.
+    private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<string, TenantState> _states = new(StringComparer.Ordinal);
     private readonly List<(string Tenant, OperationsTelemetry Value)> _telemetry = [];
     private readonly List<(string Tenant, RunEvidenceEnvelope Value)> _evidence = [];
-    public IReadOnlyList<(string Tenant, OperationsTelemetry Value)> Telemetry { get { lock (_gate) return _telemetry.ToArray(); } }
-    // Lite mode has no real agent_run table to fence against, so -- exactly like the legacy
-    // telemetry path above -- tenant scoping here is simply "written under the tenant key the
-    // caller supplied", with no cross-run existence/snapshot check. That check is real-DB-only
-    // (see OperationsGovernanceRepository) and covered by the Dapper/Postgres test.
-    public IReadOnlyList<(string Tenant, RunEvidenceEnvelope Value)> Evidence { get { lock (_gate) return _evidence.ToArray(); } }
-
-    public Task<RegressionGate> RecordRegressionAsync(string tenantId, string suite, bool passed, string evidenceRef, string actorId, CancellationToken ct)
+    public IReadOnlyList<(string Tenant, OperationsTelemetry Value)> Telemetry
     {
-        lock (_gate)
+        get { _gate.Wait(); try { return _telemetry.ToArray(); } finally { _gate.Release(); } }
+    }
+    // Lite mode records evidence under the caller's tenant; Dapper additionally fences the run.
+    public IReadOnlyList<(string Tenant, RunEvidenceEnvelope Value)> Evidence
+    {
+        get { _gate.Wait(); try { return _evidence.ToArray(); } finally { _gate.Release(); } }
+    }
+
+    public async Task<RegressionGate> RecordRegressionAsync(string tenantId, string suite, bool passed, string evidenceRef, string actorId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
         {
             var state = State(tenantId); var item = new RegressionGate(Guid.NewGuid(), passed, suite, DateTime.UtcNow, false, state.Audit.Count + 1);
             state.Gate = item; state.Audit.Add("regression");
-            return Task.FromResult(item with { AuditEntries = state.Audit.Count });
+            return item with { AuditEntries = state.Audit.Count };
         }
+        finally { _gate.Release(); }
     }
 
-    public Task<RegressionGate?> GetCurrentGateAsync(string tenantId, CancellationToken ct)
+    public async Task<RegressionGate?> GetCurrentGateAsync(string tenantId, CancellationToken ct)
     {
-        lock (_gate) return Task.FromResult(State(tenantId).Gate is { } gate ? gate with { OverrideActive = State(tenantId).Overrides.Values.Any(x => x.RegressionId == gate.Id), AuditEntries = State(tenantId).Audit.Count } : null);
+        await _gate.WaitAsync(ct);
+        try { return State(tenantId).Gate is { } gate ? gate with { OverrideActive = State(tenantId).Overrides.Values.Any(x => x.RegressionId == gate.Id), AuditEntries = State(tenantId).Audit.Count } : null; }
+        finally { _gate.Release(); }
     }
 
-    public Task<OverrideWriteResult> CreateOverrideAsync(string tenantId, Guid regressionId, string idempotencyKeyHash, string reason, string actorId, CancellationToken ct)
+    public async Task<OverrideWriteResult> CreateOverrideAsync(string tenantId, Guid regressionId, string idempotencyKeyHash, string reason, string actorId, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             var state = State(tenantId);
             if (state.Overrides.TryGetValue(idempotencyKeyHash, out var prior))
-                return Task.FromResult(prior.RegressionId == regressionId
+                return prior.RegressionId == regressionId
                     && string.Equals(prior.Reason, reason, StringComparison.Ordinal)
                     ? new OverrideWriteResult(OverrideWriteStatus.Replay, Gate(state, prior.RegressionId))
-                    : new OverrideWriteResult(OverrideWriteStatus.GateChanged, Gate(state, state.Gate?.Id)));
-            if (state.Gate is not { } gate || gate.Id != regressionId) return Task.FromResult(new OverrideWriteResult(OverrideWriteStatus.GateChanged, Gate(state, regressionId)));
-            if (gate.Passed) return Task.FromResult(new OverrideWriteResult(OverrideWriteStatus.NoLongerRequired, Gate(state, regressionId)));
+                    : new OverrideWriteResult(OverrideWriteStatus.GateChanged, Gate(state, state.Gate?.Id));
+            if (state.Gate is not { } gate || gate.Id != regressionId) return new OverrideWriteResult(OverrideWriteStatus.GateChanged, Gate(state, regressionId));
+            if (gate.Passed) return new OverrideWriteResult(OverrideWriteStatus.NoLongerRequired, Gate(state, regressionId));
             state.Overrides[idempotencyKeyHash] = (regressionId, reason); state.Audit.Add("regression_override");
-            return Task.FromResult(new OverrideWriteResult(OverrideWriteStatus.Accepted, Gate(state, regressionId)));
+            return new OverrideWriteResult(OverrideWriteStatus.Accepted, Gate(state, regressionId));
         }
+        finally { _gate.Release(); }
     }
 
-    public Task<RolloutWriteStatus> ApplyRolloutAsync(string tenantId, TenantRuntimeBinding binding, string actorId, CancellationToken ct)
+    public async Task<RolloutWriteStatus> ApplyRolloutAsync(string tenantId, TenantRuntimeBinding binding, string actorId, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             var state = State(tenantId);
             if (binding.Enabled && state.Gate is { Passed: false } gate
                 && !state.Overrides.Values.Any(x => x.RegressionId == gate.Id))
-                return Task.FromResult(RolloutWriteStatus.RegressionBlocked);
+                return RolloutWriteStatus.RegressionBlocked;
             if (bindings is not null)
-                bindings.PutAsync(tenantId, binding, ct).GetAwaiter().GetResult();
+                await bindings.PutAsync(tenantId, binding, ct);
             state.Audit.Add(binding.Enabled ? "rollout" : "rollback");
-            return Task.FromResult(RolloutWriteStatus.Applied);
+            return RolloutWriteStatus.Applied;
         }
+        finally { _gate.Release(); }
     }
 
-    public Task RecordTelemetryAsync(string tenantId, OperationsTelemetry telemetry, CancellationToken ct)
-    { lock (_gate) { if (!_telemetry.Any(x => x.Tenant == tenantId && x.Value.RunId == telemetry.RunId && x.Value.EventId == telemetry.EventId)) _telemetry.Add((tenantId, telemetry)); return Task.CompletedTask; } }
-
-    public Task RecordEvidenceAsync(string tenantId, RunEvidenceEnvelope envelope, CancellationToken ct)
-    { lock (_gate) { if (!_evidence.Any(x => x.Tenant == tenantId && x.Value.RunId == envelope.RunId && x.Value.EventId == envelope.EventId)) _evidence.Add((tenantId, envelope)); return Task.CompletedTask; } }
-
-    public Task<EvidenceReconcileSummary> GetEvidenceReconcileAsync(string tenantId, CancellationToken ct)
+    public async Task RecordTelemetryAsync(string tenantId, OperationsTelemetry telemetry, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try { if (!_telemetry.Any(x => x.Tenant == tenantId && x.Value.RunId == telemetry.RunId && x.Value.EventId == telemetry.EventId)) _telemetry.Add((tenantId, telemetry)); }
+        finally { _gate.Release(); }
+    }
+
+    public async Task RecordEvidenceAsync(string tenantId, RunEvidenceEnvelope envelope, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try { if (!_evidence.Any(x => x.Tenant == tenantId && x.Value.RunId == envelope.RunId && x.Value.EventId == envelope.EventId)) _evidence.Add((tenantId, envelope)); }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<EvidenceReconcileSummary> GetEvidenceReconcileAsync(string tenantId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
         {
             var metricCount = _telemetry.Count(x => x.Tenant == tenantId);
             var envelope = _evidence.Where(x => x.Tenant == tenantId).Select(x => x.Value).ToArray();
@@ -84,13 +105,15 @@ public sealed class InMemoryOperationsGovernanceRepository(
             });
             var unknown = envelope.Count(e => e.ObservationQuality == "unknown");
             var measured = envelope.Where(e => e.ObservationQuality != "unknown" && e.UsageUnits is not null).Select(e => e.UsageUnits!.Value).ToArray();
-            return Task.FromResult(new EvidenceReconcileSummary(metricCount, envelope.Length, mismatched, unknown, measured.Length == 0 ? null : measured.Sum()));
+            return new EvidenceReconcileSummary(metricCount, envelope.Length, mismatched, unknown, measured.Length == 0 ? null : measured.Sum());
         }
+        finally { _gate.Release(); }
     }
 
-    public Task<OperationsMetrics> GetMetricsAsync(string tenantId, CancellationToken ct)
+    public async Task<OperationsMetrics> GetMetricsAsync(string tenantId, CancellationToken ct)
     {
-        lock (_gate)
+        await _gate.WaitAsync(ct);
+        try
         {
             var state = State(tenantId); var gate = Gate(state, state.Gate?.Id);
             var values = _telemetry.Where(x => x.Tenant == tenantId).Select(x => x.Value).ToArray();
@@ -104,17 +127,22 @@ public sealed class InMemoryOperationsGovernanceRepository(
                 .Select(x => new ToolMetric(x.Key, x.Count(), AverageNullable(x.Select(v => v.LatencyMs)), SumNullable(x.Select(v => v.UsageUnits)), SumNullable(x.Select(v => v.CostUnits)), 0)).ToArray();
             var nodes = values.Where(x => !string.IsNullOrEmpty(x.NodeId)).GroupBy(x => x.NodeId!, StringComparer.Ordinal).OrderBy(x => x.Key, StringComparer.Ordinal)
                 .Select(x => new NodeMetric(x.Key, x.Count(), Average(x.Select(v => v.LatencyMs)), Max(x.Select(v => v.LatencyMs)))).ToArray();
-            return Task.FromResult(new OperationsMetrics(gate?.Passed ?? true, gate?.OverrideActive ?? false, state.Audit.Count, state.Audit.Count(x => x is "rollout" or "rollback"), 0, 0, 0, 0, 0, 0, agents, skills, tools, nodes, new RootAggregateMetric(0, 0, 0, 0)));
+            return new OperationsMetrics(gate?.Passed ?? true, gate?.OverrideActive ?? false, state.Audit.Count, state.Audit.Count(x => x is "rollout" or "rollback"), 0, 0, 0, 0, 0, 0, agents, skills, tools, nodes, new RootAggregateMetric(0, 0, 0, 0));
         }
+        finally { _gate.Release(); }
     }
 
     // Lite 模式沒有 per-revision 的 run 指標來源:revisions 恆為空,因此 selected/previous/delta 也恆為 null。
-    public Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, CancellationToken ct)
+    public async Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, CancellationToken ct)
     {
-        lock (_gate)
-            return Task.FromResult(new OperationsVersionComparison(
+        await _gate.WaitAsync(ct);
+        try
+        {
+            return new OperationsVersionComparison(
                 selectedRevision, State(tenantId).Audit.Count(x => x is "rollout" or "rollback"),
-                selectedRevision is not null, true, Array.Empty<RevisionMetric>(), null));
+                selectedRevision is not null, true, Array.Empty<RevisionMetric>(), null);
+        }
+        finally { _gate.Release(); }
     }
 
     public Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct)

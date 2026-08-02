@@ -5,18 +5,20 @@ branch then/else、loop 的兩種離開方式、編譯快取，以及「稽核�
 治理硬規則 —— skill 的 YAML 完全沒寫 audit_feedback，trace 裡照樣要有它。
 """
 
-from types import SimpleNamespace
-
 import pytest
 
 from app.engine import compiler, node_registry, skill as skill_mod
 from app.engine.node_shell import set_budget_callback
 from app.engine.skill import Skill
-from app.nodes.kbquery.adapters import StaticGlossary
 
 # import 觸發 kb_query 節點註冊（compiler 強制附加的 audit_feedback 來自這裡）
 from app.nodes.kbquery import nodes as _kbquery_nodes  # noqa: F401
-from tests.kbquery_fakes import RecordingAuditRepo
+from tests.conftest import default_engine_deps, run_flow as _run_flow
+
+
+def run_flow(*args, **kwargs):
+    """Compiler tests deliberately start from only the state supplied by each case."""
+    return _run_flow(*args, seed_tenant=False, **kwargs)
 
 TEST_NODES = (
     "t_seed",
@@ -112,35 +114,6 @@ def _register_test_nodes():
         node_registry._REGISTRY.pop((name, "1.0"), None)
 
 
-def _deps():
-    """依賴一律注入：compiler 只認 NodeSpec.deps 宣告的欄位名，測試給一個剛好夠用的容器。
-
-    audit_repo 是 compiler 強制附加的 audit_feedback 需要的；llm/glossary/
-    max_retrieval_attempts 供 AT2-15 用到的 query_intake / query_rewrite。
-    """
-    return SimpleNamespace(
-        audit_repo=RecordingAuditRepo(),
-        llm=None,
-        glossary=StaticGlossary(),
-        max_retrieval_attempts=2,
-    )
-
-
-def _run(
-    flow: list[dict],
-    state: dict | None = None,
-    deps=None,
-    input_schema: dict | None = None,
-) -> dict:
-    import asyncio
-
-    skill = Skill.model_validate(
-        {"name": "probe-skill", "input_schema": input_schema or {}, "flow": flow}
-    )
-    graph = compiler.compile(skill, deps or _deps())
-    return compiler.public_output(asyncio.run(graph.ainvoke(state or {})))
-
-
 def _traced(result: dict) -> list[str]:
     return [t.node_name for t in result["trace"]]
 
@@ -152,7 +125,7 @@ def _traced(result: dict) -> list[str]:
 
 def test_sequence_runs_in_declared_order():
     """【AT2-15】兩個節點依宣告順序出現在 trace。"""
-    result = _run([{"node": "query_intake"}, {"node": "query_rewrite"}], {"query": "hi"})
+    result = run_flow([{"node": "query_intake"}, {"node": "query_rewrite"}], {"query": "hi"})
 
     trace = _traced(result)
     assert trace.index("query_intake") < trace.index("query_rewrite")
@@ -160,7 +133,7 @@ def test_sequence_runs_in_declared_order():
 
 def test_nested_sequence_flattens_in_order():
     """sequence 是隱含容器：巢狀寫法與攤平寫法順序一致。"""
-    result = _run(
+    result = run_flow(
         [{"node": "t_a"}, {"sequence": [{"node": "t_b"}, {"node": "t_tick"}]}]
     )
 
@@ -174,7 +147,7 @@ def test_nested_sequence_flattens_in_order():
 
 def test_branch_then_only():
     """【AT2-16】when 為真：只有 then 的節點執行，else 的節點不出現在 trace。"""
-    result = _run(
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -197,7 +170,7 @@ def test_branch_then_only():
 
 def test_branch_else_only():
     """【AT2-17】when 為假且有 else：只有 else 的節點執行。"""
-    result = _run(
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -218,7 +191,7 @@ def test_branch_else_only():
 
 def test_branch_without_else_skips_to_join():
     """when 為假且沒有 else：整段分支跳過，後續步驟照常執行。"""
-    result = _run(
+    result = run_flow(
         [
             {"node": "t_seed"},
             {"branch": {"when": "state.x == 'go'", "then": [{"node": "t_a"}]}},
@@ -240,7 +213,7 @@ def test_branch_without_else_skips_to_join():
 @pytest.mark.parametrize("max_iterations", [1, 2, 10])
 def test_loop_stops_at_max_iterations_when_until_never_true(max_iterations):
     """【AT2-18】until 恆假 → body 恰跑 max_iterations 輪（達上限強制離開，不無限跑）。"""
-    result = _run(
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -259,7 +232,7 @@ def test_loop_stops_at_max_iterations_when_until_never_true(max_iterations):
 
 def test_loop_exits_early_when_until_true():
     """【AT2-19】until 在第 1 輪後即為真、上限 5 → body 只跑 1 輪。"""
-    result = _run(
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -278,7 +251,7 @@ def test_loop_exits_early_when_until_true():
 
 def test_loop_body_runs_at_least_once():
     """語意是「先跑 body 再驗 until」：until 一開始就為真，body 仍跑一輪。"""
-    result = _run(
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -296,7 +269,7 @@ def test_loop_body_runs_at_least_once():
 
 def test_loop_without_until_runs_to_max_iterations():
     """until 選填：不給就跑滿上限（上限本身即護欄）。"""
-    result = _run(
+    result = run_flow(
         [
             {"node": "t_seed"},
             {"loop": {"max_iterations": 3, "body": [{"node": "t_tick"}]}},
@@ -319,7 +292,7 @@ def test_loop_counter_key_stripped_from_public_output():
             ],
         }
     )
-    raw = asyncio.run(compiler.compile(skill, _deps()).ainvoke({}))
+    raw = asyncio.run(compiler.compile(skill, default_engine_deps()).ainvoke({}))
 
     assert raw["__loop_0_count"] == 2  # 引擎內部確實有記
     assert "__loop_0_count" not in compiler.public_output(raw)
@@ -360,7 +333,7 @@ def test_sibling_loops_and_branch_inside_loop_keep_index_alignment():
             ],
         }
     )
-    raw = asyncio.run(compiler.compile(skill, _deps()).ainvoke({"x": "go"}))
+    raw = asyncio.run(compiler.compile(skill, default_engine_deps()).ainvoke({"x": "go"}))
 
     assert raw["__loop_0_count"] == 2  # 第一個 loop 的上限是 2
     assert raw["__loop_1_count"] == 3  # 第二個是 3；索引對調就會在這裡出局
@@ -379,8 +352,8 @@ def test_sibling_loops_and_branch_inside_loop_keep_index_alignment():
 @pytest.mark.parametrize("x", ["go", "stop"], ids=["then-path", "else-path"])
 def test_audit_node_appended_to_every_terminal_path(x):
     """【AT-GOV-01】flow 完全沒寫 audit_feedback，兩條分支的終止路徑都要有稽核 entry。"""
-    deps = _deps()
-    result = _run(
+    deps = default_engine_deps()
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -402,8 +375,8 @@ def test_audit_node_appended_to_every_terminal_path(x):
 
 def test_audit_node_appended_after_loop_exit():
     """迴圈離開後的路徑一樣附加稽核。"""
-    deps = _deps()
-    result = _run(
+    deps = default_engine_deps()
+    result = run_flow(
         [
             {"node": "t_seed"},
             {"loop": {"max_iterations": 2, "body": [{"node": "t_tick"}]}},
@@ -417,8 +390,8 @@ def test_audit_node_appended_after_loop_exit():
 
 def test_audit_node_not_duplicated_when_skill_ends_with_it():
     """Skill 把 audit_feedback 寫在 flow 的**最後一步** → 不重複附加（同一份稽核不落兩次）。"""
-    deps = _deps()
-    result = _run([{"node": "t_seed"}, {"node": "audit_feedback"}], deps=deps)
+    deps = default_engine_deps()
+    result = run_flow([{"node": "t_seed"}, {"node": "audit_feedback"}], deps=deps)
 
     assert _traced(result).count("audit_feedback") == 1
     assert len(deps.audit_repo.saved) == 1
@@ -430,8 +403,8 @@ def test_audit_still_appended_when_skill_declares_it_mid_flow():
     否則作者把 audit_feedback 放在答案節點之前，稽核到的 state 就沒有最終答案 ——
     「每條終止路徑都有稽核」這條硬規則被一個排序就繞過去了。
     """
-    deps = _deps()
-    result = _run(
+    deps = default_engine_deps()
+    result = run_flow(
         [{"node": "t_seed"}, {"node": "audit_feedback"}, {"node": "t_a"}], deps=deps
     )
 
@@ -453,8 +426,8 @@ def test_audit_appended_even_when_only_one_branch_declares_it(x, expected_audits
     `>= 1`：「末端附加的稽核取代了分支內那顆」這種迴歸只會讓 then 從 2 掉到 1，
     在 `>= 1` 底下完全看不見。
     """
-    deps = _deps()
-    result = _run(
+    deps = default_engine_deps()
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -501,7 +474,7 @@ def test_effective_reads_built_from_spec_and_params(src, expected):
     多放行 → reads 契約形同虛設（宣告 a 卻看得到 c）。
     """
     params = {} if src is None else {"params": {"src": src}}
-    result = _run(
+    result = run_flow(
         [{"node": "t_reader", **params}],
         READS_STATE,
         input_schema=READS_SCHEMA,
@@ -515,7 +488,7 @@ def test_node_without_reads_declaration_sees_full_state():
 
     空 reads 契約＝「未宣告」，不是「宣告讀零鍵」—— 誤當後者會餓死節點整個視圖。
     """
-    result = _run([{"node": "t_open"}], READS_STATE, input_schema=READS_SCHEMA)
+    result = run_flow([{"node": "t_open"}], READS_STATE, input_schema=READS_SCHEMA)
 
     assert {"a", "b", "c"} <= set(result["seen"])
 
@@ -523,7 +496,7 @@ def test_node_without_reads_declaration_sees_full_state():
 def test_run_on_fatal_node_reads_include_engine_keys():
     """run_on_fatal 節點的視野必須 ∪ ENGINE_KEYS：看不到 fatal_error/errors/trace 的
     稽核節點等於稽核不到失敗那一次。"""
-    result = _run(
+    result = run_flow(
         [{"node": "t_boom"}, {"node": "t_fatal_reader"}],
         READS_STATE,
         input_schema=READS_SCHEMA,
@@ -543,8 +516,8 @@ def test_branch_condition_eval_error_takes_safe_path_and_still_audits():
     規格 §3.1 範例的 `state.confidence < 0.7 and ...` 在 fatal 情境下就是這個形狀：
     靜態驗證是 valid 的，執行期卻踩到不存在的鍵。引擎必須兜底，否則稽核不落地。
     """
-    deps = _deps()
-    result = _run(
+    deps = default_engine_deps()
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -567,8 +540,8 @@ def test_branch_condition_eval_error_takes_safe_path_and_still_audits():
 
 def test_loop_condition_eval_error_exits_loop_and_still_audits():
     """until 求值失敗 → 安全離開迴圈（跑完當輪 body 即出場），稽核照樣落地。"""
-    deps = _deps()
-    result = _run(
+    deps = default_engine_deps()
+    result = run_flow(
         [
             {"node": "t_seed"},
             {
@@ -677,7 +650,7 @@ def test_compile_caches_by_revision(monkeypatch):
 
     monkeypatch.setattr(compiler, "_build_graph", counting_build)
 
-    deps = _deps()
+    deps = default_engine_deps()
     definition = {"name": "cache-probe", "revision": 1, "flow": [{"node": "t_a"}]}
     skill = Skill.model_validate(definition)
 
@@ -702,7 +675,7 @@ def test_compile_caches_by_revision(monkeypatch):
 def test_compiled_graph_reusable_across_budget_callbacks():
     import asyncio
 
-    deps = _deps()
+    deps = default_engine_deps()
     skill = Skill.model_validate(
         {"name": "callback-cache-probe", "revision": 1, "flow": [{"node": "t_a"}]}
     )
@@ -753,7 +726,7 @@ def test_compile_does_not_share_graph_across_different_deps(monkeypatch):
     skill = Skill.model_validate(
         {"name": "deps-probe", "revision": 1, "flow": [{"node": "t_a"}]}
     )
-    first_deps, second_deps = _deps(), _deps()
+    first_deps, second_deps = default_engine_deps(), default_engine_deps()
 
     first = compiler.compile(skill, first_deps)
     second = compiler.compile(skill, second_deps)
@@ -767,7 +740,7 @@ def test_compile_does_not_share_graph_across_different_deps(monkeypatch):
 def test_compile_cache_evicts_beyond_max(monkeypatch):
     """FIFO 上限：第 _CACHE_MAX+1 個 skill 進來時，最早的那個被淘汰（不無限成長）。"""
     calls = _counting_build(monkeypatch)
-    deps = _deps()
+    deps = default_engine_deps()
     probes = [
         Skill.model_validate({"name": f"evict-probe-{i}", "flow": [{"node": "t_a"}]})
         for i in range(compiler._CACHE_MAX + 1)
@@ -793,7 +766,7 @@ def test_compile_with_cache_false_bypasses_global_cache(monkeypatch):
     """cache=False 每次呼叫都重新建圖,且全域快取一格都不會多——eval 每 case 各自
     build_fixture_deps,若走一般快取,id(deps) 永遠不同只會塞滿 FIFO。"""
     calls = _counting_build(monkeypatch)
-    deps = _deps()
+    deps = default_engine_deps()
     skill = Skill.model_validate(
         {"name": "no-cache-probe", "revision": 1, "flow": [{"node": "t_a"}]}
     )
@@ -809,7 +782,7 @@ def test_compile_with_cache_false_bypasses_global_cache(monkeypatch):
 
 def test_compile_cache_false_does_not_evict_cached_entries():
     """eval 的 cache=False 呼叫不會擠掉既有的 cache=True 快取項(≥32 筆也不影響)。"""
-    deps = _deps()
+    deps = default_engine_deps()
     cached_skill = Skill.model_validate(
         {"name": "stays-cached-probe", "revision": 1, "flow": [{"node": "t_a"}]}
     )
@@ -836,7 +809,7 @@ def _compile_error(flow: list[dict]) -> str:
     skill = Skill.model_validate({"name": "probe-skill", "flow": flow})
 
     with pytest.raises(compiler.SkillCompileError) as exc:
-        compiler.compile(skill, _deps())
+        compiler.compile(skill, default_engine_deps())
 
     return str(exc.value)
 
@@ -897,7 +870,7 @@ def test_compile_rejects_empty_flow():
     skill = Skill.model_validate({"name": "probe-skill", "flow": []})
 
     with pytest.raises(compiler.SkillCompileError) as exc:
-        compiler.compile(skill, _deps())
+        compiler.compile(skill, default_engine_deps())
 
     assert "flow" in str(exc.value)
 

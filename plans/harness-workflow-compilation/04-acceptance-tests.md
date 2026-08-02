@@ -1,5 +1,7 @@
 # Harness 包覆 Business Workflow — 驗收測試
 
+> **Historical delivery record (2026-08-02):** 本文件保留已交付 gate；未來驗收使用 [Architecture Hard Reset acceptance tests](../architecture-hard-reset/04-acceptance-tests.md)。
+
 > 依據 [01-plan.md](01-plan.md) 和 [02-spec.md](02-spec.md)。
 > 每個測試案例標注 `[HP]` = happy path、`[EC]` = edge case、`[REG]` = regression。
 

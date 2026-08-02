@@ -12,7 +12,7 @@ tools: Read, Write, Edit, Glob, Grep
 文件分層(每個事實只住一個檔,不重複;採漸進式揭露 — 常駐 context 的檔案越薄越好):
 - 根 `AGENTS.md`:monorepo 地圖 + 日常**跨服務契約**(SSE 格式、ApiError、X-* headers、202 流程、auth、兩層記憶、Skill Engine)+ 通則。Agent 平台 D1–D7 契約在這裡**只留 1–3 行不變式**(flag 名稱、fail-closed 預設、權責分界)+ 連結。
 - `docs/agent-platform-contracts.md`:D1–D7 契約完整細節,按需載入。新的大型跨服務契約也放這類 docs/ 細節檔,root 只加一行不變式 + 連結;需要新檔就用 Write 建立。
-- `docs/coding-standards.md`:開發代理共同憲法(Karpathy 四原則、ponytail 階梯、Re-Use、Node-First、Harness/商業邏輯分層、測試取捨、清理盤點);root AGENTS.md 的 Coding Style 只留指向它的一句話與極少數不可推斷的既定決策(手寫 fake、不加依賴),不複製憲法內文。
+- `docs/coding-standards.md`:開發代理共同憲法(Karpathy 四原則、ponytail 階梯、Re-Use、Node-First、Harness/商業邏輯分層、測試取捨、清理盤點、重構正確性稽核、.NET 併發規約);root AGENTS.md 的 Coding Style 只留指向它的一句話與極少數不可推斷的既定決策(手寫 fake、不加依賴),不複製憲法內文。
 - `platform|backend|frontend|workflow|infra/AGENTS.md`:該區的結構、指令、環境變數與 gotcha。
 - 各子專案的 `CLAUDE.md` 只有 `@AGENTS.md` 匯入,永遠不放內容。
 - `README.md`:面向人的總覽(結構圖、埠號表、run-mode 矩陣、mem0 章節)。

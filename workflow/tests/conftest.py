@@ -1,11 +1,18 @@
 """跨測試檔共用的假物件與 helper（各測試檔原本各有一份，上移去重）。"""
 
 import asyncio
+import dataclasses
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import httpx
 
 from app import skills
 from app.engine import compiler
+from app.engine import skill as skill_mod
+from app.engine.skill import Skill
+from app.nodes.kbquery.adapters import StaticGlossary
+from tests.kbquery_fakes import RecordingAuditRepo
 
 # backend 內部信任邊界的預設 token（＝settings.internal_api_token 的預設值）；多檔散布 import。
 INTERNAL_TOKEN = "internal-dev-token"
@@ -72,3 +79,70 @@ def invoke_builtin(name: str, deps, **state) -> dict:
     graph = compiler.compile(skill, deps)
     out = asyncio.run(graph.ainvoke({"tenant_id": "t", **state}))
     return compiler.public_output(out)
+
+
+@contextmanager
+def swap_skill(name: str, *, base: skills.LoadedSkill | None = None, **overrides):
+    """暫時替換已載入的 Skill，並在離開時還原 registry。"""
+    original = skills.get(name)
+    source = base if base is not None else original
+    skills._SKILLS[name] = dataclasses.replace(source, **overrides)
+    try:
+        yield skills._SKILLS[name]
+    finally:
+        if original is None:
+            skills._SKILLS.pop(name, None)
+        else:
+            skills._SKILLS[name] = original
+
+
+def register_builtin_skill(name: str, template: str, base_deps):
+    """註冊測試用的內建 Skill，並回傳清理函式。"""
+    skill = skill_mod.parse_source(template.format(name=name))
+    loaded = skills.LoadedSkill(
+        skill=skill,
+        graph=compiler.compile(skill, base_deps),
+        input_model=skill_mod.build_input_model(skill),
+        deps=base_deps,
+        recursion_limit=compiler.recursion_limit(skill),
+        source="builtin",
+    )
+    skills._SKILLS[name] = loaded
+    return lambda: skills._SKILLS.pop(name, None)
+
+
+def default_engine_deps(**extra):
+    """建立 engine 測試共用的依賴物件。"""
+    fields = {
+        "audit_repo": RecordingAuditRepo(),
+        "llm": None,
+        "glossary": StaticGlossary(),
+        "max_retrieval_attempts": 2,
+    }
+    return SimpleNamespace(**{**fields, **extra})
+
+
+def run_flow(
+    flow: list[dict],
+    state: dict | None = None,
+    deps=None,
+    input_schema: dict | None = None,
+    seed_tenant: bool = True,
+    **skill_extra,
+) -> dict:
+    """編譯並執行測試用 flow，回傳公開輸出。"""
+    skill = Skill.model_validate(
+        {
+            "name": "probe-skill",
+            "input_schema": input_schema or {},
+            "flow": flow,
+            **skill_extra,
+        }
+    )
+    graph = compiler.compile(skill, deps or default_engine_deps())
+    initial_state = (
+        {"tenant_id": "t-test", **(state or {})} if seed_tenant else state or {}
+    )
+    return compiler.public_output(
+        asyncio.run(graph.ainvoke(initial_state))
+    )

@@ -6,7 +6,7 @@ using Backend.Api.Skills;
 
 namespace Backend.Api.Data.InMemory;
 
-public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestratorChildRunRepository, IAgentRunApprovalLeaseVerifier, IAgentRunApprovalDecisionTransition
+public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestratorChildRunRepository, IAgentRunApprovalLeaseVerifier, IAgentRunApprovalDecisionTransition, IAgentRunCancellationFence
 {
     private static readonly IReadOnlySet<string> CancelAuditEventTypes =
         new HashSet<string>(StringComparer.Ordinal)
@@ -37,7 +37,7 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             "deadline_exceeded",
         };
 
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly Dictionary<Guid, Entry> _runs = new();
     private readonly Dictionary<(string Tenant, string User, string Type, string KeyHash), CommandEntry> _commands = new();
     private readonly InMemoryAgentRepository _agents;
@@ -1717,6 +1717,27 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
            && entry.UserId == userId
             ? entry
             : null;
+
+    /// <summary>
+    /// D7 evidence 寫入(<see cref="InMemoryAgentRunApprovalRepository.WriteEvidenceAsync"/>)必須在
+    /// 重新取得 <c>_gate</c> 之後原子性地重新檢查 CancelRequested,而不是只信任外層先前讀到的快照 ——
+    /// 同 <see cref="InMemorySkillRepository.ReferenceSyncRoot"/> 先例,只供同組件內協調,不是公開
+    /// repository 契約。
+    /// </summary>
+    internal Lock ReferenceSyncRoot => _gate;
+
+    /// <summary>呼叫端必須持有 <see cref="ReferenceSyncRoot"/>。找不到 run 時保守回傳「已取消」。</summary>
+    internal bool IsCancelRequestedUnsafe(string tenantId, string userId, Guid runId)
+        => Find(tenantId, userId, runId) is not { CancelRequestedAt: null };
+
+    /// <summary>
+    /// <see cref="IAgentRunCancellationFence"/> 轉接:讓 <see cref="InMemoryAgentRunApprovalRepository"/>
+    /// 依薄介面取得同一把鎖與同一個原子重新檢查,不需要對這個具體型別做 downcast。
+    /// </summary>
+    Lock IAgentRunCancellationFence.SyncRoot => ReferenceSyncRoot;
+
+    bool IAgentRunCancellationFence.IsCancelRequested(string tenantId, string userId, Guid runId)
+        => IsCancelRequestedUnsafe(tenantId, userId, runId);
 
     public bool HasActiveApprovalLease(string tenantId, string userId, Guid runId, string leaseToken, long leaseGeneration)
     {

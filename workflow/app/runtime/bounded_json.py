@@ -1,6 +1,6 @@
 """共用的「序列化為 JSON 字串並截斷字元上限」邏輯。
 
-`legacy_flow._bounded_json` 與 `tool_boundary._bounded_observation` 逐行相同：
+`flow_harness` 與 `tool_boundary` 原有的 JSON 邊界處理逐行相同：
 都是 `json.dumps(..., ensure_ascii=False, allow_nan=False, sort_keys=True,
 separators=(",", ":"), default=str)`，失敗轉錯誤、成功則截斷。差異只在序列化
 失敗時的回退策略（前者直接拒絕、後者退回一個佔位結果）與截斷後綴，因此用參數

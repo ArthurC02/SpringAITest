@@ -1,5 +1,4 @@
 using System.Net.Http.Json;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 using Backend.Api.Common;
 using Backend.Api.Skills;
@@ -12,31 +11,20 @@ namespace Backend.Api.BusinessWorkflows;
 /// 因此任何非 200(含傳輸失敗)都是「驗證服務本身壞了」,不是「定義不合法」:
 /// 對外回 502(不是 422)— 不得把引擎不可達誤判成使用者的定義有問題,更不得放行未驗證的定義。
 /// </summary>
-public sealed class WorkflowSkillValidator : ISkillValidator
+public sealed class WorkflowSkillValidator(HttpClient http, string baseUrl, string internalToken) : ISkillValidator
 {
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
-
-    private readonly HttpClient _http;
-    private readonly string _baseUrl;
-    private readonly string _internalToken;
-
-    public WorkflowSkillValidator(HttpClient http, string baseUrl, string internalToken)
-    {
-        _http = http;
-        _baseUrl = baseUrl.TrimEnd('/');
-        _internalToken = internalToken;
-    }
+    private readonly string _baseUrl = baseUrl.TrimEnd('/');
 
     public async Task<SkillValidationResult> ValidateAsync(
         string definition, string tenantId, string? userId, string? role, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Post, _baseUrl + "/business-workflows/validate")
         {
-            Content = JsonContent.Create(new { definition }, options: JsonOpts),
+            Content = JsonContent.Create(new { definition }, options: InternalWorkflowClient.Options),
         };
-        req.UseInternalIdentity(_internalToken, tenantId, userId, role);
+        req.UseInternalIdentity(internalToken, tenantId, userId, role);
 
-        var body = await _http.SendJsonAsync<ValidateBody>(req, Failure, JsonOpts, ct);
+        var body = await http.SendJsonAsync<ValidateBody>(req, Failure, InternalWorkflowClient.Options, ct);
 
         // valid=true 卻沒帶 skill 中繼資料 → 引擎違反契約。此時 backend 無從得知 name/description,
         // 只能視為驗證服務故障(502);絕不猜測欄位值,也絕不放行寫入。

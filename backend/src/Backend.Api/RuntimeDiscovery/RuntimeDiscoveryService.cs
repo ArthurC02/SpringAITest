@@ -3,6 +3,7 @@ using Backend.Api.Agents;
 using Backend.Api.Common;
 using Backend.Api.OrchestratorRuns;
 using Backend.Api.Orchestrators;
+using static Backend.Api.Common.ApiErrors;
 
 namespace Backend.Api.RuntimeDiscovery;
 
@@ -100,12 +101,6 @@ public sealed class RuntimeDiscoveryService(
         }
     }
 
-    private static string Required(string? value, string field, int max)
-    {
-        value = value?.Trim();
-        if (string.IsNullOrEmpty(value) || value.Length > max || value.Any(char.IsControl)) throw new ApiException(400, $"{field} is required");
-        return value;
-    }
     private enum ActiveStatus { Ready, Missing, Inactive, Forbidden }
     private sealed record Active(ActiveStatus Status, RuntimeOrchestratorSummary? Summary = null);
 }

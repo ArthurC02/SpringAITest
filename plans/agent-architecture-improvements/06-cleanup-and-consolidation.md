@@ -1,5 +1,7 @@
 # Cleanup 與 Consolidation Roadmap
 
+> **Superseded retirement policy (2026-08-02):** C8 的 usage-zero、rollback-window 與相容雙軌退場策略已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 取代；原文保留為歷史理由。現行程式仍遵守本文件，直到 hard-reset 對應 phase 實作並通過 gate。
+
 > Cleanup 不是獨立功能里程碑。只有 replacement 已 authoritative、fallback usage 為零、rollback window 結束且 evidence 可驗證時才能刪除舊路徑。
 
 | Phase | Cleanup                                                                             | 前置 gate                                                                          | 不可刪除                                            |

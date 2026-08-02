@@ -1,7 +1,7 @@
 <Project>
 
   <!--
-    整個 backend 方案的共用建置設定(對應原 Java 多模組共用的 parent pom 設定)。
+    整個 Platform 方案的共用建置設定(對應原 Java 多模組共用的 parent pom 設定)。
     net10.0、可空參考型別、隱含 using 全專案一致,避免每個 csproj 重複宣告。
   -->
   <PropertyGroup>
@@ -14,6 +14,9 @@
       傳遞套件的預覽/安全性警告讓整個建置失敗。
     -->
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- Compaction (SlidingWindowCompactionStrategy/CompactionTriggers) is [Experimental("MAAI001")] in 1.13.0-preview;
+         P2 (copilot-shared-core) uses it deliberately for the framework session window. -->
+    <NoWarn>$(NoWarn);MAAI001</NoWarn>
   </PropertyGroup>
 
 </Project>

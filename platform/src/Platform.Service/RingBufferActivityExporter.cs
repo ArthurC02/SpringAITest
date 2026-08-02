@@ -22,7 +22,7 @@ public sealed class RingBufferActivityExporter : BaseExporter<Activity>
     };
 
     private readonly Queue<ActivitySnapshot> _buffer = new();
-    private readonly object _lock = new();
+    private readonly Lock _lock = new();
 
     /// <summary>簡化後的 Activity 快照(供 LLM 讀)。</summary>
     public sealed class ActivitySnapshot

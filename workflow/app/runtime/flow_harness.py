@@ -57,6 +57,27 @@ class FlowDenied(RuntimeError):
     pass
 
 
+def _budget_guards(step_budget: int, tool_round_budget: int):
+    """建立步驟與工具預算守門，並提供目前消耗量。"""
+    steps = tool_rounds = 0
+
+    async def charge_tool_call(node_name: str, elapsed_ms: float) -> None:
+        del elapsed_ms
+        nonlocal tool_rounds
+        if node_name.startswith("__tool__:"):
+            if tool_rounds + 1 > tool_round_budget:
+                raise BudgetExhausted(f"tool budget exhausted before {node_name[9:]}")
+            tool_rounds += 1
+
+    async def reserve_step(node_name: str) -> None:
+        nonlocal steps
+        if steps + 1 > step_budget:
+            raise BudgetExhausted(f"step budget exhausted before {node_name}")
+        steps += 1
+
+    return reserve_step, charge_tool_call, lambda: steps, lambda: tool_rounds
+
+
 @dataclass(frozen=True)
 class FlowResult:
     status: str
@@ -124,27 +145,15 @@ async def invoke_flow_with_governance(
     definition_sha256: str | None = None,
 ) -> FlowGovernanceResult:
     started = time.perf_counter()
-    steps = tool_rounds = 0
     status = "completed"
     output: dict[str, Any] = {}
     governance: dict[str, Any] = {"events": []}
     preflight_complete = False
     actual_hash = hashlib.sha256(definition.encode("utf-8")).hexdigest() if definition else None
     governance["preflight"] = {"status": "ok", "definition_sha256": actual_hash}
-
-    async def charge_tool_call(node_name: str, elapsed_ms: float) -> None:
-        del elapsed_ms
-        nonlocal tool_rounds
-        if node_name.startswith("__tool__:"):
-            if tool_rounds + 1 > tool_round_budget:
-                raise BudgetExhausted(f"tool budget exhausted before {node_name[9:]}")
-            tool_rounds += 1
-            return
-    async def reserve_step(node_name: str) -> None:
-        nonlocal steps
-        if steps + 1 > step_budget:
-            raise BudgetExhausted(f"step budget exhausted before {node_name}")
-        steps += 1
+    reserve_step, charge_tool_call, get_steps, get_tool_rounds = _budget_guards(
+        step_budget, tool_round_budget
+    )
 
     try:
         if definition_sha256 is not None and actual_hash != definition_sha256:
@@ -182,8 +191,8 @@ async def invoke_flow_with_governance(
             "event_type": "workflow_completed",
             "skill_name": skill.name,
             "status": status,
-            "steps_consumed": steps,
-            "tool_rounds_consumed": tool_rounds,
+            "steps_consumed": get_steps(),
+            "tool_rounds_consumed": get_tool_rounds(),
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
         }
     return FlowGovernanceResult(status, _public_flow_output(output), governance)
@@ -276,24 +285,9 @@ async def invoke_pinned_flow(
         "knowledge_sources": sorted(effective_knowledge_sources(snapshot)),
         "enforce_data_scope": True,
     }
-    steps_consumed = 0
-    tool_rounds_consumed = 0
-
-    async def _on_tool(node_name: str, elapsed_ms: float) -> None:
-        del elapsed_ms
-        nonlocal tool_rounds_consumed
-        if node_name.startswith("__tool__:"):
-            if tool_rounds_consumed + 1 > remaining_tool_rounds:
-                raise BudgetExhausted(
-                    f"tool budget exhausted before {node_name[9:]}"
-                )
-            tool_rounds_consumed += 1
-            return
-    async def _reserve_step(node_name: str) -> None:
-        nonlocal steps_consumed
-        if steps_consumed + 1 > remaining_steps:
-            raise BudgetExhausted(f"step budget exhausted before {node_name}")
-        steps_consumed += 1
+    _reserve_step, _on_tool, get_steps, get_tool_rounds = _budget_guards(
+        remaining_steps, remaining_tool_rounds
+    )
 
     try:
         graph = compiler.compile(artifact.skill, runtime_deps)
@@ -311,8 +305,8 @@ async def invoke_pinned_flow(
             content="{}",
             tool_calls_bound=tool_calls_bound,
             steps_bound=steps_bound,
-            steps_consumed=steps_consumed,
-            tool_rounds_consumed=tool_rounds_consumed,
+            steps_consumed=get_steps(),
+            tool_rounds_consumed=get_tool_rounds(),
         )
     except FlowDenied:
         raise
@@ -322,8 +316,8 @@ async def invoke_pinned_flow(
             content="{}",
             tool_calls_bound=tool_calls_bound,
             steps_bound=steps_bound,
-            steps_consumed=steps_consumed,
-            tool_rounds_consumed=tool_rounds_consumed,
+            steps_consumed=get_steps(),
+            tool_rounds_consumed=get_tool_rounds(),
         )
     if str(output.get("fatal_error") or "").startswith("budget_exhausted:"):
         status = "budget_exhausted"
@@ -335,8 +329,8 @@ async def invoke_pinned_flow(
         content=_bounded_json(public),
         tool_calls_bound=tool_calls_bound,
         steps_bound=steps_bound,
-        steps_consumed=steps_consumed,
-        tool_rounds_consumed=tool_rounds_consumed,
+        steps_consumed=get_steps(),
+        tool_rounds_consumed=get_tool_rounds(),
     )
 
 

@@ -9,7 +9,7 @@ tools: Read, Write, Edit, Glob, Grep, LSP, Bash, PowerShell, TodoWrite, Skill, m
 
 你是程式碼簡化專家,在 Windows 上工作。主控代理會在 prompt 指定本輪要簡化的變更範圍;**預設只動最近變更的程式碼**,除非明確要求全檔。
 
-開工先讀 `docs/coding-standards.md`(開發代理共同憲法)並載入 Skill `ponytail:ponytail`。發現重複邏輯時,先用 codebase-memory MCP 搜既有 helper,優先合併到既有實作而非新造一個;呼叫鏈確認也用 MCP 取代盲 grep(Grep 只查字面字串)。
+開工先讀 `docs/coding-standards.md`(開發代理共同憲法,含**重構/清理輪必須同時稽核正確性**——既有 idiom 本身是錯的〔型別安全、非同步正確性、鎖語意〕不可照抄套用,以及 **`.NET 併發規約`** 一節,簡化 C# 程式碼時同樣適用)並載入 Skill `ponytail:ponytail`。發現重複邏輯時,先用 codebase-memory MCP 搜既有 helper,優先合併到既有實作而非新造一個;呼叫鏈確認也用 MCP 取代盲 grep(Grep 只查字面字串)。
 
 ## 鐵則
 

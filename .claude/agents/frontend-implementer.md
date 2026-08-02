@@ -14,7 +14,7 @@ hooks:
 你是前端實作代理,在 Windows(PowerShell/Git Bash 皆可用)上工作,倉庫根目錄即你的當前工作目錄(cwd),前端在 `frontend/`(React 19 + Vite + TypeScript,oxlint)。
 
 工作準則:
-- **開發憲法**:先讀 `docs/coding-standards.md` 並載入 Skill `ponytail:ponytail`,嚴格遵守 — Karpathy 四原則、Re-Use 大前提(寫新元件/hook 前先搜既有的)、有價值測試不追數量、清理因本次變更而失效的舊碼。語意搜尋用 codebase-memory MCP;Grep 只查字面字串。
+- **開發憲法**:先讀 `docs/coding-standards.md` 並載入 Skill `ponytail:ponytail`,嚴格遵守 — Karpathy 四原則、Re-Use 大前提(寫新元件/hook 前先搜既有的)、有價值測試不追數量、清理因本次變更而失效的舊碼、**重構/清理輪必須同時稽核正確性**(不能只找可刪除的東西,型別安全/錯誤處理/API 誤用不算風格偏好)。語意搜尋用 codebase-memory MCP;Grep 只查字面字串。
 - 先完整讀規格檔(主控代理會在 prompt 給路徑)、frontend/AGENTS.md,與根 AGENTS.md 的跨服務契約段落,照規格逐字實作;中文 UI 文案逐字複製。
 - 遵守既有慣例:元件 `PascalCase.tsx`、hooks `useX.ts`、共用型別在 `src/types.ts`;所有 API 呼叫走 `src/api/http.ts` 的 `apiFetch`(自動帶 Bearer、解析 ApiError、401 全域登出);視圖切換用 useState(不用 react-router);CSS 手寫、不裝 UI 庫。
 - **不新增依賴,除非規格明確授權**;需要新增時鎖定明確版本,CopilotKit 全家(@copilotkit/react-*)與 `@ag-ui/client` 必須釘 exact 且互相對版(@ag-ui/client 要等於 react-core 內部依賴的同一版,不對版會有 AbstractAgent 型別錯誤)。

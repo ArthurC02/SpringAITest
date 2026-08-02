@@ -68,15 +68,17 @@ public sealed class AgentRunServiceTests
     [Fact]
     public async Task Start_AllocatesCommand_AndKicksWorkflowWithOnlyCommandId()
     {
-        var requests = new List<(string Path, string? IdempotencyKey, string? Body)>();
+        // Body is deliberately not captured here (never asserted below) -- StubHttpMessageHandler
+        // already reads it into LastBody before invoking this delegate, so re-reading
+        // request.Content synchronously would just be a redundant blocking call.
+        var requests = new List<(string Path, string? IdempotencyKey)>();
         var backend = new StubHttpMessageHandler(request =>
         {
             requests.Add((
                 request.RequestUri!.AbsolutePath,
                 request.Headers.TryGetValues("Idempotency-Key", out var values)
                     ? values.Single()
-                    : null,
-                request.Content?.ReadAsStringAsync().GetAwaiter().GetResult()));
+                    : null));
             return Command($$"""{"id":"{{RunIdText}}","status":"queued"}""");
         });
         var workflow = new StubHttpMessageHandler(_ =>
@@ -110,12 +112,10 @@ public sealed class AgentRunServiceTests
     [Fact]
     public async Task Start_TrimsMessageOnlyInDurableBackendAllocation()
     {
-        string? backendBody = null;
-        var backend = new StubHttpMessageHandler(request =>
-        {
-            backendBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
-            return Command($$"""{"id":"{{RunIdText}}","status":"queued"}""");
-        });
+        // Single-call handler: reading the body back via backend.LastBody after the await
+        // (StubHttpMessageHandler already reads it there) avoids a redundant blocking read here.
+        var backend = new StubHttpMessageHandler(_ =>
+            Command($$"""{"id":"{{RunIdText}}","status":"queued"}"""));
         var workflow = new StubHttpMessageHandler(_ =>
             Json(HttpStatusCode.Accepted, "{}"));
         var expected = new string('x', 16_384);
@@ -124,7 +124,7 @@ public sealed class AgentRunServiceTests
         await Build(backend, workflow).StartAsync(
             AgentId, padded, "trimmed-start", Admin);
 
-        using var backendJson = JsonDocument.Parse(backendBody!);
+        using var backendJson = JsonDocument.Parse(backend.LastBody!);
         using var workflowJson = JsonDocument.Parse(workflow.LastBody!);
         Assert.Equal(
             expected,
@@ -199,15 +199,16 @@ public sealed class AgentRunServiceTests
     [Fact]
     public async Task Resume_AllocatesCheckpointCommand_AndKicksWithOnlyCommandId()
     {
-        var backendRequests = new List<(string Path, string? IdempotencyKey, string? Body)>();
+        // Body is read back via backend.LastBody after the await (single-call handler; see
+        // Start_TrimsMessageOnlyInDurableBackendAllocation) rather than a redundant blocking read.
+        var backendRequests = new List<(string Path, string? IdempotencyKey)>();
         var backend = new StubHttpMessageHandler(request =>
         {
             backendRequests.Add((
                 request.RequestUri!.AbsolutePath,
                 request.Headers.TryGetValues("Idempotency-Key", out var values)
                     ? values.Single()
-                    : null,
-                request.Content?.ReadAsStringAsync().GetAwaiter().GetResult()));
+                    : null));
             return Command(
                 $$"""{"id":"{{RunIdText}}","status":"queued","state_version":7}""");
         });
@@ -219,7 +220,7 @@ public sealed class AgentRunServiceTests
 
         Assert.Equal($"/api/runs/{RunIdText}/resume", backendRequests[0].Path);
         Assert.Equal("resume-1", backendRequests[0].IdempotencyKey);
-        using (var body = JsonDocument.Parse(backendRequests[0].Body!))
+        using (var body = JsonDocument.Parse(backend.LastBody!))
         {
             Assert.Equal("more context", body.RootElement.GetProperty("message").GetString());
             Assert.Equal(3, body.RootElement.GetProperty("expected_checkpoint_version").GetInt64());
@@ -264,12 +265,12 @@ public sealed class AgentRunServiceTests
     [Fact]
     public async Task ReplayedCommand_ReturnsOriginalRun_WithoutWorkflowOrAck()
     {
+        // Body is read back via backend.LastBody after the await (single-call handler; see
+        // Start_TrimsMessageOnlyInDurableBackendAllocation) rather than a redundant blocking read.
         var backendCalls = 0;
-        string? backendBody = null;
         var backend = new StubHttpMessageHandler(request =>
         {
             backendCalls++;
-            backendBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
             return Command(
                 $$"""{"id":"{{RunIdText}}","status":"queued","state_version":7}""",
                 dispatchRequired: false,
@@ -294,7 +295,7 @@ public sealed class AgentRunServiceTests
         Assert.Equal(RunId, body.RootElement.GetProperty("id").GetGuid());
         Assert.Equal(1, backendCalls);
         Assert.Equal(0, workflowCalls);
-        using var sent = JsonDocument.Parse(backendBody!);
+        using var sent = JsonDocument.Parse(backend.LastBody!);
         Assert.Equal(
             "same input",
             sent.RootElement.GetProperty("message").GetString());
@@ -429,12 +430,12 @@ public sealed class AgentRunServiceTests
     public async Task DecideApproval_UsesDecisionSuffix_AndOnlyApproveKicksWorkflow(
         bool approve, string expectedSuffix, int expectedWorkflowCalls)
     {
+        // Body is read back via backend.LastBody after the await (single-call handler; see
+        // Start_TrimsMessageOnlyInDurableBackendAllocation) rather than a redundant blocking read.
         var approvalId = Guid.Parse("66666666-6666-4666-8666-666666666666");
-        string? backendBody = null;
         string? idempotencyKey = null;
         var backend = new StubHttpMessageHandler(request =>
         {
-            backendBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
             idempotencyKey = request.Headers.TryGetValues("Idempotency-Key", out var values)
                 ? values.Single()
                 : null;
@@ -455,7 +456,7 @@ public sealed class AgentRunServiceTests
             $"http://backend/api/runs/{RunIdText}/approvals/{approvalId:D}/{expectedSuffix}",
             backend.LastRequest!.RequestUri!.ToString());
         Assert.Equal("approval-attempt-1", idempotencyKey);
-        using (var sent = JsonDocument.Parse(backendBody!))
+        using (var sent = JsonDocument.Parse(backend.LastBody!))
         {
             Assert.Equal("已複核", sent.RootElement.GetProperty("reason").GetString());
         }

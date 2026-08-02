@@ -13,6 +13,7 @@ import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useResource } from '../hooks/useResource'
 import { runWithToast, useToast } from './Toast'
+import RevisionList from './RevisionList'
 
 function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   const toast = useToast()
@@ -41,12 +42,12 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   async function save() {
     const currentDraft = draft; const currentWorkflow = workflow
     if (!currentDraft || !etag || !currentWorkflow) return
-    try { await putWorkflowDraft(id, currentWorkflow, currentDraft, etag); await load(); toast('草稿已儲存', 'success') }
+    try { await putWorkflowDraft(id, currentWorkflow, currentDraft, etag); await load() }
     catch (e) { if (isConflict(e)) setBlocked(true); else throw e }
   }
   async function validate() { if (etag) setValidation(await validateWorkflow(id, etag)) }
   async function simulate() { if (etag) setSimulation(await simulateWorkflow(id, etag)) }
-  async function publish() { if (workflow && etag) { await publishWorkflow(id, workflow.draft_version, etag); await load(); toast('已發布不可變 revision', 'success') } }
+  async function publish() { if (workflow && etag) { await publishWorkflow(id, workflow.draft_version, etag); await load() } }
   if (!workflow || !draft) return <><button className="btn" onClick={onClose}>返回清單</button><ErrorText msg={error} /><Skeleton rows={4} /></>
   return <>
     <div className="view__head"><h2 className="view__title">{workflow.name}</h2><button className="btn" onClick={onClose}>返回清單</button></div>
@@ -62,7 +63,7 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
     </div>
     {validation && <section className="agent-block"><h4>Validation</h4>{validation.valid ? <p className="notice-text">驗證通過。</p> : <ul className="agent-errors">{validation.errors.map((issue, index) => <li key={`${issue.id ?? 'graph'}-${index}`}>{issue.id ? `[${issue.id}] ` : ''}{issue.message}</li>)}</ul>}</section>}
     {simulation?.trace && <section className="agent-block"><h4>Simulation trace（敏感資料已由 server 遮罩）</h4><ul>{simulation.trace.map((entry) => <li key={entry.node_id}>{entry.node_id}: {entry.status}{entry.summary ? ` — ${entry.summary}` : ''}</li>)}</ul></section>}
-    <section className="agent-block"><h4>Revisions / Semantic Diff</h4>{revisions.loading ? <Skeleton rows={2} /> : <ul className="agent-preview__list">{(revisions.data ?? []).map((revision) => { const diff = revision.definition ? semanticDiff(draft.definition, revision.definition) : null; return <li key={revision.revision}><span>r{revision.revision} · {revision.definition_sha256.slice(0, 12)}{diff ? ` · +${diff.added.length} −${diff.removed.length} ~${diff.changed.length}` : ''}</span><button className="btn" onClick={() => void runWithToast(toast, () => restoreWorkflowRevision(id, revision.revision), { success: '已從歷史 revision 建立新 revision', onSuccess: () => { void load(); void revisions.reload() } })}>還原為新 revision</button></li> })}</ul>}</section>
+    <section className="agent-block"><h4>Revisions / Semantic Diff</h4><RevisionList loading={revisions.loading} revisions={revisions.data ?? []} restoreLabel="還原為新 revision" successMessage="已從歷史 revision 建立新 revision" onRestore={(revision) => restoreWorkflowRevision(id, revision)} onRestored={() => { void load(); void revisions.reload() }} renderExtra={(revision) => { const diff = revision.definition ? semanticDiff(draft.definition, revision.definition) : null; return diff ? ` · +${diff.added.length} −${diff.removed.length} ~${diff.changed.length}` : '' }} /></section>
   </>
 }
 

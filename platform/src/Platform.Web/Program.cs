@@ -105,7 +105,7 @@ builder.Services.AddSingleton(agentChatOptions);
 // (容納文件嵌入這類較慢的呼叫);強制 HTTP/1.1 在 BackendClient 內設定。
 // ---------------------------------------------------------------------------
 builder.Services.AddHttpClient<BackendClient>(c => c.Timeout = TimeSpan.FromSeconds(90))
-    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+    .WithFastConnectTimeout();
 
 // ---------------------------------------------------------------------------
 // Services(認證/聊天歷史/文件/分析/組態 皆代理 backend;工作流仍打 Python :8001)
@@ -125,16 +125,13 @@ builder.Services.AddScoped<IAgentService, AgentService>();
 builder.Services.AddScoped<IWorkflowAdminService, WorkflowAdminService>();
 builder.Services.AddHttpClient<IAgentRunService, AgentRunService>(
         c => c.Timeout = TimeSpan.FromSeconds(150))
-    .ConfigurePrimaryHttpMessageHandler(
-        () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+    .WithFastConnectTimeout();
 builder.Services.AddHttpClient<IOrchestratorRunService, OrchestratorRunService>(
         c => c.Timeout = TimeSpan.FromSeconds(90))
-    .ConfigurePrimaryHttpMessageHandler(
-        () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+    .WithFastConnectTimeout();
 builder.Services.AddHttpClient<IAgentChatRuntime, AgentChatRuntime>(
         c => c.Timeout = TimeSpan.FromSeconds(90))
-    .ConfigurePrimaryHttpMessageHandler(
-        () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+    .WithFastConnectTimeout();
 
 // P1 prompt manifest 解析器:只在旗標開啟時註冊(Singleton —— (tenant, revision) 的 resolved manifest
 // 快取要跨請求存活)。關閉時兩條鏈路的 GetService 取到 null 直接用 constants,連 backend 都不打。
@@ -306,7 +303,7 @@ else
 
 // 下游工作流 client:連線逾時 5s;讀取逾時 150s(強制 HTTP/1.1 在 service 內設定)。
 builder.Services.AddHttpClient<IWorkflowEngineClient, WorkflowEngineClient>(c => c.Timeout = TimeSpan.FromSeconds(150))
-    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+    .WithFastConnectTimeout();
 builder.Services.AddScoped<IBusinessWorkflowService, BusinessWorkflowService>();
 
 // ---------------------------------------------------------------------------
@@ -601,3 +598,15 @@ app.Run();
 
 // 讓 WebApplicationFactory<Program> 測試能引用進入點。
 public partial class Program;
+
+/// <summary>
+/// G3:5 顆下游 HttpClient(BackendClient、AgentRunService、OrchestratorRunService、AgentChatRuntime、
+/// WorkflowEngineClient)的 primary handler 逐字相同(僅連線逾時 5s),外層 c.Timeout 依端點各異。
+/// file-scoped:只有本檔的 AddHttpClient 註冊用得到。
+/// </summary>
+file static class HttpClientBuilderExtensions
+{
+    internal static IHttpClientBuilder WithFastConnectTimeout(this IHttpClientBuilder builder)
+        => builder.ConfigurePrimaryHttpMessageHandler(
+            () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+}
