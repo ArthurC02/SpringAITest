@@ -1,6 +1,6 @@
 # 驗收測試 — 副駕共用核心層(Copilot Shared Core)
 
-> 狀態: **規劃中(實作前)。** 依據: [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)(驗收條件來源,特別是 §7)。03-design 尚未產出,本檔**不預設**任何簽章或類別名。
+> 狀態: **已實作，持續 hardening。** 依據: [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)(驗收條件來源,特別是 §7)。
 >
 > 本檔是本計畫的**安全網規格**。02-spec §7.1 指出的核心風險是:現行行為沒有回歸測試,只靠 prompt 字串相等斷言撐著(`platform/tests/Platform.Service.Tests/ChatServiceTests.cs:68`、`ChatSkillRoutingTests.cs:483`),因此**無法證明重構前後行為等價**。A 組的存在就是為了先把這件事補起來。
 
@@ -32,6 +32,8 @@
 ---
 
 ## 2. 現況基線(實際讀過的覆蓋現況)
+
+> 本節為**重構前**基線快照,現行覆蓋見 `platform/tests/Platform.Web.Tests/CopilotAguiApiTests.cs`(現有 27 個 `[Fact]`/`[Theory]`)與 `ChatSkillRoutingTests.cs`,不再是現況。
 
 ### 2.1 已有的覆蓋
 

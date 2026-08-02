@@ -7,6 +7,7 @@
 > **本文的論據分級**：
 > - **【核】** = 已對現行原始碼實測或直接引用確認。
 > - **【推】** = 由【核】的事實推導出的設計決策。
+> - 行號為實作當下快照,可能隨後續開發位移;確切位置以原始碼為準。實測位移例:`platform/src/Platform.Web/Program.cs` 的 `MEM0_MODE` 判斷現於 L293-301;`backend/src/Backend.Api/Program.cs` 的 `DB_PROVIDER` 判斷現於 L39/L65-91,`DbBootstrap.RunAsync` 呼叫現於 L193-198。
 
 ---
 
@@ -307,6 +308,8 @@ if (string.Equals(otelMode, "console", StringComparison.OrdinalIgnoreCase))
 ## 3. InMemoryMem0Client 設計
 
 ### 3.1 類別簽章 & 初始化
+
+**實作端已簡化**:`platform/src/Platform.Service/InMemoryMem0Client.cs` 改用單純 `Dictionary` + `Lock`(所有存取都在同一個 lock 下,不需 ConcurrentDictionary)。
 
 **位置:** `platform/src/Platform.Service/InMemoryMem0Client.cs` (新增)
 
@@ -1400,7 +1403,7 @@ public async Task RagRepo_Search_CalculatesCosine()
 
 ## 11. 摘要與驗收檢查清單
 
-### 11.1 實作清單(按優先序)
+### 11.1 實作清單(按優先序)(已於交付時通過,清單未回勾)
 
 - [ ] **P0** 專案結構:Platform.Web.csproj 新增 `OpenTelemetry.Exporter.Console` 套件(AddConsoleExporter 需要)
 - [ ] **P1** InMemoryMem0Client (platform/src/.../InMemoryMem0Client.cs)
@@ -1433,7 +1436,7 @@ public async Task RagRepo_Search_CalculatesCosine()
   - [ ] OTEL_MODE switch (platform)
   - [ ] DbBootstrap conditional skip (backend)
 
-### 11.2 驗收條件(抄自 02-spec §5)
+### 11.2 驗收條件(抄自 02-spec §5)(已於交付時通過,清單未回勾)
 
 - [ ] 一鍵啟動:`./scripts/start-lite.ps1` 無例外,四服務皆通過健康檢查
 - [ ] 登入成功:admin-a/password123

@@ -9,7 +9,7 @@
 | 00  | Harness thesis       | 較強        | D3/D5/D7 已把 authority、execution、approval 與 durability 分離。                                             | 保留 server-owned harness；用本矩陣補完整性檢查。                                  |
 | 01  | Agent loop           | 較強        | LangGraph preflight/policy/tool/input/approval/output/budget/finalization 是 bounded state machine。          | 不建立第二個 loop；改善 evidence 與 model policy。                                 |
 | 02  | Tool runtime         | 較強        | Registry、snapshot grants、rule scope、risk、dependencies 與 D7 once-only effect 共同約束 dispatch。          | Connector/MCP 必須映射進同一 tool boundary。                                       |
-| 03  | Permission sandbox   | 部分        | Native tools 強；custom Python script 只防意外、不防惡意。                                                    | P0 改為 process isolation；不把 AST whitelist 當 security boundary。               |
+| 03  | Permission sandbox   | 部分→較強（機制已建，rollout 待 canary） | Native tools 強；custom Python script 只防意外、不防惡意。                                                    | canary 推進與 in-process fallback 退場（C6），見 05-extension-security-plan.md Phase S1/§9 |
 | 04  | Hooks                | 不適用      | 固定 middleware/provider boundary 可稽核；沒有任意 callbacks。                                                | 不開放 runtime hooks；需要 extension 時用 typed/versioned provider。               |
 | 05  | Planning/todos       | 不適用      | D5 root/child tasks、snapshots、budgets 與 events 已是 durable plan。                                         | 不新增 session-local todo authority。                                              |
 | 06  | Subagents            | 較強        | Child run pin revisions/provenance/budgets；verifier independence、cascade cancel、PASS-only aggregation。    | 增加 operator lineage view，不改 coordination authority。                          |
@@ -19,14 +19,14 @@
 | 10  | System prompt        | 部分        | Agent prompt revisioned；legacy chat guard/router/summary/persona 多為 constants/middleware composition。     | 建立 canonical prompt manifest、pinning、eval 與 rollback。                        |
 | 11  | Error recovery       | 部分偏強    | Claims、leases、generation fencing、checkpoints、deadline、quarantine 與 dead letter 已有。                   | 將 production checks 納入 release lane；補 recovery SLO 與 model fallback policy。 |
 | 12  | Task system          | 較強        | Backend-owned root/child state、cursor events、cancel/restart recovery 超過 local task store。                | 補 tenant/owner-safe list/search API 與統一 UX。                                   |
-| 13  | Background execution | 部分        | RabbitMQ document processing durable，但 unexpected exception 目前可能 ACK 後遺失。                           | 定義 bounded retry/DLQ/durable failure；納入 recovery operations。                 |
+| 13  | Background execution | 部分        | RabbitMQ document processing durable，bounded retry + terminal DLQ 已實作（見 02-evaluation-observability-plan.md Phase E0 item 4）。 | 僅剩『納入 recovery operations』（heartbeat/claim lag/quarantine 計數，見 04-operations-trigger-plan.md O4）未完成。 |
 | 14  | Scheduling           | 缺少        | 無 product-level schedule/webhook trigger authority。                                                         | Backend-owned trigger definition + fire ledger；只建立正常 D5 root。               |
 | 15  | Worktree isolation   | 不適用      | Runtime 不修改 source tree。                                                                                  | 不實作；未來若引入 code-changing agent 再重評。                                    |
 | 16  | Coordination         | 較強        | Durable command claim、lease、budget、verifier 與 aggregation contracts 明確。                                | 只補 operator visibility 與 metrics。                                              |
 | 17  | Protocols            | 較強        | Internal token/identity、ETag/hash、AG-UI/SSE、redacted events 均有明確 contract。                            | External connector protocol 必須 canonicalized/pinned/versioned。                  |
 | 18  | Autonomy             | 較強        | Immutable snapshot、budgets、policy、approval、verifier 取代 open-ended model discretion。                    | UI 顯示 server-derived autonomy posture，不提供 client 可編輯標籤。                |
 | 19  | MCP/plugins/channels | 缺少但非 P0 | 無 first-class MCP/connector/channel lifecycle。                                                              | 有產品需求才建 governed connector；先 read-only、allowlisted。                     |
-| 20  | Observability/eval   | 部分        | OTel/Langfuse、redacted events、aggregate operations metrics 已有。                                           | 建 evidence envelope、per-run reconciliation、versioned eval runner。              |
+| 20  | Observability/eval   | 部分→較強（機制已建，live shadow 模式與正式 rollout 未完成） | OTel/Langfuse、redacted events、aggregate operations metrics 已有。                                           | live shadow eval 模式（尚未實作，見 02-plan §5.2.3）、eval gate cutover 後的 cleanup（C1/C2）。              |
 | 21  | Loop engineering     | 部分        | Budgets、repair limits、verifier、release gate、rollback 已有；improvement loop 仍人工。                      | 接通 trace/evidence → eval → gate → canary/rollback。                              |
 
 ## 交叉結論

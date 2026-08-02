@@ -5,12 +5,8 @@
 > **一句話結論:**
 > 聊天會先載入動態 Skill 目錄，再要求 LLM 回傳 Skill 名稱或 `NONE`；平台驗證選擇後自行呼叫 Skill。這不是 Agent Framework function-calling。
 >
-> **實作位置:**
-> • 主邏輯: `platform/src/Platform.Service/ChatService.cs`
->   - `BuildToolsAsync()`: 目錄取得與角色/schema 過濾
->   - `TryRouteAndExecuteAsync()`: 最多兩次路由決策與 Skill 執行
->   - `InvokeSkillToolAsync()`: Skill 呼叫委派
-> • 工作流整合: `WorkflowService.cs::GetSkillCatalogAsync()`、`InvokeSkillAsync()`
+> **實作位置(已隨 copilot-shared-core P4 遷移):**
+> 路由/工具建構/執行邏輯位於 `SkillRoutingAgent.cs`(`BuildToolsAsync`/`TryRouteAndExecuteAsync`/`InvokeSkillToolAsync`);目錄/invoke 代理位於 `WorkflowEngineClient.cs`(原 `WorkflowService.cs` 已改名)。原生 function-calling 路徑已整段移除(`ILlmAgent` 不再帶 `tools` 參數)。
 >
 > **本文檔現況:**
 > 下述內容是設計背景；具體細節以程式碼與測試為準。
@@ -65,7 +61,7 @@
 
 ### 2.3 Tool
 - **方案 A 的映射**:每個候選 skill → 一個 `LlmTool`(`ChatService.BuildTools`,`ChatService.cs:212`)→ 一個 `AIFunction`(`AgentFrameworkLlmAgent.ToRunOptions`,`AgentFrameworkLlmAgent.cs:67-85`)。
-  - `LlmTool.Name` = skill 名(需為合法函式名;skill 名 pattern `^[a-z][a-z0-9_]{2,63}$`,`workflow/app/engine/skill.py:69`,天然合法)。
+  - `LlmTool.Name` = skill 名(需為合法函式名;skill 名 pattern `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`(小寫英數 + 連字號,不可首尾/連續連字號),`workflow/app/engine/skill.py:22`,天然合法)。
   - `LlmTool.Description` = skill `description`(+ 必要時附「輸入為 <鍵名>:<型別>」提示,幫 LLM 決定何時呼叫)。
   - `LlmTool.InvokeAsync` = `(arg, ct) => _workflows.InvokeSkillAsync(name, {inputKey: arg}, userCtx, ct)`(改打 skill invoke,`WorkflowService.cs:53`),輸出以 `ExtractAnswer`(`ChatService.cs:270-281`)取字串回給模型。
 - **Schema 形狀(P1 刻意簡化)**:沿用現有「單一字串參數 `question`」的形狀(`LlmTool.cs` 的 ponytail 註解已標明升級路徑)。輸入鍵名取該 skill `input_schema` 中**唯一的必填字串欄位**;多必填/非字串 → P3 泛化成 JSON-args 的 `AIFunction`。

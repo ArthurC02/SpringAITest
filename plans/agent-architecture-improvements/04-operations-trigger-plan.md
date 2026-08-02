@@ -45,9 +45,10 @@ UI 重用既有 polling、cursor events 與 trace rendering，提供全域 list/
 
 不改 claim/fencing 演算法，先補觀測與有限 operator actions：
 
+document consumer bounded retry + terminal DLQ 已實作（見 [02-evaluation-observability-plan.md](02-evaluation-observability-plan.md) Phase E0 item 4）。O4 尚未完成的是：
+
 - heartbeat、oldest recoverable age、claim lag、lease churn、quarantine/DLQ counts、reason codes。
 - redacted retry/abandon actions，必須 idempotent、audited、capability-gated。
-- document consumer 使用 bounded transient retry + terminal DLQ/durable failed state。
 
 任何 operator retry 都不能繞過 snapshot/hash、lease generation、deadline、approval 或 effect identity。
 

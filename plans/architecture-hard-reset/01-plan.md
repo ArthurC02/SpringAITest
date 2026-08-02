@@ -33,9 +33,9 @@ P3 is one cross-service integration tranche. A branch may contain intermediate c
 - Make ETag conflicts explicit failures in Workflow and Orchestrator editors; no success toast is allowed.
 - Track raw JSON text and validity; invalid fields block create, save, validate, and publish.
 - Log unexpected Workflow exceptions with a correlation ID and return a fixed safe error.
-- Align InMemory cancellation/deadline commit semantics with the PostgreSQL transaction contract.
+- Give InMemory `CancelAsync` the same all-or-nothing cascade semantics as `ExpireLockedAsync` and PostgreSQL `ExpireDeadlineAsync`: cascade to every child first, commit the root terminal state only when all succeed, leave a non-terminal retryable state otherwise, and propagate caller cancellation rather than recording it as a child failure. The deadline path needs no further change.
 - Forward the complete feature-gate matrix through Compose and correct the D6 documentation.
-- Fail PowerShell/native bootstrap and Lite startup when required commands or health checks fail.
+- Make `start-lite.ps1` and `start-lite.sh` exit nonzero when any required service fails its health check, instead of warning and continuing. The mem0/compose bootstrap exit-code checks are already in place.
 - Add a repository CI entry point covering all four applications, Compose expansion, shell syntax, contract snapshots, and diff hygiene.
 
 ## 5. P2 — migration foundation
@@ -53,6 +53,8 @@ P3 is one cross-service integration tranche. A branch may contain intermediate c
 - Update every FK, snapshot, binding, eval candidate, repository, DTO, controller/client, workflow endpoint, UI client, fake, fixture, and contract test in the same tranche.
 - Delete discriminator dispatch, definition sniffing, dual-track routes, aliases, 410 transition behavior, and tests whose only purpose was coexistence.
 - Run the guarded destructive migration, then development seed, only against disposable/test or explicitly confirmed development databases.
+
+The tranche is large — roughly 100 to 150 files across four services plus SQL, scripts, and documentation. To keep it reviewable and bisectable without weakening the main-branch rule in section 2, sequence the work inside the branch as: (1) runner, SQL bundle, advisory lock and checksum handling; (2) fixture switch and the one-time developer migration step; (3) Backend schema, repositories, controllers, and FK rebuild; (4) Workflow routes and loaders; (5) Platform services and controllers; (6) Frontend types, API clients, and components; (7) test cleanup and documentation sync. Every intermediate commit must at least build (`dotnet build`, `npm run build`); a commit that does not compile is not a valid checkpoint even inside the branch.
 
 ## 7. P4 — one chat runtime and public Workflow contracts
 

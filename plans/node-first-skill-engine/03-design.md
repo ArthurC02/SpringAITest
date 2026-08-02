@@ -18,7 +18,7 @@ platform :8080
         ▼
 workflow :8001 ─── Engine(Skill → LangGraph 編譯)
    ├── Node Registry(@node:kb_query 10 節點 + retrieve + 後續)
-   ├── Harness(traced 泛化:契約驗證/trace/逾時/fatal 短路/Tool 注入)
+   ├── node_shell.py(Node Shell,泛化自 kbquery/runtime.py 的 traced();P1 期間暫名 harness,後由 skill-concept-realignment 正名,Harness 一詞讓給 runtime/graph.py 固定骨架)
    ├── Script Runner(v1 in-process 沙箱;ScriptRunnerPort 可換 v2)
    ├── Tool Registry(@tool:http → backend / local → 容器內函式庫)
    └── 內建 skills/*.yaml(kb_query 為首個)
@@ -32,7 +32,7 @@ backend :8002 ─── appdb(skill / skill_revision 表)
 workflow/app/
   engine/                      # 新增
     node_registry.py           # @node + NodeSpec(name/version/reads/writes/requires_tools)
-    harness.py                 # kbquery/runtime.py 泛化遷入(traced → harnessed)
+    node_shell.py               # Node Shell,泛化自 kbquery/runtime.py 的 traced()(traced → harnessed);P1 期間暫名 harness,後由 skill-concept-realignment 正名,Harness 一詞讓給 runtime/graph.py 固定骨架
     skill.py                   # Skill Pydantic schema + 靜態驗證器
     compiler.py                # Skill flow → StateGraph
     expressions.py             # kbquery/calculator.py 擴充:布林/比較條件式
@@ -44,8 +44,6 @@ workflow/app/
     kbquery/                   # kb_query 10 節點自 app/kbquery/nodes/ 遷入
   skills/
     kb_query.yaml              # 首個內建 Skill(= 現行手寫圖的宣告式等價物)
-  kbquery/                     # 保留:models/ports/adapters/locators(領域契約)
-                               # 移除:nodes/、graph.py、routing.py、runtime.py(遷入 engine/)
   workflows/                   # 相容層:@register 舊工作流不動
 ```
 
@@ -53,7 +51,7 @@ workflow/app/
 
 | 現況                          | 去處                                                                       | 改動量                                                        |
 | ----------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `kbquery/runtime.py traced()` | `engine/harness.py`                                                        | 泛化:加 reads/writes 驗證與 Tool 注入,IMMUTABLE_KEYS 邏輯不變 |
+| `kbquery/runtime.py traced()` | `engine/node_shell.py`(Node Shell,泛化自 `kbquery/runtime.py` 的 `traced()`;P1 期間暫名 harness,後由 skill-concept-realignment 正名,`Harness` 一詞讓給 `runtime/graph.py` 固定骨架) | 泛化:加 reads/writes 驗證與 Tool 注入,IMMUTABLE_KEYS 邏輯不變 |
 | `kbquery/nodes/*`(10 檔)      | `nodes/kbquery/*`                                                          | 函式本體不改,factory 外補 `@node(...)` 宣告                   |
 | `kbquery/graph.py`            | P1 改為以 registry 查節點組圖;P2 被 `skills/kb_query.yaml` + compiler 取代 | 中                                                            |
 | `kbquery/calculator.py`       | 留原地;`engine/expressions.py` import 並擴充                               | 小                                                            |
@@ -61,7 +59,7 @@ workflow/app/
 
 ## 3. DB Schema(appdb / PostgreSQL,Dapper)
 
-演進 [skill-authoring 的 skill 表](../skill-authoring/03-design.md):`flow/logic/script` 三個自由文字欄位收斂為結構化 `definition`,新增 revision 稽核表。
+演進(歷史)早期 skill-authoring 計畫的 `flow/logic/script` 三欄表(該計畫已封存刪除):三個自由文字欄位收斂為結構化 `definition`,新增 revision 稽核表。
 
 ```sql
 CREATE TABLE skill (
@@ -241,3 +239,7 @@ sequenceDiagram
 1. 自訂 Skill 的執行紀錄(audit trail)是否也要落 appdb 供前端查歷史?(現為 logging;若要查詢介面,P4 需加 `skill_run` 表——建議先不做,logging + Langfuse 已可稽核。)
 2. Skill 編輯器是否需要「試跑(dry-run)」模式(用假輸入走全圖但 tool 全 mock)?建議 P4 之後再議。
 3. 舊 4 個 code workflow 遷移為內建 skill 的時點(D4 目前為選配)。
+
+---
+
+**現況更新**:`app/kbquery/` 頂層已完全移除,含領域契約在內全數併入 `app/nodes/kbquery/`。

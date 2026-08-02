@@ -86,7 +86,7 @@ Create、Update、soft-delete revive 都必須沿用現有 atomic CTE/revision �
 
 ### 2.4 export
 
-- flow：沿用 `SkillExporter`，以 definition 原文建立 `SKILL.md` 與 `skill.yaml`。
+- flow：`SkillExporter` 產生**單一自足** `{name}/SKILL.md`(definition 內嵌 fenced yaml 區塊)，**不再輸出獨立 `skill.yaml`**(見 05-standard-conformance.md §3.1)。
 - agentic：直接回傳儲存的 package bytes；不要解壓後重新壓縮，以保住 entry bytes。
 - manifest 產生需以 YAML-safe scalar 寫入 description，消除既有 POC 的未 escaping 假設。
 
@@ -118,7 +118,7 @@ class AgentSkillPackage:
 
 ### 4.1 compiler 分派
 
-`compile(skill, deps)` 在 `kind == "agentic"` 時建立 state schema，並加入單一 `agent_skill_runner` node。runner node 之後仍由現有 `_build_graph` 終端 audit 規則串接 `audit_feedback`。
+`compile(skill, deps)` 在 `kind == "agentic"` 時建立 state schema，並加入單一 `agent_skill_runner` node。runner node 之後仍由現有 `_build_graph` 終端 audit 規則串接 `audit_feedback`。compiler 分派給獨立 `agent_skill_graph` 模組，而非併入標準 flow builder。
 
 agentic graph 不接受作者提供的 `flow`。canonical definition 將 flow 視為 internal implementation detail，避免 package 作者繞過 node contracts。
 

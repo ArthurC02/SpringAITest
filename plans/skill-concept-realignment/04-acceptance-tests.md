@@ -39,7 +39,7 @@
 
 | # | 案例 | 驗證 |
 | --- | --- | --- |
-| A3-1 | `_load_skill` 重構前後：flow pin 與 agentic pin 執行的 state 更新鍵集合與值語意逐鍵相等，**含 events 的 `event_type` 字串（`legacy_flow_completed`/`skill_scope_entered`/`skill_scope_exited`）與 payload 鍵集合** | workflow pytest golden test（重構前先落 golden） |
+| A3-1 | `_load_skill` 重構前後：flow pin 與 agentic pin 執行的 state 更新鍵集合與值語意逐鍵相等，**含 events 的 `event_type` 字串（`workflow_completed`/`skill_scope_entered`/`skill_scope_exited`；`workflow_completed` 已由既有 `AgentRunEventContractTests.cs` 覆蓋斷言，非本計畫待補項）與 payload 鍵集合** | workflow pytest golden test（重構前先落 golden） |
 | A3-2 | `compiler.compile` 對 agentic 照舊命中快取回圖（分派移至 `agent_skill_graph.build` 後行為不變）；`tests/test_agent_skill_runner.py:113` 既有測試不改斷言全綠 | workflow pytest |
 | A3-3 | `POST /skills/{name}/invoke` 對 flow 與 agentic 的 `{skill, output}` 回應形狀與重構前一致 | workflow pytest（既有 invoke 測試不改斷言） |
 | A3-4 | `custom.load()` 分派依 DB 列 kind，`_is_agentic` YAML 嗅探已刪除 | 符號搜尋零命中 + pytest |
@@ -75,7 +75,7 @@
 
 | # | 不變式 | 驗證 |
 | --- | --- | --- |
-| I-1 | `RuntimeCommand.kind` 詞彙、`ActiveSkillScope`、snapshot skill pin 形狀、`agent_run_skill` 列形狀、run event `event_type` 字串（含 `legacy_flow_completed`，backend `AgentRunRepository.cs:16-37` 白名單）零變更 | 既有 runtime/snapshot 測試不改斷言全綠 + A3-1 golden |
+| I-1 | `RuntimeCommand.kind` 詞彙、`ActiveSkillScope`、snapshot skill pin 形狀、`agent_run_skill` 列形狀、run event `event_type` 字串（含 `workflow_completed`，backend `AgentRunRepository.cs:16-37` 白名單）零變更 | 既有 runtime/snapshot 測試不改斷言全綠 + A3-1 golden |
 | I-2 | chat skill routing 行為不變（catalog 名稱路由、雙 kind 統一 invoke） | platform ChatSkillRouting 測試全綠 |
 | I-3 | 不可變 revision/快照/audit 永不改寫 | A2-1/A3-7 + code review |
 | I-4 | `/api/skills*` 與 `/api/business-workflows*` 都不掛 feature flag（維持現況恆開） | platform 路由測試 |

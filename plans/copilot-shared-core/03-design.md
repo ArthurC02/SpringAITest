@@ -20,6 +20,7 @@
 - mem0 的 best-effort 是 `ChatContextProvider` 與 `ChatTurnRecorder` 的邊界保證：任何 `IMem0Client` 例外都記錄並降級，不能依賴特定 `Mem0Client` 實作自行吞錯。
 - `AguiWireDedupAgent` 先按 ID 去重；assistant ID 不一致時以保守 role/content/tool-call fingerprint 補救，不能讓重送陣列重複寫入 history。
 - `HttpAgent` 收到 AG-UI `401` 必須觸發既有全域 logout。這是前端 session 一致性要求，不影響 AG-UI 端點本身的認證邊界。
+- `ServiceLifetime.Scoped`(§4.6 原案)已在實測中發現會讓 Development 啟動崩潰(root provider 於啟動期解析 MapAGUI agent),改為兩顆 Singleton hosted agent + `ChatContextProvider`/`SkillRoutingAgent`/`ChatTurnRecorder` 各自持 `IServiceScopeFactory`、每次呼叫開新 scope 解析 Scoped 依賴，避免 captive dependency。
 
 ---
 
@@ -748,7 +749,7 @@ if (_identity.PersistFailure is { } ex)
 
 ### 10.3 每個 phase 收尾派 `e2e-verifier` 打真鏈路一次
 
-02-spec §7.3 + 專案記憶 `fakes-hide-real-behavior`。`scripts/verify-copilot-shared-core.ps1` 僅是 black-box smoke companion，不可取代 C-03/C-04/C-05/C-07/C-08 的具名 integration tests、真服務 trace 與 browser/proxy 檢查；其 mock-gpt rebuild 路徑不可驗 routing。P1 額外要驗:`ServiceLifetime.Scoped` 的 agent 沒有 captive dependency 警告(§4.6 註)。
+02-spec §7.3 + 專案記憶 `fakes-hide-real-behavior`。`scripts/verify-copilot-shared-core.ps1` 僅是 black-box smoke companion，不可取代 C-03/C-04/C-05/C-07/C-08 的具名 integration tests、真服務 trace 與 browser/proxy 檢查；其 mock-gpt rebuild 路徑不可驗 routing。P1 額外要驗:Singleton hosted agent + per-call scope 沒有依賴生命週期錯誤(§0.2 註)。
 
 ---
 

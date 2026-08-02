@@ -30,11 +30,11 @@ return new(false, EmptyObject(), Array.Empty<JsonElement>(), missing);
 
 | 既有元件 | 位置 | 現況 |
 | --- | --- | --- |
-| `ContextAcquirer` 可插拔 seam | `workflow/app/runtime/orchestrator.py:381-383` | 已是 `(snapshot, context, round) -> ContextAcquisition` 契約 |
-| `ContextAcquisition` 契約 | `workflow/app/runtime/orchestrator.py:357-361` | 已有 `ready` / `context` / `provenance` / `missing` |
+| `ContextAcquirer` 可插拔 seam | `workflow/app/runtime/orchestrator.py` | 已是 `(snapshot, context, round) -> ContextAcquisition` 契約 |
+| `ContextAcquisition` 契約 | `workflow/app/runtime/orchestrator.py` | 已有 `ready` / `context` / `provenance` / `missing` |
 | Provenance 越權檢查 | `workflow/app/runtime/orchestrator_backend.py:291-301` | 已強制 `source_id` ⊆ snapshot authority |
-| Round 預算 | `workflow/app/runtime/orchestrator.py:420-423` | 已有 `max_context_rounds` 上限與耗盡處理 |
-| 澄清回流通道 | `backend/.../OrchestratorRunRepository.cs:308` | `current_context.user_input` 已可短路回 `ready:true` |
+| Round 預算上限檢查 | `workflow/app/runtime/orchestrator.py` | 已有 `max_context_rounds` 上限與耗盡處理 |
+| 澄清回流通道 | `backend/src/Backend.Api/OrchestratorRuns/OrchestratorRunRepository.cs` | `current_context.user_input` 已可短路回 `ready:true` |
 
 **結論：Context Enrichment ＝ 補上那個 server-owned read-only adapter，並讓它產出的 context 成為可版本化、可稽核、可重播的 artifact。不是新建一個平行的 Agent 架構。**
 

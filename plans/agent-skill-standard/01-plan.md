@@ -1,6 +1,7 @@
 # Agent Skill 標準格式支援 — 計畫
 
 > 狀態：P0–P2 已交付；P3 production script isolation 延後。本檔保留為歷史交付計畫，現況以程式碼與 AGENTS.md 為準。
+> **frontmatter 具體欄位形狀已由 05-standard-conformance.md 遷移（`metadata` 子物件 + `allowed-tools`），本檔 L41-54 的範例僅供歷史對照，不代表現行契約。**
 
 ## 目標
 
@@ -72,6 +73,8 @@ body 是 runner instruction。附件只允許 `scripts/`、`references/`、`asse
 flow:
   - node: agent_skill_runner@1.0
 ```
+
+實作以獨立 `workflow/app/engine/agent_skill_graph.py` 模組達成同等效果（`compiler.py:503-504` 分派），而非把 `flow` 塞一個 node 走標準 builder；行為結果一致。
 
 compiler 仍在終點加上 `audit_feedback`。`agent_skill_runner` 以 `harnessed(...)` 註冊，固定寫入 `answer`；Platform 與 Frontend 的 answer-key 清單以 `answer` 為相同優先序。它：
 

@@ -12,7 +12,7 @@
 
 | # | 問題 | 證據 |
 | --- | --- | --- |
-| ① | reads 只是宣告,無執行期強制;且已有三處契約不誠實:`agent_skill_runner` 讀身分三鍵未宣告、`nl_logic`/`nl_extract` 經 `_llm_input` 回落讀 `normalized_query`→`query` 未宣告 | `harness.py` 的 `harnessed` 傳整包 state;`agent_skill_runner.py:194-196`;`_llm_input.py` |
+| ① | reads 只是宣告,無執行期強制;且已有三處契約不誠實:`agent_skill_runner` 讀身分三鍵未宣告、`nl_logic`/`nl_extract` 經 `_llm_input` 回落讀 `normalized_query`→`query` 未宣告 | `node_shell.py` 的 `harnessed` 傳整包 state;`agent_skill_runner.py:194-196`;`_llm_input.py` |
 | ② | `_check_node` 對 `dynamic_reads` 的 list 值(`input_keys: [docs]`)100% 誤報警告級 `dataflow_error` —— 三支 NL 骨架在基準狀態就各帶一條假警告 | `skill.py` `_check_node`:`if not isinstance(key, str)` |
 | ③ | `nl_logic` 的 `output_key` 參數是死彈性:收了照寫,Harness 依 `writes=["business_result"]` 剝除,非預設值永遠靜默丟棄 | `nl_logic.py` 的 ponytail 註解自承 |
 | ④ | 執行表單 all-or-nothing:`input_schema` 任一欄位非 `str` → **整張表單**塌成裸 JSON textarea;旗艦 `kb-query`/`template-retrieval` 因 `session_context: dict` 中招,使用者手打非 JSON 看到 V8 英文 `Unexpected token …` | `SkillRunPanel.tsx` `strFields()` |

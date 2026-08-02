@@ -16,7 +16,7 @@
 - `workflow/app/engine/skill.py:25`
 - `workflow/app/runtime/legacy_flow.py:14`
 
-模組 docstring 更新為「Node Shell：節點執行殼」，並註明「Harness 指 `runtime/graph.py` 固定骨架」。`runtime/legacy_flow.py` 跨層 import `RUNTIME_AUTHORITY_KEYS` 的現況保留（治理鍵單一事實來源仍在 node_shell），不做套件搬移——搬 `app/harness/` 的收益是純美學，成本是更大 diff。
+模組 docstring 更新為「Node Shell：節點執行殼」，並註明「Harness 指 `runtime/graph.py` 固定骨架」。`runtime/flow_harness.py`（原 `legacy_flow.py`，已於本計畫執行窗口之外的 `02dde09` 重構改名）跨層 import `RUNTIME_AUTHORITY_KEYS` 的現況保留（`flow_harness.py:19-24` 確實仍 import `RUNTIME_AUTHORITY_KEYS` from `node_shell`，治理鍵單一事實來源仍在 node_shell），不做套件搬移——搬 `app/harness/` 的收益是純美學，成本是更大 diff。
 
 ### 1.2 platform：`WorkflowService` → `WorkflowEngineClient`
 
@@ -66,8 +66,8 @@
 - `compiler.py`：`_build_agentic_graph` **本體**（`:501-565`）移至新模組 `app/engine/agent_skill_graph.py`（依賴不變：`AGENT_RUNNER_NODE`、`harnessed`、audit 附加）；**分派留在 `_build_graph`（`:570-571`）**，改成一行顯式 `return agent_skill_graph.build(skill, deps)`。`compile()` 維持唯一 cached 入口、不 raise、cache key 零改動——審查確認 32-slot 快取只掛在 `compile()`，`custom.load()` 每次 invoke 靠它命中（`custom.py:43-44` 明文 <10ms 預算）；把 agentic 踢出 `compile()` 會讓 agentic 每次 invoke 重建圖或被迫複製快取。呼叫端全數不變：`evals`、`legacy_flow`、`custom`、`app/skills/__init__.py:109`（內建載入）、`main.py:529`（per-config 重編）、`tests/test_agent_skill_runner.py:113`（直接對 agentic 呼叫 compile 的測試**照舊通過**）。
 - `main.py`：`/skills/{name}/invoke` 不動（kind 分派已在 compile 內解決）；`/skills/validate` 與 `/business-workflows/validate` 維持同 handler alias。**P5/C8 不刪 workflow-internal `/skills/validate`**；它的退場必須另立 consumer inventory、usage=0、rollback window 與驗收 gate。
 - eval：**不改行為**——`evals/api.py:69-79` 已對 `kind != "flow"` 回 422 `workflow_eval_unsupported_candidate`（層次正確：gate 在 API 層）。只補一支 pytest 釘住此既有契約（02-spec §5）。
-- `runtime/graph.py:585-712`：`_load_skill` 抽出 `_invoke_business_workflow(state, runtime, artifact, command)`（現 flow 分支 `:597-652`；需要 `command.arguments` 作 `raw_input`）與 `_enter_skill_scope(state, runtime, artifact)`（現 agentic 分支 `:653-712`；不需 command）兩個模組級函式；`_load_skill` 本體變成 command/pin 解析 + 一行分派。**節點名、command、state 寫入形狀、event_type 字串與 payload 鍵逐鍵不變**（02-spec D-3 紅線，含 `legacy_flow_completed`——backend `AgentRunRepository.cs:16-37` 白名單硬編此字串）；以既有 runtime 測試 + golden state-diff + checkpoint round-trip 測試護行為。
-- `artifacts.py`、`models.py`、`legacy_flow.py`：不動。
+- `runtime/graph.py:585-712`：`_load_skill` 抽出 `_invoke_business_workflow(state, runtime, artifact, command)`（現 flow 分支 `:597-652`；需要 `command.arguments` 作 `raw_input`）與 `_enter_skill_scope(state, runtime, artifact)`（現 agentic 分支 `:653-712`；不需 command）兩個模組級函式；`_load_skill` 本體變成 command/pin 解析 + 一行分派。**節點名、command、state 寫入形狀、event_type 字串與 payload 鍵逐鍵不變**（02-spec D-3 紅線，含 `workflow_completed`——backend `AgentRunRepository.cs:16-37` 白名單硬編此字串）；以既有 runtime 測試 + golden state-diff + checkpoint round-trip 測試護行為。
+- `artifacts.py`、`models.py`、`flow_harness.py`：不動。
 
 ### 3.4 依賴方向規則（引擎內部）
 

@@ -47,10 +47,10 @@ P2 executes this matrix only with test-only manifests and synthetic allowlisted 
 | P2-10a | Migration lock exceeds its bounded timeout or caller cancels | Stable diagnostic, no mutation, and no indefinite startup hang |
 | P2-11 | Migration postcondition fails | No completion row is recorded |
 | P2-12 | Cleanup audit | Table counts match the pre-reset inventory and contain no row payload |
-| P2-13 | Fresh versus reset fixture database | The versioned full catalog projection produces identical normalized fingerprints; excluded nondeterministic metadata is documented |
-| P2-14 | Snapshot/restore drill | Snapshot restores into a disposable database and passes legacy fingerprint checks |
+| P2-13 | Fresh versus reset fixture database | The versioned full catalog projection produces identical normalized fingerprints; the only excluded categories are catalog OIDs, owners, ACL ordering, physical row/index order, statistics, and migration/audit timestamps, exactly as listed in 03-design §1.3 |
+| P2-14 | Snapshot/restore drill | `pg_dump --format=custom` of the disposable fixture database, restored via `pg_restore` into a second disposable database, passes the same fingerprint comparison as P2-13. This is a mechanics drill for the appdb recovery boundary in 03-design §2, not physical volume snapshotting. |
 | P2-15 | Applied manifest has name/checksum/version drift, a gap/duplicate, or a future version | Fail before pending or destructive SQL |
-| P2-16 | Unknown object exists in `public` | Hard reset refuses to drop the schema and reports the unexpected object |
+| P2-16 | Unknown object exists in `public` | Hard reset refuses to drop the schema and reports the unexpected object. This case must be evaluated after the extension-ownership exclusion in 03-design §1.3; a database with pgvector correctly installed into `public` is not an unknown-object case. |
 | P2-17 | P2 binary starts normally | Production hard-reset SQL is absent from its registered manifest; old schema remains authoritative |
 
 Migration tests must use disposable databases with allowlisted generated names. They may not target the normal `springaitest` appdb.

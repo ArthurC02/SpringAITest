@@ -1,6 +1,6 @@
 # Agent 平台重整 — 產品與系統規格
 
-> 狀態：規劃中。承接 [01-plan.md](01-plan.md)，本檔定義 WHAT 與邊界。
+> 狀態：**D1–D7 已依此規格交付**；本檔作為 WHAT/邊界的歷史決策記錄，實作偏離處見下方各節備註。承接 [01-plan.md](01-plan.md)，本檔定義 WHAT 與邊界。
 
 ## 1. 名詞
 
@@ -412,18 +412,23 @@ POST   /api/agents/{id}/revisions/{revision}/restore
 DELETE /api/agents/{id}                    # soft disable
 POST   /api/agents/{id}/enable
 
-GET    /api/agents/catalog/tools
-GET    /api/agents/catalog/skills
+# Tool/Skill picker 重用既有 GET /api/tools、GET /api/skills/catalog（帶 bindable 欄位），不新增 catalog 專屬路由。
 GET    /api/agents/catalog/rule-facts
 GET    /api/agents/catalog/rule-actions
 POST   /api/agents/rules/validate
 POST   /api/agents/rules/simulate
 
+# 已落地的選擇：root run 生命週期與 direct/child Agent run 走不同路由前綴，見下方兩組。
+POST   /api/admin/orchestrators/{id}/runs  # 啟動，需 workflow.manage
+GET    /api/orchestrator-runs/{id}
+GET    /api/orchestrator-runs/{id}/events
+POST   /api/orchestrator-runs/{id}/cancel  # root run 生命週期
+
 POST   /api/agents/{id}/runs
-POST   /api/orchestrators/{id}/runs
 GET    /api/runs/{runId}
+GET    /api/runs/{runId}/events
 POST   /api/runs/{runId}/resume
-POST   /api/runs/{runId}/cancel
+POST   /api/runs/{runId}/cancel            # direct/child Agent run
 POST   /api/runs/{runId}/approvals/{approvalId}/approve
 POST   /api/runs/{runId}/approvals/{approvalId}/reject
 

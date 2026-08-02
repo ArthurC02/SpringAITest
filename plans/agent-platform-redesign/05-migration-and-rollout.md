@@ -190,8 +190,9 @@ Trace/UI 必須遮罩 secrets、internal token、未授權 Context 與敏感工�
 | SkillRoutingAgent(含 BuildToolsAsync/SkillCatalogToTools/RouteAsync/MatchTool 建構鏈) | `platform/src/Platform.Service/SkillRoutingAgent.cs` | 刪除 | P5 完成且全 tenant 遷移、legacy fallback rate 低於門檻(R4 gate)後整批移除 |
 | Chat routing 迴歸測試(ChatSkillRoutingTests、ChatBehaviorBaselineTests 等) | `platform/tests/` | 隨 SkillRoutingAgent 同批刪除 | 同上；移除前是 legacy 路徑的迴歸保護 |
 | ChatAssistant/OperationsAssistant 舊推理路徑(platform 端 ChatClientAgent brain) | `platform/src/Platform.Web/Program.cs` | 改造為 transport adapter，舊 brain 與第 1 列同批移除 | P5 起 side-by-side，R4 gate 後收斂 |
-| ChatMemoryKeyDerivation | `platform/src/Platform.Service/` | 擴充為雙 key 規則(legacy 兩段 + orchestrator 四段)，legacy namespace 退場後收斂回單一規則 | R4 gate 後 |
-| AguiWireDedupAgent、JwtTenantIsolationKeyProvider、ChatTurnRecorder、ChatContextProvider | `platform/src/Platform.Service/` | 保留重用(transport/session/memory 外框)，不刪 | — |
+| ChatMemoryKeyDerivation | `platform/src/Platform.Service/Abstractions/` | 擴充為雙 key 規則(legacy 兩段 + orchestrator 四段)，legacy namespace 退場後收斂回單一規則 | R4 gate 後 |
+| AguiWireDedupAgent、JwtTenantIsolationKeyProvider | `platform/src/Platform.Web/Infrastructure/` | 保留重用(transport/session 層)，不刪 | — |
+| ChatTurnRecorder、ChatContextProvider | `platform/src/Platform.Service/` | 保留重用(memory 外框)，不刪 | — |
 | flow YAML 作者 UI：SimpleSkillEditor、YamlEditor 與 Advanced flow editor | `frontend/src/components/` | 移入 legacy/管理者區→停建→唯讀 | P5 前後降級；R6 條件成立後移除。`NodeParamsTab` 不在此列：它是 Harness Configuration Set 的平級設定分頁，非 flow 作者 UI；AgentSkillEditor 亦不隨此列退場。 |
 | flow 模板 | `workflow/app/skills/template-*.yaml` | 隨第 6 列同批處理 | R6 |
 | agent_skill_runner | `workflow/app/nodes/agent_skill_runner.py` | 保留為 explicit legacy invoke executor；R6 盤點時重新決策(吸收或移除)，不再無限期擱置 | R6 |

@@ -3,6 +3,12 @@
 > 狀態: **已交付能力的驗收記錄。** 依據: [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)、[03-design.md](03-design.md)；實際測試入口見 [plans README](../README.md)。
 >
 > P4 是跨 frontend/platform/backend/workflow 與 appdb 的**獨立重線**，不阻塞 P1–P3 的最小可用切片；P2/P3 的硬順序見「Phase exit criteria」。本文共 **58 案**，所有案例皆有唯一 ID、phase、前置條件、Given/When/Then、驗證層級與建議自動化位置。
+>
+> **稽核追加(已推翻的具體技術判斷,不逐案改寫下文驗收記錄):**
+> - ConfigView 現況為**四分頁**(`businessWorkflows`/`agentSkills`/`nodeParams`/`general`,`frontend/src/components/ConfigView.tsx:15-22,174-177`),非本文描述的三分頁。Skill 概念已依 skill-concept-realignment 拆分為「業務流程」(本計畫的範本/簡易-進階雙門編輯落地於此)與「Agent Skills」(package 概念,不使用本計畫的範本/nl_logic 機制)。
+> - compare/stats 的 Python `script` 槽與 O5 CodeMirror 6 **未交付**;五支範本商業邏輯槽已統一為 `nl_logic`(`frontend/src/skills/templates.ts` 型別已無 `slotKind` 欄;`workflow/app/skills/template-compare.yaml:12` 註解「舊 script 槽已廢」;`frontend/package.json` 無 codemirror 依賴,無 `PythonEditor.tsx`)。
+> - O6「`app_config` 維持全域」的決策**已被推翻**:現為 tenant-scoped + ADMIN-only(`(tenant_id, key)` 複合主鍵,GET/PUT 都經 `RequireTenant()`,見根 AGENTS.md Backend 信任邊界節)。此變更非本計畫落地,但決策記錄已過期。
+> - §3 表格中涉及 compare/stats「Python/script slot」與 O5 CodeMirror 的案例——`SSR-P2A-003`、`SSR-P2A-004`、`SSR-P2B-006`、`SSR-P2C-001`、`SSR-P2C-002`——描述的分支未被採用。若需驗收現況,應改測「五支範本皆為 NL slot」而非「三 NL 兩 Python」。另 `SSR-P2B-006` 斷言的欄位不存在:`compare` 的 `openFields` 只有 `name/description/rule`(無 `sortBy`),`stats` 只有 `name/description/rule/topK`(無 `metric`/`period`)。§4 需求追溯矩陣中 O5、O6 兩列的前提已過期。
 
 ## 1. 驗收原則與環境
 

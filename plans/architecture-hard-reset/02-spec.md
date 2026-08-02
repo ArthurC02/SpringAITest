@@ -175,6 +175,16 @@ Database classification occurs under the migration lock before any mutation: an 
 
 `migration_cleanup_audit` stores an execution UUID, migration version, table name, deleted row count, and reset timestamp. It stores no row payload.
 
+### 6.1 Bootstrap-to-runner handoff for existing databases
+
+Every developer workstation and CI runner that has started Backend before P3 carries `DbBootstrap`-created tables with no `springaitest_meta.schema_migration` row. Startup-mode classification calls this `known legacy SpringAITest` and refuses it by design. The P3 tranche therefore ships, alongside the schema cutover:
+
+- A documented one-time developer step (`migrate-db.* --confirm <db>`) that each contributor runs once against their local test database before `dotnet test` works again.
+- CI provisions a fresh, empty, disposable PostgreSQL instance per run rather than a persisted volume, so CI exercises the `empty` classification branch and never the destructive one.
+- The shared `PostgresFixture` switches `InitializeAsync` to the runner's startup mode and must surface the "legacy schema, run migrate-db first" failure as a test failure. It must not be swallowed into a skip, which would turn 37 test files green-by-skip instead of red-by-failure.
+
+P2 keeps the runner confined to disposable databases while `DbBootstrap` remains the authority for the normal appdb and the shared test database. That separation is a design decision, not an incidental consequence: the two mechanisms never target the same database before P3.
+
 ## 7. Seed and external state
 
 - Schema migrations contain no development users, tenants, prompts, Agents, Orchestrators, or Workflows.
@@ -182,6 +192,17 @@ Database classification occurs under the migration lock before any mutation: an 
 - The reset command targets only the exact `springaitest` development project and explicitly named appdb/checkpoint, mem0, RabbitMQ, and Lite state.
 - Langfuse traces and uploaded source files are excluded unless a separate explicit option names them.
 - Frontend clears named obsolete keys using a storage schema version; it never deletes arbitrary origin storage.
+
+The seed command must also recreate everything `DbBootstrap.SeedAsync` produces today, none of which is currently named in this section:
+
+- Tenants `demo-a` and `demo-b` with their invite codes.
+- Users `admin-a` (ADMIN, `workflow.manage`), `user-a` (USER), `user-b` (USER, tenant demo-b), with BCrypt password hashes.
+- Group memberships: demo-a/admin-a to operations, demo-a/user-a and demo-b/user-b to analysts.
+- The system-owned published Default Agent-Runtime Workflow (`workflow` + `workflow_revision`).
+- Context Enrichment defaults: the global `backend_documents` source catalog row and one active `default` context policy per tenant.
+- The CSR-EVAL-001 eval suite and its published revision, per tenant.
+
+Omitting these leaves a reset environment with no account that can log in and no policy or suite for the Context Enrichment and eval gates. The D5 Root Workflow, Worker, Verifier, and runtime binding named above are genuinely new content, not a migration of existing seed data.
 
 ## 8. Feature flags retained
 

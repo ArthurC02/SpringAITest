@@ -30,8 +30,8 @@
 | (a) docstring 更新 | `test_engine_skill_validation.py:449-467`（`test_definition_declaring_agentic_kind_rejected` 等） | **斷言保留**（縱深防禦仍在），P2/P3 後補註「主防線已移至 API 層」 |
 | (b) P5 整檔可刪 | **無**——P5 收斂是 backend 層動作，workflow 53 個測試檔無一因 P5 失去意義 | — |
 | (c) P5 明確保留 | `/skills/validate` 與 `/business-workflows/validate` 同 handler alias 的 API 測試 | P5/C8 不刪；alias 退場須另立 consumer inventory、usage-zero、rollback gate 與驗收 |
-| (c) 升級為紅線迴歸（凍結斷言） | `test_agent_runtime.py:1199-1292`（`active_skill_scope` 形狀 + `skill_scope_entered` event/payload 鍵——現成 golden，P3 後標註斷言值不可改）；`test_agent_runtime_legacy_flow.py:158`（`legacy_flow_completed` 字串，backend 白名單對應的唯一 Python 釘子）；`test_agent_skill_runner.py:178-200,390-417`（invoke `{skill, output}` 形狀 + audit 終端，驗證 P3 搬家不改行為的黑盒）；`test_engine_skill_validation.py` AT-GOV-02 區塊（compiler 防呆對照組） | 不可修改斷言值，只能改實作 |
-| 不刪（R6 擁有） | `test_agent_runtime_legacy_flow.py`、`test_agent_skill_runner.py` 全檔 | 本案不動 |
+| (c) 升級為紅線迴歸（凍結斷言） | `test_agent_runtime.py:1199-1292`（`active_skill_scope` 形狀 + `skill_scope_entered` event/payload 鍵——現成 golden，P3 後標註斷言值不可改）；`legacy_flow_completed` 字串釘子已於 `02dde09` 淘汰，新釘子是 `backend/tests/Backend.Api.Tests/AgentRunEventContractTests.cs`（斷言 `workflow_completed` 存在且 `legacy_flow_completed` 不存在）；`test_agent_skill_runner.py:178-200,390-417`（invoke `{skill, output}` 形狀 + audit 終端，驗證 P3 搬家不改行為的黑盒）；`test_engine_skill_validation.py` AT-GOV-02 區塊（compiler 防呆對照組） | 不可修改斷言值，只能改實作 |
+| 不刪（R6 擁有） | `test_agent_runtime_flow.py`（原 `test_agent_runtime_legacy_flow.py`，已於 `02dde09` 改名）、`test_agent_skill_runner.py` 全檔 | 本案不動 |
 
 ## 2. backend（.NET）
 
@@ -63,7 +63,7 @@
 | (b) P5 重寫 | `SkillsApiTests` 的 flow fixture **讀取**測試（`Get_ByName...:228-240`、`CrossTenant...:285-309` 等 7 項）——P5 後 flow 列從 `/api/skills` 消失，語意失真 | 改 agentic fixture 重寫或搬遷；**已補驗收 A5-3（Skill 面讀取可見性收斂）** |
 | (b) P5 搬遷 | `SkillExportTests` flow 匯出格式 10 項（`:79-334`）→ 隨 A5-2 搬 BusinessWorkflow export 測試；`ToZip` 純函式測試留原檔 | — |
 | (b) P5 改斷言 | `SkillImportTests.DefinitionOnlyUpdate_OfAgenticSkill_Rejected...:476-496`、`DefinitionOnlyCreate_AgenticKind_Rejected:505-527`——測的正是 P5 死亡的拒絕邏輯 | 改斷 410 或刪 |
-| (c) 凍結（全程不得改斷言） | `SkillExecutionArtifactTests` 全 5 法（D3 wire 紅線）；`AgentRunRepositoryTests` 中 event-type 白名單相關（`legacy_flow_completed`/`skill_scope_entered`/`skill_scope_exited`）；`SkillImportTests` Restore 系列 7 法（`:683-878`，**永久留 Skill 面**，02-spec §3.1 revisions/restore 歸屬）；`InMemorySkillRepositoryConcurrencyTests`（repo 層，與 controller 拆分無關） | 升級為契約迴歸釘子 |
+| (c) 凍結（全程不得改斷言） | `SkillExecutionArtifactTests` 全 5 法（D3 wire 紅線）；`AgentRunRepositoryTests` 中 event-type 白名單相關（`workflow_completed`/`skill_scope_entered`/`skill_scope_exited`——`legacy_flow_completed` 已於 `02dde09` 自白名單淘汰）；`SkillImportTests` Restore 系列 7 法（`:683-878`，**永久留 Skill 面**，02-spec §3.1 revisions/restore 歸屬）；`InMemorySkillRepositoryConcurrencyTests`（repo 層，與 controller 拆分無關） | 升級為契約迴歸釘子 |
 | 特殊：雙軌一致性測試自身 | P2 新建（建議名 `SkillsBusinessWorkflowsDualTrackConsistencyTests`） | **生命週期綁定雙軌期：P2 生、P5 死**——收斂後它斷言的等價關係不存在，P5 必刪，登記於此防止被當契約測試保留 |
 
 ## 3. platform（.NET）
@@ -129,7 +129,8 @@
 | `skill_from_agentic_meta` | `engine/package.py:669` | P3 後仍有兩個呼叫端：`load_agent_skill()` 與 `package._parse_agentic()`（`:823`） |
 | `MemoryPackageReader` | `engine/package_reader.py:32-53` | 測試替身非孤兒；與 `BackendPackageReader` 是刻意的 port/adapter 分層 |
 | workflow `/skills/validate` handler | `main.py:405-423` | P5 收斂的是 backend `/api/skills*` 寫入面；workflow 端 alias 並存，本計畫不下架（真要清需先確認 backend validator 已全面切新路徑，另立 C8 子項） |
-| `legacy_flow.py`、`agent_skill_runner.py` 及其測試 | — | R6 擁有，本案只改歸屬文件 |
+| `flow_harness.py`（原 `legacy_flow.py`） | `workflow/app/runtime/flow_harness.py` | 已於本案範圍外的 `02dde09` 統一治理改名；不再是「R6 待處理」的舊檔身分 |
+| `agent_skill_runner.py` 及其測試 | `workflow/app/nodes/agent_skill_runner.py` | R6 擁有，本案只改歸屬文件 |
 | `SkillExporter.ToZip` 類別本體 | `SkillExporter.cs` | P5 只死 Skill 面呼叫點；Business Workflow 面 export 沿用本體 |
 
 ## 6. 本帳本對計畫文件的回饋（已同批修訂）

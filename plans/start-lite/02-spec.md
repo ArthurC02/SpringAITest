@@ -316,6 +316,8 @@ get_recent_traces(filter?: string, limit?: int = 10)
 
 ### 4.1 start-lite.ps1 (Windows)
 
+> 以下為早期草稿示意,**實際簽章以 `scripts/start-lite.ps1` / `.sh` 原始碼為準**:需用 PowerShell 7.4+ 的 `-Environment`(非 `-EnvironmentVariables`)、`dotnet run` 需帶 `--no-launch-profile`、workflow 需帶 `--host 127.0.0.1`、npm 需以 `cmd.exe /c npm run dev` 包裝(Windows 上 `Start-Process -FilePath "npm"` 會失敗)、config 檔為 `infra/litellm-config.lite.yaml`。
+
 **前置檢查:**
 ```powershell
 # 檢查 dotnet 10 SDK

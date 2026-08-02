@@ -1,7 +1,7 @@
 # Evaluation 與 Observability 閉環計畫
 
 > 優先級：P0。  
-> 交付狀態：Phase E0/E1/E2/E3 已實作（2026-07-30）；Phase E4 部分交付（eval suites/runs UI；operations productization 其餘項目未實作）。  
+> 交付狀態：Phase E1/E2/E3 已實作（2026-07-30）；Phase E0 僅 item 4（document consumer DLQ）完成，items 1–3 仍未完成，見 §3 與 [../copilot-shared-core/05-release-evidence-plan.md](../copilot-shared-core/05-release-evidence-plan.md)；Phase E4 部分交付（eval suites/runs UI；operations productization 其餘項目未實作）。  
 > 目標：重用既有 events、OTel/Langfuse、operations metrics、`CSR-EVAL-001` 與 regression gate，建立可執行且可稽核的 improvement loop。
 
 ## 1. 問題
@@ -74,7 +74,7 @@ flowchart LR
 
 1. **Deterministic fixture**：固定 tools/rules/model fixtures，適合 routing、schema、redaction、policy 與 recovery。
 2. **Recorded response replay**：重播已去識別 model/tool responses，驗證 harness/prompt parser/runtime regression。
-3. **Live shadow**：使用真模型比較 candidate，但所有 write/mem0/conversation/outbox/approval effects 關閉，另有 budget/rate limit。
+3. **Live shadow**：使用真模型比較 candidate，但所有 write/mem0/conversation/outbox/approval effects 關閉，另有 budget/rate limit。**未實作**，屬 P0 後續範圍。
 
 ### 5.3 結果模型
 
@@ -109,7 +109,7 @@ flowchart LR
 | -------------------------- | ----- | ------------------------------------------------------- |
 | `RUN_EVIDENCE_ENABLED`     | false | dual-write → reconciliation read-shadow → authoritative |
 | `RUN_EVAL_ENABLED`         | false | deterministic suites first                              |
-| `LIVE_SHADOW_EVAL_ENABLED` | false | tenant/model allowlist + independent budget             |
+| `LIVE_SHADOW_EVAL_ENABLED` | false | **未實作**，屬 P0 後續範圍；tenant/model allowlist + independent budget（規劃中） |
 
 關閉 evidence/eval 只停止新寫入/執行，不影響正常 runtime 與既有 audit records。Gate 在 required evidence 缺席時 fail closed。
 

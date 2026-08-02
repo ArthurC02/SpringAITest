@@ -9,7 +9,7 @@
 系統經過 Agent 平台重整（D1–D7）後，執行模型已經變成「**Harness（固定 LangGraph 骨架）+ 動態載入的能力**」，但程式碼與 API 仍殘留舊概念「**Skill == Workflow**」（Skill 是一張可執行的宣告式流程圖）。具體證據：
 
 - `workflow/app/runtime/graph.py:585-712` 的 `_load_skill` 一個節點兩種語意：`kind=='flow'` 分支同步跑完整段子圖（`invoke_pinned_legacy_flow`）；`kind=='agentic'` 分支只掛載漸進揭露 scope（`ActiveSkillScope`），實際執行留給後續 ReAct 迴圈。兩種控制流完全不同的行為共用同一個 command（`load_skill`）、同一個 tool name。
-- `workflow/app/runtime/legacy_flow.py:37-44` 的 `SAFE_LEGACY_NODES` 白名單只有 4 個節點；全部 12 支內建/模板 flow skill 沒有一支能通過（`retrieve`、`nl_logic`、`summarize_text`、`triage_classify` 等都不在名單），即 **flow skill 在新 runtime 是結構性跑不動的**，程式碼自己也叫它 `legacy_flow`——但它仍佔著 `skill` 的名字、表、API。
+- （歷史）曾有 `legacy_flow.py` 的 4 節點白名單，已於 `02dde09` 被 Harness 治理統一取代為 `flow_harness.py`；flow skill 現可依 effective-tool 治理執行，非結構性跑不動。
 - `workflow/app/engine/compiler.py:501-565` 的 `_build_agentic_graph` 把符合 Anthropic Agent Skill 公規的 SKILL.md 包**反向包裝成單節點 LangGraph**，只為了共用 `/skills/{name}/invoke`；公規的東西被塞進工作流的殼，方向剛好相反。
 - `workflow/app/skills/custom.py:147-201` 的 `load()` 在單一函式內重現兩條完全不同的載入管線（agentic 繞過 `validate_source`、flow 走靜態驗證），只因兩者共享 `Skill` model 與 `LoadedSkill` 回傳型別。
 - backend 一張 `skill` 表（`backend/src/Backend.Api/Data/DbBootstrap.cs:110-158`）混裝兩種本質不同的內容；`SkillRepository` 的 Create/Update 寫死 `kind='flow', package=NULL`，Import 才允許 agentic——**寫入路徑本身已經分岔，概念層卻沒跟上**。
@@ -38,7 +38,7 @@
 **不做（非目標）：**
 - 不動 D3/D5/D7 runtime 的 wire 契約：`RuntimeCommand.kind` 詞彙、`ActiveSkillScope`/snapshot pin 形狀、checkpoint state shape 一律不變（不可變快照、audit replay、in-flight checkpoint 相容是紅線）。
 - 不拆 `skill`/`skill_revision` 實體表（理由見 02-spec D-2）。
-- 不讓 flow skill 在新 runtime 跑起來、不動 `SAFE_LEGACY_NODES`——legacy flow 的退場由 `agent-platform-redesign/05-migration-and-rollout.md` R6 擁有。
+- 不讓 flow skill 在新 runtime 跑起來——該白名單機制已被 `flow_harness.py` 取代（`02dde09`），非本案改動，亦非仍待 R6（`agent-platform-redesign/05-migration-and-rollout.md`）處理的既有物。
 - 不做租戶建立（CreateTenant）與預設種子——另案，且依賴本計畫先定名。
 - 不新建第二套編輯器/schema/runtime（遵守 `plans/README.md:35` 紅線）。
 - 不動 D4 `workflow`/`workflow_revision`/`orchestrator` 表的實體名稱與契約。
@@ -71,7 +71,8 @@ P0/P1 可並行；P2 依賴 P1；P3 與 P2 可並行（不同服務）；P4 依�
 | `/api/skills*` 的 flow Create/Update 路徑 | `backend/src/Backend.Api/Skills/SkillController.cs:159-225`、`SkillRepository.cs:58,99` | P5（雙軌收斂後） | 遷移至 BusinessWorkflowController，原路徑 410 |
 | `SkillExporter` flow 分支 | `backend/src/Backend.Api/Skills/SkillExporter.cs` | P2（隨 flow 匯出遷移） | 隨 Business Workflow 路由遷移，不刪功能 |
 | R6 清單將 `NodeParamsTab` 誤列為 flow 作者 UI | `plans/agent-platform-redesign/05-migration-and-rollout.md:193` | P0 | 修訂該列（NodeParamsTab 是 Harness 配置，不隨 flow 編輯器退場） |
-| `legacy_flow.py` 與 `agent_skill_runner.py` | `workflow/app/runtime/legacy_flow.py`、`workflow/app/nodes/agent_skill_runner.py` | **不在本案刪除** | R6 擁有；本案只修正歸屬文件 |
+| `flow_harness.py`（原 `legacy_flow.py`） | `workflow/app/runtime/flow_harness.py` | 已於本案範圍外的 `02dde09` 統一治理 | 非本案改動；本文件路徑引用需更新為 `flow_harness.py` |
+| `agent_skill_runner.py` | `workflow/app/nodes/agent_skill_runner.py` | **不在本案刪除** | R6 擁有；本案只修正歸屬文件 |
 
 ## 6. 與既有計畫的關係
 

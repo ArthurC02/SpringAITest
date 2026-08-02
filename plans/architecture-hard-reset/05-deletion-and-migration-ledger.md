@@ -20,6 +20,18 @@
 | Development seed embedded in bootstrap | Current `DbBootstrap` | P3 | Move to a separate idempotent seed command when production schema authority switches. Schema migration contains no environment-specific principals/artifacts. |
 | Legacy checkpoints, conversations, runs, approvals, audit and outbox rows | appdb application schema | P3 | Count in temporary inventory, then delete with the schema. No payload archive/quarantine. |
 | Unknown objects in `public` | Possible operator/custom state | P2 | Do not delete. Compare against the exact SpringAITest-owned object allowlist and abort on extras. |
+| `operations_execution_metric.skill_name`/`.skill_revision` 與 `operations_run_evidence.skill_name`/`.skill_revision` | `DbBootstrap.cs:509,515,531`; `OperationsGovernanceRepository`/`InMemoryOperationsGovernanceRepository` | P3 | Split into typed Agent Skill / Business Workflow identity columns. Row 18 named only the governance repository, not these two tables. |
+| `eval_run.candidate_kind`/`candidate_ref`/`candidate_pins`/`candidate_identity_sha256` | `DbBootstrap.cs:889-890`; `EvalController`/`EvalRepository`/`InMemoryEvalRepository`/`EvalDtos.cs:99-124` | P3 | Replace the `CHECK (candidate_kind IN ('skill','agent'))` discriminator union with an explicit candidate type plus typed ref. Mirrors the Workflow-side item in §3 which had no Backend counterpart. |
+| `skill.simple_form` | `DbBootstrap`; `SkillRepository`/`InMemorySkillRepository`; `BusinessWorkflowController` | P3 | Target schema (02-spec §2.1/2.2) does not define this column. Decide its destination (move into `business_workflow`, into both, or drop) and record it in the spec. |
+| Exact SpringAITest-owned object allowlist | Not written down anywhere in this plan set | P2 | 03-design §1.3 step 2 and row 22 both depend on an allowlist that was never enumerated. See §1.1 below for the 49-table baseline. |
+
+### 1.1 Object allowlist baseline (49 tables)
+
+Enumerated from `DbBootstrap.cs` at the audit commit. This is the input for the `0001` classification logic and the extras-abort comparison; refresh against the baseline commit before implementation.
+
+`tenants`, `users`, `user_group_membership`, `conversations`, `rag_documents`, `rag_chunks`, `app_config`, `skill`, `skill_revision`, `configuration_set`, `agent`, `agent_revision`, `agent_revision_skill`, `workflow`, `workflow_revision`, `orchestrator`, `orchestrator_revision`, `agent_run`, `agent_run_approval`, `agent_run_approval_decision`, `agent_run_write_effect`, `agent_run_approval_execute`, `agent_run_write_outbox`, `orchestrator_run`, `tenant_runtime_binding`, `operations_regression_result`, `operations_regression_override`, `operations_release_audit`, `operations_execution_metric`, `operations_run_evidence`, `orchestrator_run_event`, `orchestrator_run_command`, `orchestrator_run_child`, `agent_run_skill`, `agent_run_event`, `agent_run_command`, `context_policy`, `source_catalog`, `metric_definition`, `context_revision`, `context_evidence`, `context_view`, `context_request`, `context_delta`, `eval_suite`, `eval_suite_revision`, `eval_run`, `eval_case_result`, `prompt_component_revision`, `prompt_manifest_revision`
+
+Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically, but `rag_documents`, `rag_chunks`, `app_config`, `configuration_set`, `agent`, `agent_revision`, `orchestrator`, `orchestrator_revision`, and `tenant_runtime_binding` hold author-created content rather than run/audit residue. The reset destroys them too; that is intended, but it must be stated rather than implied.
 
 ## 2. Backend API and domain
 
@@ -34,6 +46,11 @@
 | Child/snapshot mixed `Skill` rows | AgentRun/OrchestratorRun repositories and snapshot builders | P3 | Replace with explicit typed collections and queries. |
 | Mixed Skill pins in InMemory consumers | `InMemoryAgentRepository`, `InMemoryAgentRunRepository`, `InMemoryOrchestratorRunRepository` | P3 | Replace with explicit Agent Skill/Business Workflow models and keep behavior aligned with PostgreSQL. |
 | Oversized repositories | AgentRun, InMemoryAgentRun, OrchestratorRun, governance repositories | P5 | Split query/command/coordinator after P3 schema stabilizes; preserve transaction boundaries. |
+| `SkillHash.cs` | `Skills/SkillHash.cs`; called by Agents, Eval, PromptArtifacts, RAG, and Governance (at least 6 non-Skill modules) | P3 | Move to a shared namespace. It is a generic SHA-256 helper that only happens to live under `Skills/`; deleting it with the Skill surface breaks four unrelated modules. |
+| `SkillNameRules.cs` | `Skills/SkillNameRules.cs`; used by both `SkillController` (deleted) and `BusinessWorkflowController` (kept) | P3 | Move to `BusinessWorkflows/` or a shared location; `ReservedBusinessWorkflowNames` becomes single-domain. |
+| `SkillExporter.cs` | `Skills/SkillExporter.cs`; used by both `SkillController` (deleted) and `BusinessWorkflowController.cs:37` (kept) | P3 | Move to `BusinessWorkflows/`. Agent Skill export uses the stored package, not on-the-fly zip assembly. |
+| `ISkillValidator.cs` (with `SkillMetadata`/`SkillValidationResult`/`SkillValidationError`) | `Skills/ISkillValidator.cs`; implemented by `BusinessWorkflows/WorkflowSkillValidator.cs` | P3 | Move to `BusinessWorkflows/`, rename off the `Skill` vocabulary, and drop `SkillMetadata.Kind`. |
+| `InMemoryOperationsGovernanceRepository` / `InMemoryEvalRepository` Skill-shaped fields | `OperationsGovernance/InMemoryOperationsGovernanceRepository.cs:123-125`, `InMemoryEvalRepository.cs:94,177-178` | P3 | Fold into row 35's InMemory parity replacement; they mirror the two §1 schema rows above. |
 
 ## 3. Workflow
 
@@ -49,6 +66,13 @@
 | Runtime use of `compiler._script_contract` | `flow_harness.py` | P4 | Publish a supported engine contract resolver, then delete the private dependency. |
 | Process-global private test registries | `workflow/tests/conftest.py` and engine tests | P5 | Replace with invocation-local fixtures; prove permitted parallel execution. |
 | Legacy chat-related execution/fallback helpers | Runtime/chat integration consumers | P4 | Delete after every chat transport uses Root Orchestrator and failure tests prove no fallback. |
+| `GET /skills` unified catalog (mixed Agent Skill / Business Workflow, mixed builtin/custom) | `workflow/app/main.py` (`list_skills`) | P3 | 02-spec §3.3 lists only four target routes and never says whether catalog splits or stays merged. Decide and record before implementation; see §4 for the three frontend call sites that break if it narrows. |
+| The 12 builtin YAML artifacts | `workflow/app/skills/*.yaml`, `workflow/app/skills/__init__.py` | P3 | None declares `kind:`, so all 12 default to `flow` — every builtin is a Business Workflow and none is an Agent Skill. Plan the directory/module move (03-design §5 `artifacts/`) accordingly. |
+| `compiler._build_graph` kind dispatch | `workflow/app/engine/compiler.py:503-505` | P3 | Split into `compile_business_workflow()` / `compile_agent_skill()`; callers dispatch by artifact type instead of passing a kind-tagged `Skill`. |
+| `engine/package.py` top-level parse dispatch | `workflow/app/engine/package.py:962-968` (`_parse_agentic`/`_parse_flow`) | P3 | Already two independent pipelines behind one entry point; split into two public parsers. |
+| `skills/custom.py` `load`/`_entry` kind dispatch | `workflow/app/skills/custom.py:79-189` | P3 | `load_business_workflow`/`load_agent_skill` already exist as clean seams; split into two modules and delete the three-way dispatch. |
+| **Harness kind routing for Skill pins** | `workflow/app/runtime/graph.py:552-559,705-788,1132-1213`; `workflow/app/runtime/models.py:149-172,229,429-437` | P3 | **Largest omission in this ledger.** D3/D5 Harness routes execution on `pin.kind`/`artifact.kind`/`scope.kind` string comparison (`_load_skill`, `_enter_skill_scope`, `_proposed_action`, route_satisfied). 02-spec §2.3 requires distinct `agentSkills`/`businessWorkflows` collections instead of a kind-tagged union, so `PinnedSkillSummary`, `ActiveSkillScope`, and `DirectAgentExecutionSnapshot.skills` must be split. Decide first whether one execution snapshot may pin both artifact types. |
+| `EvalCandidate.kind: Literal["skill","agent"]` | `workflow/app/evals/models.py:33-43`; `evals/api.py:27-80` | P3 | Orthogonal to `Skill.kind`; ambiguous after the split. Replace with explicit types and delete the runtime kind rejection at `api.py:69-79`. |
 
 ## 4. Platform and public API
 
@@ -65,12 +89,19 @@
 | Anonymous chat/history contract | Chat controller, DTO, tests | P4 | Require JWT; remove body `userId` and anonymous continuity/history behavior. |
 | Giant composition root | `Platform.Web/Program.cs` | P5 | Split registration by responsibility without moving domain rules into extensions. |
 | Partial public error envelope | Platform `ApiErrorWriter`, controllers, API clients/tests | P1 | Add stable code/correlation ID everywhere and migrate all endpoint contract tests before later phases add domain-specific codes. |
+| D6 canary chat runtime cluster | `Platform.Service/AgentChatRuntime.cs`, `Abstractions/IAgentChatRuntime.cs`, `Options/ServiceOptions.cs` (`AgentChatOptions`), `Platform.Web/Controllers/ChatOrchestratorController.cs` | P4 | Row 62 named only the thin `AgentChatRoutingAgent` shell. `AgentChatRuntime` holds the actual `IsCanaryTenant` / `mode == "legacy"` / return-null-to-fall-back logic; `IAgentChatRuntime` must fail with stable error codes instead of returning null. Decide whether `ChatOrchestratorController` is re-gated or deleted. |
+| `ChatAssistant` session store `withIsolation:false` | `Platform.Web/Program.cs:247-287` | P4 | The inline comment documents `false` as deliberate **because anonymous continuity must be preserved**. P4 removes anonymous chat, so the justification expires and this should become `withIsolation:true` (Strict, fail-closed) like AG-UI. |
+| `ChatMemoryKeyDerivation` anonymous branch | `Platform.Service/Abstractions/ChatMemoryKeyDerivation.cs` | P4 | Delete the `userCtx is null` branch (`NormalizeUser`/`NormalizeConversation`) once chat requires JWT. |
+| `ChatRequest.TurnId` and `X-Conversation-Id` response header | `Platform.Service/Dtos/ChatDtos.cs`, `Platform.Web/Controllers/ChatController.cs` | P4 | 02-spec §4 requires a mandatory UUID `turnId` and a server-generated conversationId returned as `X-Conversation-Id`. Neither exists today; both are additions, not deletions. |
+| `WORKFLOW_DESIGNER_ENABLED` x `MULTI_AGENT_DISPATCH_ENABLED` coupling | `Platform.Web/Program.cs:67-68` | P1/P4 | Current code makes dispatch require the designer gate; 02-spec §8 explicitly removes `WORKFLOW_DESIGNER_ENABLED` from runtime readiness dependencies. Direct code/spec conflict. |
+| Shared union `Skill`/`SkillUpsert`/`BusinessWorkflowCreated` DTOs | `Platform.Service/Dtos/SkillDtos.cs` | P3 | One DTO with a `[JsonRequired]` `Kind`, asserted to different subsets by `SkillService.ReadSkillAsync` and `BusinessWorkflowService.EnsureFlowKind`. Split into two record families. |
+| `agentChatEnabled` in `GET /api/features` | `Platform.Web/Program.cs:587`; frontend Features consumers | P4 | Wire-contract shape change when the flag is deleted. |
 
 ## 5. Frontend
 
 | Item | Current location | Phase | Disposition |
 | --- | --- | --- | --- |
-| `SkillKind = flow | agentic` and shared artifact revisions | `frontend/src/types.ts` | P3 | Replace with separate Agent Skill and Business Workflow types. |
+| `SkillKind = flow | agentic` and shared artifact revisions (also `SkillSimpleForm`, `SkillInfo`, `Skill`, `SkillRevision`, `SkillInputField`, `SkillCatalogEntry`, `SkillValidationError`, `SkillValidation`, `SkillResult`) | `frontend/src/types.ts` | P3 | Replace with separate Agent Skill and Business Workflow types. |
 | Unified `invokeSkill`/Skill API filtering | `frontend/src/api/skills.ts` and Skill views | P3 | Split API clients; Business Workflow never calls Skill endpoints. |
 | Shared revision/invoke hooks | `SkillHistory.tsx`, `SkillRunPanel.tsx`, `useSkillSelection.ts`, `useSkillRows.ts` | P3 | Split or parameterize with explicit domain contracts; no runtime `kind` branch. |
 | Compatibility Skill/Business Workflow UI branching | SkillHome, AgentSkillHome, BusinessWorkflowHome, run panels | P3/P5 | Delete kind-routing state; retain only genuinely shared visual components. |
@@ -78,6 +109,11 @@
 | Legacy chat/canary UI flags | root navigation/runtime flags | P4 | Delete with Platform flags. |
 | Stale browser local state | named session/chat/draft keys | P4 | Clear through an explicit storage schema version; do not scan/delete unrelated keys. |
 | Central `types.ts` and oversized editors | frontend feature code | P5 | Move domain types/API/state beside each feature; preserve shared primitives only. |
+| `SkillHome.tsx` builtin-view catalog call | `frontend/src/components/SkillHome.tsx:2,100` (`openBuiltinView`) | P3 | Calls the Agent Skill catalog unconditionally, including for Business Workflow rows. Breaks if `/api/skills/catalog` narrows. |
+| `useSkillSelection.ts` unconditional catalog call | `frontend/src/hooks/useSkillSelection.ts:3,100` (`onHistoryReverted`) | P3 | Same catalog-domain mismatch during revision restore; the `kind` branch above it does not cover this call. |
+| `SimpleSkillEditor.tsx` template skeleton source | `frontend/src/components/SimpleSkillEditor.tsx:3,74` (`loadSkeleton`) | P3 | A Business-Workflow-only editor reads `template-*` skeletons from the Agent Skill catalog endpoint. |
+| Storage/build schema version mechanism | Verified absent: no `X-Client-Schema-Version` header, no 426 handling, no storage version constant | P4 | Rows in §4/§5 reference this as an existing mechanism. It does not exist — this is a feature to add per 03-design §6 / 02-spec §5, not cleanup. |
+| `springai-chat:conversationId` client-generated UUID | `frontend/src/api/chat.ts:28-35` (`getConversationId`) | P4 | Client pre-generates the id; 02-spec §4 makes the server authoritative via `X-Conversation-Id`. Reconcile which side generates on the first turn. |
 
 ## 6. Infrastructure and data cleanup
 
@@ -103,6 +139,9 @@
 | Skill package migration tests for old rows | P3 | Delete; destructive reset does not rewrite old packages. |
 | InMemory/PostgreSQL behavior divergence tests | P1/P5 | Replace with one shared contract suite, not implementation-specific expectations. |
 | Root/area AGENTS, API contracts, README, Compose comments | Each phase | Update in the same change as behavior; historical plans retain a superseded header. |
+| D3 pin/artifact mixed-kind test fixture source | P3 | `workflow/tests/test_agent_runtime.py` (`snapshot()`/`flow_artifact()` helpers) is imported by `test_agent_runtime_api.py`, `test_agent_runtime_manager.py`, `test_d7_write_evidence.py`, and `test_prompt_manifest_assembler.py`; rewriting the models rewrites all five. |
+| `workflow/tests/test_skills_custom.py` (667 lines) | P3 | Mixed flow/agentic custom-artifact coverage in one file; split into two per-type test files. |
+| Backend PostgreSQL fixture switch | P3 | `PostgresFixture` (`ConfigurationSetRepositoryTests.cs:16-46`) is shared by 37 test files via `[Collection("Postgres")]`, and 5 files call `DbBootstrap.RunAsync` directly at ~26 sites. All must move to the runner in the same tranche. |
 
 ## 8. Items explicitly retained
 

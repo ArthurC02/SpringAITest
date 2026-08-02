@@ -154,7 +154,7 @@ get_recent_traces(filter?: string, limit?: int) → List<{timestamp, name, durat
 
 **流程:**
 1. 前置檢查: dotnet 10 SDK、uv、node、python 3.12+
-2. (可選)啟 LiteLLM: `uvx --from "litellm[proxy]" litellm --config infra/litellm-config.yaml --port 4000`
+2. (可選)啟 LiteLLM: `uvx --from "litellm[proxy]" litellm --config infra/litellm-config.lite.yaml --port 4000`(移除 langfuse callback,見 02-spec §1.2)
 3. 平行啟動四個服務(各自新視窗/背景 job):
    - backend(:8002): `DB_PROVIDER=inmemory EMBEDDINGS_PROVIDER=fake`
    - workflow(:8001): `LLM_MODEL=mock-gpt BACKEND_BASE_URL=http://localhost:8002`

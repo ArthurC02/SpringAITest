@@ -3,6 +3,12 @@
 > 狀態: **主要能力已交付。** 本文保留原始規格；目前實作與待驗證行為以 [plans README](../README.md) 為準。
 > 下文保留 [01-plan.md](01-plan.md) 的 D1–D8 / O1–O7 原始規格；與現行程式碼不一致時，以程式碼和測試為準。
 > 引擎(`workflow/app/engine/`)資料模型不動;唯一動到引擎的是新增一顆 `nl_logic` 節點與「執行時套用 Configuration Set」。
+>
+> **稽核追加(已推翻的具體技術判斷,不逐行改寫下文步驟記錄):**
+> - ConfigView 現況為**四分頁**(`businessWorkflows`/`agentSkills`/`nodeParams`/`general`,`frontend/src/components/ConfigView.tsx:15-22,174-177`),非本文描述的三分頁。Skill 概念已依 skill-concept-realignment 拆分為「業務流程」(本計畫的範本/簡易-進階雙門編輯落地於此)與「Agent Skills」(package 概念,不使用本計畫的範本/nl_logic 機制)。
+> - compare/stats 的 Python `script` 槽與 O5 CodeMirror 6 **未交付**;五支範本商業邏輯槽已統一為 `nl_logic`(`frontend/src/skills/templates.ts` 型別已無 `slotKind` 欄;`workflow/app/skills/template-compare.yaml:12` 註解「舊 script 槽已廢」;`frontend/package.json` 無 codemirror 依賴,無 `PythonEditor.tsx`)。
+> - O6「`app_config` 維持全域」的決策**已被推翻**:現為 tenant-scoped + ADMIN-only(`(tenant_id, key)` 複合主鍵,GET/PUT 都經 `RequireTenant()`,見根 AGENTS.md Backend 信任邊界節)。此變更非本計畫落地,但決策記錄已過期。
+> - `SkillsTab.tsx` **已不存在**,進階編輯器現為獨立 `AdvancedSkillEditor.tsx`(被 `BusinessWorkflowHome.tsx` 使用);`WorkflowsView.tsx` **未刪除**,已被 agent-platform-redesign D4 的 Workflow Designer 重新利用,與本文描述的用途無關;`SkillHome.tsx` 已變成無 kind 決策的共享 presentation 元件,由 `AgentSkillHome.tsx`/`BusinessWorkflowHome.tsx` 各自帶 `kind` props 組裝,非單一頂層 tab 元件;簡單/進階編輯實際呼叫 `frontend/src/api/businessWorkflows.ts`,非 `api/skills.ts`。
 
 ---
 

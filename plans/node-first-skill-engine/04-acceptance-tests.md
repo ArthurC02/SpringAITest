@@ -8,7 +8,7 @@
 
 | 層級                                | 範圍                                                                                                                                                                             | 位置(建議)                                                                                            | 執行方式                                                        |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| workflow 服務 pytest — 元件單元測試 | `engine/node_registry.py`、`engine/harness.py`、`engine/skill.py`(靜態驗證)、`engine/compiler.py`、`engine/expressions.py`、`engine/script_runner.py`、`engine/tool_registry.py` | `workflow/tests/test_engine_*.py`(比照現有 `test_registry.py`/`test_retrieve.py` 命名慣例)            | `uv run pytest`                                                 |
+| workflow 服務 pytest — 元件單元測試 | `engine/node_registry.py`、`engine/node_shell.py`(P1 期間暫名 `harness.py`,後正名為 Node Shell)、`engine/skill.py`(靜態驗證)、`engine/compiler.py`、`engine/expressions.py`、`engine/script_runner.py`、`engine/tool_registry.py` | `workflow/tests/test_engine_*.py`(現況為 `test_engine_node_shell.py`/`test_engine_node_registry.py`)            | `uv run pytest`                                                 |
 | workflow 服務 pytest — parity e2e   | `skills/kb_query.yaml` 編譯圖 vs 手寫 `kbquery/graph.py`                                                                                                                         | `workflow/tests/test_skill_kbquery_parity_e2e.py`(對照現有 `test_kbquery_e2e.py` 7 案例逐一複製)      | `uv run pytest`                                                 |
 | workflow 服務 pytest — 沙箱逃逸     | `engine/script_runner.py` 攻擊樣本集                                                                                                                                             | `workflow/tests/test_script_runner_sandbox.py`                                                        | `uv run pytest`(納入 CI)                                        |
 | backend xUnit                       | `Features/Skills/`(CRUD、驗證轉發、revision、軟刪、租戶隔離、角色)                                                                                                               | `backend/Backend.Tests/Features/Skills/SkillsControllerTests.cs` 等(比照現有 feature folder 測試慣例) | `dotnet test`                                                   |
@@ -18,7 +18,7 @@
 
 ## 2. Phase 1 — Node Registry + Harness
 
-前置(全 Phase 共用):`workflow/` 已加入 `engine/node_registry.py`、`engine/harness.py`,kb_query 10 節點 + `retrieve` 已補 `@node(...)` 宣告(見 [02-spec.md §2.2](02-spec.md))。
+前置(全 Phase 共用):`workflow/` 已加入 `engine/node_registry.py`、`engine/node_shell.py`(P1 期間暫名 `harness.py`),kb_query 10 節點 + `retrieve` 已補 `@node(...)` 宣告(見 [02-spec.md §2.2](02-spec.md))。
 
 **AT1-01 `@node` 註冊與 NodeSpec 契約查詢**
 - 前置:匯入 `app.nodes.kbquery.evidence_verification`。

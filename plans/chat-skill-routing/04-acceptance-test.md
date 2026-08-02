@@ -37,12 +37,12 @@ P1 必須同時滿足：
 
 ### 2.2 目錄樣本
 
-> 注意：`template_*` 內建骨架是空殼、不可被路由當工具（`source=="builtin"` 且 `name` 以 `template_` 開頭者一律過濾，與前端同一條規則）。因此可路由的 builtin 範例改用非 template 名（如 `kb_query`）；template_ 的排除見 CSR-P1-031。
+> 注意：`template-*` 內建骨架是空殼、不可被路由當工具（`source=="builtin"` 且 `name` 以 `template-` 開頭者一律過濾，與前端同一條規則）。因此可路由的 builtin 範例改用非 template 名（如 `kb-query`）；template- 的排除見 CSR-P1-031。
 
 ```json
 [
   {
-    "name": "kb_query",
+    "name": "kb-query",
     "description": "從知識庫檢索答案",
     "required_role": "USER",
     "source": "builtin",
@@ -52,7 +52,7 @@ P1 必須同時滿足：
     }
   },
   {
-    "name": "tenant_a_private_search",
+    "name": "tenant-a-private-search",
     "description": "租戶 A 的專用檢索",
     "required_role": "USER",
     "source": "custom",
@@ -62,7 +62,7 @@ P1 必須同時滿足：
     }
   },
   {
-    "name": "admin_report",
+    "name": "admin-report",
     "description": "管理報表",
     "required_role": "ADMIN",
     "source": "custom",
@@ -215,7 +215,7 @@ P1 必須同時滿足：
 #### CSR-P1-031 — builtin `template_*` 骨架不可被路由
 
 - 優先級／Phase：Must / P1
-- 前置條件：目錄含 `source=="builtin"` 且名稱以 `template_` 開頭的空殼骨架（如 `template_retrieval`、`template_stats`，撰寫端 settings-skill-redesign 併入同一 `GET /skills` 目錄），以及至少一個非 template 的可路由 Skill。
+- 前置條件：目錄含 `source=="builtin"` 且名稱以 `template_` 開頭的空殼骨架（如 `template-retrieval`、`template-stats`，撰寫端 settings-skill-redesign 併入同一 `GET /skills` 目錄），以及至少一個非 template 的可路由 Skill。
 - Given：template_ 骨架縱使有合格的單一必填字串 `input_schema`，仍是不可路由的空殼。
 - When：建立 tools。
 - Then：`template_*`（builtin）一律不出現在 tools；非 template 的 Skill 正常成為工具。過濾條件是 `source=="builtin"` 與 `template_` 前綴的**合取**——`source=="custom"` 的 `template_` 前綴不被剝除（off-point：驗 source 維度）。
@@ -270,13 +270,13 @@ P1 必須同時滿足：
 - Then：回覆正常、skill invoke 次數為 0；不得強制分類或派工。
 - 驗證層級／位置：Service unit + Web integration。
 
-#### CSR-P1-020 — Catalog HTTP 502 回退靜態工具
+#### CSR-P1-020 — Catalog HTTP 502 回退空工具清單
 
 - 優先級／Phase：Must / P1
 - 前置條件：`GetSkillCatalogAsync` 拋對應 workflow 502 的例外。
-- Given：殘留靜態工具表非空。
+- Given：`ChatToolSpecs` 已移除，無殘留靜態工具可退。
 - When：已登入者聊天。
-- Then：聊天不中斷；agent 收到角色允許的靜態工具；記錄 warning；不產生半套動態工具。
+- Then：聊天不中斷；agent 收到空的工具清單（`Array.Empty<LlmTool>()`）；記錄 warning；不產生半套動態工具。
 - 驗證層級／位置：Service unit。
 
 #### CSR-P1-021 — Catalog 傳輸錯誤與逾時皆 best-effort
@@ -285,13 +285,13 @@ P1 必須同時滿足：
 - 前置條件：分列注入 DNS/connection failure、`HttpRequestException`、逾時，以及壞 JSON 解析錯誤。
 - Given：目錄尚未成功建立。
 - When：已登入者聊天。
-- Then：各錯誤均走與 502 相同的靜態工具 fallback，聊天不回 5xx；warning 不得記錄 token、完整 prompt 或敏感 catalog。
+- Then：各錯誤均走與 502 相同的空工具清單 fallback，聊天不回 5xx；warning 不得記錄 token、完整 prompt 或敏感 catalog。
 - 驗證層級／位置：Service unit；至少一種 connection failure 另做 Web integration。
 
 #### CSR-P1-022 — Catalog 失敗且無靜態工具時裸聊
 
 - 優先級／Phase：Must / P1
-- 前置條件：catalog 失敗；測試配置的 `BuildStaticTools` 結果為空。
+- 前置條件：catalog 失敗；`ChatToolSpecs`/`BuildStaticTools` 已移除，恆為空。
 - Given：已登入使用者仍可使用一般聊天。
 - When：發送訊息。
 - Then：agent 在沒有可用工具的情況正常作答，API 不失敗。
@@ -306,7 +306,7 @@ P1 必須同時滿足：
 - Then：每種錯誤都轉成含 Skill name 的失敗字串交回 agent；聊天仍產生最終回覆並記 warning，不把未處理例外洩露成 API 5xx。
 - 驗證層級／位置：Service unit / xUnit theory。
 
-#### CSR-P1-024 — 既有 workflow `kb_query → rag_qa` fallback 不回歸
+#### CSR-P1-024 — 既有 workflow `kb-query → rag-qa` fallback 不回歸
 
 - 優先級／Phase：Must / P1
 - 前置條件：`kb_query` 仍由殘留 `ChatToolSpecs` 提供；第一次結果 `answer_mode=ABSTAIN`。

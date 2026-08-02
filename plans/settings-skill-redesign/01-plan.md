@@ -14,7 +14,12 @@
 > • 後端支撐: `backend/src/Backend.Api/Skills/` (CRUD已有,Validation 由 workflow 提供)
 >
 > **併入的計畫:**
-> 原 [skill-authoring](../skill-authoring/) 計畫的內容已分解至本計畫 P1–P4,統籌於此。
+> 原 skill-authoring 計畫的內容已分解至本計畫 P1–P4 並統籌於此;該計畫已封存並刪除。
+>
+> **稽核追加(已推翻的具體技術判斷,不逐行改寫下文步驟記錄):**
+> - ConfigView 現況為**四分頁**(`businessWorkflows`/`agentSkills`/`nodeParams`/`general`,`frontend/src/components/ConfigView.tsx:15-22,174-177`),非本文描述的三分頁。Skill 概念已依 skill-concept-realignment 拆分為「業務流程」(本計畫的範本/簡易-進階雙門編輯落地於此)與「Agent Skills」(package 概念,不使用本計畫的範本/nl_logic 機制)。
+> - compare/stats 的 Python `script` 槽與 O5 CodeMirror 6 **未交付**;五支範本商業邏輯槽已統一為 `nl_logic`(`frontend/src/skills/templates.ts` 型別已無 `slotKind` 欄;`workflow/app/skills/template-compare.yaml:12` 註解「舊 script 槽已廢」;`frontend/package.json` 無 codemirror 依賴,無 `PythonEditor.tsx`)。
+> - O6「`app_config` 維持全域」的決策**已被推翻**:現為 tenant-scoped + ADMIN-only(`(tenant_id, key)` 複合主鍵,GET/PUT 都經 `RequireTenant()`,見根 AGENTS.md Backend 信任邊界節)。此變更非本計畫落地,但決策記錄已過期。
 
 ## 1. 使用者需求(逐條)
 

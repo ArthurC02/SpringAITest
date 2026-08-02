@@ -23,17 +23,25 @@ The repository is still under development. Existing API and development data com
 | Severity | Finding | Consequence | Planned owner |
 | --- | --- | --- | --- |
 | High | Workflow and Orchestrator editors can turn an ETag conflict into a successful toast. | The UI reports a write that did not happen. | P1 / Frontend |
-| High | Compose does not forward every D4–D7/Context gate to Backend. | A partially enabled deployment returns unexpected 404s. | P1 / Infra |
+| High | Compose does not forward every D4–D7/Context gate to Backend: `WORKFLOW_DESIGNER_ENABLED`, `MULTI_AGENT_DISPATCH_ENABLED`, `AGENT_CHAT_ENABLED`, `AGENT_WRITE_TOOLS_ENABLED`, and `CONTEXT_ENRICHMENT_ENABLED` are all read by Backend but absent from its Compose env block; Workflow's Compose env block is also missing `CONTEXT_ENRICHMENT_ENABLED`. | A partially enabled deployment returns unexpected 404s. | P1 / Infra |
 | Medium | Standalone Workflow execution exposes raw exception text through HTTP 500. | Internal paths, URLs, provider details, or data fragments can cross the service boundary. | P1 / Workflow |
 | Medium | Orchestrator JSON editors silently retain the last valid value after invalid input. | The screen and the persisted draft can differ. | P1 / Frontend |
-| Medium | InMemory root cancellation/deadline can commit a terminal root before child cascade succeeds and can swallow caller cancellation. | Lite behavior diverges from the PostgreSQL transaction model and can hide consistency bugs. | P1 / Backend |
+| Medium | InMemory `CancelAsync` commits a terminal root before the child cascade succeeds. The deadline path (`ExpireLockedAsync`) already matches the PostgreSQL all-or-nothing contract and propagates real caller cancellation correctly; only the caller-initiated cancel path diverges. | Lite behavior diverges from the PostgreSQL transaction model and can hide consistency bugs. | P1 / Backend |
 | Medium | `flow_harness` imports concrete kb-query registration and a private compiler helper. | Runtime and engine modules cannot evolve independently. | P4 / Workflow |
 | Medium | Agent Skill and Business Workflow share `skill` tables, DTOs, repositories, and dispatch. | Every change preserves a discriminator-based dual concept and increases branch count. | P3 / Cross-service |
-| Low | PowerShell mem0 bootstrap and Lite health checks do not consistently fail on native-process failure. | Automation can report a successful partial startup. | P1 / Infra |
+| Low | Lite startup reports success even when a service never passes its health check: the timeout path only warns and the script still exits zero. Native-process bootstrap failures (mem0, compose) already fail fast on `$LASTEXITCODE`. | Automation can report a successful partial startup. | P1 / Infra |
 | Low | Workflow tests mutate process-global private registries. | Parallel test execution is unsafe. | P5 / Workflow |
 | Low | Large composition roots, repositories, runtime managers, editors, and a central frontend type file concentrate unrelated reasons to change. | Review and regression scope grows with every feature. | P5 / All areas |
 
 The repository also lacks a checked-in CI pipeline that proves all four services, Compose configuration, shell syntax, and contract snapshots together.
+
+Verified absent: there is no `.github/` directory and no Azure Pipelines, Jenkins, or GitLab CI
+definition. The building blocks already exist and only need wiring: `dotnet build` plus
+`dotnet test` for Backend and Platform, `uv run pytest` for Workflow, `npm run lint`/`build`/
+`test:unit` for Frontend, the `scripts/start-*.{ps1,sh}` compose entry points, and the six
+`scripts/verify-*.ps1` cross-service chains. Two of the four claims in this sentence have no
+existing basis at all and must be built from scratch in P1: shell syntax checking (nothing but
+`.gitattributes` LF pinning exists today) and contract snapshot comparison.
 
 ## 3. Target concepts
 

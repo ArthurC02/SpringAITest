@@ -38,7 +38,7 @@
 - `RuntimeCommand.kind` 詞彙（`workflow/app/runtime/models.py:413-426`）：`load_skill`/`exit_skill`/`tool_call`/`read_resource`/`request_input`/`final`。
 - `ActiveSkillScope`（`models.py:429-437`）、`PinnedSkillSummary`（`models.py:149-171`）、`AgentRunSnapshotBuilder` 的 skill pin 形狀（`AgentRunSnapshotBuilder.cs:184-199`）。
 - checkpoint state shape 與 thread id 規則、`agent_run_skill` 列形狀。
-- **run event 的 `event_type` 字串與 payload 鍵集合**：`_load_skill` 產生 `legacy_flow_completed`/`skill_scope_entered`/`skill_scope_exited`（`graph.py:638-651,674-702`），backend `AgentRunRepository.cs:16-37` 有硬編 event-type 白名單且違反時整筆 transition 被拒（`:1015-1023`）——**正名工作絕不可觸碰這些字串**，`legacy_flow_completed` 即使名字帶 legacy 也凍結。
+- **run event 的 `event_type` 字串與 payload 鍵集合**：`_load_skill`/`_invoke_business_workflow` 產生的 event_type 為 **`workflow_completed`**（非 `legacy_flow_completed`——該字串已於 `02dde09` 統一治理時淘汰，並立回歸測試 `AgentRunEventContractTests.cs` 禁止復現）/`skill_scope_entered`/`skill_scope_exited`（`graph.py:638-651,674-702`），backend `AgentRunRepository.cs:16-37` 有硬編 event-type 白名單且違反時整筆 transition 被拒（`:1015-1023`）——此三字串為凍結範圍，不含已淘汰的 `legacy_flow_completed`。
 
 理由：in-flight run 的 checkpoint resume、不可變快照 hash、audit replay 都以這些形狀為準。`_load_skill` 的內部重構（03-design §3.3）必須是行為保持的純程式碼整理。
 

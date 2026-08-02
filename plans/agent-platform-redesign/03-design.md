@@ -1,6 +1,6 @@
 # Agent 平台重整 — 技術設計
 
-> 狀態：規劃中。承接 [01-plan.md](01-plan.md) 與 [02-spec.md](02-spec.md)，本檔定義 HOW。
+> 狀態：**D1–D7 已依此設計交付**；本檔作為 HOW 的歷史決策記錄。承接 [01-plan.md](01-plan.md) 與 [02-spec.md](02-spec.md)，本檔定義 HOW。
 
 ## 1. 架構決策
 

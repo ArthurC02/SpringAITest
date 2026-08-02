@@ -1,6 +1,6 @@
 # 規格 — 副駕共用核心層(Copilot Shared Core)
 
-> 狀態: **規劃中。** 承接 [01-plan.md](01-plan.md);本檔是 **WHAT**(定案的行為與契約),`03-design.md` 才給簽章與落地順序。
+> 狀態: **已實作，持續 hardening。** 承接 [01-plan.md](01-plan.md);WHAT 契約已由 03-design/04-acceptance-test 回填修正,見各節註記。本檔是 **WHAT**(定案的行為與契約),`03-design.md` 才給簽章與落地順序。
 > 本檔不重述 01-plan 的探查證據,只在需要時引用其節次。
 
 ---

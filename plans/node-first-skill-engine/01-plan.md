@@ -34,26 +34,19 @@
 | D1  | Skill 定義格式              | **YAML 為權威格式,JSON 為 API 傳輸格式**                                                      | 人可讀、易 diff、易稽核;DB 存原文 + 正規化 JSON           |
 | D2  | Script 沙箱起步等級         | **v1 in-process 受限執行(AST 白名單 + 受限 builtins + timeout);v2 subprocess 隔離為升級路徑** | 先滿足流程膠水邏輯;重運算(pandas 級)需求出現才升 v2       |
 | D3  | 自訂 Skill 儲存             | **backend appdb(經 BackendClient 同源同路);內建 Skill 留 repo 檔案**                          | 多租戶、權限、審計現成;與 skill-authoring 的 D 系決策一致 |
-| D4  | 既有 4 個舊 workflow        | **保留 `@register` 相容層不動;Phase 2 以 kb_query 驗證引擎,舊 workflow 遷移為選配**           | 降低一次改動面;相容層與 Skill 清單在 API 層合併呈現       |
+| D4  | 既有 4 個舊 workflow        | **保留 `@register` 相容層不動;Phase 2 以 kb_query 驗證引擎,舊 workflow 遷移為選配**           | 降低一次改動面;相容層與 Skill 清單在 API 層合併呈現<br>**後續現況**:`@register` 相容層已隨 4 個舊 workflow 全面遷移為 skill YAML(`skills/rag-qa.yaml`/`summarize.yaml`/`triage.yaml`/`analyze-report.yaml`)而移除,`workflow/app/workflows/` 目錄已不存在,此決策已被取代。       |
 | D5  | 治理硬規則不可被 Skill 關閉 | **loop 無上限拒存、audit 節點引擎強制附加、trace/fatal 短路不可停用**                         | 金融稽核紅線,引擎層寫死                                   |
 | D6  | Node 契約版本化             | **Skill 引用 `node@version`,預設解析到最新相容版**                                            | 節點升級不悄悄改變已上線 Skill 行為                       |
 
-## 4. 與 skill-authoring 計畫的關係
+## 4. 與 skill-authoring 計畫的關係(歷史)
 
-| 面向                 | skill-authoring               | 本計畫                                                                          |
-| -------------------- | ----------------------------- | ------------------------------------------------------------------------------- |
-| Skill 的「流程」欄位 | 管理 YAML definition          | 結構化 flow 定義(規格見 [02-spec.md](02-spec.md) 第 3 節)                       |
-| Script 執行          | YAML 中的 `script` 步驟       | 統一為引擎的 script 步驟;單 script Skill = 只有一個步驟的 flow                  |
-| DB                   | `skill` 表(權威 `definition`) | `skill_revision` 稽核表保留每一版 YAML(見 [03-design.md](03-design.md) 第 3 節) |
-| 匯出可攜格式         | `SKILL.md` + `skill.yaml`     | 匯出 UI 由 skill-authoring 負責，YAML 原文不重序列化                            |
-
-skill-authoring 已於其計劃書 D3 明文作廢 P3(Skill 執行);其 P1 只保留設定頁工作流唯讀區，P2 消費本計畫的 CRUD/revision schema 與 Workflows & Skills 管理位置，不另建資料表或 Script 格式。
+(歷史)本計畫取代了已封存並刪除的 skill-authoring 計畫:`flow/logic/script` 三欄表被 `definition` 單一權威欄位取代。
 
 ## 5. 分階段實施與驗收標準
 
 | Phase                   | 內容                                                                                                                                                              | 驗收                                                                              |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **P1 — Node 一等公民**  | `engine/node_registry.py` + `engine/harness.py`(泛化 traced:契約驗證、Tool 注入);kb_query 10 節點 + retrieve 遷入註冊;kb_query 圖改由「程式碼組合已註冊節點」建出 | 現有 workflow 測試全數不改一行、全綠;`GET /nodes` 列出節點與契約                  |
+| **P1 — Node 一等公民**  | `engine/node_registry.py` + `engine/node_shell.py`(P1 期間叫 harness,後由 skill-concept-realignment 正名為 Node Shell,因 `Harness` 一詞已被 D4 固定骨架收回);kb_query 10 節點 + retrieve 遷入註冊;kb_query 圖改由「程式碼組合已註冊節點」建出 | 現有 workflow 測試全數不改一行、全綠;`GET /nodes` 列出節點與契約                  |
 | **P2 — Skill 引擎**     | Skill schema + 靜態驗證(資料流檢查、loop 上限、未知節點拒絕)+ compiler(sequence/branch/bounded-loop)+ 條件式求值器(calculator 擴充布林/比較)                      | `skills/kb_query.yaml` 編譯出的圖通過與手寫圖**完全相同**的 7 個 e2e(parity test) |
 | **P3 — Script 與 Tool** | v1 沙箱 Script Runner + Tool Registry(backend HTTP + 容器內工具)+ script/tool 步驟型別 + 稽核擴充(script 原始碼 hash、tool 呼叫紀錄入 trace)                      | 沙箱逃逸測試集(import/open/網路/無限迴圈)全數被擋;tool 呼叫出現在 audit trail     |
 | **P4 — 對外化**         | backend skill CRUD API + appdb 資料表 + platform 代理 `/api/skills` + 前端 Skills 視圖(清單/編輯器/執行/trace 檢視)                                               | 端到端:ADMIN 於前端建立 Skill → USER invoke → trace 可視 → 稽核落地               |

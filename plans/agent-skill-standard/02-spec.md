@@ -27,7 +27,7 @@
 agentic package 必須有根目錄 `SKILL.md`，且只允許根目錄 `SKILL.md` 及 `scripts/`、`references/`、`assets/` 下的檔案。
 
 - 拒絕絕對路徑、Windows drive path、`..`、空路徑、正規化後重複的 path、symlink-like archive entry，以及超過設定檔案數、單檔大小、總解壓大小或壓縮比限制的 archive。
-- agentic 的 `SKILL.md` 必須有 YAML frontmatter，`name`、`description`、`kind: agentic`、`input_schema`、`uses_tools`、`required_role`、`timeout_seconds` 均依 Workflow schema 驗證。
+- agentic 的 `SKILL.md` 必須有 YAML frontmatter，`name`、`description`、`kind: agentic`、`input_schema`、`uses_tools`、`required_role`、`timeout_seconds` 均依 Workflow schema 驗證。（此節描述 P0–P2 初版 frontmatter 形狀；05-standard-conformance.md §3 為之後的標準對齊遷移，**現行程式碼以該檔為準**（`metadata` 子物件收 `kind`/`required_role`/`timeout_seconds`/`input_schema`，`uses_tools` 已被空白分隔的頂層 `allowed-tools` 取代）。）
 - `name` 必須等於 import route 的 `{name}`；不得藉由 package 改名。
 - `uses_tools` 的每個名稱必須在既有 tool registry 註冊。
 - `scripts/*.py` 在寫入時須通過既有 AST scan；這只代表靜態格式合格，**不代表可以執行**。
