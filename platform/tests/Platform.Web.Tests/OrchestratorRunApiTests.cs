@@ -50,7 +50,7 @@ public sealed class OrchestratorRunApiTests
         Assert.Contains($"cancel:{RunId}:::owner",FakeOrchestratorRunService.Calls);
     }
 
-    // D5 的 dispatch 旗標與 D4 designer 旗標各自 fail-closed,且都在認證之前 —— 帶不帶 token 都看不到端點。
+    // dispatch 關閉時,runtime 與 admin 兩組路由都在認證之前 fail-closed —— 帶不帶 token 都看不到端點。
     [Theory]
     [InlineData("GET", "/api/orchestrator-runs/" + RunId)]
     [InlineData("GET", "/api/orchestrator-runs/" + RunId + "/events")]
@@ -59,7 +59,7 @@ public sealed class OrchestratorRunApiTests
     [InlineData("POST", "/api/admin/orchestrators/" + OrchestratorId + "/runs/")]
     public async Task DispatchFlagOff_HidesOrchestratorRunRoutesBeforeAuthentication(string method,string path)
     {
-        using var factory=new TestWebAppFactory(workflowDesignerEnabled:true,multiAgentDispatchEnabled:false);
+        using var factory=new TestWebAppFactory(multiAgentDispatchEnabled:false);
         var before=FakeOrchestratorRunService.Calls.Count;
 
         var response=await factory.CreateClient().SendAsync(Request(method,path));
@@ -68,16 +68,18 @@ public sealed class OrchestratorRunApiTests
         Assert.Equal(before,FakeOrchestratorRunService.Calls.Count);
     }
 
-    // 派生旗標:multiAgentDispatchEnabled = workflowDesignerEnabled && MULTI_AGENT_DISPATCH_ENABLED。
-    // 與 D3 的 TestFlagCannotEnableWhenBuilderIsOff 對稱 —— 單獨打開 dispatch 不得繞過 designer 的閘。
+    // 02-spec §8:dispatch 只看 MULTI_AGENT_DISPATCH_ENABLED,designer 已從 runtime readiness 移除。
+    // 兩個 gate 的作用面因此不同,必須同時釘住兩邊:
+    //   runtime 路由 /api/orchestrator-runs/* → designer 關著也照常可達(匿名時是 401,不再是 404);
+    //   管理路由 /api/admin/orchestrators/* → 仍受 designer 這個「管理 gate」保護,維持 404。
     [Fact]
-    public async Task DispatchFlagCannotEnableWhenWorkflowDesignerIsOff()
+    public async Task DispatchIsIndependentOfWorkflowDesigner_ButAdminSurfaceStaysGated()
     {
         using var factory=new TestWebAppFactory(workflowDesignerEnabled:false,multiAgentDispatchEnabled:true);
         var admin=factory.CreateClient().WithToken(
             factory.IssueToken("owner","ADMIN","tenant-x",new[]{"workflow.manage"}));
 
-        Assert.Equal(HttpStatusCode.NotFound,
+        Assert.Equal(HttpStatusCode.Unauthorized,
             (await factory.CreateClient().GetAsync($"/api/orchestrator-runs/{RunId}")).StatusCode);
         using var start=new HttpRequestMessage(HttpMethod.Post,"/api/admin/orchestrators/"+OrchestratorId+"/runs")
         { Content=JsonContent.Create(new { message="m",conversationId="c" }) };
@@ -134,6 +136,8 @@ public sealed class OrchestratorRunApiTests
         }
     }
 
+    // start 路由住在 /api/admin/orchestrators 之下,仍受 designer 這個管理 gate 保護,
+    // 所以完整流程的 fixture 兩個旗標都要開(runtime 路由本身已不需要 designer)。
     private static TestWebAppFactory EnabledFactory()=>new(workflowDesignerEnabled:true,multiAgentDispatchEnabled:true);
     private static HttpRequestMessage Request(string method,string path)=>new(new HttpMethod(method),path)
     { Content=method=="POST"?JsonContent.Create(new { reason="stop" }):null };

@@ -201,10 +201,7 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         var resp = await Admin().GetAsync($"/api/agents/{Guid.NewGuid()}");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal(404, body["status"]!.GetValue<int>());
-        Assert.NotNull(body["timestamp"]);
-        Assert.NotNull(body["fieldErrors"]);
+        (await resp.ReadJsonAsync()).AssertApiError(404, "not_found");
     }
 
     // ---- A-DATA-08:stale ETag → 409;正確 If-Match → 版本 +1;缺 If-Match → 428 ----
@@ -223,6 +220,10 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         // 另一位 ADMIN 拿舊 ETag "1" 再改 → 409,不覆蓋。
         var stale = await client.SendAsync(PutDraft(id, ValidBody("a08-slug", "偷改"), "\"1\""));
         Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        (await stale.ReadJsonAsync()).AssertApiError(409, "version_conflict");
+        // 02-spec §5:repository 判別「不存在/版本不符」的那一趟查詢順手帶回當下 draft_version,
+        // 所以這條最常撞的併發 409 也附得出最新 ETag —— 呼叫端直接拿 "2" 重試,不必再打一次 GET。
+        Assert.Equal("\"2\"", stale.Headers.ETag!.Tag);
 
         var current = await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync();
         Assert.Equal("第二版", current["name"]!.GetValue<string>());
@@ -249,9 +250,12 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(
             HttpStatusCode.PreconditionRequired,
             (await client.PostAsync($"/api/agents/{id}/validate", null)).StatusCode);
-        Assert.Equal(
-            HttpStatusCode.Conflict,
-            (await ValidateAsync(client, id, expectedDraftVersion: 99)).StatusCode);
+        var stale = await ValidateAsync(client, id, expectedDraftVersion: 99);
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        // 02-spec §5:資源對呼叫者可見時,409 要把當下最新 ETag 一併帶回,呼叫端不必再多打一次 GET。
+        // 這條 409 走 ApiErrors.VersionConflict 直接回 ObjectResult、繞開例外路徑 —— 例外路徑上
+        // UseExceptionHandler 的 ClearCacheHeaders 會清掉 ETag,永遠帶不出來。
+        Assert.Equal("\"1\"", stale.Headers.ETag!.Tag);
 
         var current = await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync();
         Assert.Null(current["draft_validated_version"]);
@@ -285,10 +289,11 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         await ValidateAsync(client, id);                                    // validated = 1
         await client.SendAsync(PutDraft(id, ValidBody("a09-slug", "改"), "\"1\"")); // version 2,validated 清空
 
-        // draft 已漂移且未重新驗證 → publish 拒絕。
+        // draft 已漂移且未重新驗證 → publish 拒絕,並帶回當下最新 ETag(02-spec §5)。
         var rejected = await PublishAsync(client, id, 2);
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
         Assert.Contains("尚未重新驗證", (await rejected.ReadJsonAsync())["message"]!.GetValue<string>());
+        Assert.Equal("\"2\"", rejected.Headers.ETag!.Tag);
 
         // 重新驗證同一 draft version → publish 成功。
         await ValidateAsync(client, id, 2);

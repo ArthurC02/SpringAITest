@@ -61,10 +61,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(401, body["status"]!.GetValue<int>());
-        Assert.False(string.IsNullOrWhiteSpace(body["message"]!.GetValue<string>()));
-        Assert.NotNull(body["timestamp"]);
-        Assert.NotNull(body["fieldErrors"]);
+        body.AssertApiError(401, "authentication_required");
 
         // 兩個下游都不得被碰到。
         Assert.Equal(beforeBackend, FakeSkillService.Calls.Count);
@@ -276,9 +273,8 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
         var body = await response.ReadJsonAsync();
-        Assert.Equal(413, body["status"]!.GetValue<int>());
+        body.AssertApiError(413, "payload_too_large");
         Assert.Equal("Skill 套件超過上傳大小上限（17 MiB）", body["message"]!.GetValue<string>());
-        Assert.NotNull(body["timestamp"]);
         Assert.Empty(body["fieldErrors"]!.AsObject());
         Assert.Equal(before, FakeSkillService.Calls.Count(c => c == call));
     }
@@ -328,7 +324,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(422, body["status"]!.GetValue<int>());
+        body.AssertApiError(422, "unprocessable_entity");
         Assert.Equal("Skill 套件驗證失敗", body["message"]!.GetValue<string>());
         Assert.Equal("腳本未通過 AST 掃描", body["fieldErrors"]!["forbidden_script"]!.GetValue<string>());
     }
@@ -342,11 +338,10 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(422, body["status"]!.GetValue<int>());
+        body.AssertApiError(422, "unprocessable_entity");
         Assert.Equal("Skill 定義驗證失敗", body["message"]!.GetValue<string>());
         Assert.Equal("loop 缺少 max_iterations（第 7 行）",
             body["fieldErrors"]!["unbounded_loop"]!.GetValue<string>());
-        Assert.NotNull(body["timestamp"]);
     }
 
     [Fact]
@@ -356,7 +351,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(409, body["status"]!.GetValue<int>());
+        body.AssertApiError(409, "version_conflict");
         Assert.Equal("Skill 名稱已存在：dup-skill", body["message"]!.GetValue<string>());
     }
 
@@ -367,7 +362,7 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(404, body["status"]!.GetValue<int>());
+        body.AssertApiError(404, "not_found");
         Assert.Equal("找不到 Skill：ghost", body["message"]!.GetValue<string>());
         Assert.Empty(body["fieldErrors"]!.AsObject());
     }
@@ -497,20 +492,18 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
     // invoke 的下游狀態碼映射:404 → NotFound、403 → Forbidden、422 → BadInput(400)、其他 → 502。
     [Theory]
-    [InlineData("ghost", HttpStatusCode.NotFound)]
-    [InlineData("forbidden", HttpStatusCode.Forbidden)]
-    [InlineData("badinput", HttpStatusCode.BadRequest)]
-    [InlineData("boom", HttpStatusCode.BadGateway)]
-    public async Task Invoke_DownstreamError_MapsToSameStatus(string name, HttpStatusCode expected)
+    [InlineData("ghost", HttpStatusCode.NotFound, "not_found")]
+    [InlineData("forbidden", HttpStatusCode.Forbidden, "forbidden")]
+    [InlineData("badinput", HttpStatusCode.BadRequest, "validation_failed")]
+    [InlineData("boom", HttpStatusCode.BadGateway, "upstream_unavailable")]
+    public async Task Invoke_DownstreamError_MapsToSameStatus(
+        string name, HttpStatusCode expected, string expectedCode)
     {
         var resp = await _factory.AdminClient().PostAsJsonAsync(
             $"/api/skills/{name}/invoke", new { input = new { query = "x" } });
 
         Assert.Equal(expected, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal((int)expected, body["status"]!.GetValue<int>());
-        Assert.NotNull(body["timestamp"]);
-        Assert.NotNull(body["fieldErrors"]);
+        (await resp.ReadJsonAsync()).AssertApiError((int)expected, expectedCode);
     }
 
     [Fact]

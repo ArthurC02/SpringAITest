@@ -64,8 +64,11 @@ var workflowDesignerEnabled = string.Equals(
     cfg["WORKFLOW_DESIGNER_ENABLED"],
     "true",
     StringComparison.OrdinalIgnoreCase);
-var multiAgentDispatchEnabled = workflowDesignerEnabled
-    && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+// MULTI_AGENT_DISPATCH_ENABLED 是 runtime kill switch,只看自己的 env(02-spec §8):
+// WORKFLOW_DESIGNER_ENABLED 純粹是 authoring/管理面的 gate(仍然守著 /api/admin/workflows*
+// 與 /api/admin/orchestrators*),已明確從 runtime readiness 依賴中移除 —— 關掉設計器不得順帶停掉執行期。
+var multiAgentDispatchEnabled = string.Equals(
+    cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 // Context Enrichment 只服務於 D5/D6 的 Root Orchestrator；沒有 dispatch 時即使
 // 個別旗標被誤設為 true 也不得對外宣告可用（fail-closed）。
 var contextEnrichmentEnabled = multiAgentDispatchEnabled

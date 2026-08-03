@@ -38,8 +38,11 @@ var rabbitUrl = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:56
 var workflowBaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001";
 var useInMemoryDb = string.Equals(cfg["DB_PROVIDER"], "inmemory", StringComparison.OrdinalIgnoreCase);
 var workflowDesignerEnabled = string.Equals(cfg["WORKFLOW_DESIGNER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
-var multiAgentDispatchEnabled = workflowDesignerEnabled
-    && string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+// Runtime kill switch, self-contained (02-spec §8): WORKFLOW_DESIGNER_ENABLED stays an
+// administration gate for the authoring routes only and is explicitly removed from runtime
+// readiness -- turning the designer off must not stop dispatch. Chat and context enrichment
+// still depend on dispatch; those two layers are the spec's.
+var multiAgentDispatchEnabled = string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentChatEnabled = multiAgentDispatchEnabled
     && string.Equals(cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentWriteToolsEnabled = string.Equals(cfg["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
@@ -235,8 +238,9 @@ if (!workflowDesignerEnabled)
     });
 }
 
-// D5 is independently undiscoverable until both the Designer and multi-agent dispatch rollout
-// are explicitly enabled.  This is deliberately before MVC/auth, matching the D3/D4 posture.
+// D5 is independently undiscoverable until the multi-agent dispatch rollout is explicitly
+// enabled.  This is deliberately before MVC/auth, matching the D3/D4 posture.  The Designer
+// gate above is administration-only and no longer participates (02-spec §8).
 if (!multiAgentDispatchEnabled)
 {
     app.Use(async (context, next) =>

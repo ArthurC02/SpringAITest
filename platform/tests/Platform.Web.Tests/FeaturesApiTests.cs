@@ -67,15 +67,17 @@ public sealed class FeaturesApiTests
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
     }
 
+    // 02-spec §8:WORKFLOW_DESIGNER_ENABLED 只是管理 gate,已從 runtime readiness 依賴移除 ——
+    // 關掉設計器不得順帶關掉 runtime kill switch,dispatch 只看自己的 env。
     [Fact]
-    public async Task Features_MultiAgentDispatch_TrueWithoutWorkflowDesigner_StaysFalse()
+    public async Task Features_MultiAgentDispatch_TrueWithoutWorkflowDesigner_StaysTrue()
     {
         using var factory = new TestWebAppFactory(multiAgentDispatchEnabled: true);
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
         Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
-        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
     }
 
     [Fact]
@@ -89,16 +91,6 @@ public sealed class FeaturesApiTests
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
         Assert.True(body["workflowDesignerEnabled"]!.GetValue<bool>());
         Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
-    }
-
-    [Fact]
-    public async Task Features_MultiAgentDispatchRequiresWorkflowDesigner()
-    {
-        using var factory = new TestWebAppFactory(
-            workflowDesignerEnabled: true,
-            multiAgentDispatchEnabled: true);
-        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
-        Assert.True(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
     }
 
     [Fact]
@@ -118,9 +110,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_ContextEnrichment_DispatchOnWithoutOwnFlag_StaysFalse()
     {
-        using var factory = new TestWebAppFactory(
-            workflowDesignerEnabled: true,
-            multiAgentDispatchEnabled: true);
+        using var factory = new TestWebAppFactory(multiAgentDispatchEnabled: true);
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -132,7 +122,6 @@ public sealed class FeaturesApiTests
     public async Task Features_ContextEnrichmentEnabledWithDispatch_IsExposed()
     {
         using var factory = new TestWebAppFactory(
-            workflowDesignerEnabled: true,
             multiAgentDispatchEnabled: true,
             contextEnrichmentEnabled: true);
 
@@ -163,7 +152,7 @@ public sealed class FeaturesApiTests
     }
 
     // 每個旗標的「獨立」測試都只在其他旗標全關的基準上開一個;全開這格補上另一端:
-    // 兩條 AND 鏈(builder→testRun、designer→dispatch→context)與兩個獨立旗標同時開時,
+    // 兩條 AND 鏈(builder→testRun、dispatch→context)與三個獨立旗標同時開時,
     // 七個值必須全 true——任何把不相干旗標互相耦合成條件的改動會在這裡爆。
     [Fact]
     public async Task Features_AllFlagsOn_Anonymous_Returns200_AllTrue()

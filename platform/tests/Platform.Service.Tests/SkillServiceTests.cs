@@ -269,7 +269,7 @@ public sealed class SkillServiceTests
     public async Task Create_Backend422_KeepsEngineErrorCodes()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 定義驗證失敗","fieldErrors":{"unbounded_loop":"loop 缺少 max_iterations（第 7 行）","unknown_node":"節點不存在"}}"""));
+            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"code":"unprocessable_entity","message":"Skill 定義驗證失敗","correlationId":"backend-trace-1","fieldErrors":{"unbounded_loop":"loop 缺少 max_iterations（第 7 行）","unknown_node":"節點不存在"}}"""));
 
         var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
             () => Build(stub).CreateAsync(Upsert(), AdminCtx));
@@ -284,7 +284,7 @@ public sealed class SkillServiceTests
     public async Task Create_Backend400WithFieldErrors_KeepsFieldErrors()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":400,"message":"輸入驗證失敗","fieldErrors":{"definition":"definition 不可為空"}}"""));
+            """{"timestamp":"2026-07-14T00:00:00Z","status":400,"code":"validation_failed","message":"輸入驗證失敗","correlationId":"backend-trace-1","fieldErrors":{"definition":"definition 不可為空"}}"""));
 
         var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(
             () => Build(stub).CreateAsync(Upsert(), AdminCtx));
@@ -312,7 +312,7 @@ public sealed class SkillServiceTests
     public async Task Create_Backend400WithoutFieldErrors_HasNullFieldErrors()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":400,"message":"輸入驗證失敗"}"""));
+            """{"timestamp":"2026-07-14T00:00:00Z","status":400,"code":"validation_failed","message":"輸入驗證失敗"}"""));
 
         var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(
             () => Build(stub).CreateAsync(Upsert(), AdminCtx));
@@ -401,7 +401,7 @@ public sealed class SkillServiceTests
     public async Task Import_Backend422_PassesThroughFieldErrors()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 套件驗證失敗","fieldErrors":{"forbidden_script":"腳本未通過 AST 掃描","unknown_tool":"工具未註冊"}}"""));
+            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"code":"unprocessable_entity","message":"Skill 套件驗證失敗","correlationId":"backend-trace-1","fieldErrors":{"forbidden_script":"腳本未通過 AST 掃描","unknown_tool":"工具未註冊"}}"""));
 
         var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
             () => Build(stub).ImportAsync("sales-helper", PackageBytes(), PackageFileName, AdminCtx));
@@ -417,7 +417,7 @@ public sealed class SkillServiceTests
     public async Task ImportDerived_Backend422_PassesThroughFieldErrors()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Skill 套件驗證失敗","fieldErrors":{"missing_skill_md":"套件缺少 SKILL.md"}}"""));
+            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"code":"unprocessable_entity","message":"Skill 套件驗證失敗","correlationId":"backend-trace-1","fieldErrors":{"missing_skill_md":"套件缺少 SKILL.md"}}"""));
 
         var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
             () => Build(stub).ImportAsync(PackageBytes(), PackageFileName, AdminCtx));

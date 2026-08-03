@@ -48,11 +48,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
         var resp = await _factory.CreateClient().SendAsync(req);
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal(401, body["status"]!.GetValue<int>());
-        Assert.False(string.IsNullOrWhiteSpace(body["message"]!.GetValue<string>()));
-        Assert.NotNull(body["timestamp"]);
-        Assert.NotNull(body["fieldErrors"]);
+        (await resp.ReadJsonAsync()).AssertApiError(401, "authentication_required");
 
         Assert.Equal(before, FakeConfigurationSetService.Calls.Count);
     }
@@ -132,7 +128,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(404, body["status"]!.GetValue<int>());
+        body.AssertApiError(404, "not_found");
         Assert.Equal("找不到 Configuration Set", body["message"]!.GetValue<string>());
         Assert.Empty(body["fieldErrors"]!.AsObject());
     }
@@ -144,7 +140,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(409, body["status"]!.GetValue<int>());
+        body.AssertApiError(409, "version_conflict");
         Assert.Equal("Configuration Set 名稱已存在：dup_set", body["message"]!.GetValue<string>());
     }
 
@@ -155,7 +151,7 @@ public sealed class ConfigurationSetApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(422, body["status"]!.GetValue<int>());
+        body.AssertApiError(422, "unprocessable_entity");
         Assert.Equal("Configuration Set 驗證失敗", body["message"]!.GetValue<string>());
         Assert.Equal("必須介於 1 到 50", body["fieldErrors"]!["retrieval.top_k"]!.GetValue<string>());
     }

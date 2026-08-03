@@ -62,6 +62,8 @@ public sealed class ChatOrchestratorApiTests
         var response = await client.GetAsync(Path);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        // 隱藏端點的 404 也是公開錯誤,必須是完整 envelope(裸 NotFound() 只會回沒有 code/correlationId 的殼)。
+        (await response.ReadJsonAsync()).AssertApiError(404, "not_found");
         Assert.Null(factory.Backend.Path);
     }
 
@@ -85,9 +87,8 @@ public sealed class ChatOrchestratorApiTests
 
         Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
         var body = await response.ReadJsonAsync();
-        Assert.Equal(502, body["status"]!.GetValue<int>());
+        body.AssertApiError(502, "upstream_unavailable");
         Assert.Equal("上游服務暫時無法使用，請稍後再試", body["message"]!.GetValue<string>());
-        Assert.NotNull(body["timestamp"]);
         Assert.Empty(body["fieldErrors"]!.AsObject());
         Assert.DoesNotContain("10.0.0.7", body.ToJsonString(), StringComparison.Ordinal);
     }

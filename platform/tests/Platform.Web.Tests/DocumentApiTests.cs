@@ -25,9 +25,7 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
         var resp = await _factory.CreateClient().SendAsync(req);
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal(401, body["status"]!.GetValue<int>());
-        Assert.NotNull(body["fieldErrors"]);
+        (await resp.ReadJsonAsync()).AssertApiError(401, "authentication_required");
     }
 
     [Fact]

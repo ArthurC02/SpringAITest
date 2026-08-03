@@ -56,7 +56,8 @@ public sealed class OrchestratorRepositoryTests(PostgresFixture fixture)
         var created = await repo.CreateAsync(tenant, "Root", "", "{}", "admin", default); Assert.True(await repo.MarkValidatedAsync(tenant, created.Orchestrator!.Id, 1, "{}", default));
         var updated = await repo.UpdateAsync(tenant, created.Orchestrator.Id, 1, "Renamed", "desc", """{"a":1}""", default);
         Assert.Equal(OrchestratorWriteStatus.Success, updated.Status); Assert.Equal("Renamed", updated.Orchestrator!.Name); Assert.Equal(2, updated.Orchestrator.DraftVersion); Assert.Null(updated.Orchestrator.DraftValidatedVersion); Assert.Equal("""{"a":1}""", updated.Orchestrator.Definition);
-        Assert.Equal(OrchestratorWriteStatus.VersionConflict, (await repo.UpdateAsync(tenant, created.Orchestrator.Id, 1, "Again", "", "{}", default)).Status);
+        var conflict = await repo.UpdateAsync(tenant, created.Orchestrator.Id, 1, "Again", "", "{}", default);
+        Assert.Equal(OrchestratorWriteStatus.VersionConflict, conflict.Status); Assert.Equal(2, conflict.CurrentDraftVersion); // controller 靠它給 409 附最新 ETag
         Assert.Equal(OrchestratorWriteStatus.NotFound, (await repo.UpdateAsync(tenant, Guid.NewGuid(), 1, "Ghost", "", "{}", default)).Status);
         Assert.Equal(OrchestratorWriteStatus.NotFound, (await repo.UpdateAsync(tenant + "-b", created.Orchestrator.Id, 2, "Ghost", "", "{}", default)).Status);
     }

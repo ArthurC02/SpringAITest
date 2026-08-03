@@ -253,7 +253,7 @@ public sealed class AgentServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => Resp(
             (HttpStatusCode)409,
-            """{"timestamp":"2026-07-24T00:00:00Z","status":409,"message":"草稿版本衝突","fieldErrors":{}}""",
+            """{"timestamp":"2026-07-24T00:00:00Z","status":409,"code":"version_conflict","message":"草稿版本衝突","correlationId":"backend-trace-1","fieldErrors":{}}""",
             "\"5\""));
 
         var result = await Build(stub).UpdateDraftAsync(AgentId, AdminCtx, "\"1\"", Json("{}"));
@@ -273,7 +273,7 @@ public sealed class AgentServiceTests
     [InlineData(428)]
     public async Task Backend4xx_PassesThroughStatusAndBodyVerbatim(int status)
     {
-        var body = $"{{\"timestamp\":\"2026-07-24T00:00:00Z\",\"status\":{status},\"message\":\"下游訊息\",\"fieldErrors\":{{\"slug\":\"重複\"}}}}";
+        var body = $"{{\"timestamp\":\"2026-07-24T00:00:00Z\",\"status\":{status},\"code\":\"backend_code\",\"message\":\"下游訊息\",\"correlationId\":\"backend-trace-1\",\"fieldErrors\":{{\"slug\":\"重複\"}}}}";
         var stub = new StubHttpMessageHandler(_ => Resp((HttpStatusCode)status, body));
 
         var result = await Build(stub).CreateAsync(AdminCtx, Json("{}"));
@@ -283,6 +283,9 @@ public sealed class AgentServiceTests
         Assert.Equal("下游訊息", parsed.GetProperty("message").GetString());
         // fieldErrors 原樣穿透(不被代理層吞掉)。
         Assert.Equal("重複", parsed.GetProperty("fieldErrors").GetProperty("slug").GetString());
+        // code/correlationId 是 backend 自己的欄位,代理層不得改寫或補上本地推導值。
+        Assert.Equal("backend_code", parsed.GetProperty("code").GetString());
+        Assert.Equal("backend-trace-1", parsed.GetProperty("correlationId").GetString());
     }
 
     // off-point:5xx 邊界 —— 500 不穿透 backend body,收斂成對外 502(隱藏內部細節)。

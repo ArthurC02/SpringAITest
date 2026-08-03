@@ -44,11 +44,7 @@ public sealed class AgentApiTests : IDisposable
         var resp = await client.SendAsync(Request(method, path, body: method is "POST" or "PUT" ? new { slug = "x" } : null));
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-        var body = await resp.ReadJsonAsync();
-        Assert.Equal(404, body["status"]!.GetValue<int>());
-        Assert.False(string.IsNullOrWhiteSpace(body["message"]!.GetValue<string>()));
-        Assert.NotNull(body["timestamp"]);
-        Assert.NotNull(body["fieldErrors"]);
+        (await resp.ReadJsonAsync()).AssertApiError(404, "not_found");
         Assert.Equal(before, FakeAgentService.Calls.Count);
     }
 

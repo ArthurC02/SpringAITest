@@ -157,4 +157,20 @@ internal static class TestHelpers
     public static async Task<JsonNode> ReadJsonAsync(this HttpResponseMessage response)
         => JsonNode.Parse(await response.Content.ReadAsStringAsync())
            ?? throw new InvalidOperationException("回應 body 不是有效 JSON");
+
+    /// <summary>
+    /// 完整 ApiError envelope 的唯一斷言點,與 platform 端的同名 helper 逐項相同(02-spec §5):
+    /// 恰好六個欄位 { timestamp, status, code, message, correlationId, fieldErrors }。
+    /// backend 的 body 會被 platform 的透明代理原樣轉給瀏覽器,所以少一欄就是跨服務契約破了。
+    /// </summary>
+    public static void AssertApiError(this JsonNode body, int status, string code)
+    {
+        Assert.Equal(6, body.AsObject().Count);
+        Assert.NotNull(body["timestamp"]);
+        Assert.Equal(status, body["status"]!.GetValue<int>());
+        Assert.Equal(code, body["code"]!.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(body["message"]!.GetValue<string>()));
+        Assert.False(string.IsNullOrWhiteSpace(body["correlationId"]!.GetValue<string>()));
+        Assert.NotNull(body["fieldErrors"]);
+    }
 }

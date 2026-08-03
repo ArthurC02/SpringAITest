@@ -33,9 +33,9 @@
 - [x] P1-FE1 `runWithToast` 新增 `onConflict` 共通層(409/412 鎖編輯器、零成功 toast),覆蓋 Workflows/Orchestrators 並擴及 validate/simulate/publish;守衛不成立改 `requireLoaded` 明確報錯;conflict 出口按鈕的 `load` 失敗可見化。**更正:AgentEditor 經實作驗證無此 bug**(不走 runWithToast),以回歸斷言釘住(P1-01, P1-02)— 2026-08-03
 - [x] P1-FE2 `JsonField` 受控化(`{text, error}` 由父層持有),invalid 阻擋 save/validate/publish/建立,`load()` re-seed 取代 key-remount 保留刷新行為(P1-03, P1-04)— 2026-08-03
 ### WP1-PLAT(dotnet-implementer)
-- [ ] P1-PL1 ApiError envelope 加 `code` + `correlationId`,7 個出口全改(含 `ChatOrchestratorController` 裸 NotFound),backend `Common/` 鏡像同步(P1-10)
-- [ ] P1-PL2 dispatch 與 designer gate 解耦(`Program.cs:67`),驗證 E1/E3 三層鏈行為,對齊 02-spec §8(P1-08 相關)
-- [ ] P1-PL3 公開端點契約測試全面遷移到完整 envelope
+- [x] P1-PL1 ApiError envelope 6 欄(+`code`+`correlationId`),7 出口全改、status→code 對照表兩服務逐字一致、correlationId 進 log 模板;409 於已知 ETag 路徑帶 ETag(ObjectResult 直回——UseExceptionHandler 的 ClearCacheHeaders 使例外路徑永遠帶不出 ETag);draft PUT 409 亦帶 ETag(repo 的 SELECT EXISTS 改 SELECT draft_version,零額外查詢)(P1-10)— 2026-08-03
+- [x] P1-PL2 dispatch 與 designer gate 解耦(platform `Program.cs:67` **與 backend `Program.cs:42`**,後者為實作期新發現);保留 chat→dispatch、context→dispatch;admin 路由(`/api/admin/workflows*`、`/api/admin/orchestrators*` 含 test-run)仍在 designer gate 後——此為規格 §8 刻意行為,需寫入 runbook(P1-08)— 2026-08-03
+- [x] P1-PL3 公開端點契約測試全面遷移到完整 envelope(`AssertApiError` helper 兩側鏡像)— 2026-08-03
 ### WP1-BE(dotnet-implementer)
 - [ ] P1-BE1 InMemory `CancelAsync` 對齊 `ExpireLockedAsync`:先 cascade、逐 child try/catch、caller cancellation 傳播、全成才落 terminal(P1-06, P1-07)
 ### WP1-WF(python-implementer)

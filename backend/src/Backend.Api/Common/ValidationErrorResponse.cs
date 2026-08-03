@@ -29,7 +29,13 @@ public static class ValidationErrorResponse
             }
         }
 
-        var error = new ApiError(DateTime.UtcNow, StatusCodes.Status400BadRequest, "輸入驗證失敗", fieldErrors);
+        var error = new ApiError(
+            DateTime.UtcNow,
+            StatusCodes.Status400BadRequest,
+            ApiErrorCodes.ForStatus(StatusCodes.Status400BadRequest),
+            "輸入驗證失敗",
+            context.HttpContext.TraceIdentifier,
+            fieldErrors);
         // 用 "application/json"(格式化器會自動補上 charset=utf-8);
         // 不可寫成 "application/json; charset=utf-8",否則內容協商找不到格式化器會回 406。
         return new ObjectResult(error)

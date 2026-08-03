@@ -26,8 +26,8 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
+        body.AssertApiError(401, "authentication_required");
         Assert.Equal("內部憑證無效", body["message"]!.GetValue<string>());
-        Assert.NotNull(body["fieldErrors"]);
     }
 
     // FixedTimeEquals 的「長度相同、內容不同」分支:上面的 "nope" 長度就對不上,只走到長度短路那條路。

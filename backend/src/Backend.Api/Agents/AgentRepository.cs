@@ -123,12 +123,14 @@ public sealed class AgentRepository : IAgentRepository
             return new AgentDraftResult(AgentWriteStatus.Success, ToAgent(updated));
         }
 
-        // 沒更新到:區分「不存在」與「版本不符(stale ETag)」。
-        var exists = await conn.ExecuteScalarAsync<bool>(new CommandDefinition(
-            "SELECT EXISTS(SELECT 1 FROM agent WHERE tenant_id = @tenantId AND id = @id)",
+        // 沒更新到:區分「不存在」與「版本不符(stale ETag)」。這一趟本來就要打(原本是 EXISTS),
+        // 改讀 draft_version 讓 409 附得出最新 ETag,round-trip 數不變。
+        var current = await conn.ExecuteScalarAsync<long?>(new CommandDefinition(
+            "SELECT draft_version FROM agent WHERE tenant_id = @tenantId AND id = @id",
             new { tenantId, id }, cancellationToken: ct));
-        return new AgentDraftResult(
-            exists ? AgentWriteStatus.VersionConflict : AgentWriteStatus.NotFound, null);
+        return current is long version
+            ? new AgentDraftResult(AgentWriteStatus.VersionConflict, null, version)
+            : new AgentDraftResult(AgentWriteStatus.NotFound, null);
     }
 
     public async Task<bool> MarkValidatedAsync(

@@ -163,7 +163,8 @@ public sealed class InMemoryAgentRepository : IAgentRepository
 
             if (entry.DraftVersion != expectedVersion)
             {
-                return Task.FromResult(new AgentDraftResult(AgentWriteStatus.VersionConflict, null));
+                return Task.FromResult(
+                    new AgentDraftResult(AgentWriteStatus.VersionConflict, null, entry.DraftVersion));
             }
 
             entry.Name = name;

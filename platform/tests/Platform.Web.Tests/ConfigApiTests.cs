@@ -37,10 +37,8 @@ public sealed class ConfigApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
+        body.AssertApiError(403, "forbidden");
         Assert.Equal("權限不足，無法讀取系統組態", body["message"]!.GetValue<string>());
-        Assert.Equal(403, body["status"]!.GetValue<int>());
-        Assert.NotNull(body["timestamp"]);
-        Assert.NotNull(body["fieldErrors"]);
     }
 
     // 認證狀態 × 端點的另一格:類別層級單一 [Authorize] 也要罩到 PUT ——

@@ -38,7 +38,7 @@ public sealed class InMemoryWorkflowRepository : IWorkflowRepository
         {
             var e = Find(tenantId, id); if (e is null) return Task.FromResult(new WorkflowWriteResult(WorkflowWriteStatus.NotFound));
             if (e.SystemOwned) return Task.FromResult(new WorkflowWriteResult(WorkflowWriteStatus.SystemOwned));
-            if (e.DraftVersion != expectedVersion) return Task.FromResult(new WorkflowWriteResult(WorkflowWriteStatus.VersionConflict));
+            if (e.DraftVersion != expectedVersion) return Task.FromResult(new WorkflowWriteResult(WorkflowWriteStatus.VersionConflict, CurrentDraftVersion: e.DraftVersion));
             e.Name = name; e.Definition = definition; e.UiMetadata = uiMetadata; e.DraftVersion++; e.Validated = null; e.UpdatedAt = Now();
             return Task.FromResult(new WorkflowWriteResult(WorkflowWriteStatus.Success, e.Model()));
         }

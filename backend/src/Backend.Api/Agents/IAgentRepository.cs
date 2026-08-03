@@ -30,6 +30,8 @@ public interface IAgentRepository
     /// 更新 draft(optimistic concurrency:僅當 draft_version==expectedVersion 才寫入)。
     /// 成功 → draft_version+1、draft_validated_version 清空(改過就要重新驗證)。
     /// 不存在 → NotFound;版本不符(stale ETag)→ VersionConflict(不覆蓋他人更新,A-DATA-08)。
+    /// VersionConflict 必帶 CurrentDraftVersion(判別「不存在/版本不符」本來就要讀一次,順手帶回,
+    /// 不是額外查詢),controller 據此回附最新 ETag 的 409(02-spec §5)。
     /// </summary>
     Task<AgentDraftResult> UpdateDraftAsync(
         string tenantId, Guid id, long expectedVersion, string name, string description,
@@ -102,5 +104,6 @@ public interface IAgentRepository
     Task<bool> SetEnabledAsync(string tenantId, Guid id, bool enabled, CancellationToken ct);
 }
 
-/// <summary>draft 寫入結果(狀態 + 成功時的新狀態)。</summary>
-public sealed record AgentDraftResult(AgentWriteStatus Status, Agent? Agent);
+/// <summary>draft 寫入結果(狀態 + 成功時的新狀態;VersionConflict 時帶當下 draft_version)。</summary>
+public sealed record AgentDraftResult(
+    AgentWriteStatus Status, Agent? Agent, long? CurrentDraftVersion = null);

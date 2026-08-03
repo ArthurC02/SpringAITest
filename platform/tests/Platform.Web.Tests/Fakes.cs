@@ -856,9 +856,10 @@ public sealed class FakeAgentService : IAgentService
 
     private static AgentProxyResponse Ok(string body, string? etag = null) => new(200, body, etag);
 
+    /// <summary>backend 的 ApiError envelope(六欄,含 code/correlationId),由代理層原樣穿透。</summary>
     private static AgentProxyResponse ApiError(int status, string message) => new(
         status,
-        $"{{\"timestamp\":\"2026-07-24T00:00:00Z\",\"status\":{status},\"message\":{JsonSerializer.Serialize(message)},\"fieldErrors\":{{}}}}",
+        $"{{\"timestamp\":\"2026-07-24T00:00:00Z\",\"status\":{status},\"code\":\"backend_code_{status}\",\"message\":{JsonSerializer.Serialize(message)},\"correlationId\":\"backend-trace-1\",\"fieldErrors\":{{}}}}",
         null);
 
     private static AgentProxyResponse Forbidden() => ApiError(403, "權限不足");

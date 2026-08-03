@@ -14,7 +14,8 @@ public static class ApiErrorWriter
         IReadOnlyDictionary<string, string>? fieldErrors = null)
     {
         var error = new ApiError(
-            DateTime.UtcNow, status, message,
+            DateTime.UtcNow, status, ApiErrorCodes.ForStatus(status), message,
+            response.HttpContext.TraceIdentifier,
             fieldErrors is null ? new Dictionary<string, string>() : new Dictionary<string, string>(fieldErrors));
         response.StatusCode = status;
         // 明確標記 charset=utf-8,確保中文訊息被正確解讀。

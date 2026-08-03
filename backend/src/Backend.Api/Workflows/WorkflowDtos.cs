@@ -84,7 +84,8 @@ public sealed record WorkflowRevisionInfo(
     [property: JsonPropertyName("created_at")] DateTime CreatedAt);
 
 public enum WorkflowWriteStatus { Success, NotFound, VersionConflict, Duplicate, SystemOwned }
-public sealed record WorkflowWriteResult(WorkflowWriteStatus Status, Workflow? Workflow = null, int Revision = 0);
+/// <summary>CurrentDraftVersion 只在 draft 寫入的 VersionConflict 帶回(讓 409 附得出最新 ETag)。</summary>
+public sealed record WorkflowWriteResult(WorkflowWriteStatus Status, Workflow? Workflow = null, int Revision = 0, long? CurrentDraftVersion = null);
 
 public sealed record CompilerValidationResult(
     string CanonicalDefinition, string CanonicalUiMetadata, string CompilerContractVersion,

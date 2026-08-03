@@ -37,7 +37,11 @@ public sealed class WorkflowAdminApiTests(TestWebAppFactory factory) : IClassFix
 
         using var replay = new HttpRequestMessage(HttpMethod.Put, $"/api/admin/workflows/{id}/draft") { Content = JsonContent.Create(Draft("Again")) };
         replay.Headers.TryAddWithoutValidation("If-Match", stale);
-        Assert.Equal(HttpStatusCode.Conflict, (await c.SendAsync(replay)).StatusCode);
+        var conflict = await c.SendAsync(replay);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        // 409 附當下最新 ETag(repo 在區分 NotFound/Conflict 的同一趟查詢帶回版本);
+        // 走例外路徑的話 ClearCacheHeaders 會把它清掉,這裡會是 null。
+        Assert.Equal(accepted.Headers.ETag!.ToString(), conflict.Headers.ETag!.ToString());
     }
 
     // Resource-existence × If-Match 的交叉格:兩個 sibling controller 對「id 不存在 + 沒帶 If-Match」
@@ -91,14 +95,13 @@ public sealed class WorkflowAdminApiTests(TestWebAppFactory factory) : IClassFix
         Assert.Equal(HttpStatusCode.NotFound, (await authorized.GetAsync(path)).StatusCode);
     }
 
-    // 旗標是 AND 串鏈(Program.cs:38-41):只開下游而沒開上游必須仍然 404。
-    // 這是最容易誤設的部署組合,而且誤設的方向是「以為開了其實沒開」的相反面 —— 靜默放行。
+    // 02-spec §8:designer 是純管理 gate,已從 runtime readiness 依賴移除;chat 仍串在 dispatch 之下。
+    // 保留的 AND 串鏈只有一條,而它最容易誤設的方向是「以為開了其實沒開」的相反面 —— 靜默放行。
     [Theory]
-    [InlineData(false, false, "/api/orchestrator-runs/" + Placeholder)]
-    [InlineData(true, false, "/api/orchestrator-runs/" + Placeholder)]
-    [InlineData(false, true, "/api/chat-runs")]
-    [InlineData(true, true, "/api/chat-runs")]
-    public async Task DownstreamFlagsAlone_StayHidden_WithoutTheDesignerFlag(
+    [InlineData(false, false, "/api/orchestrator-runs/" + Placeholder)]  // dispatch 自己關著
+    [InlineData(false, true, "/api/chat-runs")]                          // chat 開了但 dispatch 關著
+    [InlineData(true, false, "/api/chat-runs")]                          // dispatch 開了但 chat 關著
+    public async Task RuntimeFlagsStayHidden_WhenTheirOwnChainIsOff(
         bool multiAgentDispatch, bool agentChat, string path)
     {
         using var factoryWithoutDesigner = new DesignerDisabledFactory(multiAgentDispatch, agentChat);
@@ -108,9 +111,24 @@ public sealed class WorkflowAdminApiTests(TestWebAppFactory factory) : IClassFix
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync(path)).StatusCode);
     }
 
+    // 上一格的另一半:designer 關著、dispatch 自己開著時,D5 runtime 路由必須「看得見」——
+    // 不再是 gate 的 404,而是走到 controller 後因缺 X-Tenant-Id 而 400(gate 早於身分檢查,
+    // 兩者的狀態碼因此可以區分)。少了這格,把 designer 依賴加回去不會有任何測試變紅。
+    [Fact]
+    public async Task DispatchAloneExposesRuntimeRoutes_WithoutTheDesignerFlag()
+    {
+        using var factoryWithoutDesigner = new DesignerDisabledFactory(multiAgentDispatch: true);
+        var client = factoryWithoutDesigner.CreateClient();
+        client.DefaultRequestHeaders.Add(InternalTokenMiddleware.HeaderName, TestWebAppFactory.InternalToken);
+
+        var response = await client.GetAsync("/api/orchestrator-runs/" + Placeholder);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     private const string Placeholder = "11111111-1111-4111-8111-111111111111";
 
-    /// <summary>WORKFLOW_DESIGNER_ENABLED 顯式關閉;下游旗標可獨立打開以驗證 AND 串鏈。</summary>
+    /// <summary>WORKFLOW_DESIGNER_ENABLED 顯式關閉;runtime 旗標可獨立打開以驗證兩者已解耦。</summary>
     private sealed class DesignerDisabledFactory(bool multiAgentDispatch = false, bool agentChat = false)
         : WebApplicationFactory<Program>
     {
@@ -148,7 +166,9 @@ public sealed class WorkflowAdminApiTests(TestWebAppFactory factory) : IClassFix
 
         using var replay = new HttpRequestMessage(HttpMethod.Put, $"/api/admin/orchestrators/{id}/draft") { Content = OrchestratorBody("Root Again", definition) };
         replay.Headers.TryAddWithoutValidation("If-Match", stale);
-        Assert.Equal(HttpStatusCode.Conflict, (await c.SendAsync(replay)).StatusCode);
+        var conflict = await c.SendAsync(replay);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Equal(current, conflict.Headers.ETag!.ToString());
 
         using var validateReq = new HttpRequestMessage(HttpMethod.Post, $"/api/admin/orchestrators/{id}/validate");
         validateReq.Headers.TryAddWithoutValidation("If-Match", current);

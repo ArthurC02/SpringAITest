@@ -28,6 +28,8 @@ public sealed class GlobalExceptionHandlerTests
     }
 
     // 未映射的例外 → 500 + 固定繁中通用訊息;原始細節不得出現在對外 body。
+    // 500 只准留「固定訊息 + correlationId」(02-spec §5):correlationId 是唯一能把這次失敗
+    // 對回內部 log 的線索,被吞掉的話使用者回報 500 就只剩一句沒得追的通用話。
     [Fact]
     public async Task Unmapped_ServerError_ReturnsGenericMessage_NoLeak()
     {
@@ -35,7 +37,30 @@ public sealed class GlobalExceptionHandlerTests
 
         Assert.Equal(500, status);
         Assert.Equal("伺服器發生錯誤，請稍後再試", body["message"]!.GetValue<string>());
+        Assert.Equal("internal_error", body["code"]!.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(body["correlationId"]!.GetValue<string>()));
         Assert.DoesNotContain("內部堆疊", body.ToJsonString());
+    }
+
+    // status → code 對照表逐列(02-spec §5):code 是穩定機器碼,不隨 message 在地化改變。
+    // 每個對外狀態碼一個代表值,漏改一列會在這裡爆而不是等到前端。
+    [Theory]
+    [InlineData(typeof(DocumentNotFoundException), 404, "not_found")]
+    [InlineData(typeof(DownstreamConflictException), 409, "version_conflict")]
+    [InlineData(typeof(InvalidCredentialsException), 401, "authentication_required")]
+    [InlineData(typeof(WorkflowForbiddenException), 403, "forbidden")]
+    [InlineData(typeof(WorkflowBadInputException), 400, "validation_failed")]
+    [InlineData(typeof(WorkflowPayloadTooLargeException), 413, "payload_too_large")]
+    [InlineData(typeof(SkillValidationFailedException), 422, "unprocessable_entity")]
+    [InlineData(typeof(WorkflowInvocationException), 502, "upstream_unavailable")]
+    public async Task Exception_MapsToStableCode(Type exceptionType, int expectedStatus, string expectedCode)
+    {
+        var (status, body) = await Handle((Exception)Activator.CreateInstance(exceptionType, "訊息")!);
+
+        Assert.Equal(expectedStatus, status);
+        Assert.Equal(expectedCode, body["code"]!.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(body["correlationId"]!.GetValue<string>()));
+        Assert.Equal(6, body.AsObject().Count);
     }
 
     // 下游呼叫失敗 → 502 + 固定繁中通用訊息;下游位址/狀態碼細節不得外洩。

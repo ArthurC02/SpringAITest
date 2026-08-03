@@ -19,8 +19,10 @@ public sealed class ChatOrchestratorController(
     public async Task<IActionResult> List(CancellationToken ct)
     {
         var user = User.ToUsableChatUserContext();
+        // 非 canary 租戶看不到這個端點存在。走全域例外處理才有完整 ApiError envelope
+        // (裸 NotFound() 會回一份沒有 code/correlationId 的 ProblemDetails)。
         if (user is null || !options.IsCanaryTenant(user.TenantCode))
-            return NotFound();
+            throw new WorkflowNotFoundException("找不到資源");
 
         using var request = backend.BuildRequest(
             HttpMethod.Get, "/api/runtime-discovery/orchestrators", user);

@@ -460,11 +460,8 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(4, body.AsObject().Count);
-        Assert.NotNull(body["timestamp"]);
-        Assert.Equal(500, body["status"]!.GetValue<int>());
+        body.AssertApiError(500, "internal_error");
         Assert.Equal("伺服器發生錯誤，請稍後再試", body["message"]!.GetValue<string>());
-        Assert.NotNull(body["fieldErrors"]);
     }
 
     // ---- B-P1-07:body 的 threadId/state/forwardedProps 偽造租戶 B 識別,隔離仍只依 JWT。 ----

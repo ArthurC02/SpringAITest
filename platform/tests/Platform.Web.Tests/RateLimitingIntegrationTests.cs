@@ -25,9 +25,7 @@ public sealed class RateLimitingIntegrationTests
         Assert.Equal("utf-8", response.Content.Headers.ContentType?.CharSet);
 
         var body = await response.ReadJsonAsync();
-        Assert.Equal(4, body.AsObject().Count);
-        Assert.NotNull(body["timestamp"]);
-        Assert.Equal(429, body["status"]!.GetValue<int>());
+        body.AssertApiError(429, "rate_limited");
         Assert.Equal("請求過於頻繁，請稍後再試", body["message"]!.GetValue<string>());
         Assert.Empty(body["fieldErrors"]!.AsObject());
     }

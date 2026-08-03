@@ -169,6 +169,9 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
         var body = await response.ReadJsonAsync();
         Assert.Equal(status, body["status"]!.GetValue<int>());
         Assert.Equal("下游決策訊息", body["message"]!.GetValue<string>());
+        // 透明代理:backend 自己的 code/correlationId 不得被 platform 改寫成本地推導值。
+        Assert.Equal("backend_decision_code", body["code"]!.GetValue<string>());
+        Assert.Equal("backend-trace-2", body["correlationId"]!.GetValue<string>());
     }
 
     /// <summary>共用的 FakeAgentRunService 一律回 202;決策失敗族群需要可控狀態碼,故在本檔自備。</summary>
@@ -176,7 +179,7 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
     {
         private AgentProxyResponse Rejection() => new(
             status,
-            $"{{\"timestamp\":\"2026-07-25T00:00:00Z\",\"status\":{status},\"message\":\"下游決策訊息\",\"fieldErrors\":{{}}}}",
+            $"{{\"timestamp\":\"2026-07-25T00:00:00Z\",\"status\":{status},\"code\":\"backend_decision_code\",\"message\":\"下游決策訊息\",\"correlationId\":\"backend-trace-2\",\"fieldErrors\":{{}}}}",
             null);
 
         public Task<AgentProxyResponse> DecideApprovalAsync(

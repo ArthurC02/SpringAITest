@@ -713,6 +713,12 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
 
         var stale = await Repo.UpdateDraftAsync(tenant, agent.Id, 99, "n", "d", def, Sha(def), default);
         Assert.Equal(AgentWriteStatus.VersionConflict, stale.Status);
+        // 區分 NotFound/Conflict 的那一趟查詢就把當下版本帶回來(controller 靠它給 409 附 ETag);
+        // 不存在時仍是 NotFound + null,不會誤報成 conflict。
+        Assert.Equal(1, stale.CurrentDraftVersion);
+        var missing = await Repo.UpdateDraftAsync(tenant, Guid.NewGuid(), 1, "n", "d", def, Sha(def), default);
+        Assert.Equal(AgentWriteStatus.NotFound, missing.Status);
+        Assert.Null(missing.CurrentDraftVersion);
 
         var ok = await Repo.UpdateDraftAsync(tenant, agent.Id, 1, "改", "說明", def, Sha(def), default);
         Assert.Equal(AgentWriteStatus.Success, ok.Status);

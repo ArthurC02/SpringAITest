@@ -188,12 +188,15 @@ public sealed class RuntimeDiscoveryReplayRouteTests : IClassFixture<RuntimeDisc
         Assert.Equal(expected, response.StatusCode);
     }
 
-    // fail-closed 串接:三個 flag 任一環不是 "true",整條 /api/chat-runs* 就必須在
-    // 身分 header 與 body 驗證之前 404(這個請求連 X-Tenant-Id 和 Idempotency-Key 都沒有)。
+    // fail-closed 串接:chat 需要 MULTI_AGENT_DISPATCH_ENABLED + AGENT_CHAT_ENABLED 兩環俱全,
+    // 任一環不是 "true",整條 /api/chat-runs* 就必須在身分 header 與 body 驗證之前 404
+    // (這個請求連 X-Tenant-Id 和 Idempotency-Key 都沒有)。
+    // designer 兩個值都放進來:02-spec §8 之後它不再參與這條串鏈,開或關都不得改變結果。
     [Theory]
     [InlineData("true", "true", "false")]
     [InlineData("true", "false", "true")]
-    [InlineData("false", "true", "true")]
+    [InlineData("false", "true", "false")]
+    [InlineData("false", "false", "true")]
     public async Task Replay_WhenChatFlagCascadeIsOff_Is404BeforeIdentityCheck(string designer, string dispatch, string chat)
     {
         using var disabled = new FlagFactory(designer, dispatch, chat);

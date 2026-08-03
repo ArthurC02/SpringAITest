@@ -43,4 +43,22 @@ internal static class ApiTestHelpers
     public static async Task<JsonNode> ReadJsonAsync(this HttpResponseMessage response)
         => JsonNode.Parse(await response.Content.ReadAsStringAsync())
            ?? throw new InvalidOperationException("回應 body 不是有效 JSON");
+
+    /// <summary>
+    /// 完整 ApiError envelope 的唯一斷言點(02-spec §5):恰好六個欄位
+    /// { timestamp, status, code, message, correlationId, fieldErrors },
+    /// code 依狀態碼是穩定機器碼、correlationId 非空、fieldErrors 一定存在。
+    /// 六個欄位逐一比對比 Count 更值錢的部分在 code/correlationId —— 少了它們就沒測到 P1 的新契約。
+    /// </summary>
+    public static void AssertApiError(this JsonNode body, int status, string code)
+    {
+        var obj = body.AsObject();
+        Assert.Equal(6, obj.Count);
+        Assert.NotNull(body["timestamp"]);
+        Assert.Equal(status, body["status"]!.GetValue<int>());
+        Assert.Equal(code, body["code"]!.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(body["message"]!.GetValue<string>()));
+        Assert.False(string.IsNullOrWhiteSpace(body["correlationId"]!.GetValue<string>()));
+        Assert.NotNull(body["fieldErrors"]);
+    }
 }

@@ -21,9 +21,9 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
+        // 完整 envelope:code 穩定機器可讀、correlationId 非空、fieldErrors 永遠存在(空物件)。
+        body.AssertApiError(401, "authentication_required");
         Assert.Equal("未認證或憑證無效", body["message"]!.GetValue<string>());
-        // fieldErrors 永遠存在(空物件)。
-        Assert.NotNull(body["fieldErrors"]);
     }
 
     // AllowAnonymous 端點的契約是「空陣列,不是 401」——只驗 200 會漏掉「匿名讀到別人歷史」這個等價類。
@@ -74,7 +74,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
+        body.AssertApiError(401, "authentication_required");
         Assert.Equal("未認證或憑證無效", body["message"]!.GetValue<string>());
-        Assert.NotNull(body["fieldErrors"]);
     }
 }

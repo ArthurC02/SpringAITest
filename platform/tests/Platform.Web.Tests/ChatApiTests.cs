@@ -70,7 +70,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 
     // ---- A-15 / A-16:持久化失敗的決策表兩半 —— 阻塞 500 vs 串流 best-effort,刻意不同,必須成對驗 ----
 
-    // A-15:阻塞式 /api/chat 的持久化失敗往上拋 → 500 + ApiError 四鍵齊全,通用中文訊息不洩漏例外細節。
+    // A-15:阻塞式 /api/chat 的持久化失敗往上拋 → 500 + ApiError envelope 六鍵齊全,通用中文訊息不洩漏例外細節。
     [Fact]
     public async Task Chat_Returns500_WithGenericApiError_WhenPersistenceFails()
     {
@@ -83,11 +83,8 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 
             Assert.Equal(HttpStatusCode.InternalServerError, resp.StatusCode);
             var body = await resp.ReadJsonAsync();
-            Assert.Equal(4, body.AsObject().Count);
-            Assert.NotNull(body["timestamp"]);
-            Assert.Equal(500, body["status"]!.GetValue<int>());
+            body.AssertApiError(500, "internal_error");
             Assert.Equal("伺服器發生錯誤，請稍後再試", body["message"]!.GetValue<string>());
-            Assert.NotNull(body["fieldErrors"]);
             // 通用泛化訊息:例外細節（測試腳本用的字樣）不得外洩。
             Assert.DoesNotContain("持久化失敗", body.ToJsonString());
         }
@@ -138,7 +135,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     }
 
     // M5 + A-24:空字串與全空白都是 NotBlank 該擋的等價類,
-    // 阻塞與串流兩條路徑皆 400 + ApiError 四鍵齊全;串流端點在寫任何 SSE bytes 之前就回 JSON。
+    // 阻塞與串流兩條路徑皆 400 + ApiError envelope 六鍵齊全;串流端點在寫任何 SSE bytes 之前就回 JSON。
     [Theory]
     [InlineData("/api/chat", "")]
     [InlineData("/api/chat", "   ")]
@@ -153,9 +150,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         Assert.Equal("application/json", resp.Content.Headers.ContentType!.MediaType);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(4, body.AsObject().Count);
-        Assert.NotNull(body["timestamp"]);
-        Assert.Equal(400, body["status"]!.GetValue<int>());
+        body.AssertApiError(400, "validation_failed");
         Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
         Assert.Equal("message 不可為空", body["fieldErrors"]!["message"]!.GetValue<string>());
     }
@@ -411,11 +406,8 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(4, body.AsObject().Count);
-        Assert.NotNull(body["timestamp"]);
-        Assert.Equal(400, body["status"]!.GetValue<int>());
+        body.AssertApiError(400, "validation_failed");
         Assert.Equal(expectedMessage, body["message"]!.GetValue<string>());
-        Assert.NotNull(body["fieldErrors"]);
     }
 
     // MaxLogicalAttemptIdLength = 512 的 on-point:剛好 512 字元是合法值、照常放行(不是 400),
@@ -479,8 +471,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(4, body.AsObject().Count);
-        Assert.Equal(400, body["status"]!.GetValue<int>());
+        body.AssertApiError(400, "validation_failed");
         Assert.Equal("orchestratorId 格式錯誤", body["message"]!.GetValue<string>());
     }
 
@@ -498,8 +489,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
-        Assert.Equal(4, body.AsObject().Count);
-        Assert.Equal(404, body["status"]!.GetValue<int>());
+        body.AssertApiError(404, "not_found");
         Assert.Equal("Orchestrator is unavailable", body["message"]!.GetValue<string>());
     }
 

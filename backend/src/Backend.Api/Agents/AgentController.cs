@@ -93,6 +93,10 @@ public sealed class AgentController : ControllerBase
         return result.Status switch
         {
             AgentWriteStatus.NotFound => throw NotFound(id),
+            // 最常撞的併發路徑(兩個 ADMIN 同時 PUT draft):repo 用區分 NotFound/Conflict 的那一趟
+            // 順手帶回當下 draft_version,所以這裡也附得出最新 ETag,呼叫端不必再打一次 GET。
+            AgentWriteStatus.VersionConflict when result.CurrentDraftVersion is long current
+                => VersionConflictWithETag(current),
             AgentWriteStatus.VersionConflict => throw VersionConflict(),
             _ => WithETag(result.Agent!),
         };
@@ -110,7 +114,7 @@ public sealed class AgentController : ControllerBase
         var agent = await _repo.GetAsync(tenantId, id, ct) ?? throw NotFound(id);
         if (agent.DraftVersion != expectedVersion)
         {
-            throw VersionConflict();
+            return VersionConflictWithETag(agent.DraftVersion);
         }
 
         var lifecycleDefinition =
@@ -162,13 +166,13 @@ public sealed class AgentController : ControllerBase
         var agent = await _repo.GetAsync(tenantId, id, ct) ?? throw NotFound(id);
         if (agent.DraftVersion != expectedVersion)
         {
-            throw VersionConflict();
+            return VersionConflictWithETag(agent.DraftVersion);
         }
 
         if (agent.DraftValidatedVersion != agent.DraftVersion)
         {
-            throw new ApiException(
-                StatusCodes.Status409Conflict, "draft 尚未重新驗證,無法發布(請先呼叫 validate)");
+            return ApiErrors.VersionConflict(
+                HttpContext, "draft 尚未重新驗證,無法發布(請先呼叫 validate)", agent.DraftVersion);
         }
         var lifecycleDefinition =
             AgentCanonicalizer.CanonicalizeForLifecycleWrite(agent.DraftDefinition);
@@ -339,8 +343,18 @@ public sealed class AgentController : ControllerBase
 
     private static ApiException NotFound(Guid id) => ApiErrors.NotFound(" Agent", id);
 
+    private const string DraftConflictMessage = "draft 版本衝突:已被他人更新,請重新載入";
+
+    /// <summary>
+    /// repo 只回 VersionConflict、當下版本不在手上的路徑(validate/publish 的寫入競態:實體讀過但
+    /// 版本已經是舊的,重讀一次才拿得到新值)。不為了 ETag 多打一次查詢,所以這條 409 不帶 ETag。
+    /// </summary>
     private static ApiException VersionConflict()
-        => new(StatusCodes.Status409Conflict, "draft 版本衝突:已被他人更新,請重新載入");
+        => new(StatusCodes.Status409Conflict, DraftConflictMessage);
+
+    /// <summary>已讀過 agent 的路徑:同一個 409,外加當下最新 ETag(02-spec §5)。</summary>
+    private ObjectResult VersionConflictWithETag(long currentVersion)
+        => ApiErrors.VersionConflict(HttpContext, DraftConflictMessage, currentVersion);
 
     private static ApiException InvalidReferences(IReadOnlyList<AgentValidationError>? errors)
     {

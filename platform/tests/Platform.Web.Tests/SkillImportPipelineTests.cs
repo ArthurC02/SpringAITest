@@ -195,10 +195,9 @@ public sealed class SkillImportPipelineTests : IClassFixture<SkillImportPipeline
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.ReadJsonAsync();
-        Assert.Equal(400, body["status"]!.GetValue<int>());
+        body.AssertApiError(400, "validation_failed");
         Assert.Equal("Skill 服務呼叫失敗：匯入套件超過上限 16777216 bytes",
             body["message"]!.GetValue<string>());
-        Assert.NotNull(body["timestamp"]);
         Assert.Empty(body["fieldErrors"]!.AsObject());
     }
 

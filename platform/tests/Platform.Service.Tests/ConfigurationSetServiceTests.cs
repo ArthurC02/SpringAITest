@@ -161,7 +161,7 @@ public sealed class ConfigurationSetServiceTests
     public async Task Create_Backend422_KeepsValueRangeFieldErrors()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"message":"Configuration Set 驗證失敗","fieldErrors":{"retrieval.top_k":"必須介於 1 到 50","llm.model":"不在允許清單"}}"""));
+            """{"timestamp":"2026-07-14T00:00:00Z","status":422,"code":"unprocessable_entity","message":"Configuration Set 驗證失敗","correlationId":"backend-trace-1","fieldErrors":{"retrieval.top_k":"必須介於 1 到 50","llm.model":"不在允許清單"}}"""));
 
         var ex = await Assert.ThrowsAsync<SkillValidationFailedException>(
             () => Build(stub).CreateAsync(Upsert(), AdminCtx));
@@ -175,7 +175,7 @@ public sealed class ConfigurationSetServiceTests
     public async Task Update_Backend400WithFieldErrors_KeepsFieldErrors()
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
-            """{"timestamp":"2026-07-14T00:00:00Z","status":400,"message":"輸入驗證失敗","fieldErrors":{"name":"name 不可為空"}}"""));
+            """{"timestamp":"2026-07-14T00:00:00Z","status":400,"code":"validation_failed","message":"輸入驗證失敗","correlationId":"backend-trace-1","fieldErrors":{"name":"name 不可為空"}}"""));
 
         var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(
             () => Build(stub).UpdateAsync(SetId, Upsert(), AdminCtx));
