@@ -446,17 +446,21 @@ public sealed class InMemoryOrchestratorRunRepository(
             if (x.Status is "completed" or "failed" or "cancelled" or "timed_out")
                 return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, Message: "Run is terminal");
 
-            x.Status = "cancelled";
-            // Dapper cascades the agent_run cancel with a three-state WHERE
-            // (queued/running/waiting_input) -- Child.Status only mirrors the real D3 status when
-            // GetChildAsync last synced it, so a child parked in waiting_input must still be
-            // included or its underlying agent run is never told to cancel.
-            foreach (var child in x.Children.Where(child => child.Status is "queued" or "running" or "waiting_input"))
+            // All-or-nothing, matching the Dapper authority's single cancel transaction: the child
+            // cascade runs first and the root becomes terminal only when every child cancel
+            // succeeded. A partial failure commits nothing (no terminal status, no run_cancelled
+            // event, no cancel idempotency record) so the terminal/replay guards above cannot
+            // permanently block a retry of the still-uncancelled children, and the failure is
+            // surfaced the same way Dapper surfaces a rolled back transaction: as an exception to
+            // the caller, plus a non-terminal event naming the children that failed.
+            var failures = await CascadeChildCancelLocked(x, reason, "orchestrator-cancel", ct);
+            if (failures is { Count: > 0 })
             {
-                if (agentRuns is not null)
-                    await agentRuns.CancelAsync(tenant, user, child.AgentRunId, reason, $"orchestrator-cancel:{id:D}:{child.AgentRunId:D}", ct);
-                child.Status = "cancelled";
+                AppendCascadeIncomplete(x, "root_cancel_cascade_incomplete", failures);
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0].Error).Throw();
             }
+
+            x.Status = "cancelled";
             x.CancelRequested = true;
             x.Version++;
             x.Updated = DateTime.UtcNow;
@@ -535,29 +539,10 @@ public sealed class InMemoryOrchestratorRunRepository(
     private async Task ExpireLockedAsync(Entry run, CancellationToken ct)
     {
         if (run.Status is "completed" or "failed" or "cancelled" or "timed_out") return;
-        List<(Guid ChildId, string Error)>? failures = null;
-        foreach (var child in run.Children.Where(x => x.Status is "queued" or "running" or "waiting_input"))
-        {
-            if (agentRuns is null) { child.Status = "cancelled"; continue; }
-            try
-            {
-                await agentRuns.CancelAsync(run.Tenant, run.User, child.AgentRunId, "deadline", $"orchestrator-deadline:{run.Id:D}:{child.AgentRunId:D}", ct);
-                child.Status = "cancelled";
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                (failures ??= []).Add((child.Id, ex.Message));
-            }
-        }
+        var failures = await CascadeChildCancelLocked(run, "deadline", "orchestrator-deadline", ct);
         if (failures is { Count: > 0 })
         {
-            run.Events.Add(new(run.Events.Count + 1, "root_timeout_cascade_incomplete", run.Hash,
-                JsonSerializer.SerializeToElement(new { failed_children = failures.Select(f => new { child_id = f.ChildId, error = f.Error }) }),
-                DateTime.UtcNow));
+            AppendCascadeIncomplete(run, "root_timeout_cascade_incomplete", failures);
             return;
         }
         run.Status = "timed_out";
@@ -570,6 +555,43 @@ public sealed class InMemoryOrchestratorRunRepository(
         run.Updated = DateTime.UtcNow;
         run.Events.Add(new(run.Events.Count + 1, "root_timed_out", run.Hash, JsonDocument.Parse("{}").RootElement.Clone(), run.Updated));
     }
+
+    // Called with _gate held, by both the cancel and the deadline path: their cascade semantics are
+    // one contract, so they share one implementation instead of drifting apart again.
+    // Dapper cascades the agent_run cancel with a three-state WHERE (queued/running/waiting_input)
+    // -- Child.Status only mirrors the real D3 status when GetChildAsync last synced it, so a child
+    // parked in waiting_input must still be included or its underlying agent run is never told to
+    // cancel. Caller cancellation is not a child failure: it propagates untouched so no durable
+    // record (neither a terminal transition nor a cascade-incomplete event) is written for it.
+    // Do not call another gate-acquiring member here: SemaphoreSlim is not reentrant.
+    private async Task<List<(Guid ChildId, Exception Error)>?> CascadeChildCancelLocked(
+        Entry run, string? reason, string keyPrefix, CancellationToken ct)
+    {
+        List<(Guid ChildId, Exception Error)>? failures = null;
+        foreach (var child in run.Children.Where(x => x.Status is "queued" or "running" or "waiting_input"))
+        {
+            try
+            {
+                if (agentRuns is not null)
+                    await agentRuns.CancelAsync(run.Tenant, run.User, child.AgentRunId, reason, $"{keyPrefix}:{run.Id:D}:{child.AgentRunId:D}", ct);
+                child.Status = "cancelled";
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                (failures ??= []).Add((child.Id, ex));
+            }
+        }
+        return failures;
+    }
+
+    private static void AppendCascadeIncomplete(Entry run, string eventType, List<(Guid ChildId, Exception Error)> failures)
+        => run.Events.Add(new(run.Events.Count + 1, eventType, run.Hash,
+            JsonSerializer.SerializeToElement(new { failed_children = failures.Select(f => new { child_id = f.ChildId, error = f.Error.Message }) }),
+            DateTime.UtcNow));
     private sealed class Entry(Guid id, Guid commandId, string tenant, string user, string role, Guid oid, int orev, string conversation, Guid wid, int wrev, string snapshot, string hash, DateTime deadline, DateTime now) { public Guid Id = id, CommandId = commandId; public string Tenant = tenant, User = user, Role = role, Conversation = conversation, Snapshot = snapshot, Hash = hash, Status = "queued"; public Guid OrchestratorId = oid, WorkflowId = wid; public int OrchestratorRevision = orev, WorkflowRevision = wrev; public long Version = 1, LeaseGeneration, CheckpointVersion; public bool CancelRequested, CommandCompleted, DispatchCompleted; public string? ClaimTokenHash, ResumeInput, CheckpointRef, ErrorCode, ErrorMessage; public DateTime ClaimExpiresAt = DateTime.MinValue; public DateTime Deadline = deadline, Created = now, Updated = now; public List<E> Events = []; public List<Child> Children = []; }
     private sealed class Child(Guid id, string task, int attempt, string kind, Guid agentId, int agentRevision, Guid workflowId, int workflowRevision, string hash, Guid agentRunId, Guid commandId, JsonElement taskEnvelope, JsonElement dispatchArtifact) { public Guid Id = id, AgentId = agentId, WorkflowId = workflowId, AgentRunId = agentRunId, CommandId = commandId; public string Task = task, Kind = kind, Hash = hash, Status = "queued"; public int Attempt = attempt, AgentRevision = agentRevision, WorkflowRevision = workflowRevision; public JsonElement TaskEnvelope = taskEnvelope.Clone(), DispatchArtifact = dispatchArtifact.Clone(); public TaskContextRequest? ContextRequest; }
     private sealed class TaskContextRequest(Guid id, Guid contextId, string role, ContextRef? baseContext, DateTime now)

@@ -37,7 +37,12 @@
 - [x] P1-PL2 dispatch 與 designer gate 解耦(platform `Program.cs:67` **與 backend `Program.cs:42`**,後者為實作期新發現);保留 chat→dispatch、context→dispatch;admin 路由(`/api/admin/workflows*`、`/api/admin/orchestrators*` 含 test-run)仍在 designer gate 後——此為規格 §8 刻意行為,需寫入 runbook(P1-08)— 2026-08-03
 - [x] P1-PL3 公開端點契約測試全面遷移到完整 envelope(`AssertApiError` helper 兩側鏡像)— 2026-08-03
 ### WP1-BE(dotnet-implementer)
-- [ ] P1-BE1 InMemory `CancelAsync` 對齊 `ExpireLockedAsync`:先 cascade、逐 child try/catch、caller cancellation 傳播、全成才落 terminal(P1-06, P1-07)
+- [x] P1-BE1 InMemory `CancelAsync` 對齊 all-or-nothing:cascade 抽共用 helper(`CascadeChildCancelLocked`)與 deadline 路徑共用防止三度 drift;任一 child 失敗 → root 零半提交 + 非 terminal `root_cancel_cascade_incomplete` 事件 + 原例外穿出(同 Dapper 語意);caller cancellation 原樣傳播;全成才 staged commit;2 個權威狀態回歸測試(P1-06, P1-07)— 2026-08-03
+
+### P1 遺留觀察(不擋 gate,擇機處理)
+- `WorkflowRepository.UpdateDraftAsync` 對 system-owned workflow:Dapper 回 409、InMemory 回 403 —— 既有 Dapper↔InMemory 漂移,修法是判別查詢多帶 `system_owned` 一欄,但需先定對外契約(403 或 409)
+- `OrchestratorsView`/`WorkflowsView` 未渲染 `revisions.error`(revision 清單載入失敗靜默變空)—— 既有讀路徑缺口,各補一個 `<ErrorText>` 即可
+- designer gate 罩住 `/api/admin/orchestrators/{id}/runs`(關 designer = 關 admin test-run)為規格 §8 刻意行為 —— 待 docs 批次寫入旗標說明
 ### WP1-WF(python-implementer)
 - [x] P1-WF1 correlation ID 機制(ASGI middleware + contextvar + 兜底 catch,罩住未修補路徑);外洩點實際 **5 處**非 3:任務原列 3 處 + flow 主路徑 `governance["error"]=str(exc)` + agentic 200 回應的 `fatal_error`/`errors`/`audit_trail`(根因修法:agentic 複用 flow 的 `PUBLIC_DENY_KEYS`);FlowDenied 保留列舉式訊息不當未預期例外(P1-05)— 2026-08-03
 ### WP1-INFRA

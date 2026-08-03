@@ -547,6 +547,82 @@ public sealed class OrchestratorRunRepositoryTests
         Assert.True(childRuns.CancelCalled);
     }
 
+    // P1-06 回歸測試:cancel 的 child cascade 原本排在 root 已被寫成 cancelled 之後,而且整段沒有
+    // try/catch —— 第二個 child 取消失敗時例外直接穿出,留下「root 已終局 + 部分 child 未取消 +
+    // 事件/idempotency/Version 都沒寫」的半個 transition,下一次重試又被 terminal guard 擋成
+    // InvalidState "Run is terminal",殘留的 child 永遠不會再被取消。對齊 Dapper 的單一交易語意:
+    // 全成功才提交,任何 child 失敗都不得留下終局狀態,且同一把 key 必須還能重試完成 cascade。
+    [Fact]
+    public async Task Cancel_WhenSecondChildCancelFails_CommitsNothing_AndRetryCompletesCascade()
+    {
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(maxChildRuns: 3, maxConcurrency: 3, agentRuns: childRuns);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "cancel-partial", "plan", "cancel-partial-start", default);
+        var first = await ChildAsync(fixture, created.Run!.Id, "task-1");
+        var second = await ChildAsync(fixture, created.Run.Id, "task-2");
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        childRuns.FailCancelAgentRunId = second!.AgentRunId;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Runs.CancelAsync("t", "u", created.Run.Id, "stop", "cancel-partial-1", default));
+
+        var afterFailure = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        Assert.Equal("queued", afterFailure!.Status);
+        Assert.False(afterFailure.CancelRequested);
+        Assert.Equal(1, afterFailure.StateVersion);
+        var events = await fixture.Runs.EventsAsync("t", "u", created.Run.Id, 0, 50, default);
+        Assert.DoesNotContain(events!.Events, x => x.EventType == "run_cancelled");
+        var incomplete = Assert.Single(events.Events, x => x.EventType == "root_cancel_cascade_incomplete");
+        Assert.Equal(second.Id.ToString(), incomplete.Payload.GetProperty("failed_children")[0].GetProperty("child_id").GetString(), ignoreCase: true);
+        // 權威狀態(底層 agent_run),不是 Child.Status 鏡射欄位:第一個 child 的取消已經真的發生
+        // 且不可逆,第二個必須仍未取消 —— 這正是下一次重試要補完的部分。
+        Assert.Equal("cancelled", (await childRuns.GetAsync("t", "u", first!.AgentRunId, default))!.Status);
+        Assert.Equal("queued", (await childRuns.GetAsync("t", "u", second.AgentRunId, default))!.Status);
+
+        childRuns.FailCancelAgentRunId = null;
+        var retried = await fixture.Runs.CancelAsync("t", "u", created.Run.Id, "stop", "cancel-partial-1", default);
+
+        // idempotency 也不得半提交:同一把 key 若已被記成 replay,重試就只會回上一份回應,
+        // 殘留的 child 再也不會被取消。
+        Assert.Equal(OrchestratorRunWriteStatus.Success, retried.Status);
+        Assert.False(retried.Replayed);
+        Assert.Equal("cancelled", retried.Run!.Status);
+        Assert.Equal("cancelled", (await childRuns.GetAsync("t", "u", second.AgentRunId, default))!.Status);
+    }
+
+    // P1-07 回歸測試:caller 在 cascade 進行到一半時取消,OperationCanceledException 必須原樣傳播,
+    // 不得被當成 child 取消失敗吞掉並轉成 durable 記錄(既不得把 root 標成 timed_out,也不得寫下
+    // root_timeout_cascade_incomplete 這種失敗事件 —— 取消不是失敗)。
+    [Fact]
+    public async Task DeadlineCascade_WhenCallerCancelsMidway_Propagates_AndWritesNoDurableRecord()
+    {
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(maxChildRuns: 3, maxConcurrency: 3, agentRuns: childRuns);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "expire-ct", "plan", "expire-ct-key", default);
+        var first = await ChildAsync(fixture, created.Run!.Id, "task-1");
+        var second = await ChildAsync(fixture, created.Run.Id, "task-2");
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        SetDeadline(fixture.Runs, created.Run.Id, DateTime.UtcNow.AddSeconds(-1));
+        using var cts = new CancellationTokenSource();
+        childRuns.CancelDuringChildCancel = cts;
+        IOrchestratorRunRepository durable = fixture.Runs;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => durable.ClaimRecoveryAsync("scrubber-ct", 10, 30, cts.Token));
+
+        childRuns.CancelDuringChildCancel = null;
+        var run = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        Assert.Equal("queued", run!.Status);
+        var events = await fixture.Runs.EventsAsync("t", "u", created.Run.Id, 0, 50, default);
+        Assert.DoesNotContain(events!.Events, x => x.EventType is "root_timed_out" or "root_timeout_cascade_incomplete");
+        Assert.Equal("queued", (await childRuns.GetAsync("t", "u", first!.AgentRunId, default))!.Status);
+        Assert.Equal("queued", (await childRuns.GetAsync("t", "u", second!.AgentRunId, default))!.Status);
+    }
+
     // SemaphoreSlim is not reentrant like the System.Threading.Lock this repository used to use.
     // ClaimRecoveryAsync internally claims each candidate via ClaimCommandLocked (not the public,
     // gate-acquiring ClaimCommandAsync) specifically to avoid re-entering _gate, and the explicit
@@ -790,7 +866,10 @@ public sealed class OrchestratorRunRepositoryTests
         // orchestrator 端的 cascade 呼叫進來時會短暫取得它。這裡加一把等價的鎖,讓併發測試能
         // 真的製造鎖爭用(而不是測一個沒上鎖、天生不會卡住的假物件)。
         private readonly Lock _gate = new();
-        private AgentRunResponse? _run;
+        // 每個 child 一筆真正的 D3 run(cascade 回歸測試需要對「第二個 child」單獨注入失敗,
+        // 並分別斷言兩筆底層 run 的權威狀態)。單 child 的既有測試沿用最後建立的那一筆。
+        private readonly Dictionary<Guid, AgentRunResponse> _runs = [];
+        private Guid _last;
 
         /// <summary>The exact canonical envelope the orchestrator persists on the child (same value
         /// goes to `orchestrator_run_child.task_envelope` and to the D3 child start command).</summary>
@@ -805,29 +884,36 @@ public sealed class OrchestratorRunRepositoryTests
             lock (_gate)
             {
                 DispatchedEnvelope = taskEnvelope.Clone();
-                _run = new AgentRunResponse(
+                var run = new AgentRunResponse(
                     Guid.NewGuid(), provenance.RootRunId, provenance.RootRunId, provenance.TaskId, runKind,
                     agent.AgentId, agent.Revision, workflow.WorkflowId, workflow.Revision, agent.DefinitionSha256,
                     "queued", 1, 0, 0, null, 0, 0, false, null, null, null, null, 0, null,
                     DateTime.UtcNow, DateTime.UtcNow.AddMinutes(10), DateTime.UtcNow, null, [],
                     JsonDocument.Parse("{}").RootElement.Clone());
+                _runs[run.Id] = run;
+                _last = run.Id;
                 return Task.FromResult(new AgentRunWriteResult(
-                    AgentRunWriteStatus.Success, _run, Dispatch: new AgentRunCommandDispatch(Guid.NewGuid(), "claim", DateTime.UtcNow.AddSeconds(30), 1)));
+                    AgentRunWriteStatus.Success, run, Dispatch: new AgentRunCommandDispatch(Guid.NewGuid(), "claim", DateTime.UtcNow.AddSeconds(30), 1)));
             }
         }
 
-        public void Complete(string resultJson) => _run = _run! with
+        public void Complete(string resultJson) => Mutate(run => run with
         {
             Status = "completed",
             Result = JsonDocument.Parse(resultJson).RootElement.Clone(),
-        };
+        });
 
         /// <summary>F1 回歸測試用:讓子執行進入 D3 的 waiting_input 狀態,之後才由 GetChildAsync 同步進
         /// orchestrator 端的 Child.Status 快取欄位。</summary>
-        public void EnterWaitingInput() => _run = _run! with { Status = "waiting_input" };
+        public void EnterWaitingInput() => Mutate(run => run with { Status = "waiting_input" });
 
         /// <summary>F3 回歸測試用:讓子執行進入 D3 的 running 狀態(同步流程與 EnterWaitingInput 相同)。</summary>
-        public void EnterRunning() => _run = _run! with { Status = "running" };
+        public void EnterRunning() => Mutate(run => run with { Status = "running" });
+
+        private void Mutate(Func<AgentRunResponse, AgentRunResponse> change)
+        {
+            lock (_gate) _runs[_last] = change(_runs[_last]);
+        }
 
         /// <summary>是否曾被要求取消(F1 迴歸斷言:waiting_input 子執行的取消是否真的傳到這裡)。</summary>
         public bool CancelCalled { get; private set; }
@@ -837,9 +923,17 @@ public sealed class OrchestratorRunRepositoryTests
         /// 仍然標成 timed_out。</summary>
         public bool FailCancel { get; set; }
 
+        /// <summary>Cancel cascade all-or-nothing 回歸測試用:只讓「這一筆」底層 run 的取消失敗,
+        /// 用來製造「第一個 child 成功、第二個 child 失敗」的部分失敗。</summary>
+        public Guid? FailCancelAgentRunId { get; set; }
+
+        /// <summary>P1-07 用:模擬 cascade 進行到一半時 caller 取消(真正的 InMemoryAgentRunRepository
+        /// 會在 `_gate.WaitAsync(ct)` 丟 OperationCanceledException)。</summary>
+        public CancellationTokenSource? CancelDuringChildCancel { get; set; }
+
         public Task<AgentRunResponse?> GetAsync(string t, string u, Guid id, CancellationToken ct)
         {
-            lock (_gate) return Task.FromResult(_run is not null && _run.Id == id ? _run : null);
+            lock (_gate) return Task.FromResult(_runs.TryGetValue(id, out var run) ? run : null);
         }
 
         public Task<AgentRunWriteResult> CreateDirectAsync(string a, string b, string c, IReadOnlyCollection<string> d, IReadOnlyCollection<string> e, Guid f, string g, string h, CancellationToken i) => throw new NotSupportedException();
@@ -850,11 +944,14 @@ public sealed class OrchestratorRunRepositoryTests
         {
             lock (_gate)
             {
-                if (_run is null || _run.Id != id) throw new NotSupportedException();
-                if (FailCancel) throw new InvalidOperationException("scripted cancel failure");
+                if (!_runs.TryGetValue(id, out var run)) throw new NotSupportedException();
+                CancelDuringChildCancel?.Cancel();
+                ct.ThrowIfCancellationRequested();
+                if (FailCancel || FailCancelAgentRunId == id) throw new InvalidOperationException("scripted cancel failure");
                 CancelCalled = true;
-                _run = _run with { Status = "cancelled" };
-                return Task.FromResult(new AgentRunWriteResult(AgentRunWriteStatus.Success, _run));
+                run = run with { Status = "cancelled" };
+                _runs[id] = run;
+                return Task.FromResult(new AgentRunWriteResult(AgentRunWriteStatus.Success, run));
             }
         }
         public Task<AgentRunWriteResult> TransitionAsync(string a, string b, Guid c, AgentRunTransitionRequest d, CancellationToken e) => throw new NotSupportedException();
