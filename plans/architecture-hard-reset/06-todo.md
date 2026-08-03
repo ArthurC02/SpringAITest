@@ -39,7 +39,7 @@
 ### WP1-BE(dotnet-implementer)
 - [ ] P1-BE1 InMemory `CancelAsync` 對齊 `ExpireLockedAsync`:先 cascade、逐 child try/catch、caller cancellation 傳播、全成才落 terminal(P1-06, P1-07)
 ### WP1-WF(python-implementer)
-- [ ] P1-WF1 新建 correlation ID 機制;3 處 `str(e)` 外洩點改固定安全訊息 + log 落例外(P1-05)
+- [x] P1-WF1 correlation ID 機制(ASGI middleware + contextvar + 兜底 catch,罩住未修補路徑);外洩點實際 **5 處**非 3:任務原列 3 處 + flow 主路徑 `governance["error"]=str(exc)` + agentic 200 回應的 `fatal_error`/`errors`/`audit_trail`(根因修法:agentic 複用 flow 的 `PUBLIC_DENY_KEYS`);FlowDenied 保留列舉式訊息不當未預期例外(P1-05)— 2026-08-03
 ### WP1-INFRA
 - [x] P1-IN1 compose:backend 補五 gate(經程式碼實讀逐一確認);workflow 補 CONTEXT_ENRICHMENT_ENABLED。AGENT_CHAT_ENABLED 經實讀確認 workflow 不讀取、刻意不加;workflow 原有的 inert `WORKFLOW_DESIGNER_ENABLED` 宣告一併移除(P1-08)— 2026-08-03
 - [x] P1-IN2 `start-lite.ps1`/`start-lite.sh` 健康檢查失敗收集後 exit 1 並指名失敗服務(P1-09)— 2026-08-03

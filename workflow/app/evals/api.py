@@ -6,16 +6,19 @@ Workflow 只執行 eval candidate，不保存 release state、不建 suite catal
 與既有 /agent-runs、/orchestrator-runs 兩條旗標保護路由同一套慣例。
 """
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app import skills
+from app import correlation, skills
 from app.engine.skill import Skill
 from app.evals.models import EvalRunRequest, EvalRunResponse
 from app.evals.runner import RUNNER_VERSION, run_cases
 from app.security import RequestContext, get_context
 from app.skills import custom
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/evals", tags=["evals"])
 
@@ -45,11 +48,9 @@ async def _resolve_candidate_skill(ref: dict, ctx: RequestContext) -> Skill:
     if loaded is None:
         try:
             loaded = await custom.load(name, ctx)
-        except (custom.BackendUnavailable, custom.InvalidCustomSkill) as e:
-            raise HTTPException(
-                status_code=500,
-                detail={"error": "workflow_execution_failed", "message": str(e)},
-            )
+        except (custom.BackendUnavailable, custom.InvalidCustomSkill):
+            # 訊息夾帶 backend path/URL 與編譯器例外文字；只進日誌，不進回應（規格 §3.3）。
+            raise correlation.execution_failed(logger, f"eval candidate '{name}' load")
     if loaded is None:
         raise HTTPException(
             status_code=404,

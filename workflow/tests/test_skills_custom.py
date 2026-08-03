@@ -477,7 +477,10 @@ def test_invoke_custom_skill_with_unrecognized_kind_fails_closed(backend, fake_d
     assert resp.status_code == 500
     detail = resp.json()["detail"]
     assert detail["error"] == "workflow_execution_failed"
-    assert "'bogus'" in detail["message"]  # 訊息點名那個無效 kind
+    # 規格 02-spec §3.3「Runtime failures never expose raw exception text」：訊息不再點名
+    # 無效 kind（那是 InvalidCustomSkill 的原始例外文字），改由 correlation_id 對回日誌。
+    assert "bogus" not in detail["message"]
+    assert detail["correlation_id"]
     assert fake_deps.audit_repo.saved == []  # 沒有真的跑起來
 
 
@@ -663,4 +666,3 @@ def test_validate_has_no_side_effects_on_custom_catalog(backend, fake_deps):
     assert after == before
     assert skills.get("quarterly-qa") is None  # 自訂 skill 不會被寫進內建註冊表
     assert skills.get("broken-skill") is None
-

@@ -21,13 +21,17 @@ trace 中繼資料不該在那裡繞一圈；ContextVar 又天然是 per-task �
   一次步驟可以有 N 筆。
 """
 
+import logging
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable
 
+from app import correlation
 from app.engine.models import TraceEntry
+
+logger = logging.getLogger(__name__)
 
 BudgetCallback = Callable[[str, float], Awaitable[None]]
 StepGuard = Callable[[str], Awaitable[None]]
@@ -197,6 +201,13 @@ def harnessed(
                 await callback(node_name, (time.perf_counter() - t0) * 1000)
         except Exception as e:
             # 不可恢復錯誤 → 設 fatal_error，走安全 ABSTAIN + 稽核路徑
+            if not isinstance(e, BudgetExhausted):
+                # 節點例外在這裡被吞成 fatal_error/errors —— 兩者都夾帶原始例外文字，Node Shell
+                # 自己不保證它們不外洩；擋在對外邊界的是各 invoke 路徑（flow 的
+                # _public_flow_output、agentic invoke 的 _public_agentic_output，規格 §3.3）。
+                # 而這裡是唯一還拿得到 traceback 的地方，不記就沒有東西對得上 correlation ID。
+                # 預算耗盡是列舉出來的治理結果，不是未預期例外，不記。
+                correlation.log_unexpected(logger, f"node '{node_name}'")
             entry = _build_entry(
                 step,
                 node_name=node_name,

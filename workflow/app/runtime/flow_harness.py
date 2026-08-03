@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
 from contextvars import copy_context
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from app.engine.skill import (
     parse_step,
     resolve_node,
 )
+from app import correlation
 from app.runtime.artifacts import LoadedSkillArtifact
 from app.runtime.bounded_json import bounded_canonical_json
 from app.runtime.models import DirectAgentExecutionSnapshot
@@ -38,6 +40,8 @@ from app.runtime.tool_boundary import (
     effective_knowledge_sources,
     effective_tool_names,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_FLOW_RESULT_CHARS = 16_384
 
@@ -180,11 +184,22 @@ async def invoke_flow_with_governance(
                 governance["error"] = str(output["fatal_error"])
     except TimeoutError:
         status = "timeout"
+    except FlowDenied as denied:
+        # FlowDenied 是列舉出來的治理拒絕（訊息是我們自己寫的固定字串，不含例外文字），
+        # 與 budget_exhausted 同一類：訊息原樣進稽核，且不得被記成「未預期例外」——
+        # 記了會在日誌裡留下一筆對不到任何真實 bug 的 traceback。
+        status = "error"
+        if not preflight_complete:
+            governance["preflight"]["status"] = "error"
+        governance["error"] = str(denied)
     except Exception as exc:
         status = "error"
         if not preflight_complete:
             governance["preflight"]["status"] = "error"
+        # governance["error"] 留給稽核；HTTP 層只會回固定安全訊息，所以原始例外必須在這裡
+        # （唯一還拿得到 traceback 的地方）記一次，否則 correlation ID 對不到任何日誌。
         governance["error"] = str(exc)
+        correlation.log_unexpected(logger, f"flow skill '{skill.name}' execution")
     finally:
         governance["events"].append("workflow_completed")
         governance["finalize"] = {

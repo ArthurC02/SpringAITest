@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -7,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from app import backend_http, skills, tracing
+from app import backend_http, correlation, skills, tracing
 from app.business_rules.catalog import catalog_response as business_rule_catalog
 from app.business_rules.http_limits import BusinessRuleRequestLimitMiddleware
 from app.business_rules.models import (
@@ -63,8 +64,10 @@ from app.runtime.orchestrator_backend import OrchestratorBackendClient
 from app.runtime.orchestrator_supervisor import RootRuntimeSupervisor
 from app.orchestration.api import router as workflow_designer_router
 from app.runtime.service import RuntimeService
-from app.runtime.flow_harness import invoke_flow_with_governance
+from app.runtime.flow_harness import PUBLIC_DENY_KEYS, invoke_flow_with_governance
 from app.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_skill_input(raw: dict) -> dict:
@@ -78,6 +81,30 @@ def _clean_skill_input(raw: dict) -> dict:
     型別不符而 500。引擎內部鍵（__ 前綴）同理一併剝除。
     """
     return clean_invoke_input(raw)
+
+
+# agentic invoke 的對外遮蔽清單：與 flow 的 `_public_flow_output` 共用同一份
+# PUBLIC_DENY_KEYS，只多放行 trace 與（下面會去識別化的）fatal_error 兩個鍵。
+_AGENTIC_DENY_KEYS = PUBLIC_DENY_KEYS - {"trace", "fatal_error"}
+
+
+def _public_agentic_output(state: dict) -> dict:
+    """agentic invoke 對外輸出前的遮蔽（規格 §3.3：不外洩原始例外文字）。
+
+    Node Shell 把節點例外吞成 `fatal_error = f"{node}: {e}"`、`errors[].error = str(e)`，
+    audit_feedback 又把同一份 errors 抄進 `audit_trail`；agentic 是受控失敗（HTTP 200），
+    所以這些原始例外文字（backend 路徑、URL、provider 細節）會隨 200 一起送出去。
+    flow 路徑早就用 PUBLIC_DENY_KEYS 擋掉這整組鍵，agentic 只是沒接上同一份清單 ——
+    這裡接上，不另立第二套標準。
+
+    兩個例外：`trace` 是 agentic 的公開契約，且 TraceEntry 只帶 `error_code`＝例外型別名
+    （無訊息內文），保留；`fatal_error` 保留「這次失敗了」這個訊號、文字換成固定安全訊息，
+    要細節請拿回應標頭的 correlation ID 查日誌。
+    """
+    public = {key: value for key, value in state.items() if key not in _AGENTIC_DENY_KEYS}
+    if public.get("fatal_error"):
+        public["fatal_error"] = correlation.SAFE_EXECUTION_FAILED_MESSAGE
+    return public
 
 
 def _require_role(required_role: str | None, ctx: RequestContext, name: str) -> None:
@@ -165,14 +192,9 @@ async def _run_with_timeout(coro, timeout_seconds: float, name: str):
                 "message": f"skill '{name}' 執行超過 {timeout_seconds} 秒",
             },
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "workflow_execution_failed",
-                "message": str(e),
-            },
-        )
+    except Exception:
+        # 原始例外只進日誌（規格 §3.3）；呼叫端拿到的是固定安全訊息 + correlation ID。
+        raise correlation.execution_failed(logger, f"skill '{name}' invoke")
 
 
 @asynccontextmanager
@@ -222,6 +244,9 @@ app.add_middleware(
     prefix="/evals/",
     flag_name="run_eval_enabled",
 )
+# 最後 add ＝ 站在最外層（Starlette 把 user_middleware 反序堆疊）：correlation ID 因此對
+# 每一個回應都成立，包含被 feature gate / body 上限 middleware 提前擋掉的那些。
+app.add_middleware(correlation.CorrelationIdMiddleware)
 app.include_router(agent_runtime_router)
 app.include_router(orchestrator_runtime_router)
 app.include_router(workflow_designer_router)
@@ -505,11 +530,9 @@ async def invoke_skill(
                 if per_config is not None
                 else await custom.load(name, ctx)
             )
-        except (custom.BackendUnavailable, custom.InvalidCustomSkill) as e:
-            raise HTTPException(
-                status_code=500,
-                detail={"error": "workflow_execution_failed", "message": str(e)},
-            )
+        except (custom.BackendUnavailable, custom.InvalidCustomSkill):
+            # 這些訊息夾帶 backend path/URL 與編譯器例外文字，一律不外流。
+            raise correlation.execution_failed(logger, f"custom skill '{name}' load")
 
     if loaded is None:
         raise HTTPException(
@@ -575,7 +598,8 @@ async def invoke_skill(
                     "message": f"skill '{name}' 執行超過 {timeout_seconds} 秒",
                 },
             )
-        if result.status in {"error", "budget_exhausted"}:
+        if result.status == "budget_exhausted":
+            # 預算耗盡是列舉出來的治理結果（訊息只含 node 名），不是未預期例外，訊息照舊。
             raise HTTPException(
                 status_code=500,
                 detail={
@@ -583,10 +607,15 @@ async def invoke_skill(
                     "message": result.governance.get("error", result.status),
                 },
             )
+        if result.status == "error":
+            # governance["error"] 會夾帶節點／harness 的原始例外文字（稽核要留，HTTP 不能給）。
+            raise HTTPException(status_code=500, detail=correlation.execution_failed_detail())
         output = result.output
     else:
-        output = await _run_with_timeout(
-            graph.ainvoke(state, config=config), timeout_seconds, name
+        output = _public_agentic_output(
+            await _run_with_timeout(
+                graph.ainvoke(state, config=config), timeout_seconds, name
+            )
         )
 
     return SkillInvokeResponse(skill=name, output=compiler.public_output(output))
