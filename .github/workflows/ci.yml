@@ -1,0 +1,143 @@
+name: CI
+
+# 五個 job 都只需要讀 repo,不給 GITHUB_TOKEN 任何寫入權
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # main 上不取消（要保留每個 commit 的紀錄），分支/PR 只跑最新一次
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # backend/AGENTS.md：`dotnet test`（從 backend/），需要 appdb
+  # (預設 DB_CONNECTION_STRING = Host=localhost;Port=5433;...;Database=springaitest)。
+  # PostgresFixture 在 DB 不可達時會 skip 而非 fail，所以 CI 必須真的把 DB 開起來，
+  # 否則整批 PostgreSQL 測試會靜默消失。service container 每次 run 都是全新空 DB。
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      appdb:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: springaitest
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-backend-${{ hashFiles('backend/**/*.csproj', 'backend/Directory.Build.props') }}
+          restore-keys: nuget-backend-
+      # 防呆:PostgresFixture 在 DB 不可達時誠實 skip(綠但沒跑)。這一步讓
+      # 容器壞掉/憑證漂移直接紅,而不是 20+ 個 repository 測試靜默消失。
+      - name: appdb must be reachable
+        run: psql "postgresql://postgres:postgres@localhost:5433/springaitest" -c 'select 1'
+      - run: dotnet test
+        working-directory: backend
+
+  # platform/AGENTS.md：`dotnet test`（從 platform/）。無 DB 依賴（fakes + WebApplicationFactory）。
+  platform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-platform-${{ hashFiles('platform/**/*.csproj', 'platform/Directory.Build.props') }}
+          restore-keys: nuget-platform-
+      - run: dotnet test
+        working-directory: platform
+
+  # workflow/AGENTS.md：uv + `uv run pytest`（從 workflow/），pyproject requires-python >= 3.12。
+  # 註：CHECKPOINT_DATABASE_URL 未設，真 PostgreSQL checkpointer 測試仍會 skip
+  # （見 workflow/AGENTS.md「The default skips hide the only production checkpointer」）。
+  workflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: workflow/uv.lock
+      - run: uv run pytest -q
+        working-directory: workflow
+
+  # frontend/AGENTS.md：npm ci / lint / build / test:unit（package.json 無 engines，用 Node 22 LTS）。
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:unit:logic
+      # = npm run test:unit:ui，但 playwright.unit.config.ts 沒有 retries 設定，
+      # 而 agentBuilder/agentRuns 有已知的全套並行資源競爭 flake。CI 用 CLI flag 補一次重試，
+      # 不動 config 檔（本機仍是零重試，flake 會被看見）。
+      - run: npx playwright test --config playwright.unit.config.ts --retries=1
+
+  compose-and-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git diff --check 需要 PR base commit
+      # infra/.env 不進版控，用 .env.example 當 CI 的 env-file（純語法展開驗證，不啟動服務）。
+      # 三個 ${VAR:?} 必填變數（evidence 檔）在此給假值，缺了會讓整份展開失敗。
+      - name: Compose expansion
+        env:
+          EVIDENCE_HMAC_KEY: ci-not-a-secret
+          EVIDENCE_CHECKPOINT_HMAC_KEY: ci-not-a-secret
+          EVIDENCE_DB_NAME: ci_evidence
+        run: |
+          docker compose --env-file infra/.env.example -f infra/docker-compose.yml config --quiet
+          docker compose --env-file infra/.env.example -f infra/docker-compose.yml -f infra/docker-compose.evidence.yml config --quiet
+      - name: Shell syntax
+        run: git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+      # 根 AGENTS.md：所有 *.sh 必須是 LF，CRLF shebang 會讓 Linux build image 裡的 ./script.sh 報 not found。
+      - name: Shell scripts must be LF
+        run: |
+          if git ls-files --eol -- '*.sh' | grep -q 'crlf'; then
+            echo "CRLF found in shell scripts:"
+            git ls-files --eol -- '*.sh' | grep 'crlf'
+            exit 1
+          fi
+      # 只看 PR 自己的 diff（首次全量匯入不追溯歷史）。排除 *.md：Markdown 行尾兩個空白
+      # 是刻意的硬換行語法，git diff --check 會把它誤報成 trailing whitespace。
+      - name: Diff hygiene
+        if: github.event_name == 'pull_request'
+        run: git diff --check ${{ github.event.pull_request.base.sha }}...HEAD -- . ':(exclude)*.md'
+
+  # TODO(WP1-CI): 契約 snapshot 比對。各服務內以 snapshot test 形式實作
+  # （backend/platform xUnit、workflow pytest），因此會直接落在上面既有的
+  # dotnet test / uv run pytest 步驟裡，不需要獨立 job；若之後改為跨服務比對
+  # 的獨立產物 diff，再在這裡新增一個 job。

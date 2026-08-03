@@ -561,4 +561,3 @@ def validate(definition: Any, ui_metadata: Any = None) -> ValidationResult:
             valid=False,
             errors=[GraphDiagnostic(path="$.definition", code="invalid_json_value", message="Definition and UI metadata must contain finite JSON values.")],
         )
-

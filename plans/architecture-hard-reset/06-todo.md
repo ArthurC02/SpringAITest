@@ -46,7 +46,9 @@
 - [x] P1-IN3 `ensure-mem0-db.ps1` CREATE DATABASE 加 `$LASTEXITCODE` 檢查 — 2026-08-03
 - [x] P1-IN4 docs 同步:`infra/AGENTS.md` gate 敘述與 compose 收斂一致(D5 的 backend gate 疊層敘述改由 P1-PL2 對應的 docs 批次處理)— 2026-08-03
 ### WP1-CI
-- [ ] P1-CI1 GitHub Actions:四服務 build/test + compose config 展開驗證 + shell 語法檢查 + 契約 snapshot(後兩者從零建)
+- [x] P1-CI1 GitHub Actions:四服務 build/test(backend 帶 pgvector service container + psql 可達性防呆,杜絕誠實-skip 假綠)+ compose 展開驗證 + shell 語法/LF + diff hygiene + `permissions: contents: read` — 2026-08-03
+- [ ] P1-CI2 契約 snapshot 測試:各服務內以 snapshot test 形式實作(platform 公開路由、backend 路由、workflow FastAPI 路由對 checked-in 清單比對),落在既有 test 步驟內(自 P1-CI1 拆出)
+- [ ] P1-CI3(選配)compose env 矩陣可執行驗證:`docker compose config --format json` 對 checked-in 清單比對各服務 gate(審查 L2;成本/價值待評)
 ### P1 gate
 - [ ] P1-G 全部既有測試 + 各包新增回歸測試綠;e2e-verifier 跨服務鏈路通過
 

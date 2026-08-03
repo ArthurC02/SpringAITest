@@ -31,6 +31,8 @@ pnpm-debug.log*
 ### 雜項 ###
 .playwright-mcp/
 .lite/
+# Claude Code subagent 隔離 worktree(巢狀 checkout,絕不入版控)
+.claude/worktrees/
 
 # Local release evidence may contain request/trace projections; never commit it.
 artifacts/copilot-shared-core/
