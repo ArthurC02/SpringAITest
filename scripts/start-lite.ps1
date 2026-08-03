@@ -133,6 +133,7 @@ $healthChecks = @(
     @{ url = "http://localhost:8080/actuator/health"; name = "platform" }
 )
 
+$unhealthy = @()
 foreach ($check in $healthChecks) {
     $elapsed = 0
     $ok = $false
@@ -147,8 +148,14 @@ foreach ($check in $healthChecks) {
     if ($ok) {
         Write-Host "✓ $($check.name) healthy"
     } else {
-        Write-Warning "$($check.name) failed health check after 60s（見 $($check.name).log）"
+        Write-Warning "$($check.name) failed health check after 60s（見 .lite/$($check.name).log 與 .lite/$($check.name)-err.log，啟動失敗通常在後者）"
+        $unhealthy += $check.name   # 先收集完所有服務再判定，避免只回報第一個失敗的
     }
+}
+
+if ($unhealthy.Count -gt 0) {
+    Write-Host "✗ Lite 模式啟動失敗：$($unhealthy -join ', ') 未通過健康檢查（程序仍在跑，收攤用 .\scripts\stop-lite.ps1）" -ForegroundColor Red
+    exit 1
 }
 
 # ── 完成輸出 ───────────────────────────────────────────────────────────────
@@ -163,3 +170,4 @@ if (-not $SkipLiteLlm) {
 }
 Write-Host ""
 Write-Host "  停止：.\scripts\stop-lite.ps1"
+exit 0

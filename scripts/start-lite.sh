@@ -107,13 +107,20 @@ check_health() {
     sleep 2
     elapsed=$((elapsed + 2))
   done
-  echo "⚠ $name failed health check after 60s（見 $name.log）" >&2
-  return 0
+  echo "⚠ $name failed health check after 60s（見 .lite/$name.log）" >&2
+  return 1
 }
 
-check_health "http://localhost:8002/health"          "backend"
-check_health "http://localhost:8001/health"          "workflow"
-check_health "http://localhost:8080/actuator/health" "platform"
+# 先收集完所有服務再判定：`|| unhealthy+=()` 同時擋掉 set -e 的中途中斷，也避免只回報第一個失敗的
+unhealthy=()
+check_health "http://localhost:8002/health"          "backend"  || unhealthy+=("backend")
+check_health "http://localhost:8001/health"          "workflow" || unhealthy+=("workflow")
+check_health "http://localhost:8080/actuator/health" "platform" || unhealthy+=("platform")
+
+if [ ${#unhealthy[@]} -gt 0 ]; then
+  echo "✗ Lite 模式啟動失敗：${unhealthy[*]} 未通過健康檢查（程序仍在跑，收攤用 ./scripts/stop-lite.sh）" >&2
+  exit 1
+fi
 
 # ── 完成輸出 ───────────────────────────────────────────────────────────────
 echo ""
@@ -125,3 +132,4 @@ echo "  frontend: http://localhost:5173  (logs: .lite/frontend.log)"
 [ "$SKIP_LITELLM" -eq 0 ] && echo "  litellm:  http://localhost:4000  (logs: .lite/litellm.log)"
 echo ""
 echo "  停止：./scripts/stop-lite.sh"
+exit 0

@@ -41,10 +41,10 @@
 ### WP1-WF(python-implementer)
 - [ ] P1-WF1 新建 correlation ID 機制;3 處 `str(e)` 外洩點改固定安全訊息 + log 落例外(P1-05)
 ### WP1-INFRA
-- [ ] P1-IN1 compose:backend 補 WORKFLOW_DESIGNER/MULTI_AGENT_DISPATCH/AGENT_CHAT/AGENT_WRITE_TOOLS/CONTEXT_ENRICHMENT 五 gate;workflow 補 CONTEXT_ENRICHMENT、AGENT_CHAT(P1-08)
-- [ ] P1-IN2 `start-lite.ps1`/`start-lite.sh` 健康檢查失敗 exit 非零並指名失敗服務(P1-09)
-- [ ] P1-IN3 `ensure-mem0-db.ps1` CREATE DATABASE 加 `$LASTEXITCODE` 檢查
-- [ ] P1-IN4 docs 同步:`infra/AGENTS.md` gate 敘述與 compose 收斂一致
+- [x] P1-IN1 compose:backend 補五 gate(經程式碼實讀逐一確認);workflow 補 CONTEXT_ENRICHMENT_ENABLED。AGENT_CHAT_ENABLED 經實讀確認 workflow 不讀取、刻意不加;workflow 原有的 inert `WORKFLOW_DESIGNER_ENABLED` 宣告一併移除(P1-08)— 2026-08-03
+- [x] P1-IN2 `start-lite.ps1`/`start-lite.sh` 健康檢查失敗收集後 exit 1 並指名失敗服務(P1-09)— 2026-08-03
+- [x] P1-IN3 `ensure-mem0-db.ps1` CREATE DATABASE 加 `$LASTEXITCODE` 檢查 — 2026-08-03
+- [x] P1-IN4 docs 同步:`infra/AGENTS.md` gate 敘述與 compose 收斂一致(D5 的 backend gate 疊層敘述改由 P1-PL2 對應的 docs 批次處理)— 2026-08-03
 ### WP1-CI
 - [ ] P1-CI1 GitHub Actions:四服務 build/test + compose config 展開驗證 + shell 語法檢查 + 契約 snapshot(後兩者從零建)
 ### P1 gate

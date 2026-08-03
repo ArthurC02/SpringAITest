@@ -218,6 +218,13 @@ services:
       RUN_EVIDENCE_ENABLED: ${RUN_EVIDENCE_ENABLED:-false}
       RUN_EVAL_ENABLED: ${RUN_EVAL_ENABLED:-false}
       PROMPT_ARTIFACTS_ENABLED: ${PROMPT_ARTIFACTS_ENABLED:-false}
+      # D4~D7 功能旗標：backend 在 Program.cs 逐一讀取（D5/D6/E1 是階層式的，上層關掉時下層恆為 false）。
+      # 未顯式宣告時容器內完全讀不到，等於預設關；顯式寫出來是為了讓「開哪些旗標」與 platform 對齊可見。
+      WORKFLOW_DESIGNER_ENABLED: ${WORKFLOW_DESIGNER_ENABLED:-false}
+      MULTI_AGENT_DISPATCH_ENABLED: ${MULTI_AGENT_DISPATCH_ENABLED:-false}
+      CONTEXT_ENRICHMENT_ENABLED: ${CONTEXT_ENRICHMENT_ENABLED:-false}
+      AGENT_CHAT_ENABLED: ${AGENT_CHAT_ENABLED:-false}
+      AGENT_WRITE_TOOLS_ENABLED: ${AGENT_WRITE_TOOLS_ENABLED:-false}
 
   # ---------------- LangGraph 工作流服務（Python/FastAPI，只管狀態管理，資料存取走 backend）----------------
   workflow:
@@ -248,13 +255,16 @@ services:
       BACKEND_BASE_URL: http://backend:8080          # 向量檢索改呼叫 backend 的資料檢索服務
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
       AGENT_TEST_RUN_ENABLED: ${AGENT_TEST_RUN_ENABLED:-false}
-      WORKFLOW_DESIGNER_ENABLED: ${WORKFLOW_DESIGNER_ENABLED:-false}
+      # workflow 不讀 WORKFLOW_DESIGNER_ENABLED（settings.py 無此欄位，designer gate 在 platform/backend），刻意不宣告
       MULTI_AGENT_DISPATCH_ENABLED: ${MULTI_AGENT_DISPATCH_ENABLED:-false}
       RUN_EVAL_ENABLED: ${RUN_EVAL_ENABLED:-false}
       ISOLATED_SKILL_SCRIPTS_ENABLED: ${ISOLATED_SKILL_SCRIPTS_ENABLED:-false}
       PROMPT_ARTIFACTS_ENABLED: ${PROMPT_ARTIFACTS_ENABLED:-false}
       PROMPT_ARTIFACTS_SHADOW: ${PROMPT_ARTIFACTS_SHADOW:-false}
       AGENT_WRITE_TOOLS_ENABLED: ${AGENT_WRITE_TOOLS_ENABLED:-false}
+      # workflow 的 settings.py 有 context_enrichment_enabled，但刻意沒有 agent_chat_enabled
+      # （D6 的公開 canary 決策在 platform/backend，workflow 沒有 chat 派送端點），故此處不補該旗標。
+      CONTEXT_ENRICHMENT_ENABLED: ${CONTEXT_ENRICHMENT_ENABLED:-false}
       CHECKPOINT_DATABASE_URL: ${CHECKPOINT_DATABASE_URL:-}
       CHECKPOINT_HMAC_KEY: ${CHECKPOINT_HMAC_KEY:-agent-run-checkpoint-dev-key}
 

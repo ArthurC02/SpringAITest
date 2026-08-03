@@ -29,5 +29,6 @@ if ("$exists".Trim() -eq '1') {
     Write-Host "  ✓ 資料庫 mem0_app 已存在"
 } else {
     docker compose exec -T postgres psql -U postgres -q -c "CREATE DATABASE mem0_app;" *> $null
+    if ($LASTEXITCODE -ne 0) { Write-Error "✗ 建立資料庫 mem0_app 失敗（mem0 會啟動失敗）"; exit 1 }
     Write-Host "  ✓ 已建立資料庫 mem0_app"
 }
