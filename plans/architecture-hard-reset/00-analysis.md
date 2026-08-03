@@ -29,7 +29,7 @@ The repository is still under development. Existing API and development data com
 | Medium | InMemory `CancelAsync` commits a terminal root before the child cascade succeeds. The deadline path (`ExpireLockedAsync`) already matches the PostgreSQL all-or-nothing contract and propagates real caller cancellation correctly; only the caller-initiated cancel path diverges. | Lite behavior diverges from the PostgreSQL transaction model and can hide consistency bugs. | P1 / Backend |
 | Medium | `flow_harness` imports concrete kb-query registration and a private compiler helper. | Runtime and engine modules cannot evolve independently. | P4 / Workflow |
 | Medium | Agent Skill and Business Workflow share `skill` tables, DTOs, repositories, and dispatch. | Every change preserves a discriminator-based dual concept and increases branch count. | P3 / Cross-service |
-| Low | Lite startup reports success even when a service never passes its health check: the timeout path only warns and the script still exits zero. Native-process bootstrap failures (mem0, compose) already fail fast on `$LASTEXITCODE`. | Automation can report a successful partial startup. | P1 / Infra |
+| Low | Lite startup reports success even when a service never passes its health check: the timeout path only warns and the script still exits zero. Postgres readiness wait already fails fast, but `ensure-mem0-db.ps1` CREATE DATABASE step (L31) does not check exit code before reporting success; the `.sh` version is protected by `set -e` fail-fast. | Automation can report a successful partial startup. | P1 / Infra |
 | Low | Workflow tests mutate process-global private registries. | Parallel test execution is unsafe. | P5 / Workflow |
 | Low | Large composition roots, repositories, runtime managers, editors, and a central frontend type file concentrate unrelated reasons to change. | Review and regression scope grows with every feature. | P5 / All areas |
 
@@ -83,3 +83,4 @@ The migration audit stores counts and identifiers only, never row contents, prom
 - [Design](03-design.md)
 - [Acceptance tests](04-acceptance-tests.md)
 - [Deletion and migration ledger](05-deletion-and-migration-ledger.md)
+- [Todo list](06-todo.md)

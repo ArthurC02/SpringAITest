@@ -140,3 +140,4 @@ Both shell variants use the same target list and confirmation phrase, stop on th
 - [Specification](02-spec.md)
 - [Acceptance tests](04-acceptance-tests.md)
 - [Deletion and migration ledger](05-deletion-and-migration-ledger.md)
+- [Todo list](06-todo.md)

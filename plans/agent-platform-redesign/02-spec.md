@@ -1,5 +1,7 @@
 # Agent 平台重整 — 產品與系統規格
 
+> **Superseded retirement policy (2026-08-03):** R6 的共存、流量門檻與 rollback-window 退場策略已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 取代；原文保留為歷史理由。現行程式仍遵守本文件，直到 hard-reset 對應 phase 實作並通過 gate。
+
 > 狀態：**D1–D7 已依此規格交付**；本檔作為 WHAT/邊界的歷史決策記錄，實作偏離處見下方各節備註。承接 [01-plan.md](01-plan.md)，本檔定義 WHAT 與邊界。
 
 ## 1. 名詞

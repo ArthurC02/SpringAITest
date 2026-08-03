@@ -1,5 +1,7 @@
 # Agent 平台重整 — 驗收測試
 
+> **Superseded retirement policy (2026-08-03):** R6 的共存、流量門檻與 rollback-window 退場策略已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 取代；原文保留為歷史理由。現行程式仍遵守本文件，直到 hard-reset 對應 phase 實作並通過 gate。
+
 > 狀態：分期交付中。D1 已覆蓋 A-DATA-01~09、11、14、15 與 A-UI-01~07；
 > A-UI-08 目前只有 audience authoring/storage，published catalog 與 run-time enforcement
 > 分別在 D6/D3 驗收。其餘條目仍是後續里程碑的 release gate。

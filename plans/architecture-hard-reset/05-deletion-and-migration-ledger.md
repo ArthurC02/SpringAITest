@@ -1,6 +1,6 @@
 # Architecture Hard Reset — Deletion and Migration Ledger
 
-> Status: planning inventory. Before implementation, line references must be refreshed against the baseline commit. A row is complete only when its replacement and acceptance evidence exist in the same phase.
+> Status: planning inventory. Before implementation, line references must be refreshed against the baseline commit. A row is complete only when its replacement and acceptance evidence exist in the same phase. Line references refreshed against baseline commit `8652528` (2026-08-03).
 
 ## 1. Database and migration
 
@@ -22,12 +22,12 @@
 | Unknown objects in `public` | Possible operator/custom state | P2 | Do not delete. Compare against the exact SpringAITest-owned object allowlist and abort on extras. |
 | `operations_execution_metric.skill_name`/`.skill_revision` 與 `operations_run_evidence.skill_name`/`.skill_revision` | `DbBootstrap.cs:509,515,531`; `OperationsGovernanceRepository`/`InMemoryOperationsGovernanceRepository` | P3 | Split into typed Agent Skill / Business Workflow identity columns. Row 18 named only the governance repository, not these two tables. |
 | `eval_run.candidate_kind`/`candidate_ref`/`candidate_pins`/`candidate_identity_sha256` | `DbBootstrap.cs:889-890`; `EvalController`/`EvalRepository`/`InMemoryEvalRepository`/`EvalDtos.cs:99-124` | P3 | Replace the `CHECK (candidate_kind IN ('skill','agent'))` discriminator union with an explicit candidate type plus typed ref. Mirrors the Workflow-side item in §3 which had no Backend counterpart. |
-| `skill.simple_form` | `DbBootstrap`; `SkillRepository`/`InMemorySkillRepository`; `BusinessWorkflowController` | P3 | Target schema (02-spec §2.1/2.2) does not define this column. Decide its destination (move into `business_workflow`, into both, or drop) and record it in the spec. |
-| Exact SpringAITest-owned object allowlist | Not written down anywhere in this plan set | P2 | 03-design §1.3 step 2 and row 22 both depend on an allowlist that was never enumerated. See §1.1 below for the 49-table baseline. |
+| `skill.simple_form` | `DbBootstrap`; `SkillRepository`/`InMemorySkillRepository`; `BusinessWorkflowController` | P3 | Target schema (02-spec §2.1/2.2) does not define this column. Decide its destination (move into `business_workflow`, into both, or drop) and record it in the spec. Decision must also cover the `simpleForm` wire DTO fields in `Platform.Service/Dtos/SkillDtos.cs:23,48,62`; dropping the column without removing DTO fields leaves orphan fields. |
+| Exact SpringAITest-owned object allowlist | Not written down anywhere in this plan set | P2 | 03-design §1.3 step 2 and row 22 both depend on an allowlist that was never enumerated. See §1.1 below for the 50-table baseline. |
 
-### 1.1 Object allowlist baseline (49 tables)
+### 1.1 Object allowlist baseline (50 tables)
 
-Enumerated from `DbBootstrap.cs` at the audit commit. This is the input for the `0001` classification logic and the extras-abort comparison; refresh against the baseline commit before implementation.
+Enumerated from `DbBootstrap.cs` at the audit commit. This is the input for the `0001` classification logic and the extras-abort comparison; refresh against the baseline commit before implementation. Note: `skill.simple_form` is an ALTER TABLE post-column added at `DbBootstrap.cs:144`, not present in the CREATE TABLE body, and easily overlooked during allowlist comparison.
 
 `tenants`, `users`, `user_group_membership`, `conversations`, `rag_documents`, `rag_chunks`, `app_config`, `skill`, `skill_revision`, `configuration_set`, `agent`, `agent_revision`, `agent_revision_skill`, `workflow`, `workflow_revision`, `orchestrator`, `orchestrator_revision`, `agent_run`, `agent_run_approval`, `agent_run_approval_decision`, `agent_run_write_effect`, `agent_run_approval_execute`, `agent_run_write_outbox`, `orchestrator_run`, `tenant_runtime_binding`, `operations_regression_result`, `operations_regression_override`, `operations_release_audit`, `operations_execution_metric`, `operations_run_evidence`, `orchestrator_run_event`, `orchestrator_run_command`, `orchestrator_run_child`, `agent_run_skill`, `agent_run_event`, `agent_run_command`, `context_policy`, `source_catalog`, `metric_definition`, `context_revision`, `context_evidence`, `context_view`, `context_request`, `context_delta`, `eval_suite`, `eval_suite_revision`, `eval_run`, `eval_case_result`, `prompt_component_revision`, `prompt_manifest_revision`
 
@@ -46,10 +46,10 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | Child/snapshot mixed `Skill` rows | AgentRun/OrchestratorRun repositories and snapshot builders | P3 | Replace with explicit typed collections and queries. |
 | Mixed Skill pins in InMemory consumers | `InMemoryAgentRepository`, `InMemoryAgentRunRepository`, `InMemoryOrchestratorRunRepository` | P3 | Replace with explicit Agent Skill/Business Workflow models and keep behavior aligned with PostgreSQL. |
 | Oversized repositories | AgentRun, InMemoryAgentRun, OrchestratorRun, governance repositories | P5 | Split query/command/coordinator after P3 schema stabilizes; preserve transaction boundaries. |
-| `SkillHash.cs` | `Skills/SkillHash.cs`; called by Agents, Eval, PromptArtifacts, RAG, and Governance (at least 6 non-Skill modules) | P3 | Move to a shared namespace. It is a generic SHA-256 helper that only happens to live under `Skills/`; deleting it with the Skill surface breaks four unrelated modules. |
-| `SkillNameRules.cs` | `Skills/SkillNameRules.cs`; used by both `SkillController` (deleted) and `BusinessWorkflowController` (kept) | P3 | Move to `BusinessWorkflows/` or a shared location; `ReservedBusinessWorkflowNames` becomes single-domain. |
+| `SkillHash.cs` | `Skills/SkillHash.cs`; called by 24 files across 10 modules (Agents, AgentRuns, Contexts, OrchestratorRuns, Orchestrators, Workflows, PromptArtifacts, Eval (`EvalRepository.cs`), RAG (InMemory), Data/DbBootstrap) | P3 | Move to a shared namespace. It is a generic SHA-256 helper that only happens to live under `Skills/`. |
+| `SkillNameRules.cs` | `Skills/SkillNameRules.cs`; used by `SkillController` (deleted), `BusinessWorkflowController` (kept), and `Data/DbBootstrap.cs:1069` (in `MigrateSkillRowAsync`); if DbBootstrap is deleted in the same tranche, no issue, but namespace moves must be concurrent. | P3 | Move to `BusinessWorkflows/` or a shared location; `ReservedBusinessWorkflowNames` becomes single-domain. |
 | `SkillExporter.cs` | `Skills/SkillExporter.cs`; used by both `SkillController` (deleted) and `BusinessWorkflowController.cs:37` (kept) | P3 | Move to `BusinessWorkflows/`. Agent Skill export uses the stored package, not on-the-fly zip assembly. |
-| `ISkillValidator.cs` (with `SkillMetadata`/`SkillValidationResult`/`SkillValidationError`) | `Skills/ISkillValidator.cs`; implemented by `BusinessWorkflows/WorkflowSkillValidator.cs` | P3 | Move to `BusinessWorkflows/`, rename off the `Skill` vocabulary, and drop `SkillMetadata.Kind`. |
+| `ISkillValidator.cs` (with `SkillMetadata`/`SkillValidationResult`/`SkillValidationError`) | `Skills/ISkillValidator.cs`; implemented by `BusinessWorkflows/WorkflowSkillValidator.cs` | P3 | Move to `BusinessWorkflows/`, rename off the `Skill` vocabulary, and drop `SkillMetadata.Kind`. Conflict: `SkillMetadata` is also used on the retained side by Agent Skill package validation (`Skills/ISkillPackageValidator.cs:12` field `SkillMetadata? Skill` and `WorkflowSkillPackageValidator.cs:63`). "Move to BusinessWorkflows/" will pull Agent Skill validation in the opposite direction — mark as P3 pre-spec decision pending. |
 | `InMemoryOperationsGovernanceRepository` / `InMemoryEvalRepository` Skill-shaped fields | `OperationsGovernance/InMemoryOperationsGovernanceRepository.cs:123-125`, `InMemoryEvalRepository.cs:94,177-178` | P3 | Fold into row 35's InMemory parity replacement; they mirror the two §1 schema rows above. |
 
 ## 3. Workflow
@@ -71,8 +71,9 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | `compiler._build_graph` kind dispatch | `workflow/app/engine/compiler.py:503-505` | P3 | Split into `compile_business_workflow()` / `compile_agent_skill()`; callers dispatch by artifact type instead of passing a kind-tagged `Skill`. |
 | `engine/package.py` top-level parse dispatch | `workflow/app/engine/package.py:962-968` (`_parse_agentic`/`_parse_flow`) | P3 | Already two independent pipelines behind one entry point; split into two public parsers. |
 | `skills/custom.py` `load`/`_entry` kind dispatch | `workflow/app/skills/custom.py:79-189` | P3 | `load_business_workflow`/`load_agent_skill` already exist as clean seams; split into two modules and delete the three-way dispatch. |
-| **Harness kind routing for Skill pins** | `workflow/app/runtime/graph.py:552-559,705-788,1132-1213`; `workflow/app/runtime/models.py:149-172,229,429-437` | P3 | **Largest omission in this ledger.** D3/D5 Harness routes execution on `pin.kind`/`artifact.kind`/`scope.kind` string comparison (`_load_skill`, `_enter_skill_scope`, `_proposed_action`, route_satisfied). 02-spec §2.3 requires distinct `agentSkills`/`businessWorkflows` collections instead of a kind-tagged union, so `PinnedSkillSummary`, `ActiveSkillScope`, and `DirectAgentExecutionSnapshot.skills` must be split. Decide first whether one execution snapshot may pin both artifact types. |
+| **Harness kind routing for Skill pins** | `workflow/app/runtime/graph.py:555-561,705-788,1132-1213`; `workflow/app/runtime/models.py:149-172,229,429-437` | P3 | **Largest omission in this ledger.** D3/D5 Harness routes execution on `pin.kind`/`artifact.kind`/`scope.kind` string comparison (`_load_skill`, `_enter_skill_scope`, `_proposed_action`, route_satisfied). 02-spec §2.3 requires distinct `agentSkills`/`businessWorkflows` collections instead of a kind-tagged union, so `PinnedSkillSummary`, `ActiveSkillScope`, and `DirectAgentExecutionSnapshot.skills` must be split. Decide first whether one execution snapshot may pin both artifact types. |
 | `EvalCandidate.kind: Literal["skill","agent"]` | `workflow/app/evals/models.py:33-43`; `evals/api.py:27-80` | P3 | Orthogonal to `Skill.kind`; ambiguous after the split. Replace with explicit types and delete the runtime kind rejection at `api.py:69-79`. |
+| Workflow exception exposure and correlation tracking | `app/main.py:168-175` (`_run_with_timeout`), `app/main.py:508-512` (invoke custom.load except), `app/evals/api.py:48-52` | P1-05 | Workflow has no correlation ID mechanism; three raw exception external leak points via `str(e)` expose internal paths, URLs, provider details, or data fragments. P1-05 builds the mechanism; these three points replace `str(e)` with fixed safe messages and log the full exception. |
 
 ## 4. Platform and public API
 
@@ -89,11 +90,12 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | Anonymous chat/history contract | Chat controller, DTO, tests | P4 | Require JWT; remove body `userId` and anonymous continuity/history behavior. |
 | Giant composition root | `Platform.Web/Program.cs` | P5 | Split registration by responsibility without moving domain rules into extensions. |
 | Partial public error envelope | Platform `ApiErrorWriter`, controllers, API clients/tests | P1 | Add stable code/correlation ID everywhere and migrate all endpoint contract tests before later phases add domain-specific codes. |
+| `ChatOrchestratorController.cs:23` bare `NotFound()` | `platform/src/Platform.Web/Controllers/ChatOrchestratorController.cs:23` | P1 | Seventh public error exit; returns empty 404 body outside ApiError envelope. P1 error-envelope migration must cover it; otherwise contract tests miss this path. |
 | D6 canary chat runtime cluster | `Platform.Service/AgentChatRuntime.cs`, `Abstractions/IAgentChatRuntime.cs`, `Options/ServiceOptions.cs` (`AgentChatOptions`), `Platform.Web/Controllers/ChatOrchestratorController.cs` | P4 | Row 62 named only the thin `AgentChatRoutingAgent` shell. `AgentChatRuntime` holds the actual `IsCanaryTenant` / `mode == "legacy"` / return-null-to-fall-back logic; `IAgentChatRuntime` must fail with stable error codes instead of returning null. Decide whether `ChatOrchestratorController` is re-gated or deleted. |
-| `ChatAssistant` session store `withIsolation:false` | `Platform.Web/Program.cs:247-287` | P4 | The inline comment documents `false` as deliberate **because anonymous continuity must be preserved**. P4 removes anonymous chat, so the justification expires and this should become `withIsolation:true` (Strict, fail-closed) like AG-UI. |
+| `ChatAssistant` session store `withIsolation:false` | `Platform.Web/Program.cs:247-287` | P4 | The inline comment documents `false` as deliberate **because anonymous continuity must be preserved**. P4 removes anonymous chat, so the justification expires and this should become `withIsolation:true` (Strict, fail-closed) like AG-UI. Note: `Program.cs:254-255` comments name test cases (e.g., `ChatServiceTests.Chat_ShortTermMemory_CarriesPriorExchange`) that assume anonymous continuity; changing to `withIsolation:true` and deleting the anonymous branch must be coordinated with those tests in the same tranche. |
 | `ChatMemoryKeyDerivation` anonymous branch | `Platform.Service/Abstractions/ChatMemoryKeyDerivation.cs` | P4 | Delete the `userCtx is null` branch (`NormalizeUser`/`NormalizeConversation`) once chat requires JWT. |
 | `ChatRequest.TurnId` and `X-Conversation-Id` response header | `Platform.Service/Dtos/ChatDtos.cs`, `Platform.Web/Controllers/ChatController.cs` | P4 | 02-spec §4 requires a mandatory UUID `turnId` and a server-generated conversationId returned as `X-Conversation-Id`. Neither exists today; both are additions, not deletions. |
-| `WORKFLOW_DESIGNER_ENABLED` x `MULTI_AGENT_DISPATCH_ENABLED` coupling | `Platform.Web/Program.cs:67-68` | P1/P4 | Current code makes dispatch require the designer gate; 02-spec §8 explicitly removes `WORKFLOW_DESIGNER_ENABLED` from runtime readiness dependencies. Direct code/spec conflict. |
+| `WORKFLOW_DESIGNER_ENABLED` x `MULTI_AGENT_DISPATCH_ENABLED` coupling | `Platform.Web/Program.cs:67-68` | P1/P4 | Current code makes dispatch require the designer gate; 02-spec §8 explicitly removes `WORKFLOW_DESIGNER_ENABLED` from runtime readiness dependencies. Direct code/spec conflict. Additional: `contextEnrichmentEnabled` flows through `Program.cs:63→67→71` with three-layer dependency on `WORKFLOW_DESIGNER_ENABLED`; when decoupling dispatch, E1/E3 validity conditions and their interconnection must be revisited, and the refactor scope expands to include context enrichment feature completeness. |
 | Shared union `Skill`/`SkillUpsert`/`BusinessWorkflowCreated` DTOs | `Platform.Service/Dtos/SkillDtos.cs` | P3 | One DTO with a `[JsonRequired]` `Kind`, asserted to different subsets by `SkillService.ReadSkillAsync` and `BusinessWorkflowService.EnsureFlowKind`. Split into two record families. |
 | `agentChatEnabled` in `GET /api/features` | `Platform.Web/Program.cs:587`; frontend Features consumers | P4 | Wire-contract shape change when the flag is deleted. |
 
@@ -107,6 +109,7 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | Compatibility Skill/Business Workflow UI branching | SkillHome, AgentSkillHome, BusinessWorkflowHome, run panels | P3/P5 | Delete kind-routing state; retain only genuinely shared visual components. |
 | Chat `userId` and anonymous UUID/localStorage | chat API/hooks/session state | P4 | Delete; JWT identity and server-derived session keys are authoritative. |
 | Legacy chat/canary UI flags | root navigation/runtime flags | P4 | Delete with Platform flags. |
+| `AgentEditor.tsx` similar 409 false-success toast pattern | `frontend/src/components/AgentEditor.tsx` (`onSaveDraft` 534–548 + multiple `runWithToast(toast, onSaveDraft, {success})` calls) | P1 | The original plan listed only Workflow and Orchestrator editors; AgentEditor shares the same `runWithToast` (`Toast.tsx:32-44`) template. The fix belongs in the common `runWithToast`/conflict layer (conflict must not display success toast), not per-component patches. |
 | Stale browser local state | named session/chat/draft keys | P4 | Clear through an explicit storage schema version; do not scan/delete unrelated keys. |
 | Central `types.ts` and oversized editors | frontend feature code | P5 | Move domain types/API/state beside each feature; preserve shared primitives only. |
 | `SkillHome.tsx` builtin-view catalog call | `frontend/src/components/SkillHome.tsx:2,100` (`openBuiltinView`) | P3 | Calls the Agent Skill catalog unconditionally, including for Business Workflow rows. Breaks if `/api/skills/catalog` narrows. |
@@ -121,6 +124,7 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | --- | --- | --- | --- |
 | Missing Backend gate propagation | `infra/docker-compose.yml` | P1 | Add every retained enforcing flag; remove deleted chat flags in P4. |
 | PowerShell native failures ignored | `scripts/ensure-mem0-db.ps1` and callers | P1 | Check exit codes and fail with context. |
+| `ensure-mem0-db.ps1` CREATE DATABASE exit code unchecked | `scripts/ensure-mem0-db.ps1:31-32` | P1 | CREATE DATABASE can fail but the script still prints success and exits 0; the `.sh` version is protected by `set -e` fail-fast. Add `$LASTEXITCODE` check. |
 | Lite health failure returns success | `scripts/start-lite.*` | P1 | Aggregate required health failures and exit nonzero. |
 | Mutable deployment image tags | Compose services | P5 | Pin reviewed deployment images by digest; local mem0 image gets an existence check. |
 | Normal appdb pollution/container drift by evidence scripts | D3/D5/D6 and all other verifier service chains | P2/P5 | Use a generated allowlisted per-run DB actually wired into every evidence service; restore prior container state. D7 is the reference pattern. |
@@ -128,6 +132,7 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | RabbitMQ development jobs | application queues | P2 | Purge named queues after writers stop; do not delete unrelated vhosts/volumes. |
 | Lite local state | repository `.lite` directory | P2 | Resolve and verify the exact repository child path before removal. |
 | Langfuse traces/evidence | Langfuse storage and `artifacts/` | — | Preserve by default; require a separate named option to remove. |
+| Compose profile discovery mismatch | `docker-compose.yml` and `docker-compose.evidence.yml` | P1 | Current `infra/AGENTS.md` gate descriptions (D6/D7 backends/workflows) do not match actual Compose setup: there is a fourth profile layer (`evidence-real` with rabbitmq-evidence/backend-evidence/workflow-evidence services). After P1 composer fixes, docs must sync the gate descriptions to match actual Compose reality. |
 
 ## 7. Tests and documents
 
@@ -139,9 +144,9 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | Skill package migration tests for old rows | P3 | Delete; destructive reset does not rewrite old packages. |
 | InMemory/PostgreSQL behavior divergence tests | P1/P5 | Replace with one shared contract suite, not implementation-specific expectations. |
 | Root/area AGENTS, API contracts, README, Compose comments | Each phase | Update in the same change as behavior; historical plans retain a superseded header. |
-| D3 pin/artifact mixed-kind test fixture source | P3 | `workflow/tests/test_agent_runtime.py` (`snapshot()`/`flow_artifact()` helpers) is imported by `test_agent_runtime_api.py`, `test_agent_runtime_manager.py`, `test_d7_write_evidence.py`, and `test_prompt_manifest_assembler.py`; rewriting the models rewrites all five. |
+| D3 pin/artifact mixed-kind test fixture source | P3 | `workflow/tests/test_agent_runtime.py` (`snapshot()`/`flow_artifact()` helpers) is imported by `test_agent_runtime_api.py`, `test_agent_runtime_manager.py`, `test_d7_write_evidence.py`, `test_prompt_manifest_assembler.py`, and `test_agent_runtime_flow.py` (5 consumers); rewriting the models affects the source and all five consumers (6 files total). |
 | `workflow/tests/test_skills_custom.py` (667 lines) | P3 | Mixed flow/agentic custom-artifact coverage in one file; split into two per-type test files. |
-| Backend PostgreSQL fixture switch | P3 | `PostgresFixture` (`ConfigurationSetRepositoryTests.cs:16-46`) is shared by 37 test files via `[Collection("Postgres")]`, and 5 files call `DbBootstrap.RunAsync` directly at ~26 sites. All must move to the runner in the same tranche. |
+| Backend PostgreSQL fixture switch | P3 | `PostgresFixture` (`ConfigurationSetRepositoryTests.cs:16-46`) is shared by 14 test files via `[Collection("Postgres")]` (SkillRepositoryTests, RunEvidenceEnvelopePostgresApiTests, RagRepositoryTests, PromptArtifactsPostgresTests, OrchestratorRunRepositoryTests, OrchestratorRepositoryTests, OperationsGovernancePostgresApiTests, EvalGovernancePostgresApiTests, ContextRepositoryTests, ConfigurationSetRepositoryTests, ConfigRepositoryTests, AuthRepositoryTests, AgentRunRepositoryTests, AgentRepositoryTests), and 5 files call `DbBootstrap.RunAsync` directly at 32 sites (AgentRepositoryTests×3, ConfigRepositoryTests×4, ConfigurationSetRepositoryTests×2, OrchestratorRepositoryTests×9, SkillRepositoryTests×14) plus production Program.cs 1 site. All must move to the runner in the same tranche. |
 
 ## 8. Items explicitly retained
 
@@ -155,3 +160,12 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 ## 9. Completion query
 
 Before closing P3/P4, run a literal and semantic inventory across production code, tests, scripts, Compose, README/AGENTS/contracts, and generated route/schema snapshots. Historical plan text may retain old names only when its header links here and labels the content historical.
+
+## Related documents
+
+- [Analysis](00-analysis.md)
+- [Delivery plan](01-plan.md)
+- [Target specification](02-spec.md)
+- [Design](03-design.md)
+- [Acceptance tests](04-acceptance-tests.md)
+- [Implementation todo list](06-todo.md)

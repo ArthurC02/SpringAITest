@@ -35,7 +35,7 @@ P3 is one cross-service integration tranche. A branch may contain intermediate c
 - Log unexpected Workflow exceptions with a correlation ID and return a fixed safe error.
 - Give InMemory `CancelAsync` the same all-or-nothing cascade semantics as `ExpireLockedAsync` and PostgreSQL `ExpireDeadlineAsync`: cascade to every child first, commit the root terminal state only when all succeed, leave a non-terminal retryable state otherwise, and propagate caller cancellation rather than recording it as a child failure. The deadline path needs no further change.
 - Forward the complete feature-gate matrix through Compose and correct the D6 documentation.
-- Make `start-lite.ps1` and `start-lite.sh` exit nonzero when any required service fails its health check, instead of warning and continuing. The mem0/compose bootstrap exit-code checks are already in place.
+- Make `start-lite.ps1` and `start-lite.sh` exit nonzero when any required service fails its health check, instead of warning and continuing. Postgres readiness wait is already fail-fast; `ensure-mem0-db.ps1` CREATE DATABASE step (L31) lacks exit-code check and remains to be fixed; the `.sh` version has `set -e` protection.
 - Add a repository CI entry point covering all four applications, Compose expansion, shell syntax, contract snapshots, and diff hygiene.
 
 ## 5. P2 — migration foundation
@@ -86,3 +86,4 @@ The tranche is large — roughly 100 to 150 files across four services plus SQL,
 - [Design](03-design.md)
 - [Acceptance tests](04-acceptance-tests.md)
 - [Deletion and migration ledger](05-deletion-and-migration-ledger.md)
+- [Todo list](06-todo.md)

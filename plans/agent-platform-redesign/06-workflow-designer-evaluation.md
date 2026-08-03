@@ -1,5 +1,7 @@
 # Workflow Designer UI 技術評估
 
+> **Superseded retirement policy (2026-08-03):** R6 的共存、流量門檻與 rollback-window 退場策略已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 取代；原文保留為歷史理由。現行程式仍遵守本文件，直到 hard-reset 對應 phase 實作並通過 gate。
+
 > 決策：v1 選用 `@xyflow/react`（React Flow）作視覺畫布，搭配 ELK.js 自動排版；Backend/appdb 持久化 Graph IR drafts/revisions，Workflow server 是語意驗證、canonicalization、LangGraph 編譯與執行的唯一權威。
 >
 > 產品定位：這是 SYSTEM_ADMIN 使用的 Agent Execution Harness Designer。n8n-like 指操作方式，不代表建立通用商業自動化平台。

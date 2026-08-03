@@ -207,3 +207,12 @@ Omitting these leaves a reset environment with no account that can log in and no
 ## 8. Feature flags retained
 
 Security/operational gates such as Agent Builder, Agent test run, Workflow Designer, multi-agent dispatch, context enrichment, approved write tools, eval, prompt artifacts, and isolated scripts remain fail closed. Compatibility-only chat canary flags are deleted. Chat requires `MULTI_AGENT_DISPATCH_ENABLED` to be effective in Platform, Backend, and Workflow. `WORKFLOW_DESIGNER_ENABLED` remains an administration gate and is explicitly removed from runtime readiness dependencies. Context enrichment is optional but cannot become effective without dispatch; D7 is additionally required only when the pinned runtime grants a write tool. Compose must pass every retained flag to every service that enforces it.
+
+## Related documents
+
+- [Analysis](00-analysis.md)
+- [Delivery plan](01-plan.md)
+- [Design](03-design.md)
+- [Acceptance tests](04-acceptance-tests.md)
+- [Deletion and migration ledger](05-deletion-and-migration-ledger.md)
+- [Implementation todo list](06-todo.md)

@@ -4,7 +4,7 @@ This directory records the evolution of the Skill and Agent platform. Source cod
 
 ## Approved Next Architecture
 
-- [Architecture Hard Reset](architecture-hard-reset/00-analysis.md): approved but not implemented. Keeps the four-service topology while replacing compatibility-era artifact/chat paths, splitting Agent Skill and Business Workflow storage, and introducing a guarded destructive SQL migration plus development-data cleanup. Its [delivery plan](architecture-hard-reset/01-plan.md), [target specification](architecture-hard-reset/02-spec.md), [design](architecture-hard-reset/03-design.md), [acceptance tests](architecture-hard-reset/04-acceptance-tests.md), and [deletion/migration ledger](architecture-hard-reset/05-deletion-and-migration-ledger.md) are one decision set. Current source and tests remain authoritative until each phase lands.
+- [Architecture Hard Reset](architecture-hard-reset/00-analysis.md): approved but not implemented. Keeps the four-service topology while replacing compatibility-era artifact/chat paths, splitting Agent Skill and Business Workflow storage, and introducing a guarded destructive SQL migration plus development-data cleanup. Its [delivery plan](architecture-hard-reset/01-plan.md), [target specification](architecture-hard-reset/02-spec.md), [design](architecture-hard-reset/03-design.md), [acceptance tests](architecture-hard-reset/04-acceptance-tests.md), and [deletion/migration ledger](architecture-hard-reset/05-deletion-and-migration-ledger.md) are one decision set. Implementation progress is tracked in the [todo list](architecture-hard-reset/06-todo.md). Current source and tests remain authoritative until each phase lands.
 
 ## Architecture Research and Improvements
 

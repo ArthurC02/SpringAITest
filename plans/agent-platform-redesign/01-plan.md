@@ -1,5 +1,7 @@
 # Agent 平台重整 — 計畫
 
+> **Superseded retirement policy (2026-08-03):** R6 的共存、流量門檻與 rollback-window 退場策略已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 取代；原文保留為歷史理由。現行程式仍遵守本文件，直到 hard-reset 對應 phase 實作並通過 gate。
+
 > 狀態：D1–D7 code/contracts 已交付；R6 legacy cleanup 尚未完成。D6 real-model release evidence 的兩份記錄互相矛盾，需依 `copilot-shared-core/05-release-evidence-plan.md` 與實際 artifacts reconciliation 後才能 sign-off。
 >
 > 本計畫調整的是產品領域模型與執行責任，不否定既有 Skill Engine 的工程價值。現有 flow Skill、Agent Skill package、聊天與記憶能力先保持相容，再逐步把使用者心智模型改為「建立 Agent、替 Agent 綁定 Skills」。
