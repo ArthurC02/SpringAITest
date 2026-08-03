@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { isConflict } from '../api/http'
 import {
   createOrchestrator, getOrchestrator, listOrchestratorRevisions, listOrchestrators,
   publishOrchestrator, putOrchestratorDraft, restoreOrchestratorRevision, validateOrchestrator,
@@ -11,7 +10,7 @@ import type {
 import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
-import { runWithToast, useToast } from './Toast'
+import { requireLoaded, runWithToast, useToast } from './Toast'
 import RevisionList from './RevisionList'
 import { cancelOrchestratorRun, getOrchestratorRun, getOrchestratorRunEvents, newIdempotencyKey, startOrchestratorRun } from '../api/orchestratorRuns'
 import { getSession } from '../api/auth'
@@ -196,22 +195,61 @@ function WorkerPolicyEditor({ value, disabled = false, onChange }: { value: Orch
   return <div className="agent-runtime-grid"><div className="field"><label>Worker required audience<textarea className="input" disabled={disabled} value={value.requiredAudience.join('\n')} onChange={(e) => onChange({ ...value, requiredAudience: lines(e.target.value) })} /></label></div><div className="field"><label>Worker required capabilities<textarea className="input" disabled={disabled} value={value.requiredCapabilities.join('\n')} onChange={(e) => onChange({ ...value, requiredCapabilities: lines(e.target.value) })} /></label></div><p className="muted">selection=pinned-only</p></div>
 }
 
-/** JSON 欄位:單一 textarea 對應一個非字串欄位;解析失敗靜默忽略(保留最後一次合法值)。 */
-function JsonField<T>({ id, label, value, disabled, onChange }: { id: string; label: string; value: T; disabled?: boolean; onChange: (next: T) => void }) {
-  return <div className="field"><label htmlFor={id}>{label}</label><textarea id={id} className="input" disabled={disabled} defaultValue={JSON.stringify(value, null, 2)} onChange={(e) => { try { onChange(JSON.parse(e.target.value) as T) } catch { /* 解析失敗時忽略，保留最後一次合法值 */ } }} /></div>
+const JSON_FIELD_ERROR = 'JSON 格式錯誤,請修正後才能繼續。'
+type JsonKey = 'context' | 'workerPool' | 'verifier' | 'budgets'
+
+/**
+ * JSON 欄位:受控 textarea(文字由父層持有),解析失敗時顯示欄位錯誤,並由父層停用
+ * create/save/validate/publish——畫面永遠等於使用者輸入,也不會送出上一次的合法值。
+ */
+function JsonField({ id, label, text, error, disabled, onChange }: { id: string; label: string; text: string; error?: string; disabled?: boolean; onChange: (text: string) => void }) {
+  return <div className="field"><label htmlFor={id}>{label}</label>
+    <textarea id={id} className="input" disabled={disabled} value={text} aria-invalid={!!error} aria-describedby={error ? `${id}-error` : undefined} onChange={(e) => onChange(e.target.value)} />
+    <ErrorText msg={error ?? null} id={`${id}-error`} />
+  </div>
+}
+
+/** 載入/重新載入後用最新 draft 重新 seed 顯示文字(取代原本靠 key remount 的刷新)。 */
+function jsonTexts(draft: OrchestratorDraft): Record<JsonKey, string> {
+  return {
+    context: JSON.stringify(draft.context, null, 2),
+    workerPool: JSON.stringify(draft.workerPool, null, 2),
+    verifier: JSON.stringify(draft.verifier, null, 2),
+    budgets: JSON.stringify(draft.budgets, null, 2),
+  }
 }
 
 function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClose: () => void; multiAgentDispatchEnabled: boolean }) {
   const toast = useToast(); const [item, setItem] = useState<Orchestrator | null>(null); const [draft, setDraft] = useState<OrchestratorDraft | null>(null)
   const [etag, setEtag] = useState<string | null>(null); const [blocked, setBlocked] = useState(false); const [errors, setErrors] = useState<string[]>([])
+  const [texts, setTexts] = useState<Partial<Record<JsonKey, string>>>({}); const [jsonErrors, setJsonErrors] = useState<Partial<Record<JsonKey, string>>>({})
   const revisions = useResource(useCallback(() => listOrchestratorRevisions(id), [id]))
-  const load = useCallback(async () => { const result = await getOrchestrator(id); setItem(result.data); setDraft(result.data.draft); setEtag(result.etag); setBlocked(false); setErrors([]) }, [id])
-  useEffect(() => { void load().catch((e) => setErrors([(e as Error).message])) }, [load])
+  // 失敗在 load 本體收斂成可見錯誤：衝突鎖定後「重新載入」是唯一出口，它靜默失敗等於死路。
+  const load = useCallback(async () => {
+    try {
+      const result = await getOrchestrator(id)
+      setItem(result.data); setDraft(result.data.draft); setEtag(result.etag); setBlocked(false); setErrors([]); setTexts(jsonTexts(result.data.draft)); setJsonErrors({})
+    } catch (e) { setErrors([(e as Error).message]) }
+  }, [id])
+  useEffect(() => { void load() }, [load])
   if (!item || !draft) return <><button className="btn" onClick={onClose}>返回清單</button><Skeleton rows={4} /><ErrorText msg={errors[0] ?? null} /></>
+  const jsonInvalid = Object.values(jsonErrors).some(Boolean)
   const disabled = blocked || !etag
+  const onConflict = () => setBlocked(true)
   const update = (patch: Partial<OrchestratorDraft>) => { setDraft({ ...draft, ...patch }); setErrors([]) }
-  async function save() { const current = draft; try { if (etag && current) { await putOrchestratorDraft(id, current, etag); await load() } } catch (e) { if (isConflict(e)) setBlocked(true); else throw e } }
-  async function validate() { if (etag) { const result = await validateOrchestrator(id, etag); setErrors(result.errors.map((x) => x.message)) } }
+  // 文字永遠寫回顯示;只有解析成功才更新 draft(parsedValue),失敗留下欄位錯誤把寫入動作鎖住。
+  const editJson = (key: JsonKey, text: string) => {
+    setTexts((prev) => ({ ...prev, [key]: text }))
+    let parsed: unknown
+    try { parsed = JSON.parse(text) } catch { setJsonErrors((prev) => ({ ...prev, [key]: JSON_FIELD_ERROR })); return }
+    setJsonErrors((prev) => ({ ...prev, [key]: undefined }))
+    update({ [key]: parsed } as Partial<OrchestratorDraft>)
+  }
+  // 衝突不在這裡吞（吞掉 = runWithToast 看不到失敗 → 假成功 toast），一律往外拋，
+  // 由 runWithToast 的 onConflict 統一鎖定編輯器。
+  // 守衛不成立 = UI 狀態與寫入前提脫節（disabled 失守），一律拋錯而非靜默返回。
+  async function save() { await putOrchestratorDraft(id, requireLoaded(draft, '草稿'), requireLoaded(etag, '草稿版本')); await load() }
+  async function validate() { const result = await validateOrchestrator(id, requireLoaded(etag, '草稿版本')); setErrors(result.errors.map((x) => x.message)) }
   return <><div className="view__head"><h2 className="view__title">{item.name}</h2><button className="btn" onClick={onClose}>返回清單</button></div>
     {blocked && <div className="agent-errors" role="alert">草稿已過期，已鎖定所有寫入。<button className="btn" onClick={() => void load()}>重新載入</button></div>}
     <section className="agent-block"><div className="field"><label htmlFor="orchestrator-name">名稱</label><input id="orchestrator-name" className="input" disabled={disabled} value={draft.name} onChange={(e) => update({ name: e.target.value })} /></div><div className="field"><label htmlFor="orchestrator-description">說明</label><input id="orchestrator-description" className="input" disabled={disabled} value={draft.description} onChange={(e) => update({ description: e.target.value })} /></div><div className="field"><label htmlFor="orchestrator-instructions">Root instructions</label><textarea id="orchestrator-instructions" className="input" disabled={disabled} value={draft.instructions} onChange={(e) => update({ instructions: e.target.value })} /></div>
@@ -220,12 +258,12 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
       <div className="agent-runtime-grid"><div className="field"><label htmlFor="orchestrator-workflow-id">Pinned Workflow id</label><input id="orchestrator-workflow-id" className="input" disabled={disabled} value={draft.workflow.id} onChange={(e) => update({ workflow: { ...draft.workflow, id: e.target.value } })} /></div><div className="field"><label htmlFor="orchestrator-workflow-revision">Workflow revision</label><input id="orchestrator-workflow-revision" className="input" type="number" min={1} disabled={disabled} value={draft.workflow.revision} onChange={(e) => update({ workflow: { ...draft.workflow, revision: Number(e.target.value) } })} /></div></div>
       <div className="field"><label htmlFor="orchestrator-audience">Audience（每行一項）</label><textarea id="orchestrator-audience" className="input" disabled={disabled} value={draft.audience.join('\n')} onChange={(e) => update({ audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></div>
       <div className="field"><label htmlFor="orchestrator-capabilities">Capabilities（每行一項）</label><textarea id="orchestrator-capabilities" className="input" disabled={disabled} value={draft.capabilities.join('\n')} onChange={(e) => update({ capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></div>
-      <JsonField id="orchestrator-context" label="Context (JSON)" disabled={disabled} value={draft.context} key={`${item.draft_version}-context`} onChange={(context) => update({ context })} />
-      <JsonField id="orchestrator-worker-pool" label="Worker pool (JSON)" disabled={disabled} value={draft.workerPool} key={`${item.draft_version}-worker`} onChange={(workerPool) => update({ workerPool })} />
+      <JsonField id="orchestrator-context" label="Context (JSON)" disabled={disabled} text={texts.context ?? ''} error={jsonErrors.context} onChange={(text) => editJson('context', text)} />
+      <JsonField id="orchestrator-worker-pool" label="Worker pool (JSON)" disabled={disabled} text={texts.workerPool ?? ''} error={jsonErrors.workerPool} onChange={(text) => editJson('workerPool', text)} />
       <WorkerPolicyEditor value={draft.workerPolicy} disabled={disabled} onChange={(workerPolicy) => update({ workerPolicy })} />
-      <JsonField id="orchestrator-verifier" label="Verifier (JSON)" disabled={disabled} value={draft.verifier} key={`${item.draft_version}-verifier`} onChange={(verifier) => update({ verifier })} />
-      <JsonField id="orchestrator-budgets" label="Budgets (JSON)" disabled={disabled} value={draft.budgets} key={`${item.draft_version}-budget`} onChange={(budgets) => update({ budgets })} />
-    </section><div className="agent-actions"><button className="btn btn--primary" disabled={disabled} onClick={() => void runWithToast(toast, save, { success: '草稿已儲存' })}>儲存</button><button className="btn" disabled={disabled} onClick={() => void runWithToast(toast, validate, { success: '驗證完成' })}>驗證</button><button className="btn btn--info" disabled={disabled || errors.length > 0} onClick={() => void runWithToast(toast, async () => { if (etag) await publishOrchestrator(id, item.draft_version, etag) }, { success: '已發布', onSuccess: () => load() })}>發布</button></div>
+      <JsonField id="orchestrator-verifier" label="Verifier (JSON)" disabled={disabled} text={texts.verifier ?? ''} error={jsonErrors.verifier} onChange={(text) => editJson('verifier', text)} />
+      <JsonField id="orchestrator-budgets" label="Budgets (JSON)" disabled={disabled} text={texts.budgets ?? ''} error={jsonErrors.budgets} onChange={(text) => editJson('budgets', text)} />
+    </section><div className="agent-actions"><button className="btn btn--primary" disabled={disabled || jsonInvalid} onClick={() => void runWithToast(toast, save, { success: '草稿已儲存', onConflict })}>儲存</button><button className="btn" disabled={disabled || jsonInvalid} onClick={() => void runWithToast(toast, validate, { success: '驗證完成', onConflict })}>驗證</button><button className="btn btn--info" disabled={disabled || jsonInvalid || errors.length > 0} onClick={() => void runWithToast(toast, async () => { await publishOrchestrator(id, item.draft_version, requireLoaded(etag, '草稿版本')) }, { success: '已發布', onSuccess: () => load(), onConflict })}>發布</button></div>
     {errors.length > 0 && <ul className="agent-errors">{errors.map((error) => <li key={error}>{error}</li>)}</ul>}
     {multiAgentDispatchEnabled && item.enabled && <TestRunConsole orchestrator={item} />}
     <section className="agent-block"><h4>Revision history</h4><RevisionList loading={revisions.loading} revisions={revisions.data ?? []} successMessage="已建立新 revision" onRestore={(revision) => restoreOrchestratorRevision(id, revision)} onRestored={() => { void load(); void revisions.reload() }} /></section>
@@ -234,7 +272,15 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
 
 export default function OrchestratorsView({ multiAgentDispatchEnabled = false }: { multiAgentDispatchEnabled?: boolean }) {
   const toast = useToast(); const resource = useResource(listOrchestrators); const [editing, setEditing] = useState<string | null>(null); const [create, setCreate] = useState(false); const [draft, setDraft] = useState(emptyDraft)
+  const [workerPoolText, setWorkerPoolText] = useState(() => JSON.stringify(emptyDraft().workerPool, null, 2)); const [workerPoolError, setWorkerPoolError] = useState<string | undefined>(undefined)
   if (editing) return <Editor id={editing} multiAgentDispatchEnabled={multiAgentDispatchEnabled} onClose={() => { setEditing(null); void resource.reload() }} />
-  const refsReady = !!draft.workflow.id && draft.workflow.revision > 0 && !!draft.verifier.agentId && draft.verifier.revision > 0 && draft.workerPool.length > 0
-  return <><div className="skills__bar"><button className="btn btn--info" onClick={() => setCreate(!create)}>＋ 建立</button></div>{create && <section className="agent-block"><div className="field"><label>名稱<input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label></div><div className="field"><label>說明<input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label></div><div className="agent-runtime-grid"><div className="field"><label>Root Workflow id<input className="input" value={draft.workflow.id} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, id: e.target.value } })} /></label></div><div className="field"><label>Workflow revision<input className="input" type="number" min={1} value={draft.workflow.revision} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, revision: Number(e.target.value) } })} /></label></div><div className="field"><label>Verifier Agent id<input className="input" value={draft.verifier.agentId} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, agentId: e.target.value } })} /></label></div><div className="field"><label>Verifier revision<input className="input" type="number" min={1} value={draft.verifier.revision} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, revision: Number(e.target.value) } })} /></label></div></div><JsonField id="orchestrator-create-worker-pool" label="Worker pool (JSON)" value={draft.workerPool} onChange={(workerPool) => setDraft({ ...draft, workerPool })} /><PolicyEditor value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} /><WorkerPolicyEditor value={draft.workerPolicy} onChange={(workerPolicy) => setDraft({ ...draft, workerPolicy })} /><div className="field"><label>Audience（每行一項）<textarea className="input" value={draft.audience.join('\n')} onChange={(e) => setDraft({ ...draft, audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><div className="field"><label>Capabilities（每行一項）<textarea className="input" value={draft.capabilities.join('\n')} onChange={(e) => setDraft({ ...draft, capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><button className="btn btn--primary" disabled={!draft.name.trim() || !refsReady} onClick={() => void runWithToast(toast, async () => { const item = await createOrchestrator(draft); setEditing(item.id) }, { success: '已建立 Orchestrator 草稿' })}>建立</button><p className="muted">建立前需提供 pinned Workflow、至少一個 pinned Worker 與 pinned read-only Verifier；revision 必須明確指定，不使用 latest 或硬編碼。</p></section>}<ErrorText msg={resource.error} />{resource.loading ? <Skeleton rows={3} /> : <div className="table-wrap"><table className="table"><thead><tr><th>名稱</th><th>發布</th><th>操作</th></tr></thead><tbody>{(resource.data ?? []).map((row) => <tr key={row.id}><td>{row.name}<br /><span className="muted">{row.description}</span></td><td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td><td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td></tr>)}</tbody></table></div>}</>
+  const editWorkerPool = (text: string) => {
+    setWorkerPoolText(text)
+    let parsed: unknown
+    try { parsed = JSON.parse(text) } catch { setWorkerPoolError(JSON_FIELD_ERROR); return }
+    setWorkerPoolError(undefined)
+    setDraft({ ...draft, workerPool: parsed as OrchestratorDraft['workerPool'] })
+  }
+  const refsReady =!!draft.workflow.id && draft.workflow.revision > 0 && !!draft.verifier.agentId && draft.verifier.revision > 0 && draft.workerPool.length > 0
+  return <><div className="skills__bar"><button className="btn btn--info" onClick={() => setCreate(!create)}>＋ 建立</button></div>{create && <section className="agent-block"><div className="field"><label>名稱<input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label></div><div className="field"><label>說明<input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label></div><div className="agent-runtime-grid"><div className="field"><label>Root Workflow id<input className="input" value={draft.workflow.id} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, id: e.target.value } })} /></label></div><div className="field"><label>Workflow revision<input className="input" type="number" min={1} value={draft.workflow.revision} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, revision: Number(e.target.value) } })} /></label></div><div className="field"><label>Verifier Agent id<input className="input" value={draft.verifier.agentId} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, agentId: e.target.value } })} /></label></div><div className="field"><label>Verifier revision<input className="input" type="number" min={1} value={draft.verifier.revision} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, revision: Number(e.target.value) } })} /></label></div></div><JsonField id="orchestrator-create-worker-pool" label="Worker pool (JSON)" text={workerPoolText} error={workerPoolError} onChange={editWorkerPool} /><PolicyEditor value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} /><WorkerPolicyEditor value={draft.workerPolicy} onChange={(workerPolicy) => setDraft({ ...draft, workerPolicy })} /><div className="field"><label>Audience（每行一項）<textarea className="input" value={draft.audience.join('\n')} onChange={(e) => setDraft({ ...draft, audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><div className="field"><label>Capabilities（每行一項）<textarea className="input" value={draft.capabilities.join('\n')} onChange={(e) => setDraft({ ...draft, capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><button className="btn btn--primary" disabled={!draft.name.trim() || !refsReady || !!workerPoolError} onClick={() => void runWithToast(toast, async () => { const item = await createOrchestrator(draft); setEditing(item.id) }, { success: '已建立 Orchestrator 草稿' })}>建立</button><p className="muted">建立前需提供 pinned Workflow、至少一個 pinned Worker 與 pinned read-only Verifier；revision 必須明確指定，不使用 latest 或硬編碼。</p></section>}<ErrorText msg={resource.error} />{resource.loading ? <Skeleton rows={3} /> : <div className="table-wrap"><table className="table"><thead><tr><th>名稱</th><th>發布</th><th>操作</th></tr></thead><tbody>{(resource.data ?? []).map((row) => <tr key={row.id}><td>{row.name}<br /><span className="muted">{row.description}</span></td><td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td><td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td></tr>)}</tbody></table></div>}</>
 }

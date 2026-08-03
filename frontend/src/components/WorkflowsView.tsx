@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react'
-import { isConflict } from '../api/http'
 import {
   createWorkflow, getWorkflow, listWorkflowNodeCatalog, listWorkflowRevisions, listWorkflows,
   publishWorkflow, restoreWorkflowRevision, simulateWorkflow, putWorkflowDraft, validateWorkflow,
@@ -12,7 +11,7 @@ import WorkflowDesigner from '../workflowDesigner/WorkflowDesigner'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useResource } from '../hooks/useResource'
-import { runWithToast, useToast } from './Toast'
+import { requireLoaded, runWithToast, useToast } from './Toast'
 import RevisionList from './RevisionList'
 
 function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
@@ -39,15 +38,16 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   useEffect(() => { void load() }, [load])
   const dirty = !!draft && semanticFingerprint(draft.definition) !== savedSemantic
   const writable = !!etag && !blocked && !!draft
+  const onConflict = () => setBlocked(true)
+  // 衝突不在這裡吞（吞掉 = runWithToast 看不到失敗 → 假成功 toast），一律往外拋，
+  // 由 runWithToast 的 onConflict 統一鎖定編輯器。
+  // 守衛不成立 = UI 狀態與寫入前提脫節（disabled 失守），一律拋錯而非靜默返回。
   async function save() {
-    const currentDraft = draft; const currentWorkflow = workflow
-    if (!currentDraft || !etag || !currentWorkflow) return
-    try { await putWorkflowDraft(id, currentWorkflow, currentDraft, etag); await load() }
-    catch (e) { if (isConflict(e)) setBlocked(true); else throw e }
+    await putWorkflowDraft(id, requireLoaded(workflow, 'Workflow'), requireLoaded(draft, '草稿'), requireLoaded(etag, '草稿版本')); await load()
   }
-  async function validate() { if (etag) setValidation(await validateWorkflow(id, etag)) }
-  async function simulate() { if (etag) setSimulation(await simulateWorkflow(id, etag)) }
-  async function publish() { if (workflow && etag) { await publishWorkflow(id, workflow.draft_version, etag); await load() } }
+  async function validate() { setValidation(await validateWorkflow(id, requireLoaded(etag, '草稿版本'))) }
+  async function simulate() { setSimulation(await simulateWorkflow(id, requireLoaded(etag, '草稿版本'))) }
+  async function publish() { await publishWorkflow(id, requireLoaded(workflow, 'Workflow').draft_version, requireLoaded(etag, '草稿版本')); await load() }
   if (!workflow || !draft) return <><button className="btn" onClick={onClose}>返回清單</button><ErrorText msg={error} /><Skeleton rows={4} /></>
   return <>
     <div className="view__head"><h2 className="view__title">{workflow.name}</h2><button className="btn" onClick={onClose}>返回清單</button></div>
@@ -56,10 +56,10 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
     <WorkflowDesigner definition={draft.definition} uiMetadata={draft.ui_metadata} catalog={catalog.data ?? []}
       validation={validation} simulation={simulation} disabled={!writable} onChange={(definition, ui_metadata) => { setDraft({ definition, ui_metadata }); setValidation(null); setSimulation(null) }} />
     <div className="agent-actions">
-      <button className="btn btn--primary" disabled={!writable} onClick={() => void runWithToast(toast, save, { success: '草稿已儲存' })}>儲存草稿</button>
-      <button className="btn" disabled={!writable || dirty} title={dirty ? '請先儲存草稿' : undefined} onClick={() => void runWithToast(toast, validate, { success: '驗證完成' })}>驗證</button>
-      <button className="btn" disabled={!writable || dirty} onClick={() => void runWithToast(toast, simulate, { success: '模擬完成' })}>模擬</button>
-      <button className="btn btn--info" disabled={!writable || dirty || !validation?.valid} onClick={() => void runWithToast(toast, publish, { success: '已發布' })}>發布</button>
+      <button className="btn btn--primary" disabled={!writable} onClick={() => void runWithToast(toast, save, { success: '草稿已儲存', onConflict })}>儲存草稿</button>
+      <button className="btn" disabled={!writable || dirty} title={dirty ? '請先儲存草稿' : undefined} onClick={() => void runWithToast(toast, validate, { success: '驗證完成', onConflict })}>驗證</button>
+      <button className="btn" disabled={!writable || dirty} onClick={() => void runWithToast(toast, simulate, { success: '模擬完成', onConflict })}>模擬</button>
+      <button className="btn btn--info" disabled={!writable || dirty || !validation?.valid} onClick={() => void runWithToast(toast, publish, { success: '已發布', onConflict })}>發布</button>
     </div>
     {validation && <section className="agent-block"><h4>Validation</h4>{validation.valid ? <p className="notice-text">驗證通過。</p> : <ul className="agent-errors">{validation.errors.map((issue, index) => <li key={`${issue.id ?? 'graph'}-${index}`}>{issue.id ? `[${issue.id}] ` : ''}{issue.message}</li>)}</ul>}</section>}
     {simulation?.trace && <section className="agent-block"><h4>Simulation trace（敏感資料已由 server 遮罩）</h4><ul>{simulation.trace.map((entry) => <li key={entry.node_id}>{entry.node_id}: {entry.status}{entry.summary ? ` — ${entry.summary}` : ''}</li>)}</ul></section>}

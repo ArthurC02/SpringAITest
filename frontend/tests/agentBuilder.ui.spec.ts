@@ -215,6 +215,8 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   await page.getByRole('button', { name: '儲存草稿' }).click()
   expect(savedAudience).toEqual(['role:USER', 'role:ADMIN', 'group:finance-reviewers'])
   await expect(page.getByRole('alert')).toContainText('已被其他人更新')
+  // 衝突鎖定的同時絕不能出現成功 toast(共通層 runWithToast 的 conflict 分支保證)。
+  await expect(page.locator('.toast--success')).toHaveCount(0)
   await expect(name).toBeDisabled()
   await expect(page.getByRole('button', { name: '驗證', exact: true })).toBeDisabled()
 
