@@ -17,6 +17,14 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!--
+    P2 遷移測試的 test-only 資產:fixture migration SQL 與 schema fingerprint 腳本。
+    生產 0001-0003 刻意不存在於 src/,所以正常啟動的 binary 的 manifest 是空的(02-spec §6.1)。
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="Migrations\**\*.sql" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\Backend.Api\Backend.Api.csproj" />
   </ItemGroup>

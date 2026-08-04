@@ -59,12 +59,12 @@
 - [x] P1-G 四套件全綠(backend 1243、platform 893、workflow 1643、frontend logic 115/UI 98);e2e-verifier 對 HEAD 原生程序驗證 API 層全 PASS(envelope 6 欄、409+ETag、workflow 安全 500 真實觸發、RBAC、SSE/AG-UI、202→ready、rag-qa);orchestrator ETag 同機制與 SSE error frame 為 covered-by-unit — 2026-08-03
 
 ## P2 — 遷移地基(生產 0001–0003 不出貨)
-- [ ] P2-1 `DbMigrationRunner`:資源探索、checksum、advisory lock、交易(03-design §1.2)
-- [ ] P2-2 測試用 fixture migrations;確認生產 hard-reset SQL 不在註冊 manifest(P2-17)
-- [ ] P2-3 守護式 `migrate-db.*` / `reset-development-data.*`(印出精確 host/db/project、確認 token、拒絕空變數與系統庫)
-- [ ] P2-4 P2-01~P2-16 安全矩陣 against 一次性 PostgreSQL 全綠(含 fingerprint 比對 P2-13、snapshot/restore P2-14)
-- [ ] P2-5 seed 獨立於 schema migration 且可重跑冪等
-- [ ] P2-G P2 gate:安全套件全綠;正常啟動路徑無任何生產 schema 變更可達
+- [x] P2-1 `DbMigrationRunner`:embedded-resource manifest(LF 正規化、SHA-256、建構期拒絕非交易/交易控制語句與環境替換)、`pg_try_advisory_xact_lock` 輪詢(key 823746292,有界 5–300s、取消傳播)、鎖內四態分類、applied-row 驗證、顯式 `BundleThroughVersion` 原子 bundle + 後續一檔一交易、KnownCurrent no-op 前仍驗 postcondition、runner 寫 completion rows — 2026-08-03
+- [x] P2-2 fixture migrations 五組;P2-17 三重證據(Production manifest 空、assembly 零 .sql resource、runner 不在 DI)+ 第四道保險(空 manifest 使既有 ledger 庫被 version-ahead 拒絕)— 2026-08-03
+- [x] P2-3 `migrate-db.*` / `reset-development-data.*` 四支:先印精確目標、字面確認 token(Ordinal)、拒空變數/系統庫、遠端雙重確認、`.lite` 實體路徑圍堵、checkpoint db 名 regex、ALLOW_DESTRUCTIVE_MIGRATION 僅限專用行程 — 2026-08-03
+- [x] P2-4 P2-01~P2-17 矩陣 + 決策表收尾測試全綠(一次性庫零殘留;fingerprint 為 versioned SQL 資產,排序全在 SQL 端 COLLATE "C");LangGraph checkpoint 四表納入 legacy 白名單(決策記於 05-ledger §1.1)— 2026-08-03
+- [x] P2-5 runner 不含任何 seed;`DbBootstrap.SeedAsync` 維持生產 seed 權威且冪等(P3 再搬出為獨立命令)— 2026-08-03
+- [x] P2-G backend 1308/1308(含全部 SkippableFact 真跑)、platform 893/893;code-reviewer 3 中 7 低全數修復;正常啟動路徑無任何生產 schema 變更可達 — 2026-08-03
 
 ## P3 — Schema 與 artifact 硬切換(單一 tranche;先決策後動工)
 ### 前置規格決策(定案回寫 02-spec 後才可動工)

@@ -20,6 +20,14 @@ using Backend.Api.Contexts;
 using Backend.Api.PromptArtifacts;
 using Microsoft.AspNetCore.Mvc;
 
+// 專用 migration 行程:與一般啟動完全分離的分支,在建 host 之前就結束。
+// DbMigrationRunner 只在這裡被呼叫 —— 正常啟動流程(下方 DbBootstrap.RunAsync)永遠不碰它,
+// 也永遠不讀 ALLOW_DESTRUCTIVE_MIGRATION(02-spec §6、§6.1)。
+if (args.Length > 0 && args[0] == Backend.Api.Data.Migrations.MigrationCommand.CommandName)
+{
+    Environment.Exit(await Backend.Api.Data.Migrations.MigrationCommand.RunAsync(args));
+}
+
 var builder = WebApplication.CreateBuilder(args);
 var cfg = builder.Configuration;
 

@@ -33,6 +33,8 @@ Enumerated from `DbBootstrap.cs` at the audit commit. This is the input for the 
 
 Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically, but `rag_documents`, `rag_chunks`, `app_config`, `configuration_set`, `agent`, `agent_revision`, `orchestrator`, `orchestrator_revision`, and `tenant_runtime_binding` hold author-created content rather than run/audit residue. The reset destroys them too; that is intended, but it must be stated rather than implied.
 
+**Decision (2026-08-03, P2 review):** the same `springaitest` database also carries the four LangGraph checkpointer tables `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations` — created by workflow's `AsyncPostgresSaver.setup()` (`workflow/app/runtime/checkpoints.py`) whenever `CHECKPOINT_DATABASE_URL` points at appdb (the default in `.env.example`/evidence). They are part of the legacy allowlist and are dropped by `0001` together with the rest of the execution state (00-analysis §4 already discards checkpoints); without this, any machine that ever enabled D3/D5 classifies as `unknown_database` and blocks the 02-spec §6.1 developer migration path.
+
 ## 2. Backend API and domain
 
 | Item | Current location | Phase | Disposition |
