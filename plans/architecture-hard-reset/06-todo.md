@@ -40,6 +40,7 @@
 - [x] P1-BE1 InMemory `CancelAsync` 對齊 all-or-nothing:cascade 抽共用 helper(`CascadeChildCancelLocked`)與 deadline 路徑共用防止三度 drift;任一 child 失敗 → root 零半提交 + 非 terminal `root_cancel_cascade_incomplete` 事件 + 原例外穿出(同 Dapper 語意);caller cancellation 原樣傳播;全成才 staged commit;2 個權威狀態回歸測試(P1-06, P1-07)— 2026-08-03
 
 ### P1 遺留觀察(不擋 gate,擇機處理)
+- e2e 環境遺留:app 容器仍是 pre-P1 舊 image(daemon 過載致 build EOF ×2,workflow image 有建成);daemon 空閒時重跑 `docker compose build backend platform frontend` + `--profile full up -d --no-build`,並補一次瀏覽器層驗證(login、Workflows/Orchestrators view、CopilotKit sidebar);容器驗新鮮度須比對 image ID,非只看 CreatedAt
 - `WorkflowRepository.UpdateDraftAsync` 對 system-owned workflow:Dapper 回 409、InMemory 回 403 —— 既有 Dapper↔InMemory 漂移,修法是判別查詢多帶 `system_owned` 一欄,但需先定對外契約(403 或 409)
 - `OrchestratorsView`/`WorkflowsView` 未渲染 `revisions.error`(revision 清單載入失敗靜默變空)—— 既有讀路徑缺口,各補一個 `<ErrorText>` 即可
 - designer gate 罩住 `/api/admin/orchestrators/{id}/runs`(關 designer = 關 admin test-run)為規格 §8 刻意行為 —— 待 docs 批次寫入旗標說明
@@ -55,7 +56,7 @@
 - [ ] P1-CI2 契約 snapshot 測試:各服務內以 snapshot test 形式實作(platform 公開路由、backend 路由、workflow FastAPI 路由對 checked-in 清單比對),落在既有 test 步驟內(自 P1-CI1 拆出)
 - [ ] P1-CI3(選配)compose env 矩陣可執行驗證:`docker compose config --format json` 對 checked-in 清單比對各服務 gate(審查 L2;成本/價值待評)
 ### P1 gate
-- [ ] P1-G 全部既有測試 + 各包新增回歸測試綠;e2e-verifier 跨服務鏈路通過
+- [x] P1-G 四套件全綠(backend 1243、platform 893、workflow 1643、frontend logic 115/UI 98);e2e-verifier 對 HEAD 原生程序驗證 API 層全 PASS(envelope 6 欄、409+ETag、workflow 安全 500 真實觸發、RBAC、SSE/AG-UI、202→ready、rag-qa);orchestrator ETag 同機制與 SSE error frame 為 covered-by-unit — 2026-08-03
 
 ## P2 — 遷移地基(生產 0001–0003 不出貨)
 - [ ] P2-1 `DbMigrationRunner`:資源探索、checksum、advisory lock、交易(03-design §1.2)
