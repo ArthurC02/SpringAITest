@@ -66,15 +66,18 @@ business_workflow_revision
   definition_sha256 text
   created_by text
   created_at timestamptz
+
+business_workflow (UI-only fields not in revision hash)
+  simple_form jsonb NULL
 ```
 
-Required invariants mirror Agent Skill revision ownership but contain no package or `kind` column.
+Required invariants mirror Agent Skill revision ownership but contain no package or `kind` column. **Decided 2026-08-03:** `simple_form` is added to the base record to hold UI-only simple-mode form state and does not participate in the revision hash or definition integrity.
 
 ### 2.3 Harness Workflow
 
 Existing `workflow` and `workflow_revision` remain the D4 Graph IR authority for `agent-runtime` and `orchestrator` Harness declarations. They do not reference either artifact table merely to reuse a schema.
 
-Agent bindings reference `agent_skill`; Business Workflow pins and flow-run artifacts reference `business_workflow`. Any snapshot that may contain both uses distinct `agentSkills` and `businessWorkflows` collections rather than a kind-tagged union.
+Agent bindings reference `agent_skill`; Business Workflow pins and flow-run artifacts reference `business_workflow`. **Decided 2026-08-03:** Any execution snapshot may simultaneously pin both artifact kinds using independent, strongly-typed `agentSkills` and `businessWorkflows` collections (not a kind-discriminated union). Workflow-side types `PinnedSkillSummary`, `ActiveSkillScope`, and `DirectAgentExecutionSnapshot.skills` are partitioned into two variants serving their respective collections; routing dispatch is collection-aware and must never rely on `kind` field string comparison.
 
 ## 3. HTTP contracts
 
@@ -89,6 +92,8 @@ Agent bindings reference `agent_skill`; Business Workflow pins and flow-run arti
 /api/chat/history                    authenticated caller history
 /api/copilot/agui                    authenticated AG-UI transport
 ```
+
+**Decided 2026-08-03:** `/api/skills/catalog` lists only Agent Skills (no Business Workflows). New `/api/business-workflows/catalog` lists all Business Workflows including builtin YAML templates and custom flows. Frontend routes all catalog requests by artifact domain and never merges the two catalogs.
 
 `/api/skills/validate` is removed. Business Workflow validation is only `/api/business-workflows/validate`. `/api/skills/{name}/invoke` never accepts or resolves a Business Workflow.
 
@@ -112,7 +117,11 @@ All routes except health require `X-Internal-Token`. Tenant-scoped handlers stil
 /business-workflows/{name}/invoke
 ```
 
-`/agent-skills/validate-package` remains the Workflow-owned package parser/validator used by Backend import and restore. All routes require the internal token and their documented identity context. Validation failures use controlled field errors. Runtime failures never expose raw exception text.
+`/agent-skills/validate-package` remains the Workflow-owned package parser/validator used by Backend import and restore. **Decided 2026-08-03:** `/agent-skills/*` and `/business-workflows/*` routes are distinct catalogs; prior unified `/skills` routes are removed. All routes require the internal token and their documented identity context. Validation failures use controlled field errors. Runtime failures never expose raw exception text.
+
+### 3.4 Metadata model
+
+**Decided 2026-08-03:** `SkillMetadata` as a union with `Kind` is removed. Agent Skill package validation and Business Workflow validation each own independent metadata types with no shared union or `kind` discriminator.
 
 ## 4. Chat and identity
 

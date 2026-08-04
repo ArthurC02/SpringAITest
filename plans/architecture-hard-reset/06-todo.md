@@ -67,11 +67,11 @@
 - [x] P2-G backend 1308/1308(含全部 SkippableFact 真跑)、platform 893/893;code-reviewer 3 中 7 低全數修復;正常啟動路徑無任何生產 schema 變更可達 — 2026-08-03
 
 ## P3 — Schema 與 artifact 硬切換(單一 tranche;先決策後動工)
-### 前置規格決策(定案回寫 02-spec 後才可動工)
-- [ ] P3-D1 `skill.simple_form` 去向(含 `SkillDtos.cs:23,48,62` wire 欄位)
-- [ ] P3-D2 `GET /skills` catalog 拆或不拆(前端三處無條件呼叫點的遷移方案)
-- [ ] P3-D3 一份 execution snapshot 能否同時 pin 兩種 artifact(決定 `PinnedSkillSummary`/`ActiveSkillScope` 拆分形狀)
-- [ ] P3-D4 `SkillMetadata` 歸屬(保留側 `ISkillPackageValidator` 同時使用的衝突)
+### 前置規格決策(已定案回寫 02-spec,見各節「Decided 2026-08-03」)
+- [x] P3-D1 `simple_form` 只留 `business_workflow`(UI-only、不參與 revision hash);Agent Skill 側含 wire DTO 欄位一併刪除 — 2026-08-03
+- [x] P3-D2 catalog 拆兩個:`/api/skills/catalog` Agent-Skill-only、新增 `/api/business-workflows/catalog`(含 12 builtin);前端三處呼叫點按 domain 改打;workflow 統一 `GET /skills` 廢除 — 2026-08-03
+- [x] P3-D3 snapshot 允許同時 pin 兩種 artifact,以 `agentSkills`/`businessWorkflows` 兩個 typed 集合承載;Workflow 側模型兩型兩集合、按集合路由、禁 kind 字串比較 — 2026-08-03
+- [x] P3-D4 `SkillMetadata` union 刪除,Business Workflow 與 Agent Skill package 各自獨立 metadata 型別(02-spec 新增 §3.4)— 2026-08-03
 ### Tranche 分支內順序(每段 commit 必須可編譯)
 - [ ] P3-1 runner + 生產 0001–0003 SQL bundle + lock/checksum(含 P3-00 重放 P2 矩陣)
 - [ ] P3-2 fixture 切換到 runner + 一次性開發者 migrate 步驟(14 個 Postgres 測試檔、32 處 RunAsync 直呼、刪 DbBootstrap)
