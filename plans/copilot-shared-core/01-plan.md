@@ -103,7 +103,7 @@
 2. skill catalog 缺 `output_schema`,前端只能靠 `frontend/src/skills/answerOf.ts` 猜答案鍵。
 3. 慢 skill(`kb_query` 最長阻塞 120 秒)無進度回報;workflow 用 `ainvoke` 非 `astream`。
 4. 前端 `useCopilotChatSuggestions` / 多參補問 / generative UI 渲染 skill 結果。
-5. `JWT_SECRET` 與 `INTERNAL_API_TOKEN` 的公開開發預設值。
+5. 正式環境的 credential provisioning 與 ES256 key rotation（現由 deployment contract 與 startup fail-fast 管理）。
 
 ## 7. 分階
 

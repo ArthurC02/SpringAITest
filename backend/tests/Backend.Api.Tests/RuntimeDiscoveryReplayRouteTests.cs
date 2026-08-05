@@ -226,6 +226,7 @@ public sealed class RuntimeDiscoveryReplayRouteTests : IClassFixture<RuntimeDisc
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
+            TestWebAppFactory.ConfigureCredentials(builder);
             builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", designer);
             builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", dispatch);
             builder.UseSetting("AGENT_CHAT_ENABLED", chat);
@@ -245,6 +246,7 @@ public sealed class RuntimeDiscoveryReplayRouteTests : IClassFixture<RuntimeDisc
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
+            TestWebAppFactory.ConfigureCredentials(builder);
             builder.UseSetting("AGENT_CHAT_ENABLED", "true");
             builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", "true");
             builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", "true");

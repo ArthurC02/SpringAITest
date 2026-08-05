@@ -31,6 +31,7 @@ from app.nodes.kbquery.locators import (
 )
 from app.nodes.kbquery.models import AuditTrail, SourceResult
 from app.skills.deps import KbQueryDeps
+from app.engine.script_policy import configured_script_runner
 
 
 class FixtureStructuredLLM:
@@ -106,4 +107,5 @@ def build_fixture_deps(fixtures: dict[str, Any]) -> KbQueryDeps:
             "structured": StructuredDataLocator(),
         },
         audit_repo=NoopAuditRepository(),
+        script_runner=configured_script_runner(),
     )

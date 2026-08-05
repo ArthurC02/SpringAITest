@@ -6,7 +6,7 @@ using Platform.Service.Exceptions;
 namespace Platform.Service;
 
 /// <summary>
-/// 文件服務:建立走 RabbitMQ 非同步(生成 id、發佈訊息、立即回 processing),
+/// 文件服務:建立先向 backend 配置穩定 id，再走 RabbitMQ 非同步(發佈訊息、立即回 processing),
 /// 讀取/刪除仍代理 backend /api/documents(HTTP)。傳輸層失敗 → WorkflowInvocationException
 /// (List/Delete 前綴「文件服務呼叫失敗：」;發佈前綴「文件佇列服務呼叫失敗：」,對外皆 502)。
 /// backend 的錯誤狀態碼走 <see cref="BackendErrorMapper"/>(與 Skill/ConfigurationSet 一致):
@@ -29,10 +29,27 @@ public sealed class DocumentService : IDocumentService
 
     private Exception WrapTransport(Exception ex) => new WorkflowInvocationException(FailurePrefix + ex.Message, ex);
 
-    public async Task<DocumentAccepted> CreateAsync(DocumentCreateRequest request, UserContext ctx, CancellationToken ct = default)
+    public async Task<DocumentAccepted> CreateAsync(
+        DocumentCreateRequest request,
+        UserContext ctx,
+        string idempotencyKey,
+        CancellationToken ct = default)
     {
-        var documentId = Guid.NewGuid().ToString();
-        var message = new DocumentMessage(documentId, ctx.TenantCode, ctx.UserId, request.Title!, request.Text!);
+        var allocationRequest = _backend.BuildRequest(
+            HttpMethod.Post,
+            "/api/documents/ingest-intents",
+            ctx,
+            request);
+        allocationRequest.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+
+        var allocated = await _backend.SendForJsonAsync<DocumentAccepted>(
+            allocationRequest,
+            WrapTransport,
+            MapErrorAsync,
+            () => new WorkflowInvocationException(FailurePrefix + "backend 回應為空"),
+            ct);
+
+        var message = new DocumentMessage(allocated.Id, ctx.TenantCode, ctx.UserId, request.Title!, request.Text!);
 
         try
         {
@@ -43,7 +60,8 @@ public sealed class DocumentService : IDocumentService
             throw new WorkflowInvocationException(QueueFailurePrefix + ex.Message, ex);
         }
 
-        return new DocumentAccepted(documentId, request.Title!, "processing");
+        // Backend 的 durable state 是 pending_publish；public contract 一律維持 processing。
+        return new DocumentAccepted(allocated.Id, allocated.Title, "processing");
     }
 
     public Task<JsonElement> ListAsync(UserContext ctx, CancellationToken ct = default)

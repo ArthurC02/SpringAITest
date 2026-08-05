@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_development-environment.ps1')
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $infra = Join-Path $repo 'infra'
 $runTag = "d5e2e-$([guid]::NewGuid().ToString('N'))"

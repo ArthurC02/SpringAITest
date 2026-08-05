@@ -1,5 +1,6 @@
 # 共用前置：切到 infra/、檢查 .env、先起 postgres 並備妥 mem0 需要的庫。
 # 由 start-infra.sh / start-full.sh 以 .（dot-source）載入——呼叫端須先定義 SCRIPT_DIR；cd 與 exit 都作用在呼叫端。
+. "$SCRIPT_DIR/_development-environment.sh"
 cd "$SCRIPT_DIR/../infra"
 
 if [ ! -f .env ]; then

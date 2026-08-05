@@ -10,6 +10,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_development-environment.ps1')
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $infra = Join-Path $repo 'infra'
 $run = "d6evidence_$([guid]::NewGuid().ToString('N'))"

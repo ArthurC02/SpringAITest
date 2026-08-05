@@ -71,6 +71,7 @@ export async function parseErrorMessage(res: Response, fallback: string): Promis
  */
 async function request(path: string, options: RequestInit): Promise<Response> {
   const session = getSession()
+  const requestSessionToken = session?.token ?? null
   const headers = new Headers(options.headers)
   // FormData（multipart 上傳，例：agentic package import）不可硬設 Content-Type，
   // 否則會蓋掉瀏覽器自動帶的 multipart boundary。其餘 body 一律補 application/json。
@@ -93,8 +94,12 @@ async function request(path: string, options: RequestInit): Promise<Response> {
     // 401：token 過期 → 全域登出回登入頁。仍沿用後端 message（登入頁的帳密錯誤
     // 也是 401，需顯示真正原因，而非蓋成「session 過期」）。
     if (res.status === 401) {
-      if (session) sessionExpired = true // 有 session 才是「被踢出」，登入失敗不算
-      logoutHandler?.()
+      // Response parsing can outlive the session that sent the request. Never
+      // let an old account's late 401 log out a newer account.
+      if (requestSessionToken && getSession()?.token === requestSessionToken) {
+        sessionExpired = true
+        logoutHandler?.()
+      }
     }
     throw new ApiError(res.status, message, fieldErrors)
   }

@@ -48,6 +48,7 @@ public sealed class WorkflowEngineClientTests
     [Theory]
     [InlineData(404, typeof(WorkflowNotFoundException))]
     [InlineData(403, typeof(WorkflowForbiddenException))]
+    [InlineData(413, typeof(WorkflowPayloadTooLargeException))]
     [InlineData(422, typeof(WorkflowBadInputException))]
     [InlineData(500, typeof(WorkflowInvocationException))]
     [InlineData(504, typeof(WorkflowInvocationException))]
@@ -58,6 +59,21 @@ public sealed class WorkflowEngineClientTests
         var ex = await Assert.ThrowsAnyAsync<Exception>(() => svc.InvokeSkillAsync("s", Input(), Ctx));
 
         Assert.IsType(expected, ex);
+    }
+
+    [Fact]
+    public async Task InvokeSkill_413MapsToPayloadTooLarge_WithoutLeakingWorkflowBody()
+    {
+        var service = Build(new StubHttpMessageHandler(_ => TestHttp.Json(
+            (HttpStatusCode)413,
+            """{"detail":{"error":"request_too_large","message":"internal parser detail","field_errors":{"secret":"must not escape"}}}""")));
+
+        var error = await Assert.ThrowsAsync<WorkflowPayloadTooLargeException>(() =>
+            service.InvokeSkillAsync("quarterly-qa", Input(), Ctx));
+
+        Assert.Equal("Skill request exceeds the allowed size", error.Message);
+        Assert.DoesNotContain("internal parser detail", error.Message);
+        Assert.DoesNotContain("secret", error.Message);
     }
 
     // 422 契約:解析 detail.message + detail.field_errors,填進 WorkflowBadInputException(對外 ApiError.fieldErrors)。

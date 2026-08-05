@@ -298,6 +298,7 @@ export default function AppShell({
               <Suspense fallback={<div className="muted" role="status">Loading…</div>}>
               {view === 'chat' && (
                 <ChatView
+                  session={session}
                   orchestrators={chatOrchestrators}
                   selectedOrchestratorId={selectedOrchestratorId}
                   onSelectOrchestrator={onSelectOrchestrator}

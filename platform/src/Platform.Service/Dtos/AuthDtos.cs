@@ -7,6 +7,7 @@ namespace Platform.Service.Dtos;
 /// 只保留規格指定的中文驗證訊息。</summary>
 public sealed record RegisterRequest(
     [NotBlank(ErrorMessage = "username 不可為空")]
+    [StringLength(AuthIdentityLimits.MaximumLength, ErrorMessage = "username 長度不可超過 128")]
     string? Username,
 
     [NotBlank(ErrorMessage = "password 不可為空")]
@@ -14,6 +15,7 @@ public sealed record RegisterRequest(
     string? Password,
 
     [NotBlank(ErrorMessage = "tenantCode 不可為空")]
+    [StringLength(AuthIdentityLimits.MaximumLength, ErrorMessage = "tenantCode 長度不可超過 128")]
     string? TenantCode,
 
     [NotBlank(ErrorMessage = "inviteCode 不可為空")]
@@ -22,10 +24,16 @@ public sealed record RegisterRequest(
 /// <summary>登入請求。</summary>
 public sealed record LoginRequest(
     [NotBlank(ErrorMessage = "username 不可為空")]
+    [StringLength(AuthIdentityLimits.MaximumLength, ErrorMessage = "username 長度不可超過 128")]
     string? Username,
 
     [NotBlank(ErrorMessage = "password 不可為空")]
     string? Password);
+
+internal static class AuthIdentityLimits
+{
+    public const int MaximumLength = 128;
+}
 
 /// <summary>AuthService 的輸出;也是 register 的 HTTP 回應 body。JSON:{ username, role, tenantCode }。</summary>
 public sealed record AuthResult(string Username, string Role, string TenantCode);

@@ -33,7 +33,9 @@ public sealed class RagRepositoryTests : IAsyncLifetime
         }
 
         await using var conn = await _fx.DataSource!.OpenConnectionAsync();
-        await conn.ExecuteAsync("DELETE FROM rag_documents WHERE tenant_id LIKE 'ragrepo-%'");
+        await conn.ExecuteAsync(
+            "DELETE FROM document_ingest WHERE tenant_id LIKE 'ragrepo-%';"
+            + " DELETE FROM rag_documents WHERE tenant_id LIKE 'ragrepo-%'");
     }
 
     /// <summary>合法的 1536 維單位向量(index 位置為 1,其餘 0)。非退化 → cosine 不會 NaN。</summary>
@@ -49,6 +51,201 @@ public sealed class RagRepositoryTests : IAsyncLifetime
         await using var conn = await _fx.DataSource!.OpenConnectionAsync();
         return await conn.ExecuteScalarAsync<int>(
             "SELECT count(*) FROM rag_chunks WHERE document_id = @docId", new { docId });
+    }
+
+    private NpgsqlDataSource CreateObservedDataSource(string applicationName)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(_fx.ConnectionString)
+        {
+            ApplicationName = applicationName,
+            MaxPoolSize = 1,
+        };
+        return NpgsqlDataSource.Create(builder.ConnectionString);
+    }
+
+    private async Task AssertBlockedOnDatabaseLockAsync(string applicationName, Task operation)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var observer = await _fx.DataSource!.OpenConnectionAsync(timeout.Token);
+        while (true)
+        {
+            Assert.False(operation.IsCompleted, "operation completed before the expected PostgreSQL row lock wait");
+            var blocked = await observer.ExecuteScalarAsync<bool>(new CommandDefinition(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity"
+                + " WHERE datname = current_database() AND application_name = @applicationName"
+                + " AND wait_event_type = 'Lock')",
+                new { applicationName }, cancellationToken: timeout.Token));
+            if (blocked)
+            {
+                return;
+            }
+            await Task.Yield();
+        }
+    }
+
+    [SkippableFact]
+    public async Task AllocateDocumentAsync_CreateReplayConflictAndConcurrentCalls_AreStable()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-ingest-a";
+        const string user = "user-a";
+        var keyHash = DocumentIngestIdentity.HashKey("raw-key-never-persisted");
+        var requestHash = DocumentIngestIdentity.HashRequest("title", "text");
+
+        var allocations = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ =>
+            Repo.AllocateDocumentAsync(tenant, user, keyHash, requestHash, "title", default)));
+
+        Assert.Single(allocations, x => x.Status == DocumentIngestAllocationStatus.Created);
+        Assert.Equal(7, allocations.Count(x => x.Status == DocumentIngestAllocationStatus.Replay));
+        Assert.Single(allocations.Select(x => x.DocumentId).Distinct(StringComparer.Ordinal));
+        Assert.Empty(await Repo.ListDocumentsAsync(tenant, default)); // pending_publish stays private.
+        await using (var conn = await _fx.DataSource!.OpenConnectionAsync())
+        {
+            var persisted = await conn.QuerySingleAsync<string>(
+                "SELECT idempotency_key_sha256 FROM document_ingest WHERE tenant_id = @tenant",
+                new { tenant });
+            Assert.Equal(keyHash, persisted);
+            Assert.DoesNotContain("raw-key-never-persisted", persisted, StringComparison.Ordinal);
+        }
+
+        var conflict = await Repo.AllocateDocumentAsync(
+            tenant,
+            user,
+            keyHash,
+            DocumentIngestIdentity.HashRequest("title", "changed"),
+            "title",
+            default);
+        Assert.Equal(DocumentIngestAllocationStatus.PayloadConflict, conflict.Status);
+        Assert.Equal(allocations[0].DocumentId, conflict.DocumentId);
+    }
+
+    [SkippableFact]
+    public async Task DeleteDocumentAsync_TombstonesAndFencesCompletionFailureAndReplay()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-tombstone-a";
+        const string user = "user-a";
+        var keyHash = DocumentIngestIdentity.HashKey("delete-key");
+        var requestHash = DocumentIngestIdentity.HashRequest("title", "text");
+        var allocated = await Repo.AllocateDocumentAsync(tenant, user, keyHash, requestHash, "title", default);
+        var documentId = allocated.DocumentId;
+        var guid = Guid.Parse(documentId);
+        await Repo.InsertProcessingDocumentAsync(documentId, tenant, "title", default);
+        await Repo.CompleteDocumentAsync(documentId, tenant, new[] { "old" }, new[] { OneHot(0) }, default);
+        Assert.Equal(1, await ChunkCountAsync(guid));
+
+        Assert.True(await Repo.DeleteDocumentAsync(tenant, documentId, default));
+        Assert.False(await Repo.DeleteDocumentAsync(tenant, documentId, default));
+        Assert.Equal(0, await ChunkCountAsync(guid));
+        Assert.Equal("deleted", await Repo.GetDocumentStatusAsync(documentId, tenant, default));
+
+        await Repo.CompleteDocumentAsync(documentId, tenant, new[] { "late" }, new[] { OneHot(0) }, default);
+        await Repo.MarkFailedAsync(documentId, tenant, default);
+        Assert.Equal("deleted", await Repo.GetDocumentStatusAsync(documentId, tenant, default));
+        Assert.Equal(0, await ChunkCountAsync(guid));
+        Assert.Empty(await Repo.ListDocumentsAsync(tenant, default));
+        Assert.Empty(await Repo.SearchAsync(tenant, OneHot(0), 10, default));
+
+        var replay = await Repo.AllocateDocumentAsync(tenant, user, keyHash, requestHash, "title", default);
+        Assert.Equal(DocumentIngestAllocationStatus.DeletedConflict, replay.Status);
+        Assert.Equal(documentId, replay.DocumentId);
+    }
+
+    [SkippableFact]
+    public async Task Completion_BlocksBehindUncommittedDelete_ThenCannotResurrect()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-race-delete-first";
+        var documentId = Guid.NewGuid();
+        await CompleteAsync(
+            tenant, documentId.ToString("D"), "doc", new[] { "old" }, new[] { OneHot(0) });
+
+        await using var holder = await _fx.DataSource!.OpenConnectionAsync();
+        await using var deleteTx = await holder.BeginTransactionAsync();
+        Assert.Equal(1, await holder.ExecuteAsync(
+            "UPDATE rag_documents SET status = 'deleted', chunk_count = 0"
+            + " WHERE id = @documentId AND tenant_id = @tenant",
+            new { documentId, tenant }, deleteTx));
+
+        var applicationName = "ragrepo-complete-wait-" + Guid.NewGuid().ToString("N");
+        await using var observedSource = CreateObservedDataSource(applicationName);
+        var completion = new RagRepository(observedSource).CompleteDocumentAsync(
+            documentId.ToString("D"), tenant, new[] { "late" }, new[] { OneHot(0) }, default);
+        await AssertBlockedOnDatabaseLockAsync(applicationName, completion);
+
+        await holder.ExecuteAsync(
+            "DELETE FROM rag_chunks WHERE document_id = @documentId AND tenant_id = @tenant",
+            new { documentId, tenant }, deleteTx);
+        await deleteTx.CommitAsync();
+        await completion.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("deleted", await Repo.GetDocumentStatusAsync(documentId.ToString("D"), tenant, default));
+        Assert.Equal(0, await ChunkCountAsync(documentId));
+    }
+
+    [SkippableFact]
+    public async Task Delete_BlocksBehindCompletionRowLock_ThenWinsTerminally()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-race-complete-first";
+        var documentId = Guid.NewGuid();
+        await CompleteAsync(
+            tenant, documentId.ToString("D"), "doc", new[] { "completed" }, new[] { OneHot(0) });
+
+        await using var holder = await _fx.DataSource!.OpenConnectionAsync();
+        await using var completionTx = await holder.BeginTransactionAsync();
+        Assert.Equal("ready", await holder.QuerySingleAsync<string>(
+            "SELECT status FROM rag_documents"
+            + " WHERE id = @documentId AND tenant_id = @tenant FOR UPDATE",
+            new { documentId, tenant }, completionTx));
+
+        var applicationName = "ragrepo-delete-wait-" + Guid.NewGuid().ToString("N");
+        await using var observedSource = CreateObservedDataSource(applicationName);
+        var deletion = new RagRepository(observedSource).DeleteDocumentAsync(
+            tenant, documentId.ToString("D"), default);
+        await AssertBlockedOnDatabaseLockAsync(applicationName, deletion);
+
+        await holder.ExecuteAsync(
+            "UPDATE rag_documents SET chunk_count = 1, status = 'ready'"
+            + " WHERE id = @documentId AND tenant_id = @tenant",
+            new { documentId, tenant }, completionTx);
+        await completionTx.CommitAsync();
+        Assert.True(await deletion.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal("deleted", await Repo.GetDocumentStatusAsync(documentId.ToString("D"), tenant, default));
+        Assert.Equal(0, await ChunkCountAsync(documentId));
+    }
+
+    [SkippableFact]
+    public async Task MarkFailed_BlocksBehindUncommittedDelete_ThenNoOps()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-race-failed";
+        var documentId = Guid.NewGuid();
+        Assert.True(await Repo.InsertProcessingDocumentAsync(
+            documentId.ToString("D"), tenant, "doc", default));
+
+        await using var holder = await _fx.DataSource!.OpenConnectionAsync();
+        await using var deleteTx = await holder.BeginTransactionAsync();
+        Assert.Equal(1, await holder.ExecuteAsync(
+            "UPDATE rag_documents SET status = 'deleted', chunk_count = 0"
+            + " WHERE id = @documentId AND tenant_id = @tenant",
+            new { documentId, tenant }, deleteTx));
+
+        var applicationName = "ragrepo-failed-wait-" + Guid.NewGuid().ToString("N");
+        await using var observedSource = CreateObservedDataSource(applicationName);
+        var markFailed = new RagRepository(observedSource).MarkFailedAsync(
+            documentId.ToString("D"), tenant, default);
+        await AssertBlockedOnDatabaseLockAsync(applicationName, markFailed);
+
+        await holder.ExecuteAsync(
+            "DELETE FROM rag_chunks WHERE document_id = @documentId AND tenant_id = @tenant",
+            new { documentId, tenant }, deleteTx);
+        await deleteTx.CommitAsync();
+        await markFailed.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("deleted", await Repo.GetDocumentStatusAsync(documentId.ToString("D"), tenant, default));
+        Assert.Equal(0, await ChunkCountAsync(documentId));
     }
 
     /// <summary>建列(processing)後 complete,對應真實流程(platform 先建列、消費者再 complete)。</summary>

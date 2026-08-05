@@ -1,6 +1,15 @@
 # Optional release-evidence services. Use together with docker-compose.yml:
 # docker compose -f docker-compose.yml -f docker-compose.evidence.yml --profile evidence up -d
 # They publish only on loopback and never replace the normal production profile.
+x-evidence-application-security: &evidence-application-security
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+
 services:
   # These overrides are inert unless the real-evidence wrapper explicitly sets
   # EVIDENCE_REAL_*. RealModel recreates shared mem0, while its database-backed
@@ -40,7 +49,7 @@ services:
   # backend, workflow, and document traffic can never reach disposable state.
   rabbitmq-evidence:
     profiles: ["evidence-real"]
-    image: rabbitmq:4-management
+    image: rabbitmq:4-management@sha256:c86dd1d32c1cbf3ff6547db9e359d7551b5973fe6e158e0edc64a3ed6ac69981
     environment:
       RABBITMQ_DEFAULT_USER: app
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-app-dev-password}
@@ -52,6 +61,7 @@ services:
       retries: 20
 
   backend-evidence:
+    <<: *evidence-application-security
     profiles: ["evidence-real"]
     build:
       context: ../backend
@@ -64,10 +74,14 @@ services:
       litellm:
         condition: service_started
     environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres};Database=${EVIDENCE_DB_NAME:?set a generated evidence database}
       RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq-evidence:5672
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
-      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
+      JWT_ISSUER:
+      JWT_AUDIENCE:
+      JWT_ACTIVE_KID:
+      JWT_PRIVATE_KEY_PEM_BASE64:
       EMBEDDINGS_PROVIDER: ${EVIDENCE_BACKEND_EMBEDDINGS_PROVIDER:-openai}
       EMBEDDING_MODEL: ${EVIDENCE_REAL_EMBEDDING_MODEL:-text-embedding-3-small}
       LLM_BASE_URL: http://litellm:4000
@@ -76,16 +90,18 @@ services:
       WORKFLOW_DESIGNER_ENABLED: "true"
       MULTI_AGENT_DISPATCH_ENABLED: "true"
       AGENT_CHAT_ENABLED: "true"
+    user: app
     networks:
       - default
       - evidence_internal
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && read -r _ code _ <&3 && [ \"$$code\" = 200 ]"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
 
   workflow-evidence:
+    <<: *evidence-application-security
     profiles: ["evidence-real"]
     build:
       context: ../workflow
@@ -96,6 +112,7 @@ services:
       litellm:
         condition: service_started
     environment:
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-Production}
       LLM_BASE_URL: ${EVIDENCE_WORKFLOW_LLM_BASE_URL:-http://litellm:4000/v1}
       LLM_API_KEY: ${EVIDENCE_WORKFLOW_LLM_API_KEY:-sk-1234}
       LLM_MODEL: ${EVIDENCE_REAL_WORKFLOW_MODEL:-evidence-gpt-4o-mini-2024-07-18}
@@ -107,16 +124,18 @@ services:
       MULTI_AGENT_DISPATCH_ENABLED: "true"
       CHECKPOINT_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@appdb:5432/${EVIDENCE_DB_NAME:?set a generated evidence database}
       CHECKPOINT_HMAC_KEY: ${EVIDENCE_CHECKPOINT_HMAC_KEY:?set a per-run checkpoint HMAC key}
+    user: appuser
     networks:
       - default
       - evidence_internal
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
-      interval: 3s
-      timeout: 5s
-      retries: 20
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=1)"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
 
   evidence-model:
+    <<: *evidence-application-security
     profiles: ["evidence"]
     build:
       context: ./evidence
@@ -126,6 +145,7 @@ services:
     environment:
       EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:?set a per-run HMAC key via the evidence wrapper}
       EVIDENCE_FRAME_DELAY_SECONDS: ${EVIDENCE_FRAME_DELAY_SECONDS:-0.5}
+    user: evidence
     networks: [evidence_internal]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
@@ -134,6 +154,7 @@ services:
       retries: 10
 
   workflow-capture-proxy:
+    <<: *evidence-application-security
     profiles: ["evidence"]
     build:
       context: ./evidence
@@ -143,6 +164,7 @@ services:
     environment:
       EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:?set a per-run HMAC key via the evidence wrapper}
       WORKFLOW_UPSTREAM_URL: ${EVIDENCE_WORKFLOW_UPSTREAM_URL:-http://workflow:8000}
+    user: evidence
     networks:
       - default
       - evidence_internal
@@ -155,6 +177,7 @@ services:
   # A separate gateway instance keeps deterministic evidence traffic out of the
   # normal platform service. Evidence runners use http://127.0.0.1:8180.
   platform-evidence:
+    <<: *evidence-application-security
     profiles: ["evidence"]
     build:
       context: ../platform
@@ -166,10 +189,16 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8180:8080"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /actuator/health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && read -r _ code _ <&3 && [ \"$$code\" = 200 ]"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
     networks:
       - default
       - evidence_internal
     environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       # Deterministic is the default.  RealModel switches only this isolated
       # gateway to LiteLLM; it never alters the normal platform service.
       LLM_BASE_URL: ${EVIDENCE_PLATFORM_LLM_BASE_URL:-http://evidence-model:8080}
@@ -181,7 +210,9 @@ services:
       BACKEND_BASE_URL: ${EVIDENCE_PLATFORM_BACKEND_BASE_URL:-http://backend:8080}
       RABBITMQ_URL: ${EVIDENCE_PLATFORM_RABBITMQ_URL:-amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
-      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
+      JWT_ISSUER:
+      JWT_AUDIENCE:
+      JWT_PUBLIC_KEY_RING_JSON:
       AGENT_TEST_RUN_ENABLED: ${EVIDENCE_AGENT_TEST_RUN_ENABLED:-true}
       # RealModel D6 evidence enables these only for the isolated gateway and
       # generated tenant. Defaults stay fail-closed for deterministic evidence.
@@ -191,28 +222,37 @@ services:
       AGENT_CHAT_ENABLED: ${EVIDENCE_AGENT_CHAT_ENABLED:-${AGENT_CHAT_ENABLED:-false}}
       AGENT_CHAT_TENANT_ALLOWLIST: ${EVIDENCE_AGENT_CHAT_TENANT_ALLOWLIST:-${AGENT_CHAT_TENANT_ALLOWLIST:-}}
       TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-10.253.254.0/28}
+    user: app
 
   # Curl targets this proxy directly. It retains production SSE nginx settings
   # while routing to the isolated platform-evidence service.
   evidence-nginx:
+    <<: *evidence-application-security
     profiles: ["evidence"]
-    image: nginx:1.27-alpine
+    image: nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
     depends_on:
       platform-evidence:
         condition: service_started
       evidence-model:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8181:80"
+      - "127.0.0.1:8181:8080"
     volumes:
       - ./evidence/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - default
       - evidence_internal
+    user: "101"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/features"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   # Same compiled SPA as full mode, but its same-origin nginx routes to the
   # isolated evidence platform. Browser evidence uses http://127.0.0.1:5180.
   frontend-evidence:
+    <<: *evidence-application-security
     profiles: ["evidence"]
     build:
       context: ../frontend
@@ -221,9 +261,15 @@ services:
       platform-evidence:
         condition: service_started
     ports:
-      - "127.0.0.1:5180:80"
+      - "127.0.0.1:5180:8080"
     volumes:
       - ./evidence/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    user: "101"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
 networks:
   evidence_internal:

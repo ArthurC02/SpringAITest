@@ -10,6 +10,7 @@ param(
     [string]$BaseUrl = 'http://localhost:8080',
     [string]$ProxyBaseUrl = 'http://localhost:5173',
     [switch]$Rebuild,
+    [switch]$CiComposeSubset,
     [switch]$IncludeMem0Outage,
     [string]$EvidenceDir = ''
 )
@@ -20,6 +21,9 @@ $infraDir = Join-Path $repoRoot 'infra'
 $script:passed = 0
 $script:failed = 0
 $evidenceRun = $null
+if ($CiComposeSubset -and -not $Rebuild) {
+    throw '-CiComposeSubset requires -Rebuild'
+}
 if ($EvidenceDir) {
     Import-Module (Join-Path $PSScriptRoot 'EvidenceHarness.psm1') -Force
     $evidenceRun = New-EvidenceRun -RepoRoot $repoRoot -EvidenceDir $EvidenceDir -Lane BlackBoxSmoke -Gates @('black-box-smoke')
@@ -102,8 +106,25 @@ if ($Rebuild) {
     $oldChatModel = $env:CHAT_MODEL
     try {
         $env:CHAT_MODEL = 'mock-gpt'
-        & (Join-Path $PSScriptRoot 'start-full.ps1')
-        if ($LASTEXITCODE -ne 0) { throw "start-full failed with exit code $LASTEXITCODE" }
+        if ($CiComposeSubset) {
+            Push-Location $infraDir
+            try {
+                & docker compose --env-file .env.example build backend workflow platform frontend
+                if ($LASTEXITCODE -ne 0) { throw "compose build failed with exit code $LASTEXITCODE" }
+                # The deterministic CI lane starts only the services exercised by this smoke.
+                # Compose still brings their declared dependencies, but it does not pull the
+                # optional prebuilt mem0 image or run a real-model lane.
+                & docker compose --env-file .env.example --profile full up -d --no-build backend workflow platform frontend
+                if ($LASTEXITCODE -ne 0) { throw "compose up failed with exit code $LASTEXITCODE" }
+            }
+            finally {
+                Pop-Location
+            }
+        }
+        else {
+            & (Join-Path $PSScriptRoot 'start-full.ps1')
+            if ($LASTEXITCODE -ne 0) { throw "start-full failed with exit code $LASTEXITCODE" }
+        }
     }
     finally {
         $env:CHAT_MODEL = $oldChatModel
@@ -126,10 +147,48 @@ Assert-True ($null -ne $health -and $health.StatusCode -eq 200) "platform did no
 
 $tokenA = Login 'user-a'
 $tokenB = Login 'user-b'
+$tokenAdmin = Login 'admin-a'
 $marker = "shared-core-$([guid]::NewGuid().ToString('N'))"
 $threadId = "shared-core-$([guid]::NewGuid().ToString('N'))"
 
-Invoke-Case 'C-01 chat SSE + appdb history' {
+Invoke-Case 'C-00 default-disabled Agent Builder returns 404 before auth' {
+    $anonymous = Invoke-JsonRequest GET "$BaseUrl/api/agents"
+    Assert-True ($anonymous.StatusCode -eq 404) "anonymous /api/agents returned $($anonymous.StatusCode), expected fail-closed 404"
+    $error = $anonymous.Content | ConvertFrom-Json
+    Assert-True ($error.status -eq 404 -and -not [string]::IsNullOrWhiteSpace($error.code)) 'anonymous 404 is not ApiError-shaped'
+
+    # admin-a is the seeded ADMIN identity with workflow.manage. It must still
+    # see 404 while AGENT_BUILDER_ENABLED is at its default false value.
+    $admin = Invoke-JsonRequest GET "$BaseUrl/api/agents" $null $tokenAdmin
+    Assert-True ($admin.StatusCode -eq 404) "authorized admin /api/agents returned $($admin.StatusCode), expected fail-closed 404"
+}
+
+Invoke-Case 'C-01A authenticated blocking chat + appdb history' {
+    $historyBefore = @(((Invoke-JsonRequest GET "$BaseUrl/api/chat/history" $null $tokenA).Content | ConvertFrom-Json)).Count
+    $chat = Invoke-JsonRequest POST "$BaseUrl/api/chat" @{
+        message = "blocking-$marker"
+        conversationId = "$threadId-blocking"
+    } $tokenA
+    Assert-True ($chat.StatusCode -eq 200) "blocking chat returned $($chat.StatusCode)"
+
+    $body = $chat.Content | ConvertFrom-Json
+    $responseId = 0L
+    Assert-True ([long]::TryParse([string]$body.id, [ref]$responseId) -and $responseId -gt 0) 'blocking chat response id is missing or invalid'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($body.reply)) 'blocking chat response reply is empty'
+    $createdAt = [DateTimeOffset]::MinValue
+    Assert-True ([DateTimeOffset]::TryParse([string]$body.createdAt, [ref]$createdAt)) 'blocking chat response createdAt is invalid'
+    $createdAge = [DateTimeOffset]::UtcNow - $createdAt.ToUniversalTime()
+    Assert-True ($createdAge.TotalMinutes -ge -1 -and $createdAge.TotalMinutes -le 10) 'blocking chat response createdAt is outside the expected time window'
+
+    $history = Invoke-JsonRequest GET "$BaseUrl/api/chat/history" $null $tokenA
+    Assert-True ($history.StatusCode -eq 200) "history returned $($history.StatusCode) after blocking chat"
+    $historyItems = @(($history.Content | ConvertFrom-Json))
+    Assert-True ($historyItems.Count -gt $historyBefore) 'chat history count did not increase after the blocking turn'
+    $persisted = $historyItems | Where-Object id -eq $responseId | Select-Object -First 1
+    Assert-True ($null -ne $persisted -and $persisted.reply -eq $body.reply) 'blocking chat response was not persisted with the same id and reply'
+}
+
+Invoke-Case 'C-01B chat SSE + appdb history' {
     $historyBefore = @(((Invoke-JsonRequest GET "$BaseUrl/api/chat/history" $null $tokenA).Content | ConvertFrom-Json)).Count
     $stream = Invoke-JsonRequest POST "$BaseUrl/api/chat/stream" @{
         message = $marker

@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_development-environment.ps1') -IgnoreDotEnv
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $runDir   = Join-Path $repoRoot '.lite'   # 執行期產物（log / pid）集中處，已 gitignore
@@ -83,7 +84,7 @@ $jobs += Start-Process -FilePath "dotnet" -ArgumentList `
         "DB_PROVIDER"            = "inmemory"
         "EMBEDDINGS_PROVIDER"    = "fake"
         "ASPNETCORE_URLS"        = "http://localhost:8002"
-        "ASPNETCORE_ENVIRONMENT" = "Development"
+        "ASPNETCORE_ENVIRONMENT" = $env:ASPNETCORE_ENVIRONMENT
     } `
     -RedirectStandardOutput (LogPath 'backend.log') `
     -RedirectStandardError  (LogPath 'backend-err.log')
@@ -94,6 +95,7 @@ $jobs += Start-Process -FilePath "uv" -ArgumentList `
     "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8001" `
     -WorkingDirectory (Join-Path $repoRoot 'workflow') -PassThru `
     -Environment @{
+        "APP_ENVIRONMENT"   = $env:APP_ENVIRONMENT
         "BACKEND_BASE_URL"  = "http://localhost:8002"
         "LLM_BASE_URL"      = "http://localhost:4000"
         "LLM_MODEL"         = "mock-gpt"
@@ -112,7 +114,7 @@ $jobs += Start-Process -FilePath "dotnet" -ArgumentList `
         "OTEL_MODE"              = "console"
         "CHAT_MODEL"             = "mock-gpt"
         "ASPNETCORE_URLS"        = "http://localhost:8080"
-        "ASPNETCORE_ENVIRONMENT" = "Development"
+        "ASPNETCORE_ENVIRONMENT" = $env:ASPNETCORE_ENVIRONMENT
     } `
     -RedirectStandardOutput (LogPath 'platform.log') `
     -RedirectStandardError  (LogPath 'platform-err.log')

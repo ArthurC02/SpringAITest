@@ -18,6 +18,58 @@ public sealed class RagRepository : IRagRepository
 
     public RagRepository(NpgsqlDataSource dataSource) => _dataSource = dataSource;
 
+    public async Task<DocumentIngestAllocation> AllocateDocumentAsync(
+        string tenantId,
+        string userId,
+        string idempotencyKeyHash,
+        string requestHash,
+        string title,
+        CancellationToken ct)
+    {
+        var documentId = Guid.NewGuid();
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO rag_documents (id, tenant_id, title, chunk_count, status)"
+            + " VALUES (@documentId, @tenantId, @title, 0, 'pending_publish')",
+            new { documentId, tenantId, title }, tx, cancellationToken: ct));
+
+        var inserted = await conn.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "INSERT INTO document_ingest"
+            + " (document_id, tenant_id, user_id, idempotency_key_sha256, request_sha256)"
+            + " VALUES (@documentId, @tenantId, @userId, @idempotencyKeyHash, @requestHash)"
+            + " ON CONFLICT (tenant_id, user_id, idempotency_key_sha256) DO NOTHING"
+            + " RETURNING document_id",
+            new { documentId, tenantId, userId, idempotencyKeyHash, requestHash }, tx, cancellationToken: ct));
+        if (inserted is not null)
+        {
+            await tx.CommitAsync(ct);
+            return new(DocumentIngestAllocationStatus.Created, documentId.ToString("D"), title);
+        }
+
+        // A concurrent winner owns the unique key. Remove this transaction's unreferenced pending
+        // row, then compare only persisted hashes/status; the raw Idempotency-Key never reaches SQL.
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM rag_documents WHERE id = @documentId",
+            new { documentId }, tx, cancellationToken: ct));
+        var prior = await conn.QuerySingleAsync<IngestRow>(new CommandDefinition(
+            "SELECT i.document_id AS DocumentId, i.request_sha256 AS RequestHash,"
+            + " d.title AS Title, d.status AS DocumentStatus"
+            + " FROM document_ingest i JOIN rag_documents d ON d.id = i.document_id"
+            + " WHERE i.tenant_id = @tenantId AND i.user_id = @userId"
+            + " AND i.idempotency_key_sha256 = @idempotencyKeyHash",
+            new { tenantId, userId, idempotencyKeyHash }, tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
+
+        var status = prior.DocumentStatus == "deleted"
+            ? DocumentIngestAllocationStatus.DeletedConflict
+            : string.Equals(prior.RequestHash, requestHash, StringComparison.Ordinal)
+                ? DocumentIngestAllocationStatus.Replay
+                : DocumentIngestAllocationStatus.PayloadConflict;
+        return new(status, prior.DocumentId.ToString("D"), prior.Title);
+    }
+
     public async Task<string?> GetDocumentStatusAsync(string documentId, string tenantId, CancellationToken ct)
     {
         var docId = Guid.Parse(documentId);
@@ -27,15 +79,26 @@ public sealed class RagRepository : IRagRepository
             new { docId, tenantId }, cancellationToken: ct));
     }
 
-    public async Task InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct)
+    public async Task<bool> InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct)
     {
         var docId = Guid.Parse(documentId);
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(
+        var inserted = await conn.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
             "INSERT INTO rag_documents (id, tenant_id, title, chunk_count, status)"
             + " VALUES (@docId, @tenantId, @title, 0, 'processing')"
-            + " ON CONFLICT (id) DO NOTHING",
+            + " ON CONFLICT (id) DO NOTHING RETURNING id",
             new { docId, tenantId, title }, cancellationToken: ct));
+        if (inserted is not null)
+        {
+            return true;
+        }
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE rag_documents SET status = 'processing'"
+            + " WHERE id = @docId AND tenant_id = @tenantId"
+            + " AND status IN ('pending_publish', 'processing', 'failed')",
+            new { docId, tenantId }, cancellationToken: ct));
+        return false;
     }
 
     public async Task CompleteDocumentAsync(
@@ -44,6 +107,16 @@ public sealed class RagRepository : IRagRepository
         var docId = Guid.Parse(documentId);
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
+
+        var status = await conn.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            "SELECT status FROM rag_documents"
+            + " WHERE id = @docId AND tenant_id = @tenantId FOR UPDATE",
+            new { docId, tenantId }, tx, cancellationToken: ct));
+        if (status is null || status == "deleted")
+        {
+            await tx.CommitAsync(ct);
+            return;
+        }
 
         // 重跑冪等:先清掉上一次(可能部分)寫入的切塊,避免重複投遞造成 chunk 累積。
         await conn.ExecuteAsync(new CommandDefinition(
@@ -91,7 +164,9 @@ public sealed class RagRepository : IRagRepository
         var docId = Guid.Parse(documentId);
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
-            "UPDATE rag_documents SET status = 'failed' WHERE id = @docId AND tenant_id = @tenantId",
+            "UPDATE rag_documents SET status = 'failed'"
+            + " WHERE id = @docId AND tenant_id = @tenantId"
+            + " AND status IN ('pending_publish', 'processing', 'failed')",
             new { docId, tenantId }, cancellationToken: ct));
     }
 
@@ -100,7 +175,8 @@ public sealed class RagRepository : IRagRepository
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<DocumentInfo>(new CommandDefinition(
             "SELECT id::text AS Id, title AS Title, chunk_count AS ChunkCount, created_at AS CreatedAt, status AS Status"
-            + " FROM rag_documents WHERE tenant_id = @tenantId ORDER BY created_at",
+            + " FROM rag_documents WHERE tenant_id = @tenantId"
+            + " AND status NOT IN ('pending_publish', 'deleted') ORDER BY created_at",
             new { tenantId }, cancellationToken: ct));
         return rows.AsList();
     }
@@ -113,10 +189,22 @@ public sealed class RagRepository : IRagRepository
         }
 
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
-        var rows = await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM rag_documents WHERE id = @id AND tenant_id = @tenantId",
-            new { id, tenantId }, cancellationToken: ct));
-        return rows > 0;
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var changed = await conn.ExecuteAsync(new CommandDefinition(
+            "UPDATE rag_documents SET status = 'deleted', chunk_count = 0"
+            + " WHERE id = @id AND tenant_id = @tenantId AND status <> 'deleted'",
+            new { id, tenantId }, tx, cancellationToken: ct));
+        if (changed == 0)
+        {
+            await tx.CommitAsync(ct);
+            return false;
+        }
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM rag_chunks WHERE document_id = @id AND tenant_id = @tenantId",
+            new { id, tenantId }, tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
+        return true;
     }
 
     public async Task<IReadOnlyList<RetrievedChunk>> SearchAsync(
@@ -127,7 +215,7 @@ public sealed class RagRepository : IRagRepository
             "SELECT c.document_id::text AS DocumentId, c.id::text AS ChunkId, d.title AS Title, c.content AS Content,"
             + " 1 - (c.embedding <=> @query::vector) AS Score"
             + " FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id"
-            + " WHERE c.tenant_id = @tenantId"
+            + " WHERE c.tenant_id = @tenantId AND d.status = 'ready'"
             + " ORDER BY c.embedding <=> @query::vector"
             + " LIMIT @topK",
             new { query = FormatVector(queryEmbedding), tenantId, topK }, cancellationToken: ct));
@@ -151,7 +239,7 @@ public sealed class RagRepository : IRagRepository
             "SELECT c.document_id::text AS DocumentId, c.id::text AS ChunkId, d.title AS Title, c.content AS Content,"
             + " 1 - (c.embedding <=> @query::vector) AS Score"
             + " FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id"
-            + " WHERE c.tenant_id = @tenantId AND d.tenant_id = @tenantId"
+            + " WHERE c.tenant_id = @tenantId AND d.tenant_id = @tenantId AND d.status = 'ready'"
             + " AND c.document_id = ANY(@allowedDocumentIds)"
             + " ORDER BY c.embedding <=> @query::vector"
             + " LIMIT @topK",
@@ -172,11 +260,13 @@ public sealed class RagRepository : IRagRepository
 
         var counts = await conn.QuerySingleAsync<(long DocumentCount, long ChunkCount)>(new CommandDefinition(
             "SELECT count(*) AS DocumentCount, coalesce(sum(chunk_count), 0) AS ChunkCount"
-            + " FROM rag_documents WHERE tenant_id = @tenantId",
+            + " FROM rag_documents WHERE tenant_id = @tenantId"
+            + " AND status NOT IN ('pending_publish', 'deleted')",
             new { tenantId }, cancellationToken: ct));
 
         var titles = await conn.QueryAsync<string>(new CommandDefinition(
-            "SELECT title FROM rag_documents WHERE tenant_id = @tenantId ORDER BY created_at DESC LIMIT 5",
+            "SELECT title FROM rag_documents WHERE tenant_id = @tenantId"
+            + " AND status NOT IN ('pending_publish', 'deleted') ORDER BY created_at DESC LIMIT 5",
             new { tenantId }, cancellationToken: ct));
 
         return new AnalysisSummary((int)counts.DocumentCount, (int)counts.ChunkCount, titles.AsList());
@@ -185,4 +275,6 @@ public sealed class RagRepository : IRagRepository
     /// <summary>把 float 向量格式化成 pgvector 文字字面值 '[0.1,0.2,...]'(invariant,避免地區小數點)。</summary>
     private static string FormatVector(float[] v) =>
         "[" + string.Join(',', v.Select(x => x.ToString(CultureInfo.InvariantCulture))) + "]";
+
+    private sealed record IngestRow(Guid DocumentId, string RequestHash, string Title, string DocumentStatus);
 }

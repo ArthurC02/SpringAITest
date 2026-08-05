@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from app.runtime.backend import BackendRunConflict, BackendRunError
 from app.runtime.manager import (
+    RuntimeAdmissionRejected,
     RuntimeManagerConflict,
     RuntimeManagerError,
     RuntimeRunManager,
@@ -93,6 +94,12 @@ async def execute_approved_write(run_id: str, approval_id: str, request: Request
 async def _call(awaitable) -> RuntimeRunResult:
     try:
         return await awaitable
+    except RuntimeAdmissionRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "agent_runtime_busy", "message": str(exc)},
+            headers={"Retry-After": "1"},
+        ) from exc
     except (RuntimeManagerConflict, BackendRunConflict) as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

@@ -5,17 +5,64 @@
 metadata/definition（backend 以此決定能不能寫）。
 """
 
+import asyncio
 import io
+import tempfile
 import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect, Request
 
-from app.engine.package import LIMITS, TIMEOUT_SECONDS_MAX, TIMEOUT_SECONDS_MIN
+from app import main as main_module
+from app.engine.package import (
+    LIMITS,
+    MAX_PACKAGE_RAW_BYTES,
+    TIMEOUT_SECONDS_MAX,
+    TIMEOUT_SECONDS_MIN,
+)
 from app.main import app
 from tests.conftest import auth_headers as _headers
 
 client = TestClient(app)
+
+
+def _multipart_request(
+    chunks: list[bytes], boundary: bytes, *, disconnect: bool = False
+) -> Request:
+    messages = [
+        {"type": "http.request", "body": chunk, "more_body": True}
+        for chunk in chunks
+    ]
+    messages.append(
+        {"type": "http.disconnect"}
+        if disconnect
+        else {"type": "http.request", "body": b"", "more_body": False}
+    )
+
+    async def receive():
+        return messages.pop(0)
+
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/skills/validate-package",
+            "headers": [(b"content-type", b"multipart/form-data; boundary=" + boundary)],
+        },
+        receive,
+    )
+
+
+def _package_part(boundary: bytes, payload: bytes, *, complete: bool = True) -> bytes:
+    body = (
+        b"--"
+        + boundary
+        + b'\r\nContent-Disposition: form-data; name="package"; filename="skill.zip"'
+        + b"\r\nContent-Type: application/zip\r\n\r\n"
+        + payload
+    )
+    return body + (b"\r\n--" + boundary + b"--\r\n" if complete else b"")
 
 
 def _zip(files, compression=zipfile.ZIP_DEFLATED) -> bytes:
@@ -78,6 +125,96 @@ def test_missing_tenant_returns_400():
     raw = _zip({"SKILL.md": AGENTIC_SKILL_MD})
     resp = _post(raw, "sales-helper", tenant_id=None)
     assert resp.status_code == 400
+
+
+def test_package_raw_transport_limit_is_enforced_while_multipart_is_streamed():
+    """The exact raw payload reaches package validation; N+1 is rejected by the parser."""
+    exact = _post(b"x" * MAX_PACKAGE_RAW_BYTES)
+    oversized = _post(b"x" * (MAX_PACKAGE_RAW_BYTES + 1))
+
+    assert exact.status_code == 200
+    assert exact.json()["valid"] is False
+    assert oversized.status_code == 413
+    assert oversized.json()["detail"]["error"] == "package_too_large"
+
+
+def test_package_upload_rejects_unexpected_scalar_and_duplicate_fields():
+    raw = _zip({"SKILL.md": AGENTIC_SKILL_MD})
+    unexpected = client.post(
+        "/skills/validate-package",
+        files={"package": ("skill.zip", raw, "application/zip")},
+        data={"unexpected": "value"},
+        headers=_headers(),
+    )
+    duplicate = client.post(
+        "/skills/validate-package",
+        files=[
+            ("package", ("first.zip", raw, "application/zip")),
+            ("package", ("second.zip", raw, "application/zip")),
+        ],
+        headers=_headers(),
+    )
+
+    assert unexpected.status_code == 400
+    assert unexpected.json()["detail"] == "Invalid package multipart form."
+    assert duplicate.status_code == 400
+    assert duplicate.json()["detail"] == "Invalid package multipart form."
+
+
+def test_package_upload_accepts_closing_boundary_split_across_chunks():
+    boundary = b"split-boundary"
+    raw = _zip({"SKILL.md": AGENTIC_SKILL_MD})
+    body = _package_part(boundary, raw)
+    split_at = body.rfind(boundary) + 3
+    request = _multipart_request([body[:split_at], body[split_at:]], boundary)
+
+    uploaded, expected_name = asyncio.run(main_module._read_package_upload(request))
+
+    assert uploaded == raw
+    assert expected_name is None
+
+
+def test_incomplete_multipart_after_spooling_is_rejected_and_closed(monkeypatch):
+    created = []
+
+    def tracking_spooled_file(*args, **kwargs):
+        file = tempfile.SpooledTemporaryFile(*args, **kwargs)
+        created.append(file)
+        return file
+
+    monkeypatch.setattr("starlette.formparsers.SpooledTemporaryFile", tracking_spooled_file)
+    boundary = b"incomplete-boundary"
+    request = _multipart_request(
+        [_package_part(boundary, b"spooled payload", complete=False)], boundary
+    )
+
+    with pytest.raises(main_module.HTTPException) as exc:
+        asyncio.run(main_module._read_package_upload(request))
+
+    assert exc.value.status_code == 400
+    assert created and all(file.closed for file in created)
+
+
+def test_client_disconnect_closes_spooled_package(monkeypatch):
+    created = []
+
+    def tracking_spooled_file(*args, **kwargs):
+        file = tempfile.SpooledTemporaryFile(*args, **kwargs)
+        created.append(file)
+        return file
+
+    monkeypatch.setattr("starlette.formparsers.SpooledTemporaryFile", tracking_spooled_file)
+    boundary = b"disconnect-boundary"
+    request = _multipart_request(
+        [_package_part(boundary, b"partial payload", complete=False)],
+        boundary,
+        disconnect=True,
+    )
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(main_module._read_package_upload(request))
+
+    assert created and all(file.closed for file in created)
 
 
 # ---------------------------------------------------------------------------

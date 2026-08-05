@@ -155,7 +155,7 @@ public sealed class AuthRepositoryTests
                 new LoginRequest(username, "password123"),
                 default);
             var jwt = new JwtService(
-                "dev-jwt-secret-change-me-0123456789abcdef",
+                TestJwtSigningKeys.Configuration(),
                 TimeSpan.FromHours(24));
             Assert.Throws<InvalidOperationException>(() => jwt.Issue(
                 result.Username,
@@ -221,7 +221,7 @@ public sealed class AuthRepositoryTests
             Assert.Equal(expected, result.Groups!);
 
             var jwt = new JwtService(
-                "dev-jwt-secret-change-me-0123456789abcdef",
+                TestJwtSigningKeys.Configuration(),
                 TimeSpan.FromHours(24));
             var token = jwt.Issue(
                 result.Username,

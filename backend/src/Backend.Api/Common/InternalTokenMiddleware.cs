@@ -4,7 +4,7 @@ using System.Text;
 namespace Backend.Api.Common;
 
 /// <summary>
-/// 內部憑證守門:除 /health 外,所有請求都必須帶 header X-Internal-Token 且與設定值相符。
+/// 內部憑證守門:除 health 端點外,所有請求都必須帶 header X-Internal-Token 且與設定值相符。
 /// backend 不對公網,呼叫者只有 platform 與 workflow;不符一律回 401 ApiError。
 /// </summary>
 public sealed class InternalTokenMiddleware
@@ -22,8 +22,8 @@ public sealed class InternalTokenMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        // /health 免驗,供 compose depends_on 探活。
-        if (context.Request.Path.Equals("/health", StringComparison.Ordinal))
+        // 只有明確的 health 端點免驗,避免放寬其他 /health/* 路徑。
+        if (context.Request.Path.Value is "/health" or "/health/live" or "/health/ready")
         {
             await _next(context);
             return;

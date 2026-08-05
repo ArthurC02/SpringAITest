@@ -490,7 +490,8 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     // additive 欄位穿透由 WorkflowEngineClientTests(真 WorkflowEngineClient + stub handler)覆蓋;
     // 在這一層用 CatalogOverride 塞 JSON 再讀回來只驗到 JsonElement 序列化,不經任何 platform 分支。
 
-    // invoke 的下游狀態碼映射:404 → NotFound、403 → Forbidden、422 → BadInput(400)、其他 → 502。
+    // invoke 的下游狀態碼映射:404 → NotFound、403 → Forbidden、413 → PayloadTooLarge、
+    // 422 → BadInput(400)、其他 → 502。
     [Theory]
     [InlineData("ghost", HttpStatusCode.NotFound, "not_found")]
     [InlineData("forbidden", HttpStatusCode.Forbidden, "forbidden")]
@@ -504,6 +505,19 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(expected, resp.StatusCode);
         (await resp.ReadJsonAsync()).AssertApiError((int)expected, expectedCode);
+    }
+
+    [Fact]
+    public async Task Invoke_PayloadTooLarge_ReturnsCanonical413_WithSafeMessageAndEmptyFieldErrors()
+    {
+        var response = await _factory.AdminClient().PostAsJsonAsync(
+            "/api/skills/toolarge/invoke", new { input = new { query = "x" } });
+
+        Assert.Equal((HttpStatusCode)413, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        body.AssertApiError(413, "payload_too_large");
+        Assert.Equal("Skill request exceeds the allowed size", body["message"]!.GetValue<string>());
+        Assert.Empty(body["fieldErrors"]!.AsObject());
     }
 
     [Fact]

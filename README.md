@@ -71,6 +71,12 @@ OPENAI_API_KEY=sk-你的金鑰
 
 > 真正的 OpenAI 金鑰由 **LiteLLM 保管**,App 只持有虛擬金鑰 `sk-1234`。Langfuse 的金鑰 / 帳密 / 加密金鑰也可放 `.env`,開發用預設值即可,正式環境請更換。
 
+`infra/.env.example` 是本機 Development 範本，內含公開的 ES256 開發金鑰對與其他開發憑證，不能直接用於正式部署。Backend 只持有 `JWT_PRIVATE_KEY_PEM_BASE64` 與 `JWT_ACTIVE_KID` 來簽發 24 小時 ES256 token；Platform 只持有 `JWT_PUBLIC_KEY_RING_JSON` 來驗證，兩端另以相同且穩定的 `JWT_ISSUER`、`JWT_AUDIENCE` 限定 token 使用範圍。輪替時先把新公鑰加入 Platform ring，完成部署後再原子切換 Backend 的 kid/private-key pair；舊公鑰保留超過 24 小時並加上發布緩衝後才移除。
+
+未明確指定時，Compose 將應用服務視為 Production；此模式若仍使用空白或公開開發值，Platform、Backend、Workflow 會在啟動時拒絕服務。本機啟動與 evidence helpers 會明確選擇 Development。正式環境須另行提供內部 token、資料庫與 RabbitMQ 憑證，以及啟用 durable Agent runtime 時需要的 checkpoint HMAC key。
+
+全容器模式的四個應用容器（frontend/platform/backend/workflow）均以非 root 身分執行，根檔案系統唯讀，禁止 privilege escalation、移除全部 Linux capabilities，並只提供受限 `/tmp` tmpfs。Workflow 在 Production 不會回退到同程序執行自訂 script：隔離開關未啟用時直接拒絕 script step，啟用時才使用具 OS 限制的短生命週期 subprocess。認證入口另有 16 KiB body cap 與每 instance 固定視窗限流；多節點部署仍應在 ingress 補上全域限流。
+
 ## 啟動
 
 前後端**對稱**——可各自跑主機（開發)或進容器,基礎設施與核心服務一律用 compose 起。前端 `:5173` / 平台閘道 `:8080`,**請擇一,別同時跑**。

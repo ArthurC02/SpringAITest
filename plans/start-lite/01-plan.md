@@ -178,7 +178,7 @@ get_recent_traces(filter?: string, limit?: int) → List<{timestamp, name, durat
 | `CHAT_MODEL` | `gpt-4o-mini` | `mock-gpt` | platform 模型 |
 | `LLM_MODEL` | `gpt-4o-mini` | `mock-gpt` | workflow 模型 |
 | `LLM_BASE_URL` | `http://localhost:4000` | `http://localhost:4000` | LiteLLM endpoint |
-| `JWT_SECRET` | `dev-jwt-secret-change-me-0123456789abcdef` | `dev-jwt-secret-change-me-0123456789abcdef` | 開發預設(容器與本機同值) |
+| JWT ES256 設定 | `JWT_ISSUER` / `JWT_AUDIENCE` / active kid + private key / public ring | 同一組公開開發 key pair | Backend 簽名、Platform 只驗公鑰；Lite helper 明確選擇 Development |
 | `INTERNAL_API_TOKEN` | `internal-dev-token` | `internal-dev-token` | 開發預設 |
 | `RABBITMQ_URL` | `amqp://...` | `amqp://...` | 平台(Lite 文件上傳回 502) |
 | `MEM0_BASE_URL` | `http://localhost:8000` | 無關(InMemory用) | HTTP mem0 endpoint(Lite 不用) |

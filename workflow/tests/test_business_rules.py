@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import builtins
 import socket
 from copy import deepcopy
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.business_rules.catalog import LIMITS, catalog_response
 from app.business_rules.evaluator import evaluate
+from app.http_limits import JsonRequestLimitMiddleware
 from app.business_rules.simulator import simulate
 from app.business_rules.validator import canonical_to_json, validate_rule_set
 from app.main import app
@@ -932,6 +934,45 @@ def test_business_rule_http_transport_rejects_large_or_deep_json():
     )
     assert too_deep.status_code == 413
     assert too_deep.json()["detail"]["error"] == "json_depth_exceeded"
+
+
+def test_business_rule_transport_rejects_one_oversized_chunk_before_calling_app():
+    """No Content-Length: the raw receive chunk itself must be refused."""
+    called = False
+    sent = []
+    messages = [
+        {
+            "type": "http.request",
+            "body": b"x" * (LIMITS["maxRequestBytes"] + 1),
+            "more_body": False,
+        }
+    ]
+
+    async def downstream(scope, receive, send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        return messages.pop(0)
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(
+        JsonRequestLimitMiddleware(downstream)(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/business-rules/validate",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert called is False
+    assert sent[0]["status"] == 413
 
 
 def test_api_optional_reference_catalog_is_backward_compatible_and_enforced():

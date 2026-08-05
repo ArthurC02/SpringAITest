@@ -85,6 +85,24 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("UP", (await resp.ReadJsonAsync())["status"]!.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData("/health/live")]
+    [InlineData("/health/ready")]
+    public async Task AdditiveHealthEndpoints_AreAlsoTokenExempt(string path)
+    {
+        var response = await _factory.CreateClient().GetAsync(path);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UnknownHealthSubpath_IsNotTokenExempt()
+    {
+        var response = await _factory.CreateClient().GetAsync("/health/not-an-endpoint");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     // 「完全沒帶 header」與「帶了但只有空白」是兩種不同的線上輸入,IdentityHeaders.Value() 把空白折成 null,
     // 兩者都必須落在同一個 RequireTenant() 400 分支(空白不得被當成合法租戶 code)。
     [Theory]
@@ -132,6 +150,96 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
         Assert.StartsWith("找不到文件：", (await resp.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task DocumentIngestIntent_CreateThenReplay_ReturnsSameId_AndPendingIsHidden()
+    {
+        var client = _factory.CreateInternalClient().WithTenant("ingest-api-a").WithUser("user-a");
+        client.DefaultRequestHeaders.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+
+        var created = await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容" });
+        var replay = await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容" });
+
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        var first = await created.ReadJsonAsync();
+        var second = await replay.ReadJsonAsync();
+        Assert.Equal(first["id"]!.GetValue<string>(), second["id"]!.GetValue<string>());
+        Assert.Equal("processing", first["status"]!.GetValue<string>());
+        Assert.Empty((await (await client.GetAsync("/api/documents")).ReadJsonAsync()).AsArray());
+    }
+
+    [Fact]
+    public async Task DocumentIngestIntent_RequiresInternalToken()
+    {
+        var client = _factory.CreateClient().WithTenant("ingest-token").WithUser("user-a");
+        client.DefaultRequestHeaders.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+
+        var response = await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        (await response.ReadJsonAsync()).AssertApiError(401, "authentication_required");
+    }
+
+    [Fact]
+    public async Task DocumentIngestIntent_SameKeyDifferentPayload_ReturnsStable409()
+    {
+        var client = _factory.CreateInternalClient().WithTenant("ingest-api-b").WithUser("user-a");
+        client.DefaultRequestHeaders.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+        Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容一" })).StatusCode);
+
+        var conflict = await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容二" });
+
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        var body = await conflict.ReadJsonAsync();
+        body.AssertApiError(409, "version_conflict");
+        Assert.Equal("Idempotency-Key 已用於不同的文件請求", body["message"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task DocumentIngestIntent_AfterDelete_Returns409_AndCannotResurrect()
+    {
+        var tenant = "ingest-api-deleted";
+        var client = _factory.CreateInternalClient().WithTenant(tenant).WithUser("user-a");
+        client.DefaultRequestHeaders.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+        var created = await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容" });
+        var id = (await created.ReadJsonAsync())["id"]!.GetValue<string>();
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/documents/{id}")).StatusCode);
+
+        var conflict = await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容" });
+
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Equal("已刪除文件的 Idempotency-Key 不可重用", (await conflict.ReadJsonAsync())["message"]!.GetValue<string>());
+        Assert.Empty((await (await client.GetAsync("/api/documents")).ReadJsonAsync()).AsArray());
+    }
+
+    [Theory]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    public async Task DocumentIngestIntent_RequiresTenantUserAndIdempotencyKey(
+        bool tenant,
+        bool user,
+        bool key)
+    {
+        var client = _factory.CreateInternalClient();
+        if (tenant) client.WithTenant("ingest-api-headers");
+        if (user) client.WithUser("user-a");
+        if (key) client.DefaultRequestHeaders.Add("Idempotency-Key", Guid.NewGuid().ToString("N"));
+
+        var response = await client.PostAsJsonAsync(
+            "/api/documents/ingest-intents", new { title = "手冊", text = "內容" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        (await response.ReadJsonAsync()).AssertApiError(400, "validation_failed");
     }
 
     [Fact]

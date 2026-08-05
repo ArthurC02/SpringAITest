@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics.Metrics;
 using Backend.Api.Analysis;
 using Backend.Api.Files;
 using Backend.Api.Retrieval;
@@ -68,6 +69,90 @@ public sealed class DocumentProcessorTests
         Assert.Equal("ready", doc.Status);
         Assert.Equal(2, doc.ChunkCount);
         Assert.Equal(1, embeddings.DocumentCalls); // 只嵌入一次,重投未重跑。
+    }
+
+    [Fact]
+    public async Task Process_LegacyMessageWithoutAllocation_CreatesProcessingRowUntilProducerCutover()
+    {
+        // Deletion inventory: this is the intentional legacy missing→create branch. Delete only
+        // after every producer calls ingest-intents before publishing and the rollback window ends.
+        var repo = new FakeRagRepository();
+        var id = Guid.NewGuid().ToString();
+        var processor = new DocumentProcessor(repo, new FakeEmbeddingProvider(8), NullLogger<DocumentProcessor>.Instance);
+
+        var outcome = await processor.ProcessAsync(Message(id), retryCount: 0, CancellationToken.None);
+
+        Assert.Equal(DocumentProcessingOutcome.Success, outcome);
+        Assert.Equal("ready", (Assert.Single(await repo.ListDocumentsAsync("demo-a", default))).Status);
+    }
+
+    [Fact]
+    public async Task LegacyCreateMetric_IncrementsOnlyForActualMissingRowCreate_WithoutTags()
+    {
+        var meterName = DocumentIngestMetrics.MeterName + ".tests." + Guid.NewGuid().ToString("N");
+        using var metrics = new DocumentIngestMetrics(meterName);
+        using var listener = new MeterListener();
+        long total = 0;
+        var measurements = 0;
+        var tagCount = -1;
+        listener.InstrumentPublished = (instrument, current) =>
+        {
+            if (instrument.Meter.Name == meterName
+                && instrument.Name == DocumentIngestMetrics.LegacyCreateCounterName)
+            {
+                current.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            Interlocked.Add(ref total, value);
+            Interlocked.Increment(ref measurements);
+            tagCount = tags.Length;
+        });
+        listener.Start();
+
+        var repo = new FakeRagRepository();
+        var processor = new DocumentProcessor(
+            repo,
+            new FakeEmbeddingProvider(8),
+            NullLogger<DocumentProcessor>.Instance,
+            metrics);
+        var legacy = Message(Guid.NewGuid().ToString());
+        Assert.Equal(DocumentProcessingOutcome.Success, await processor.ProcessAsync(legacy, 0, default));
+        Assert.Equal(DocumentProcessingOutcome.Success, await processor.ProcessAsync(legacy, 1, default));
+
+        var allocated = await repo.AllocateDocumentAsync(
+            "demo-a",
+            "user-a",
+            DocumentIngestIdentity.HashKey("allocated-key"),
+            DocumentIngestIdentity.HashRequest("手冊", "第一段。\n\n第二段。"),
+            "手冊",
+            default);
+        Assert.Equal(
+            DocumentProcessingOutcome.Success,
+            await processor.ProcessAsync(Message(allocated.DocumentId), 0, default));
+
+        Assert.Equal(1, Interlocked.Read(ref total));
+        Assert.Equal(1, measurements);
+        Assert.Equal(0, tagCount);
+    }
+
+    [Fact]
+    public async Task Process_RedeliveryAfterDelete_DoesNotRecreateOrEmbed()
+    {
+        var repo = new FakeRagRepository();
+        var embeddings = new CountingEmbeddingProvider();
+        var processor = new DocumentProcessor(repo, embeddings, NullLogger<DocumentProcessor>.Instance);
+        var id = Guid.NewGuid().ToString();
+        Assert.Equal(DocumentProcessingOutcome.Success, await processor.ProcessAsync(Message(id), 0, default));
+        Assert.True(await repo.DeleteDocumentAsync("demo-a", id, default));
+
+        var outcome = await processor.ProcessAsync(Message(id), retryCount: 1, CancellationToken.None);
+
+        Assert.Equal(DocumentProcessingOutcome.Success, outcome);
+        Assert.Equal("deleted", await repo.GetDocumentStatusAsync(id, "demo-a", default));
+        Assert.Empty(await repo.ListDocumentsAsync("demo-a", default));
+        Assert.Equal(1, embeddings.DocumentCalls);
     }
 
     [Fact]
@@ -308,13 +393,28 @@ public sealed class FaultyRagRepository : IRagRepository
         }
     }
 
+    public Task<DocumentIngestAllocation> AllocateDocumentAsync(
+        string tenantId,
+        string userId,
+        string idempotencyKeyHash,
+        string requestHash,
+        string title,
+        CancellationToken ct)
+        => _inner.AllocateDocumentAsync(
+            tenantId,
+            userId,
+            idempotencyKeyHash,
+            requestHash,
+            title,
+            ct);
+
     public Task<string?> GetDocumentStatusAsync(string documentId, string tenantId, CancellationToken ct)
     {
         FailIf(FaultyRagStep.GetStatus);
         return _inner.GetDocumentStatusAsync(documentId, tenantId, ct);
     }
 
-    public Task InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct)
+    public Task<bool> InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct)
     {
         FailIf(FaultyRagStep.InsertProcessing);
         return _inner.InsertProcessingDocumentAsync(documentId, tenantId, title, ct);

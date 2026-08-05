@@ -1,7 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.Agents;
+using Backend.Api.Conversations;
 using Backend.Api.Data.InMemory;
+using Backend.Api.Files;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Tests;
@@ -81,6 +83,30 @@ public sealed class InMemoryRepositoriesTests
         Assert.Equal(new[] { second.Id, first.Id }, list.Select(i => i.Id).ToArray());
     }
 
+    [Fact]
+    public async Task Conversation_Page_SameTimestamp_TieAndBoundaryUseIdDesc()
+    {
+        var instant = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
+        var repo = new InMemoryConversationRepository(new FixedTimeProvider(instant));
+        var ids = new List<long>();
+        for (var i = 0; i < 4; i++)
+        {
+            ids.Add((await repo.AddAsync("demo-a", "user-a", $"p{i}", $"r{i}", default)).Id);
+        }
+
+        var first = await repo.ListPageDescAsync("demo-a", "user-a", null, 3, default);
+        Assert.Equal(ids.AsEnumerable().Reverse().Take(3), first.Select(item => item.Id));
+
+        var next = await repo.ListPageDescAsync(
+            "demo-a", "user-a", new ConversationPosition(first[1].CreatedAt, first[1].Id), 3, default);
+        Assert.Equal(ids.Take(2).Reverse(), next.Select(item => item.Id));
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset instant) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => instant;
+    }
+
     // ---- Rag:真 cosine — 相同向量 → 1.0,正交向量 → 0.0,依相似度遞減排序,跨租戶不可見 ----
 
     private static float[] Vec(params float[] v) => v;
@@ -91,6 +117,38 @@ public sealed class InMemoryRepositoriesTests
         await repo.InsertProcessingDocumentAsync(docId, tenant, title, default);
         await repo.CompleteDocumentAsync(
             docId, tenant, chunks.Select(c => c.Item1).ToList(), chunks.Select(c => c.Item2).ToList(), default);
+    }
+
+    [Fact]
+    public async Task Rag_IngestAllocationAndDelete_MatchPostgresTombstoneSemantics()
+    {
+        var repo = new InMemoryRagRepository();
+        const string tenant = "demo-ingest";
+        var keyHash = DocumentIngestIdentity.HashKey("key");
+        var requestHash = DocumentIngestIdentity.HashRequest("title", "text");
+        var created = await repo.AllocateDocumentAsync(
+            tenant, "user-a", keyHash, requestHash, "title", default);
+        var replay = await repo.AllocateDocumentAsync(
+            tenant, "user-a", keyHash, requestHash, "title", default);
+
+        Assert.Equal(DocumentIngestAllocationStatus.Created, created.Status);
+        Assert.Equal(DocumentIngestAllocationStatus.Replay, replay.Status);
+        Assert.Equal(created.DocumentId, replay.DocumentId);
+        Assert.Empty(await repo.ListDocumentsAsync(tenant, default));
+
+        await repo.InsertProcessingDocumentAsync(created.DocumentId, tenant, "title", default);
+        await repo.CompleteDocumentAsync(created.DocumentId, tenant, new[] { "chunk" }, new[] { Vec(1f) }, default);
+        Assert.True(await repo.DeleteDocumentAsync(tenant, created.DocumentId, default));
+        await repo.CompleteDocumentAsync(created.DocumentId, tenant, new[] { "late" }, new[] { Vec(1f) }, default);
+        await repo.MarkFailedAsync(created.DocumentId, tenant, default);
+
+        Assert.Equal("deleted", await repo.GetDocumentStatusAsync(created.DocumentId, tenant, default));
+        Assert.Empty(await repo.ListDocumentsAsync(tenant, default));
+        Assert.Empty(await repo.SearchAsync(tenant, Vec(1f), 10, default));
+        Assert.Equal(
+            DocumentIngestAllocationStatus.DeletedConflict,
+            (await repo.AllocateDocumentAsync(
+                tenant, "user-a", keyHash, requestHash, "title", default)).Status);
     }
 
     [Fact]

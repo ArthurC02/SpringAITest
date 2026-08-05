@@ -26,7 +26,7 @@ public sealed class WorkflowBadInputException : Exception
 }
 
 /// <summary>
-/// The caller-controlled Business Rule payload exceeded Workflow's bounded body/depth limits.
+/// A caller-controlled Workflow payload exceeded its bounded body/depth limits.
 /// This remains HTTP 413 at the public boundary rather than being misclassified as an outage.
 /// </summary>
 public sealed class WorkflowPayloadTooLargeException : Exception

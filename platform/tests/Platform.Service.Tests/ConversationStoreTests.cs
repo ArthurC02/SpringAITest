@@ -176,4 +176,39 @@ public sealed class ConversationStoreTests
         var ex = await Assert.ThrowsAsync<BackendCallException>(() => store.AddAsync("問", "答", Ctx));
         Assert.IsNotType<WorkflowInvocationException>(ex);
     }
+
+    [Fact]
+    public async Task Page_MapsCamelCaseEnvelope_PreservesOrderCursorAndIdentity()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK,
+            "{\"items\":[{\"id\":2,\"reply\":\"r2\",\"createdAt\":\"2026-08-05T10:01:00Z\"},"
+            + "{\"id\":1,\"reply\":\"r1\",\"createdAt\":\"2026-08-05T10:00:00Z\"}],"
+            + "\"nextCursor\":\"next-token\",\"hasMore\":true}"));
+
+        var page = await Build(stub).ListPageAsync(2, "prior+/=", Ctx);
+
+        Assert.Equal(new[] { 2L, 1L }, page.Items.Select(item => item.Id));
+        Assert.Equal("next-token", page.NextCursor);
+        Assert.True(page.HasMore);
+        Assert.Equal(
+            "http://backend/api/conversations/page?limit=2&before=prior%2B%2F%3D",
+            stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.Equal("user-a", stub.Header("X-User-Id"));
+    }
+
+    [Fact]
+    public async Task Page_BackendMalformedCursor400_MapsToPublicBadInput()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.BadRequest,
+            "{\"timestamp\":\"2026-08-05T00:00:00Z\",\"status\":400,"
+            + "\"code\":\"validation_failed\",\"message\":\"聊天歷史游標無效\","
+            + "\"correlationId\":\"backend-trace\",\"fieldErrors\":{}}"));
+
+        var error = await Assert.ThrowsAsync<WorkflowBadInputException>(
+            () => Build(stub).ListPageAsync(50, "bad", Ctx));
+
+        Assert.Equal("聊天歷史游標無效", error.Message);
+        Assert.Empty(error.FieldErrors!);
+    }
 }

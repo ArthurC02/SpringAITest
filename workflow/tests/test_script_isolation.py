@@ -34,9 +34,11 @@ from app.engine.script_isolation import (
     decode_message,
 )
 from app.engine.script_runner import (
+    DisabledScriptRunner,
     MAX_ITERATIONS,
     MAX_WRITE_BYTES,
     RestrictedInProcessRunner,
+    ScriptExecutionDisabled,
     ScriptError,
     ScriptLimitExceeded,
     ScriptLimits,
@@ -695,18 +697,31 @@ def test_reserved_keys_stay_unforgeable_under_isolation():
 # ---------------------------------------------------------------------------
 
 
-def test_flag_off_leaves_the_in_process_path_in_place(monkeypatch):
+def test_development_flag_off_leaves_the_in_process_path_in_place(monkeypatch):
     from app.engine.compiler import _Builder
     from app.engine.script_runner import RestrictedInProcessRunner as InProcess
 
+    monkeypatch.setattr("app.settings.settings.app_environment", "development")
     monkeypatch.setattr("app.settings.settings.isolated_skill_scripts_enabled", False)
     from app.skills.deps import _default_deps
 
     deps = _default_deps()
-    assert deps.script_runner is None
-    assert isinstance(
-        _Builder(graph=None, deps=deps, allowed_tools=set()).runner, InProcess
-    )
+    assert isinstance(deps.script_runner, InProcess)
+    assert _Builder(graph=None, deps=deps, allowed_tools=set()).runner is deps.script_runner
+
+
+def test_production_without_isolation_fails_closed_instead_of_using_in_process(monkeypatch):
+    from app.engine.compiler import _Builder
+
+    monkeypatch.setattr("app.settings.settings.app_environment", "production")
+    monkeypatch.setattr("app.settings.settings.isolated_skill_scripts_enabled", False)
+    from app.skills.deps import _default_deps
+
+    deps = _default_deps()
+    assert isinstance(deps.script_runner, DisabledScriptRunner)
+    assert _Builder(graph=None, deps=deps, allowed_tools=set()).runner is deps.script_runner
+    with pytest.raises(ScriptExecutionDisabled):
+        _run(deps.script_runner, "state['x'] = 1")
 
 
 def test_flag_on_injects_the_isolated_adapter(monkeypatch):

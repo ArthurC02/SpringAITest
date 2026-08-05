@@ -26,13 +26,22 @@
 # （搬到 infra/ 後若不釘名，專案名會變成 "infra" 而另起一套，與現有 springaitest-* 衝突）。
 name: springaitest
 
+x-application-security: &application-security
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+
 services:
   # ---------------- LiteLLM 閘道 ----------------
   litellm:
     # 釘版本：原為浮動 main-stable（會解析到不可預期的最新版）。此為 2026-07-22 當下 ghcr.io 上最新的
     # -stable release tag，對應 digest sha256:f12d528d4a05add56cb09e54c5126088f2edc6bdf3a2f943bcd3a32b08769da2。
     # 升級：到 https://github.com/BerriAI/litellm/pkgs/container/litellm 找新的 *-stable tag 手動改此處。
-    image: ghcr.io/berriai/litellm:main-v1.83.14-stable.patch.3
+    image: ghcr.io/berriai/litellm:main-v1.83.14-stable.patch.3@sha256:f12d528d4a05add56cb09e54c5126088f2edc6bdf3a2f943bcd3a32b08769da2
     restart: always
     # 刻意不 depends_on langfuse-web：Langfuse 只是 runtime best-effort callback，
     # 若放進啟動依賴，clickhouse/minio 一抖會沿 langfuse-web→litellm→backend 拖垮整條 chat。
@@ -93,6 +102,7 @@ services:
   # 預設不啟用：前端平常用 Vite dev server 跑在「主機」上（npm run dev，有 HMR）。需要一鍵全容器時用 --profile full。
   # nginx 反向代理 /api → platform 容器（走 compose 服務名 platform:8080，容器間直連，不經主機）。
   frontend:
+    <<: *application-security
     profiles: ["full"]
     build:
       context: ../frontend            # build context 在 compose 檔的上一層 frontend/
@@ -104,7 +114,13 @@ services:
     ports:
       # 預設只綁主機 loopback（本機瀏覽器 http://localhost:5173 可達，LAN 不可達）；
       # 要對外/demo 公開才設 FRONTEND_BIND=0.0.0.0。容器內 nginx 經 compose service DNS http://platform:8080 連平台。
-      - "${FRONTEND_BIND:-127.0.0.1}:5173:80"
+      - "${FRONTEND_BIND:-127.0.0.1}:5173:8080"
+    user: "101"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
     networks:
       - frontend_platform_proxy
 
@@ -113,6 +129,7 @@ services:
   # 職責：對外 API、JWT 驗證、聊天編排（Agent Framework + mem0 + 短期記憶）；核心商業邏輯轉呼叫 backend。
   # :8080 預設只發佈到主機 loopback（localhost curl 除錯用）；容器內 frontend nginx 走 compose service DNS http://platform:8080 直連，無需經主機。
   platform:
+    <<: *application-security
     profiles: ["full"]
     build:
       context: ../platform
@@ -130,10 +147,17 @@ services:
     ports:
       # 預設只綁主機 loopback（localhost curl 可直連，LAN 不可達）；要對外/demo 公開才設 PLATFORM_BIND=0.0.0.0。
       - "${PLATFORM_BIND:-127.0.0.1}:8080:8080"
+    user: app
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /actuator/health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && read -r _ code _ <&3 && [ \"$$code\" = 200 ]"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
     networks:
       - default
       - frontend_platform_proxy
     environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       LLM_BASE_URL: http://litellm:4000                       # 走 compose 服務名（取代主機版的 localhost:4000）
       LITELLM_KEY: ${LITELLM_KEY:-sk-1234}                    # LiteLLM 虛擬金鑰
       CHAT_MODEL: ${CHAT_MODEL:-gpt-4o-mini}                  # 須存在於 litellm-config.yaml 的 model_name；無 OpenAI 額度時可設 mock-gpt 驗證鏈路
@@ -144,7 +168,9 @@ services:
       BACKEND_BASE_URL: http://backend:8080                   # 核心商業邏輯服務（主機開發時是 localhost:8002）
       RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672   # 檔案處理佇列（發佈端）
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
-      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}
+      JWT_ISSUER:
+      JWT_AUDIENCE:
+      JWT_PUBLIC_KEY_RING_JSON:
       # Agent Builder 是管理面功能；預設關閉，明確 opt-in 才暴露 /api/agents*。
       AGENT_BUILDER_ENABLED: ${AGENT_BUILDER_ENABLED:-false}
       AGENT_TEST_RUN_ENABLED: ${AGENT_TEST_RUN_ENABLED:-false}
@@ -161,7 +187,7 @@ services:
 
   # ---------------- RabbitMQ（platform → backend 檔案處理的非同步佇列）----------------
   rabbitmq:
-    image: rabbitmq:4.1-management
+    image: rabbitmq:4.1-management@sha256:d66919f2b72a3579bb0a6974e488d53238cf4e9e07142942a83cfb05cff3e7ba
     restart: always
     hostname: rabbitmq              # rabbitmq 以 hostname 命名資料目錄，固定住讓 durable 佇列跨重啟存活
     environment:
@@ -183,6 +209,7 @@ services:
   # 屬基礎設施層（不設 profile）：workflow 與主機上開發的 platform 都需要它。
   # 只信任帶 X-Internal-Token 的內部呼叫（platform / workflow），不對外公開；發佈 :8002 供主機開發與除錯。
   backend:
+    <<: *application-security
     build:
       context: ../backend
       dockerfile: Dockerfile
@@ -196,18 +223,21 @@ services:
         condition: service_started    # EMBEDDINGS_PROVIDER=openai 時經 LiteLLM 算嵌入
     ports:
       - "127.0.0.1:8002:8080"         # 只綁 localhost：主機開發的 platform 經 localhost:8002 呼叫；backend 信任 X-* 身分 header，絕不可暴露到 LAN
+    user: app
     healthcheck:
-      # aspnet runtime 映像無 curl/wget，用 bash 的 /dev/tcp 檢查埠就緒；
-      # Kestrel 在 DbBootstrap（DDL/種子）完成後才開始聽埠，故埠通 ≈ 服務可用。
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && read -r _ code _ <&3 && [ \"$$code\" = 200 ]"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
     environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres};Database=springaitest
       RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672   # 檔案處理佇列（消費端）
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
-      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-0123456789abcdef}   # backend 簽發 JWT，platform 用同一把驗證
+      JWT_ISSUER:
+      JWT_AUDIENCE:
+      JWT_ACTIVE_KID:
+      JWT_PRIVATE_KEY_PEM_BASE64:
       EMBEDDINGS_PROVIDER: ${WORKFLOW_EMBEDDINGS_PROVIDER:-fake}   # fake=免金鑰確定性嵌入；openai=經 LiteLLM 的 text-embedding-3-small
       LLM_BASE_URL: http://litellm:4000
       LITELLM_KEY: ${LITELLM_KEY:-sk-1234}
@@ -228,6 +258,7 @@ services:
 
   # ---------------- LangGraph 工作流服務（Python/FastAPI，只管狀態管理，資料存取走 backend）----------------
   workflow:
+    <<: *application-security
     build:
       context: ../workflow
       dockerfile: Dockerfile
@@ -239,12 +270,14 @@ services:
         condition: service_healthy    # 檢索/資料存取全部經 backend，不再直連 appdb；等其 DbBootstrap 完成
     ports:
       - "127.0.0.1:8001:8000"         # 只綁 localhost：主機上的 platform 經 localhost:8001 觸發工作流（:8000 已被 mem0 佔用）；workflow 信任 X-* 身分 header，絕不可暴露到 LAN
+    user: appuser
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
-      interval: 3s
-      timeout: 5s
-      retries: 20
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=1)"]
+      interval: 10s
+      timeout: 2s
+      retries: 12
     environment:
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-Production}
       LLM_BASE_URL: http://litellm:4000              # 容器內走 compose 服務名連 LiteLLM
       LLM_API_KEY: ${LITELLM_KEY:-sk-1234}
       LLM_MODEL: ${WORKFLOW_LLM_MODEL:-mock-gpt}     # 預設走無金鑰 mock 模型，正式改 gpt-4o-mini
@@ -270,7 +303,7 @@ services:
 
   # 應用資料庫（含 pgvector 擴充）：backend 核心服務的資料庫（Dapper：使用者/租戶/歷史/文件向量/組態，重啟持久）
   appdb:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg17@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
     restart: always
     environment:
       POSTGRES_USER: postgres
@@ -288,7 +321,7 @@ services:
 
   # ---------------- Langfuse ----------------
   langfuse-worker:
-    image: langfuse/langfuse-worker:3
+    image: langfuse/langfuse-worker:3@sha256:dbabecfa98b3d962f3d3477f0fec659787065d36b3beb93df7155551b1326a96
     restart: always
     depends_on: &langfuse-depends-on
       postgres:
@@ -332,7 +365,7 @@ services:
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
 
   langfuse-web:
-    image: langfuse/langfuse:3
+    image: langfuse/langfuse:3@sha256:aa92626f8b9ff5ca0aa353f1f5a958eeb82f1221b3c9a1b8c9ce420bf2e2b6c0
     restart: always
     depends_on: *langfuse-depends-on
     ports:
@@ -356,7 +389,7 @@ services:
   postgres:
     # pgvector/pgvector:pg17 = 官方 postgres 17 + pgvector 擴充。Langfuse 照舊使用，
     # 另外供 mem0 當向量庫（mem0 預設 vector_store 就是連這台 postgres 的 pgvector）。
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg17@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
     restart: always
     environment:
       POSTGRES_USER: postgres
@@ -375,7 +408,7 @@ services:
   clickhouse:
     # 釘版本：原為不帶 tag（= latest 浮動，曾解析到 26.x）。此為 2026-06-28 當下 latest 對應的精確版本。
     # 升級時手動改此處；對應 digest sha256:1d1f6508eba2…
-    image: clickhouse/clickhouse-server:26.6.1.1193
+    image: clickhouse/clickhouse-server:26.6.1.1193@sha256:1d1f6508eba2dccce2cee9913907c5f7766327debc57a6b1991f2c9e3176c163
     restart: always
     user: "101:101"
     environment:
@@ -396,7 +429,7 @@ services:
       start_period: 5s
 
   redis:
-    image: redis:7
+    image: redis:7@sha256:8e839f5b3738dbc1223ea01d5d3da0da0d750018e1336f45866630a9bf217014
     restart: always
     command: --requirepass myredissecret
     ports:
@@ -412,7 +445,7 @@ services:
   minio:
     # 釘版本：原為不帶 tag（= latest 浮動）。此為 2026-06-28 當下 latest 對應的精確 RELEASE。
     # 對應 digest sha256:14cea493d9a3…
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     restart: always
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'

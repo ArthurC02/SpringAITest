@@ -23,6 +23,12 @@ public sealed record ChatRequest(
 /// CreatedAt 為 UTC(Kind=Utc),序列化自然帶結尾 Z。</summary>
 public sealed record ChatResponse(long Id, string Reply, DateTime CreatedAt);
 
+/// <summary>Additive keyset-paginated history response.</summary>
+public sealed record ChatHistoryPage(
+    IReadOnlyList<ChatResponse> Items,
+    string? NextCursor,
+    bool HasMore);
+
 /// <summary>Server-derived D6 lineage attached to the one existing conversation write.</summary>
 public sealed record ChatTurnMetadata(
     Guid OrchestratorId,

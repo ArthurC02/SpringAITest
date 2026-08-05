@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app import skills
+from app.engine.script_runner import DisabledScriptRunner
+from app.engine.skill import Skill
 from app.engine.tool_registry import ToolContext
 from app.evals.fixtures import build_fixture_deps
 from app.evals.models import EvalSuite
@@ -207,6 +209,50 @@ def test_eval_run_deterministic_case_passes_with_valid_fixtures_and_input() -> N
     assert case["failure_reason"] is None
     assert isinstance(case["metrics"]["latency_ms"], (int, float))
     assert case["canonical_identity"]
+
+
+def test_production_eval_script_never_falls_back_to_in_process(monkeypatch) -> None:
+    """A script candidate cannot execute when production isolation is disabled."""
+    builtin = skills.get("triage")
+    scripted = replace(
+        builtin,
+        skill=Skill.model_validate(
+            {
+                "name": "eval-script-probe",
+                "kind": "flow",
+                "flow": [{"script": 'state["answer"] = "executed"'}],
+            }
+        ),
+    )
+
+    async def load_scripted(name, ctx):
+        return scripted
+
+    monkeypatch.setattr(settings, "app_environment", "production")
+    monkeypatch.setattr(settings, "isolated_skill_scripts_enabled", False)
+    monkeypatch.setattr(custom, "load", load_scripted)
+
+    deps = build_fixture_deps({})
+    response = _run(
+        _suite(
+            [
+                {
+                    "case_id": "script-disabled",
+                    "mode": "deterministic",
+                    "input": {},
+                    "expected": {"answer": "executed"},
+                    "fixtures": {},
+                }
+            ],
+            skill_name="eval-script-probe",
+        )
+    )
+
+    assert isinstance(deps.script_runner, DisabledScriptRunner)
+    assert response.status_code == 200
+    case = response.json()["cases"][0]
+    assert case["verdict"] == "FAIL"
+    assert case["failure_reason"] is not None
 
 
 # ---------------------------------------------------------------------------

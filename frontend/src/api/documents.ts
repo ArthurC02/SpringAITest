@@ -12,10 +12,15 @@ export function listDocuments(): Promise<DocumentInfo[]> {
   return apiFetch<DocumentInfo[]>('/api/documents')
 }
 
-/** 建立文件：後端回 202 Accepted（非同步處理），實際入庫由 backend consumer 完成。 */
-export function createDocument(title: string, text: string): Promise<CreatedDocument> {
+/** 建立文件：同一 logical submit 的重試必須沿用同一 key。 */
+export function createDocument(
+  title: string,
+  text: string,
+  idempotencyKey: string,
+): Promise<CreatedDocument> {
   return apiFetch<CreatedDocument>('/api/documents', {
     method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify({ title, text }),
   })
 }

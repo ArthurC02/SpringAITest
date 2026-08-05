@@ -7,22 +7,23 @@ using Microsoft.IdentityModel.Tokens;
 namespace Backend.Api.Tests;
 
 /// <summary>
-/// 驗 backend 簽發的 token 能被「platform 現行驗證參數」通過(HS256、同 secret、claims sub/role/tenantCode)。
+/// 驗 backend 簽發的 token 能被 platform 的嚴格 ES256 驗證參數通過，並保留既有 claims。
 /// 這組驗證參數逐字對應 platform JwtService.BuildValidationParameters,確保簽發側相容。
 /// </summary>
 public sealed class JwtTests
 {
-    private const string Secret = "dev-jwt-secret-change-me-0123456789abcdef";
+    private static JwtService Service(JwtSigningConfiguration? configuration = null, TimeSpan? expiration = null) =>
+        new(configuration ?? TestJwtSigningKeys.Configuration(), expiration ?? TimeSpan.FromHours(24));
 
-    private static JwtService Service(string? secret = null) =>
-        new(secret ?? Secret, TimeSpan.FromHours(24));
-
-    private static TokenValidationParameters PlatformParams(string secret) => new()
+    private static TokenValidationParameters PlatformParams(JwtSigningConfiguration configuration) => new()
     {
-        ValidateIssuer = false,
-        ValidateAudience = false,
+        ValidateIssuer = true,
+        ValidIssuer = configuration.Issuer,
+        ValidateAudience = true,
+        ValidAudience = configuration.Audience,
         ValidateIssuerSigningKey = true,
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret)),
+        IssuerSigningKey = configuration.SigningKey,
+        ValidAlgorithms = [SecurityAlgorithms.EcdsaSha256],
         ValidateLifetime = true,
         ClockSkew = TimeSpan.Zero,
     };
@@ -33,11 +34,54 @@ public sealed class JwtTests
         var token = Service().Issue("alice", "ADMIN", "demo-a");
 
         var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
-        var principal = handler.ValidateToken(token, PlatformParams(Secret), out _);
+        var principal = handler.ValidateToken(token, PlatformParams(TestJwtSigningKeys.Configuration()), out _);
 
         Assert.Equal("alice", principal.FindFirst("sub")!.Value);
         Assert.Equal("ADMIN", principal.FindFirst("role")!.Value);
         Assert.Equal("demo-a", principal.FindFirst("tenantCode")!.Value);
+    }
+
+    [Fact]
+    public void Issue_UsesConfiguredActiveKidAndEs256Algorithm()
+    {
+        var token = new JwtSecurityTokenHandler().ReadJwtToken(Service().Issue("alice", "ADMIN", "demo-a"));
+
+        Assert.Equal(TestJwtSigningKeys.ActiveKid, token.Header.Kid);
+        Assert.Equal(SecurityAlgorithms.EcdsaSha256, token.Header.Alg);
+    }
+
+    [Theory]
+    [InlineData("issuer")]
+    [InlineData("audience")]
+    [InlineData("kid")]
+    public void SigningConfiguration_BlankRequiredTextFailsClosed(string setting)
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() => TestJwtSigningKeys.Configuration(
+            issuer: setting == "issuer" ? " " : null,
+            audience: setting == "audience" ? " " : null,
+            kid: setting == "kid" ? " " : null));
+
+        Assert.Contains("JWT_", exception.Message);
+    }
+
+    [Fact]
+    public void SigningConfiguration_PublicOnlyKeyFailsClosed()
+    {
+        using var key = System.Security.Cryptography.ECDsa.Create(
+            System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        var publicPem = Convert.ToBase64String(Encoding.UTF8.GetBytes(key.ExportSubjectPublicKeyInfoPem()));
+
+        Assert.Throws<InvalidOperationException>(() => TestJwtSigningKeys.Configuration(privateKeyPemBase64: publicPem));
+    }
+
+    [Fact]
+    public void SigningConfiguration_NonP256PrivateKeyFailsClosed()
+    {
+        using var key = System.Security.Cryptography.ECDsa.Create(
+            System.Security.Cryptography.ECCurve.NamedCurves.nistP384);
+        var privatePem = Convert.ToBase64String(Encoding.UTF8.GetBytes(key.ExportPkcs8PrivateKeyPem()));
+
+        Assert.Throws<InvalidOperationException>(() => TestJwtSigningKeys.Configuration(privateKeyPemBase64: privatePem));
     }
 
     [Fact]
@@ -56,7 +100,8 @@ public sealed class JwtTests
     [Fact]
     public async Task Issue_TokenPastExactExpiry_FailsPlatformValidation_WithNoClockSkewGrace()
     {
-        var token = new JwtService(Secret, TimeSpan.FromSeconds(1)).Issue("alice", "USER", "demo-a");
+        var configuration = TestJwtSigningKeys.Configuration();
+        var token = Service(configuration, TimeSpan.FromSeconds(1)).Issue("alice", "USER", "demo-a");
         var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
         var jwt = handler.ReadJwtToken(token);
         Assert.Equal(TimeSpan.FromSeconds(1), jwt.ValidTo - jwt.ValidFrom);
@@ -64,17 +109,22 @@ public sealed class JwtTests
         await Task.Delay(1_200);
 
         Assert.Throws<SecurityTokenExpiredException>(() =>
-            handler.ValidateToken(token, PlatformParams(Secret), out _));
+            handler.ValidateToken(token, PlatformParams(configuration), out _));
     }
 
     [Fact]
-    public void Issue_WithDifferentSecret_FailsPlatformValidation()
+    public void Issue_WithDifferentPrivateKey_FailsPlatformValidation()
     {
-        var token = Service(secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").Issue("alice", "USER", "demo-a");
+        var token = Service().Issue("alice", "USER", "demo-a");
+        var different = JwtSigningConfiguration.Resolve(
+            TestJwtSigningKeys.Issuer,
+            TestJwtSigningKeys.Audience,
+            "different",
+            CreatePrivateKey());
 
         var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
         Assert.ThrowsAny<SecurityTokenException>(() =>
-            handler.ValidateToken(token, PlatformParams("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), out _));
+            handler.ValidateToken(token, PlatformParams(different), out _));
     }
 
     // ---- A-DATA-14/15:capabilities claim(如 workflow.manage)只在使用者具備時簽入 ----
@@ -126,7 +176,7 @@ public sealed class JwtTests
         var jwt = new JwtSecurityTokenHandler().ReadJwtToken(token);
         // 既有 payload claims(含 JwtSecurityToken 自帶的 exp/nbf)恰為這些;無 capabilities。
         Assert.Equal(
-            new[] { "exp", "iat", "nbf", "role", "sub", "tenantCode" },
+            new[] { "aud", "exp", "iat", "iss", "nbf", "role", "sub", "tenantCode" },
             jwt.Claims.Select(c => c.Type).OrderBy(t => t, StringComparer.Ordinal).ToArray());
     }
 
@@ -272,4 +322,11 @@ public sealed class JwtTests
                 return prefix + new string('a', length - prefix.Length);
             })
             .ToArray();
+
+    private static string CreatePrivateKey()
+    {
+        using var key = System.Security.Cryptography.ECDsa.Create(
+            System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(key.ExportPkcs8PrivateKeyPem()));
+    }
 }

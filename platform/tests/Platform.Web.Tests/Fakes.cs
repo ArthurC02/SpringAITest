@@ -168,6 +168,30 @@ public sealed class FakeConversationStore : IConversationStore
             .Select(s => s.Response)
             .Reverse()
             .ToList());
+
+    public Task<ChatHistoryPage> ListPageAsync(
+        int limit, string? before, UserContext ctx, CancellationToken ct = default)
+    {
+        var ordered = Saved
+            .Where(s => s.TenantCode == ctx.TenantCode && s.UserId == ctx.UserId)
+            .Select(s => s.Response)
+            .OrderByDescending(item => item.CreatedAt)
+            .ThenByDescending(item => item.Id)
+            .ToList();
+        if (before == "bad")
+        {
+            throw new WorkflowBadInputException("聊天歷史游標無效");
+        }
+
+        var offset = before is null ? 0 : int.Parse(before, System.Globalization.CultureInfo.InvariantCulture);
+        var items = ordered.Skip(offset).Take(limit).ToList();
+        var next = offset + items.Count;
+        var hasMore = next < ordered.Count;
+        return Task.FromResult(new ChatHistoryPage(
+            items,
+            hasMore ? next.ToString(System.Globalization.CultureInfo.InvariantCulture) : null,
+            hasMore));
+    }
 }
 
 /// <summary>
@@ -243,6 +267,8 @@ public sealed class FakeWorkflowEngineClient : IWorkflowEngineClient
                 throw new WorkflowForbiddenException("權限不足，無法執行 Skill：" + name);
             case "badinput":
                 throw new WorkflowBadInputException("Skill 輸入不符合規範：缺少 query");
+            case "toolarge":
+                throw new WorkflowPayloadTooLargeException("Skill request exceeds the allowed size");
             case "boom":
                 throw new WorkflowInvocationException("工作流服務呼叫失敗：HTTP 500");
         }
@@ -407,8 +433,17 @@ public sealed class FakeBusinessWorkflowService : IBusinessWorkflowService
 /// <summary>文件服務 fake:ghost → NotFound。建立回受理狀態(202 語意)。</summary>
 public sealed class FakeDocumentService : IDocumentService
 {
-    public Task<DocumentAccepted> CreateAsync(DocumentCreateRequest request, UserContext ctx, CancellationToken ct = default)
-        => Task.FromResult(new DocumentAccepted("doc-1", request.Title ?? string.Empty, "processing"));
+    public static string? LastIdempotencyKey { get; private set; }
+
+    public Task<DocumentAccepted> CreateAsync(
+        DocumentCreateRequest request,
+        UserContext ctx,
+        string idempotencyKey,
+        CancellationToken ct = default)
+    {
+        LastIdempotencyKey = idempotencyKey;
+        return Task.FromResult(new DocumentAccepted("doc-1", request.Title ?? string.Empty, "processing"));
+    }
 
     public Task<JsonElement> ListAsync(UserContext ctx, CancellationToken ct = default)
         => Task.FromResult(FakeJson.Of(

@@ -152,7 +152,7 @@ Users (密碼統一為 "password123"):
 | `CHAT_MODEL` | `gpt-4o-mini` | `mock-gpt` | platform 呼叫 LiteLLM 時的模型路由(litellm-config.yaml 內已定義) |
 | `LLM_MODEL` | `gpt-4o-mini` | `mock-gpt` | workflow 呼叫 LiteLLM 時的模型路由 |
 | `LLM_BASE_URL` | `http://localhost:4000` | `http://localhost:4000` | LiteLLM 端點(Lite 仍需起 uvx LiteLLM) |
-| `JWT_SECRET` | `dev-jwt-secret-change-me-0123456789abcdef` | `dev-jwt-secret-change-me-0123456789abcdef` | 平台簽名(dev 容器與本機同值,無需改) |
+| JWT ES256 設定 | `JWT_ISSUER` / `JWT_AUDIENCE` / active kid + private key / public ring | 同一組公開開發 key pair | Backend 簽名、Platform 只驗公鑰；Lite helper 明確選擇 Development |
 | `INTERNAL_API_TOKEN` | `internal-dev-token` | `internal-dev-token` | backend 認證令牌(同上) |
 | `BACKEND_BASE_URL` | `http://localhost:8002` | `http://localhost:8002` | platform/workflow 呼叫 backend 位置 |
 | `RABBITMQ_URL` | `amqp://...@localhost:5672` | `amqp://...@localhost:5672` | 平台(Lite 上傳文件回 502,無約束改變) |

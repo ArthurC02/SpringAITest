@@ -6,7 +6,7 @@
 
 ## 1. 決策
 
-Custom Skill script 目前是 trusted ADMIN authoring convenience，不是 hostile-code sandbox。AST allowlist、iteration/write limits 與 timeout 仍有價值。已證實的隔離失效是 CPU 與 memory（worker thread 無 OS-level process boundary；resource bomb 可拖垮整個 Workflow 程序）；secrets 隔離仰賴 AST analyzer 無漏洞，一旦有洞才成立，是縱深防禦而非首層邊界。
+Custom Skill script 是 trusted ADMIN authoring convenience，不是 hostile-code sandbox。AST allowlist、iteration/write limits 與 timeout 仍是必要的縱深防禦；Production 的首層 execution boundary 已改為 deployment policy：只有啟用隔離時才進短生命週期 subprocess，未啟用則拒絕 script step，不再回退至 Workflow 程序內執行。顯式 Development 仍保留 restricted in-process adapter 供快速迭代與測試。
 
 MCP/connector 不得直接把 discovered tools 暴露給模型，也不得讓 Workflow 持有 arbitrary server credentials。正確方向是 Backend-governed immutable connector revision，經 canonical discovery 映射到既有 safe tool catalog，再走 grant/rule/risk/approval/effect boundary。
 
@@ -20,11 +20,11 @@ MCP/connector 不得直接把 discovered tools 暴露給模型，也不得讓 Wo
 
 ### 2.2 替換 execution boundary
 
-以短生命週期 subprocess 或專用 isolated worker 執行，最小 IPC contract 只傳：script bytecode/source hash、allowlisted input state projection、allowlisted tool-call proxy descriptor、deadline/budgets。Child environment 不含 `INTERNAL_API_TOKEN`、DB URL、JWT secret、provider keys 或 parent environment。
+已以短生命週期 subprocess 執行，最小 IPC contract 只傳：script bytecode/source hash、allowlisted input state projection、allowlisted tool-call proxy descriptor、deadline/budgets。Child environment 不含 `INTERNAL_API_TOKEN`、DB URL、signing material、provider keys 或 parent environment。
 
 OS boundary 必須限制：wall time、CPU、memory、process/file descriptor、filesystem、network/egress。Timeout 後強制終止整個 process group；output 經 size/schema/key validation 後才 merge state。
 
-Windows/Linux 開發與 container production 可使用不同 isolation adapter，但 policy/contract tests 相同。若平台無法提供可信 OS limits，production 直接禁用 script step，不能回退到「看似 sandbox」。
+Windows/Linux 使用各自的 OS limit adapter，但共用 policy/contract tests。若平台無法提供可信 OS limits，Production 直接禁用 script step，不能回退到「看似 sandbox」。`APP_ENVIRONMENT` 未設定時視為 Production；只有顯式 Development 且隔離未啟用時可用 restricted in-process adapter。
 
 ### 2.3 Tool calls
 
@@ -77,7 +77,7 @@ Channel adapter 是 connector 的受限類型，不是任意 plugin hook：
 
 | Flag/control                     | 策略                                                                                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `ISOLATED_SKILL_SCRIPTS_ENABLED` | shadow parity → tenant canary → replace in-process；production 無可信 adapter 時 script disabled |
+| `ISOLATED_SKILL_SCRIPTS_ENABLED` | true 使用 OS-limited subprocess；false 時 Development 可 restricted in-process、Production 一律 disabled |
 | `MCP_CONNECTORS_ENABLED`         | false、tenant allowlist、read-only only                                                          |
 | Per-connector kill switch        | 立即阻擋新 invocation；active call bounded timeout                                               |
 | Revision revocation              | future calls fail closed；歷史 snapshots/evidence 保留                                           |
@@ -95,7 +95,7 @@ Native tools 不受 connector flag 影響。Rollback connector 不可讓已 revo
 
 ## 9. Cleanup inventory
 
-- Isolated adapter 全量且 parity/evidence 通過後刪除 in-process `exec` path；AST analyzer 保留。
+- Restricted in-process adapter 僅保留為 Development 工具；任何 production composition 或 fallback 不得引用它，AST analyzer 保留。
 - 移除 child process 可繼承的 broad environment/bootstrap code。
 - MCP adapter 上線後仍保留 native registry；只刪重複 discovery cache 或 permission calculation。
 - Connector 被刪除時保留 revision identity、run/effect evidence 與 audit；刪除 credential material 依 retention policy執行。

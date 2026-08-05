@@ -176,12 +176,15 @@ public sealed class WorkflowEngineClient : IWorkflowEngineClient
         return await ReadJsonAsync(resp, ct);
     }
 
-    /// <summary>invoke 的狀態碼轉譯:404 → NotFound、403 → Forbidden、422 → BadInput(對外 400)、其他 → 502。</summary>
+    /// <summary>invoke 的狀態碼轉譯:404 → NotFound、403 → Forbidden、413 → PayloadTooLarge、
+    /// 422 → BadInput(對外 400)、其他 → 502。</summary>
     private async Task<Exception> MapInvokeErrorAsync(
         HttpResponseMessage resp, string kind, string name, CancellationToken ct) => (int)resp.StatusCode switch
         {
             404 => new WorkflowNotFoundException($"找不到{kind}：{name}"),
             403 => new WorkflowForbiddenException($"權限不足，無法執行{kind}：{name}"),
+            // Body is intentionally ignored: Workflow detail is not part of the public contract.
+            413 => new WorkflowPayloadTooLargeException("Skill request exceeds the allowed size"),
             // 下游 422 → 本服務 400;解析 detail 帶出乾淨訊息與 fieldErrors(見 MapBadInputAsync)。
             422 => await MapBadInputAsync(kind, resp, ct),
             _ => new WorkflowInvocationException(FailurePrefix + "HTTP " + (int)resp.StatusCode),

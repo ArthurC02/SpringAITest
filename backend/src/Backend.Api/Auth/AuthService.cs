@@ -8,9 +8,22 @@ namespace Backend.Api.Auth;
 /// </summary>
 public sealed class AuthService
 {
-    private readonly IAuthRepository _repo;
+    internal const string DummyPasswordHash = "$2a$11$zR02Rsad67Jqv2jy2jZZqOwqxhzr4ywWdduaymAyXSkuyQqUQbkES";
+    private const string InvalidCredentialsMessage = "帳號或密碼錯誤";
 
-    public AuthService(IAuthRepository repo) => _repo = repo;
+    private readonly IAuthRepository _repo;
+    private readonly IPasswordVerifier _passwordVerifier;
+
+    public AuthService(IAuthRepository repo)
+        : this(repo, BCryptPasswordVerifier.Instance)
+    {
+    }
+
+    public AuthService(IAuthRepository repo, IPasswordVerifier passwordVerifier)
+    {
+        _repo = repo;
+        _passwordVerifier = passwordVerifier;
+    }
 
     public async Task<AuthResult> RegisterAsync(RegisterRequest request, CancellationToken ct)
     {
@@ -35,13 +48,14 @@ public sealed class AuthService
 
     public async Task<AuthResult> LoginAsync(LoginRequest request, CancellationToken ct)
     {
-        // 找不到使用者、或密碼比對失敗,都回同一個「帳號或密碼錯誤」(不洩漏帳號是否存在)。
-        var user = await FindOrThrowAsync(
-            _repo.FindUserByUsernameAsync(request.Username!, ct),
-            StatusCodes.Status401Unauthorized, "帳號或密碼錯誤");
-
-        ThrowIf(!BCrypt.Net.BCrypt.Verify(request.Password!, user.PasswordHash),
-            StatusCodes.Status401Unauthorized, "帳號或密碼錯誤");
+        // 找不到使用者仍走同成本的預先計算 BCrypt hash；兩條失敗路徑維持同一個 401 訊息。
+        var user = await _repo.FindUserByUsernameAsync(request.Username!, ct);
+        var passwordHash = user?.PasswordHash ?? DummyPasswordHash;
+        var passwordValid = _passwordVerifier.Verify(request.Password!, passwordHash);
+        if (user is null || !passwordValid)
+        {
+            throw new ApiException(StatusCodes.Status401Unauthorized, InvalidCredentialsMessage);
+        }
 
         return new AuthResult(
             user.Username,

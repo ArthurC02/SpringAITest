@@ -18,4 +18,10 @@ public interface IConversationStore
 
     /// <summary>歷史清單,created_at DESC,只回 ctx 所屬租戶+使用者的紀錄。</summary>
     Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default);
+
+    Task<ChatHistoryPage> ListPageAsync(
+        int limit,
+        string? before,
+        UserContext ctx,
+        CancellationToken ct = default);
 }

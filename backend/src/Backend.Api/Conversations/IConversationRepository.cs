@@ -7,4 +7,12 @@ public interface IConversationRepository
 
     /// <summary>依 created_at DESC(最新在前),同時間戳以 id DESC 作穩定平手判準;只回同租戶同使用者的紀錄。</summary>
     Task<IReadOnlyList<ConversationItem>> ListDescAsync(string tenantId, string userId, CancellationToken ct);
+
+    /// <summary>Keyset query in the same stable order; <paramref name="take"/> is already limit + 1.</summary>
+    Task<IReadOnlyList<ConversationItem>> ListPageDescAsync(
+        string tenantId,
+        string userId,
+        ConversationPosition? before,
+        int take,
+        CancellationToken ct);
 }

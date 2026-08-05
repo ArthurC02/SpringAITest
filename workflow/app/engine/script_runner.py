@@ -130,6 +130,10 @@ class ScriptLimitExceeded(ScriptError):
     """迭代次數／配置長度／state 寫入大小超過上限。"""
 
 
+class ScriptExecutionDisabled(ScriptError):
+    """目前部署的 script execution boundary 未達 production 要求。"""
+
+
 class ScriptTraceEntry(TraceEntry):
     """script 步驟的 trace entry：**只有** SHA-256，沒有任何放得下原始碼全文的欄位。
 
@@ -601,6 +605,17 @@ class ScriptRunnerPort(Protocol):
     async def run(
         self, source: str, state_view: dict, tools: Any, limits: ScriptLimits
     ) -> dict: ...
+
+
+class DisabledScriptRunner:
+    """Production fallback: reject rather than silently execute in-process."""
+
+    async def run(
+        self, source: str, state_view: dict, tools: Any, limits: ScriptLimits
+    ) -> dict:
+        raise ScriptExecutionDisabled(
+            "正式環境未啟用隔離 script adapter，script 步驟拒絕執行"
+        )
 
 
 class RestrictedInProcessRunner:

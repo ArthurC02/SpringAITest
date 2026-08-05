@@ -2,15 +2,19 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from python_multipart import MultipartParser
+from python_multipart.exceptions import MultipartParseError
+from python_multipart.multipart import parse_options_header
 from pydantic import ValidationError
+from starlette.formparsers import MultiPartException, MultiPartParser as StarletteMultiPartParser
+from starlette.datastructures import FormData, UploadFile
 
 from app import backend_http, correlation, skills, tracing
 from app.business_rules.catalog import catalog_response as business_rule_catalog
-from app.business_rules.http_limits import BusinessRuleRequestLimitMiddleware
 from app.business_rules.models import (
     RuleCatalogResponse,
     RuleSimulationRequest,
@@ -18,6 +22,7 @@ from app.business_rules.models import (
     RuleValidationRequest,
     RuleValidationResponse,
 )
+from app.http_limits import JsonRequestLimitMiddleware
 from app.business_rules.simulator import simulate as simulate_business_rules
 from app.business_rules.validator import (
     canonical_to_json as canonical_business_rule_set,
@@ -28,6 +33,127 @@ from app.engine import compiler, node_registry, package, tool_registry
 from app.engine.skill import ValidationResult, clean_invoke_input, validate_source
 from app.evals.api import router as evals_router
 from app.skills import config_apply, custom
+
+
+class _PackageTooLarge(MultiPartException):
+    """The package file exceeded its raw-byte transport limit while streaming."""
+
+
+class _PackageUploadParser(StarletteMultiPartParser):
+    """Multipart parser that applies the package raw limit before spooling it all."""
+
+    def __init__(self, request: Request) -> None:
+        super().__init__(
+            request.headers,
+            request.stream(),
+            max_files=1,
+            max_fields=1,
+        )
+        self._package_bytes = 0
+        self._completed = False
+        self._seen_fields: set[str] = set()
+
+    def on_headers_finished(self) -> None:
+        super().on_headers_finished()
+        field_name = self._current_part.field_name
+        if field_name in self._seen_fields:
+            raise MultiPartException(f"Duplicate multipart field: {field_name}.")
+        self._seen_fields.add(field_name)
+        if self._current_part.file is not None and field_name != "package":
+            raise MultiPartException("Unexpected file field.")
+        if self._current_part.file is None and field_name != "expected_name":
+            raise MultiPartException("Unexpected scalar field.")
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        if (
+            self._current_part.file is not None
+            and self._current_part.field_name == "package"
+        ):
+            chunk_size = end - start
+            if self._package_bytes + chunk_size > package.MAX_PACKAGE_RAW_BYTES:
+                raise _PackageTooLarge("Skill package exceeds the raw-byte limit.")
+            self._package_bytes += chunk_size
+        super().on_part_data(data, start, end)
+
+    def on_end(self) -> None:
+        self._completed = True
+
+    async def parse(self) -> FormData:
+        """Require the closing boundary and close every tracked file on any abort."""
+        _, params = parse_options_header(self.headers["Content-Type"])
+        charset = params.get(b"charset", "utf-8")
+        self._charset = charset.decode("latin-1") if isinstance(charset, bytes) else charset
+        try:
+            boundary = params[b"boundary"]
+        except KeyError as exc:
+            raise MultiPartException("Missing boundary in multipart.") from exc
+
+        parser = MultipartParser(
+            boundary,
+            {
+                "on_part_begin": self.on_part_begin,
+                "on_part_data": self.on_part_data,
+                "on_part_end": self.on_part_end,
+                "on_header_field": self.on_header_field,
+                "on_header_value": self.on_header_value,
+                "on_header_end": self.on_header_end,
+                "on_headers_finished": self.on_headers_finished,
+                "on_end": self.on_end,
+            },
+        )
+        try:
+            async for chunk in self.stream:
+                parser.write(chunk)
+                for part, data in self._file_parts_to_write:
+                    assert part.file is not None
+                    await part.file.write(data)
+                for part in self._file_parts_to_finish:
+                    assert part.file is not None
+                    await part.file.seek(0)
+                self._file_parts_to_write.clear()
+                self._file_parts_to_finish.clear()
+            parser.finalize()
+            if not self._completed:
+                raise MultiPartException("Incomplete multipart body.")
+            return FormData(self.items)
+        except BaseException:
+            self._close_tracked_files()
+            raise
+
+    def _close_tracked_files(self) -> None:
+        """Best-effort cleanup must never replace the parser's original failure."""
+        for file in self._files_to_close_on_error:
+            try:
+                file.close()
+            except BaseException:
+                pass
+
+
+async def _read_package_upload(request: Request) -> tuple[bytes, str | None]:
+    """Parse one package multipart request with raw-byte enforcement during read."""
+    try:
+        form = await _PackageUploadParser(request).parse()
+    except _PackageTooLarge as exc:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "package_too_large",
+                "message": "Skill package is too large.",
+            },
+        ) from exc
+    except (KeyError, MultiPartException, MultipartParseError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid package multipart form.") from exc
+
+    package_file = form.get("package")
+    if not isinstance(package_file, UploadFile):
+        raise HTTPException(status_code=422, detail="package file is required.")
+    expected_name = form.get("expected_name")
+    if expected_name is not None and not isinstance(expected_name, str):
+        raise HTTPException(status_code=422, detail="expected_name must be a string.")
+    try:
+        return await package_file.read(), expected_name
+    finally:
+        await package_file.close()
 
 # 這幾行 import 執行各節點模組頂層的 @node 裝飾器，讓 GET /nodes 的目錄完整
 # （不倚賴「某個 skill 剛好有 import 到該節點」這種間接關係）。同理，app.tools 的 import
@@ -57,15 +183,18 @@ from app.schemas import (
     ToolInfo,
     ValidatePackageResult,
 )
-from app.security import FeatureGateMiddleware, RequestContext, get_context
+from app.security import FeatureGateMiddleware, RequestContext, get_context, require_internal
 from app.runtime.api import router as agent_runtime_router
 from app.runtime.orchestrator_api import router as orchestrator_runtime_router
 from app.runtime.orchestrator_backend import OrchestratorBackendClient
 from app.runtime.orchestrator_supervisor import RootRuntimeSupervisor
 from app.orchestration.api import router as workflow_designer_router
 from app.runtime.service import RuntimeService
+from app.runtime.checkpoints import PostgresCheckpointStore, require_runtime_checkpoint_dsn
+from app.runtime.retention import CheckpointRetentionService
 from app.runtime.flow_harness import PUBLIC_DENY_KEYS, invoke_flow_with_governance
 from app.settings import settings
+from app.health import WorkflowReadinessProbe, live_report
 
 logger = logging.getLogger(__name__)
 
@@ -200,8 +329,16 @@ async def _run_with_timeout(coro, timeout_seconds: float, name: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """服務生命週期：暖身並在關機時釋放共用 backend HTTP client（連線池不外洩）。"""
+    if settings.checkpoint_retention_mode == "delete":
+        # Settings rejects this deployment today; retain an assembly-level
+        # wall as well so tests or future configuration wiring cannot silently
+        # construct delete mode with the default no-op evidence hook.
+        raise RuntimeError(
+            "checkpoint retention delete requires a backup/restore evidence provider"
+        )
     backend_http.get_client()  # 暖身：啟動時就備好連線池，首個請求不必臨時建立
     runtime_service: RuntimeService | None = None
+    retention_store: PostgresCheckpointStore | None = None
     root_supervisor: RootRuntimeSupervisor | None = None
     if settings.multi_agent_dispatch_enabled:
         # The durable Backend port is production-wired independently from the
@@ -217,6 +354,15 @@ async def lifespan(app: FastAPI):
         )
         root_supervisor.start()
         app.state.root_runtime_supervisor = root_supervisor
+    if settings.checkpoint_retention_mode != "off":
+        if runtime_service is not None:
+            app.state.checkpoint_retention = CheckpointRetentionService(
+                runtime_service.checkpoints
+            )
+        else:
+            retention_store = PostgresCheckpointStore(require_runtime_checkpoint_dsn())
+            await retention_store.open()
+            app.state.checkpoint_retention = CheckpointRetentionService(retention_store)
     try:
         yield
     finally:
@@ -224,11 +370,14 @@ async def lifespan(app: FastAPI):
             await root_supervisor.close()
         if runtime_service is not None:
             await runtime_service.close()
+        if retention_store is not None:
+            await retention_store.close()
         await backend_http.aclose_client()
 
 
 app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
-app.add_middleware(BusinessRuleRequestLimitMiddleware)
+app.state.readiness_probe = WorkflowReadinessProbe()
+app.add_middleware(JsonRequestLimitMiddleware)
 app.add_middleware(
     FeatureGateMiddleware,
     prefix="/agent-runs/",
@@ -275,10 +424,36 @@ async def bounded_business_rule_request_error(
     )
 
 
+@app.get("/health/live")
+async def health_live() -> dict:
+    """Process/event-loop liveness only; never calls a dependency."""
+    return live_report()
+
+
+async def _health_ready_response(request: Request) -> JSONResponse:
+    report = await request.app.state.readiness_probe.check()
+    return JSONResponse(status_code=200 if report["ready"] else 503, content=report)
+
+
+@app.get("/health/ready")
+async def health_ready(request: Request) -> JSONResponse:
+    return await _health_ready_response(request)
+
+
 @app.get("/health")
 async def health() -> dict:
-    """健康檢查端點，供 compose / platform 端（.NET）探活使用；刻意不掛任何驗證，避免探活受認證設定影響。"""
-    return {"status": "ok"}
+    """Compatibility alias for liveness; health endpoints require no token."""
+    return live_report()
+
+
+@app.post("/checkpoint-retention/run")
+async def run_checkpoint_retention(
+    _: None = Depends(require_internal),
+) -> dict:
+    if settings.checkpoint_retention_mode == "off":
+        return {"mode": "off", "candidate_count": 0, "deleted_count": 0}
+    service: CheckpointRetentionService = app.state.checkpoint_retention
+    return await service.run_once()
 
 
 @app.get("/nodes", response_model=list[NodeInfo])
@@ -456,8 +631,7 @@ async def validate_skill(
     response_model_exclude_none=True,
 )
 async def validate_package(
-    package_file: UploadFile = File(alias="package"),
-    expected_name: str | None = Form(default=None),
+    request: Request,
     ctx: RequestContext = Depends(get_context),
 ) -> ValidatePackageResult:
     """驗證上傳的 Skill package zip（設計 §2.2）。internal-only，multipart。
@@ -473,7 +647,7 @@ async def validate_package(
     步驟的 flow 定義即驗證失敗。呼叫端（backend 三個匯入入口、platform proxy）本身已是
     ADMIN-only，這是同一條寫入路徑最內層的縱深防禦。
     """
-    raw = await package_file.read()
+    raw, expected_name = await _read_package_upload(request)
     try:
         parsed = package.parse_package(raw, expected_name, author_role=ctx.role)
     except package.PackageError as e:

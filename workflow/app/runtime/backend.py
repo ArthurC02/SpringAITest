@@ -190,8 +190,8 @@ class BackendRunClient:
     async def complete_effect(self, run_id: str, effect_id: str, ctx: RequestContext, *, succeeded: bool) -> None:
         await self._request_no_content("POST", f"/api/agent-runs/{_guid(run_id)}/write-effects/{_guid(effect_id)}/complete?succeeded={'true' if succeeded else 'false'}", ctx, json={})
 
-    async def claim_approval_recovery(self) -> list[dict[str, Any]]:
-        response = await get_client().post("/api/agent-run-approval-executions/recovery/claim?limit=20", headers={"X-Internal-Token": settings.internal_api_token}, json={}, timeout=httpx.Timeout(10.0))
+    async def claim_approval_recovery(self, *, limit: int) -> list[dict[str, Any]]:
+        response = await get_client().post(f"/api/agent-run-approval-executions/recovery/claim?limit={limit}", headers={"X-Internal-Token": settings.internal_api_token}, json={}, timeout=httpx.Timeout(10.0))
         response.raise_for_status(); body=response.json(); return body if isinstance(body,list) else []
 
     async def complete_approval_execution(self, approval_id: str, claim_token: str, *, dead_letter: bool = False) -> None:

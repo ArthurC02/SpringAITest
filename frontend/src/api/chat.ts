@@ -2,8 +2,13 @@
 // 開發時經由 Vite proxy 轉發到 http://localhost:8080（見 vite.config.ts），
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
 import { getSession } from './auth'
-import { parseErrorMessage, triggerLogout } from './http'
+import { apiFetch, parseErrorMessage, triggerLogout } from './http'
 import { CHAT_USER_ID_KEY, CHAT_CONVERSATION_ID_KEY } from '../storageKeys'
+import {
+  CHAT_HISTORY_PAGE_SIZE,
+  parseChatHistoryPage,
+  type ChatHistoryPage,
+} from '../chatHistory'
 
 /**
  * mem0 長期記憶的分群鍵。登入後跟著使用者走（用 username），
@@ -37,6 +42,16 @@ function getConversationId(): string {
 /** 開一段新對話：換掉 conversationId，讓後端的短期記憶重新開始（清除對話時呼叫）。 */
 export function newConversation(): void {
   localStorage.setItem(CHAT_CONVERSATION_ID_KEY, crypto.randomUUID())
+}
+
+export async function getChatHistoryPage(
+  before?: string,
+  signal?: AbortSignal,
+): Promise<ChatHistoryPage> {
+  const query = new URLSearchParams({ limit: String(CHAT_HISTORY_PAGE_SIZE) })
+  if (before !== undefined) query.set('before', before)
+  const response = await apiFetch<unknown>(`/api/chat/history/page?${query}`, { signal })
+  return parseChatHistoryPage(response)
 }
 
 /**

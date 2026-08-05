@@ -18,6 +18,7 @@ using Backend.Api.RuntimeDiscovery;
 using Backend.Api.OperationsGovernance;
 using Backend.Api.Contexts;
 using Backend.Api.PromptArtifacts;
+using Backend.Api.CheckpointRetention;
 using Microsoft.AspNetCore.Mvc;
 
 // 專用 migration 行程:與一般啟動完全分離的分支,在建 host 之前就結束。
@@ -35,16 +36,23 @@ var cfg = builder.Configuration;
 // 組態:一律讀 flat 環境變數(env var 會自動進 IConfiguration)。
 // ---------------------------------------------------------------------------
 var connString = cfg["DB_CONNECTION_STRING"]
-    ?? "Host=localhost;Port=5433;Username=postgres;Password=postgres;Database=springaitest";
+    ?? StartupCredentialValidator.DevelopmentDatabaseConnectionString;
 var internalToken = InternalTokenResolver.Resolve(cfg["INTERNAL_API_TOKEN"]);
-var jwtSecret = cfg["JWT_SECRET"] ?? "dev-jwt-secret-change-me-0123456789abcdef";
+var jwtSigning = JwtSigningConfiguration.Resolve(
+    cfg["JWT_ISSUER"],
+    cfg["JWT_AUDIENCE"],
+    cfg["JWT_ACTIVE_KID"],
+    cfg["JWT_PRIVATE_KEY_PEM_BASE64"]);
 var embeddingsProvider = cfg["EMBEDDINGS_PROVIDER"] ?? "fake";
 var llmBaseUrl = cfg["LLM_BASE_URL"] ?? "http://localhost:4000";
 var litellmKey = cfg["LITELLM_KEY"] ?? "sk-1234";
 var embeddingModel = cfg["EMBEDDING_MODEL"] ?? "text-embedding-3-small";
-var rabbitUrl = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:5672";
+var rabbitUrl = cfg["RABBITMQ_URL"] ?? StartupCredentialValidator.DevelopmentRabbitMqUrl;
 var workflowBaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001";
 var useInMemoryDb = string.Equals(cfg["DB_PROVIDER"], "inmemory", StringComparison.OrdinalIgnoreCase);
+StartupCredentialValidator.Validate(builder.Environment.EnvironmentName, connString, internalToken, jwtSigning, rabbitUrl);
+builder.Services.AddSingleton(new ConversationCursorCodec(internalToken));
+builder.Services.AddSingleton(new CheckpointRetentionCodec(internalToken));
 var workflowDesignerEnabled = string.Equals(cfg["WORKFLOW_DESIGNER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 // Runtime kill switch, self-contained (02-spec §8): WORKFLOW_DESIGNER_ENABLED stays an
 // administration gate for the authoring routes only and is explicitly removed from runtime
@@ -70,6 +78,9 @@ var runEvalEnabled = string.Equals(cfg["RUN_EVAL_ENABLED"], "true", StringCompar
 // publish ignore `prompt_manifest_revision`, leaving the publish path byte-for-byte unchanged.
 var promptArtifactsEnabled = string.Equals(cfg["PROMPT_ARTIFACTS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 builder.Services.AddSingleton(new PromptArtifactsState(promptArtifactsEnabled));
+builder.Services.AddSingleton(sp => new BackendReadinessProbe(
+    databaseRequired: !useInMemoryDb && !builder.Environment.IsEnvironment("Testing"),
+    sp.GetService<Npgsql.NpgsqlDataSource>()));
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -96,6 +107,7 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IEvalRepository, InMemoryEvalRepository>();
     builder.Services.AddSingleton<IContextRepository, InMemoryContextRepository>();
     builder.Services.AddSingleton<IPromptArtifactRepository, InMemoryPromptArtifactRepository>();
+    builder.Services.AddSingleton<ICheckpointRetentionRepository, InMemoryCheckpointRetentionRepository>();
 }
 else
 {
@@ -112,6 +124,7 @@ else
     builder.Services.AddScoped<IWorkflowRepository, WorkflowRepository>();
     builder.Services.AddScoped<IOrchestratorRepository, OrchestratorRepository>();
     builder.Services.AddScoped<IOrchestratorRunRepository, OrchestratorRunRepository>();
+    builder.Services.AddScoped<ICheckpointRetentionRepository, CheckpointRetentionRepository>();
     builder.Services.AddScoped<IRuntimeBindingRepository, RuntimeBindingRepository>();
     builder.Services.AddScoped<IOperationsGovernanceRepository, OperationsGovernanceRepository>();
     builder.Services.AddScoped<IEvalRepository, EvalRepository>();
@@ -123,7 +136,8 @@ else
 // Services
 // ---------------------------------------------------------------------------
 builder.Services.AddScoped<AuthService>();
-builder.Services.AddSingleton(new JwtService(jwtSecret, TimeSpan.FromHours(24)));
+builder.Services.AddSingleton<IPasswordVerifier>(BCryptPasswordVerifier.Instance);
+builder.Services.AddSingleton(new JwtService(jwtSigning, TimeSpan.FromHours(24)));
 
 // Skill 定義的靜態驗證:唯一事實來源是 workflow 引擎(:8001)。backend → workflow 的反向依賴為
 // 設計上的取捨(03-design §4.1):validate 無副作用、失敗即快速回 502/422,不把驗證規則複製到 backend。
@@ -211,7 +225,7 @@ if (!app.Environment.IsEnvironment("Testing") && !useInMemoryDb)
 
 app.UseExceptionHandler();
 
-// 內部憑證守門(/health 免驗);置於例外處理之後、路由之前。
+// 內部憑證守門(只有明確 health 端點免驗);置於例外處理之後、路由之前。
 if (!agentWriteToolsEnabled)
 {
     app.Use(async (context, next) =>
@@ -333,8 +347,10 @@ if (!promptArtifactsEnabled)
 
 app.MapControllers();
 
-// 健康檢查(公開、免 token)。
-app.MapGet("/health", () => Results.Json(new { status = "UP" }));
+// 公開 health 端點。舊 /health 明確保留為 liveness alias。
+app.MapGet("/health/live", BackendHealthEndpoints.Live);
+app.MapGet("/health/ready", BackendHealthEndpoints.Ready);
+app.MapGet("/health", BackendHealthEndpoints.Live);
 
 app.Run();
 

@@ -163,6 +163,20 @@ public sealed class ChatService : IChatService
         return await _conversations.ListDescAsync(userCtx, ct);
     }
 
+    public async Task<ChatHistoryPage> HistoryPageAsync(
+        int limit,
+        string? before,
+        UserContext? userCtx = null,
+        CancellationToken ct = default)
+    {
+        if (userCtx is null)
+        {
+            return new ChatHistoryPage(Array.Empty<ChatResponse>(), null, false);
+        }
+
+        return await _conversations.ListPageAsync(limit, before, userCtx, ct);
+    }
+
     private Activity? StartSpan(string message)
     {
         // 沒有任何 OTel listener 時 StartActivity 回 null(例如單元測試),此時 span 為 no-op,不影響流程。

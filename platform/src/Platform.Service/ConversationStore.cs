@@ -55,9 +55,56 @@ public sealed class ConversationStore : IConversationStore
             .ToList();
     }
 
+    public async Task<ChatHistoryPage> ListPageAsync(
+        int limit,
+        string? before,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        var path = $"/api/conversations/page?limit={limit}";
+        if (before is not null)
+        {
+            path += "&before=" + Uri.EscapeDataString(before);
+        }
+
+        var page = await _backend.SendForJsonAsync<ConversationPage>(
+            _backend.BuildRequest(HttpMethod.Get, path, ctx),
+            WrapTransport,
+            async (response, token) =>
+            {
+                if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                {
+                    var error = await _backend.ReadErrorAsync(response, token);
+                    return new WorkflowBadInputException(
+                        error.Message ?? "聊天歷史分頁參數無效")
+                    {
+                        FieldErrors = error.FieldErrors,
+                    };
+                }
+
+                return new BackendCallException(
+                    FailurePrefix + "HTTP " + (int)response.StatusCode);
+            },
+            () => new BackendCallException(FailurePrefix + "回應內容為空"),
+            ct);
+
+        return new ChatHistoryPage(
+            page.Items.Select(ToChatResponse).ToList(),
+            page.NextCursor,
+            page.HasMore);
+    }
+
     /// <summary>backend POST /api/conversations 回應:{ id, createdAt }。</summary>
     private sealed record ConversationCreated(long Id, DateTime CreatedAt);
 
     /// <summary>backend GET /api/conversations 項目:{ id, reply, createdAt }。</summary>
     private sealed record ConversationItem(long Id, string Reply, DateTime CreatedAt);
+
+    private sealed record ConversationPage(
+        IReadOnlyList<ConversationItem> Items,
+        string? NextCursor,
+        bool HasMore);
+
+    private static ChatResponse ToChatResponse(ConversationItem item)
+        => new(item.Id, item.Reply, DateTime.SpecifyKind(item.CreatedAt, DateTimeKind.Utc));
 }

@@ -234,7 +234,7 @@
 - `SingleRequiredStringKey` 單參天花板(01-plan §6.1)—— `A-08`/`B-P4-04` 只驗「靜默跳過」,不驗多參可路由。
 - 路由命中時 client tools 不被呼叫(`B-P4-13`)—— **已驗收的天花板**,非 bug。
 - skill catalog 缺 `output_schema`、慢 skill 無進度回報、`useCopilotChatSuggestions` / 多參補問 / generative UI(01-plan §6.2–6.4)。
-- `JWT_SECRET` / `INTERNAL_API_TOKEN` 公開開發預設值(01-plan §6.5)。
+- 正式環境 credential provisioning / ES256 key rotation(01-plan §6.5)；由 deployment contract 與 startup fail-fast 驗證，不屬於 shared-core behavior gate。
 - 前端除 `App.tsx` 一處外的任何改動(02-spec §6)——`useCopilotReadable` / `useCopilotAction` / `renderAndWaitForResponse` / `CopilotSidebar` 文案皆不在驗收範圍,只需 lint/build 不退化。
 - 不改 `CHAT_MODEL`;不刪 ChatView(兩鏈路長期並存)。
 

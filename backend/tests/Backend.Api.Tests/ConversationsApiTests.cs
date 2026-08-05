@@ -182,4 +182,126 @@ public sealed class ConversationsApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.DoesNotContain(arr, n => n!["reply"]!.GetValue<string>() == "使用者甲專屬回覆");
     }
+
+    [Fact]
+    public async Task Page_Empty_ReturnsEnvelope()
+    {
+        var response = await Client("demo-a", "page-empty-user").GetAsync("/api/conversations/page");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Empty(body["items"]!.AsArray());
+        Assert.Null(body["nextCursor"]);
+        Assert.False(body["hasMore"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Page_FirstNextAndConcurrentInsert_UseStableKeysetBoundary()
+    {
+        var client = Client("demo-a", "page-boundary-user");
+        var created = new List<long>();
+        for (var i = 0; i < 4; i++)
+        {
+            var response = await client.PostAsJsonAsync(
+                "/api/conversations", new { prompt = $"p{i}", reply = $"r{i}" });
+            created.Add((await response.ReadJsonAsync())["id"]!.GetValue<long>());
+        }
+
+        var first = await (await client.GetAsync("/api/conversations/page?limit=2")).ReadJsonAsync();
+        Assert.True(first["hasMore"]!.GetValue<bool>());
+        var firstIds = first["items"]!.AsArray().Select(x => x!["id"]!.GetValue<long>()).ToArray();
+        Assert.Equal(created.TakeLast(2).Reverse(), firstIds);
+        var cursor = first["nextCursor"]!.GetValue<string>();
+
+        var inserted = await client.PostAsJsonAsync(
+            "/api/conversations", new { prompt = "new", reply = "new" });
+        var insertedId = (await inserted.ReadJsonAsync())["id"]!.GetValue<long>();
+
+        var next = await (await client.GetAsync(
+            "/api/conversations/page?limit=2&before=" + Uri.EscapeDataString(cursor))).ReadJsonAsync();
+        var nextIds = next["items"]!.AsArray().Select(x => x!["id"]!.GetValue<long>()).ToArray();
+        Assert.Equal(created.Take(2).Reverse(), nextIds);
+        Assert.False(next["hasMore"]!.GetValue<bool>());
+        Assert.Null(next["nextCursor"]);
+        Assert.DoesNotContain(insertedId, firstIds.Concat(nextIds));
+        Assert.Empty(firstIds.Intersect(nextIds));
+    }
+
+    [Fact]
+    public async Task Page_Max100_UsesLimitPlusOne()
+    {
+        var client = Client("demo-a", "page-max-user");
+        for (var i = 0; i < 101; i++)
+        {
+            await client.PostAsJsonAsync(
+                "/api/conversations", new { prompt = $"p{i}", reply = $"r{i}" });
+        }
+
+        var defaultPage = await (await client.GetAsync("/api/conversations/page")).ReadJsonAsync();
+        Assert.Equal(50, defaultPage["items"]!.AsArray().Count);
+        Assert.True(defaultPage["hasMore"]!.GetValue<bool>());
+
+        var body = await (await client.GetAsync("/api/conversations/page?limit=100")).ReadJsonAsync();
+
+        Assert.Equal(100, body["items"]!.AsArray().Count);
+        Assert.True(body["hasMore"]!.GetValue<bool>());
+        Assert.False(string.IsNullOrWhiteSpace(body["nextCursor"]!.GetValue<string>()));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(101)]
+    public async Task Page_InvalidLimit_ReturnsStable400(int limit)
+    {
+        var response = await Client().GetAsync($"/api/conversations/page?limit={limit}");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal("validation_failed", body["code"]!.GetValue<string>());
+        Assert.Equal("limit 必須介於 1 到 100", body["message"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("bad")]
+    [InlineData("")]
+    public async Task Page_MalformedCursor_ReturnsStable400(string cursor)
+    {
+        var response = await Client().GetAsync(
+            "/api/conversations/page?before=" + Uri.EscapeDataString(cursor));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal("validation_failed", body["code"]!.GetValue<string>());
+        Assert.Equal("聊天歷史游標無效", body["message"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Page_CursorIsBoundToTenantAndUser()
+    {
+        var owner = Client("demo-a", "cursor-owner");
+        await owner.PostAsJsonAsync("/api/conversations", new { prompt = "p1", reply = "r1" });
+        await owner.PostAsJsonAsync("/api/conversations", new { prompt = "p2", reply = "r2" });
+        var first = await (await owner.GetAsync("/api/conversations/page?limit=1")).ReadJsonAsync();
+        var cursor = first["nextCursor"]!.GetValue<string>();
+
+        foreach (var client in new[]
+                 {
+                     Client("demo-b", "cursor-owner"),
+                     Client("demo-a", "cursor-other-user"),
+                 })
+        {
+            var response = await client.GetAsync(
+                "/api/conversations/page?before=" + Uri.EscapeDataString(cursor));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal("聊天歷史游標無效", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+        }
+
+        var wrongVersion = (cursor[0] == 'A' ? 'B' : 'A') + cursor[1..];
+        var versionResponse = await owner.GetAsync(
+            "/api/conversations/page?before=" + Uri.EscapeDataString(wrongVersion));
+        Assert.Equal(HttpStatusCode.BadRequest, versionResponse.StatusCode);
+        Assert.Equal(
+            "聊天歷史游標無效",
+            (await versionResponse.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
 }

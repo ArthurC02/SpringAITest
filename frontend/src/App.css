@@ -7,6 +7,24 @@
   gap: 14px;
 }
 
+.chat-history-controls {
+  min-height: 38px;
+  padding: 4px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-history-controls:empty {
+  display: none;
+}
+
+.chat-history-controls .error-text {
+  margin: 0;
+}
+
 .chat__empty {
   margin: auto;
   text-align: center;

@@ -42,11 +42,11 @@ from app.engine.graph_primitives import (
 from app.engine.node_registry import NodeSpec
 from app.engine.node_shell import describe, harnessed
 from app.engine.script_runner import (
-    RestrictedInProcessRunner,
     ScriptLimits,
     ScriptRunnerPort,
     ScriptTraceEntry,
 )
+from app.engine.script_policy import configured_script_runner
 from app.engine.skill import Skill
 from app.engine.tool_registry import ToolBag, ToolContext
 
@@ -284,10 +284,11 @@ class _Builder:
         self.loops = 0  # loop 流水號（必須與 _scan 的走訪順序一致）
         self.llm_version = str(getattr(getattr(deps, "llm", None), "version", "") or "")
         self.allowed_tools = frozenset(allowed_tools)
-        # ScriptRunnerPort 的注入點（規格 §5.4）：deps 給了就用 deps 的（v2 subprocess
-        # 只要換這一個依賴，編譯器與 Skill 都不用動），沒給就用 v1 in-process。
+        # Every compile path has an explicit execution policy. Missing fixture
+        # wiring resolves through deployment settings and can never silently
+        # widen production into the in-process Development adapter.
         self.runner: ScriptRunnerPort = (
-            getattr(deps, "script_runner", None) or RestrictedInProcessRunner()
+            getattr(deps, "script_runner", None) or configured_script_runner()
         )
 
     def tool_context(self, state: dict) -> ToolContext:

@@ -4,6 +4,8 @@ using Platform.Service.Dtos;
 using Platform.Web.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Platform.Service.Exceptions;
+using System.Diagnostics.Metrics;
 
 namespace Platform.Web.Controllers;
 
@@ -13,6 +15,10 @@ namespace Platform.Web.Controllers;
 [Authorize]
 public sealed class DocumentController : ControllerBase
 {
+    private const int MaxIdempotencyKeyLength = 128;
+    private static readonly Meter Meter = new("Platform.Documents");
+    private static readonly Counter<long> MissingIdempotencyKeyCounter =
+        Meter.CreateCounter<long>("documents.create.missing_idempotency_key");
     private readonly IDocumentService _documents;
 
     public DocumentController(IDocumentService documents) => _documents = documents;
@@ -22,8 +28,37 @@ public sealed class DocumentController : ControllerBase
     public async Task<IActionResult> Create([FromBody] DocumentCreateRequest request, CancellationToken ct)
     {
         var ctx = User.ToUserContext();
-        var accepted = await _documents.CreateAsync(request, ctx, ct);
+        var idempotencyKey = ResolveIdempotencyKey();
+        var accepted = await _documents.CreateAsync(request, ctx, idempotencyKey, ct);
         return StatusCode(StatusCodes.Status202Accepted, accepted);
+    }
+
+    private string ResolveIdempotencyKey()
+    {
+        var values = Request.Headers["Idempotency-Key"];
+        if (values.Count == 0)
+        {
+            // Compatibility inventory: remove this fallback only after this counter remains zero
+            // through the agreed client rollout/rollback window. Missing-key requests are not
+            // idempotent across separate HTTP attempts.
+            MissingIdempotencyKeyCounter.Add(1);
+            return Guid.NewGuid().ToString("N");
+        }
+
+        if (values.Count != 1)
+        {
+            throw new WorkflowBadInputException("Idempotency-Key must contain exactly one value");
+        }
+
+        var value = values[0];
+        if (string.IsNullOrEmpty(value)
+            || value.Length > MaxIdempotencyKeyLength
+            || value.Any(character => character is < '!' or > '~'))
+        {
+            throw new WorkflowBadInputException("Idempotency-Key is invalid");
+        }
+
+        return value;
     }
 
     /// <summary>列出文件 —— 原樣穿透 backend JSON。</summary>

@@ -61,6 +61,7 @@ test('mid-stream event:error keeps rendered tokens and adds an error bubble', as
   // Multiple data frames concatenate into one bubble and the partial answer survives the failure.
   await expect(answered).toHaveText('Hello')
   await expect(failed).toHaveText(STREAM_ERROR)
+  await expect.poll(() => readKey(page, MESSAGES_KEY), { timeout: 300 }).toContain(STREAM_ERROR)
 
   // Failing before any token arrived must convert the placeholder itself instead of leaving an
   // empty typing bubble behind.
@@ -92,7 +93,114 @@ test('several data: lines inside one frame rejoin with a newline', async ({ page
   await expect(page.locator('.bubble--assistant .bubble__content li')).toHaveText(['alpha', 'beta'])
 })
 
-test('chat state is debounced and flushed on unmount and page unload', async ({ page }) => {
+test.describe('SSE render batching', () => {
+  for (const chunkCount of [500, 5000]) {
+    test(`${chunkCount} chunks preserve exact content with bounded DOM updates`, async ({ page }) => {
+      await page.route('**/api/**', async (route) => {
+        const path = new URL(route.request().url()).pathname
+        if (!path.startsWith('/api/')) return route.continue()
+        if (path === '/api/auth/login') {
+          return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+        }
+        if (path === '/api/features') return json(route, {})
+        if (path === '/api/chat/stream') return sse(route, 'data:x\n\n'.repeat(chunkCount))
+        return json(route, [])
+      })
+
+      await login(page)
+      await page.evaluate(() => {
+        const probe = window as unknown as { __chatMutations: number }
+        probe.__chatMutations = 0
+        new MutationObserver((records) => { probe.__chatMutations += records.length })
+          .observe(document.querySelector('.chat')!, { subtree: true, childList: true, characterData: true })
+      })
+      await send(page, 'burst')
+
+      await expect(page.locator('.bubble--assistant .bubble__content')).toHaveText('x'.repeat(chunkCount))
+      const mutations = await page.evaluate(() =>
+        (window as unknown as { __chatMutations: number }).__chatMutations)
+      expect(mutations).toBeLessThan(50)
+    })
+  }
+})
+
+test('batched streaming does not pull a scrolled-up reader back to the bottom', async ({ page }) => {
+  let releaseStream!: () => void
+  const heldStream = new Promise<void>((resolve) => { releaseStream = resolve })
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      await heldStream
+      return sse(route, 'data:x\n\n'.repeat(500))
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await page.getByTestId('nav-documents').click()
+  await page.evaluate((messagesKey) => {
+    const messages = Array.from({ length: 100 }, (_, index) => ({
+      id: `history-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `history ${index} ${'long '.repeat(20)}`,
+    }))
+    localStorage.setItem(messagesKey, JSON.stringify(messages))
+  }, MESSAGES_KEY)
+  await page.getByTestId('nav-chat').click()
+  const chat = page.locator('.chat')
+  await send(page, 'continue')
+  await expect(page.locator('button.composer__stop')).toBeVisible()
+  await page.waitForTimeout(100)
+  await chat.evaluate((element) => {
+    element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight - 300)
+    element.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
+  await expect(page.getByRole('button', { name: '跳至最新訊息' })).toBeVisible()
+
+  releaseStream()
+  await expect(page.locator('.bubble--assistant .bubble__content').last()).toHaveText('x'.repeat(500))
+  expect(await chat.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(100)
+  await expect(page.getByRole('button', { name: '跳至最新訊息' })).toBeVisible()
+})
+
+test('quota failure shows one non-blocking content-free status', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') return sse(route, 'data:ok\n\n')
+    return json(route, [])
+  })
+
+  await login(page)
+  await page.evaluate((messagesKey) => {
+    const original = Storage.prototype.setItem
+    Storage.prototype.setItem = function guarded(name: string, value: string) {
+      if (name === messagesKey) throw new DOMException('full', 'QuotaExceededError')
+      return original.call(this, name, value)
+    }
+  }, MESSAGES_KEY)
+
+  await send(page, 'private content')
+  const warning = page.getByRole('status')
+  await expect(warning).toBeVisible({ timeout: 2000 })
+  await expect(warning).toHaveText('聊天記錄暫時無法儲存在此瀏覽器')
+  await expect(warning).not.toContainText('private content')
+  await send(page, 'second message')
+  await expect(warning).toHaveCount(1)
+  await expect(page.locator('textarea.composer__input')).toBeEnabled()
+})
+
+test('terminal state is immediately durable and still flushes on unmount and page unload', async ({ page }) => {
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (!path.startsWith('/api/')) return route.continue()
@@ -108,8 +216,7 @@ test('chat state is debounced and flushed on unmount and page unload', async ({ 
   await send(page, 'first')
   await expect(page.locator('.bubble--assistant .bubble__content')).toHaveText('ok')
 
-  // Timestamp the next write to the chat key relative to the moment before the message changes.
-  // Dropping the debounce would persist on the very first token instead of ~500ms after the last.
+  // The terminal callback owns this write: it must beat the 500ms background debounce.
   await page.evaluate((key) => {
     const probe = window as unknown as { __chatWrite?: number; __chatStart?: number }
     const original = Storage.prototype.setItem
@@ -123,13 +230,13 @@ test('chat state is debounced and flushed on unmount and page unload', async ({ 
 
   await send(page, 'second')
   await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __chatWrite?: number }).__chatWrite ?? 0))
+    .poll(() => page.evaluate(() => (window as unknown as { __chatWrite?: number }).__chatWrite ?? 0), { timeout: 300 })
     .toBeGreaterThan(0)
   const delayMs = await page.evaluate(() => {
     const probe = window as unknown as { __chatWrite: number; __chatStart: number }
     return probe.__chatWrite - probe.__chatStart
   })
-  expect(delayMs).toBeGreaterThanOrEqual(450)
+  expect(delayMs).toBeLessThan(450)
   expect(await readKey(page, MESSAGES_KEY)).toContain('second')
 
   // beforeunload flush: clearing the key after the debounce already fired means only the unload
@@ -300,7 +407,76 @@ test('stopping a stream before any token removes the placeholder without an erro
   await expect(page.locator('.bubble--assistant')).toHaveCount(0)
   await expect(page.locator('.bubble--user .bubble__content')).toHaveText('stop me')
   await expect(stopButton).toHaveCount(0)
+  await expect.poll(async () => {
+    const raw = await readKey(page, MESSAGES_KEY)
+    return raw ? JSON.parse(raw) : []
+  }, { timeout: 300 }).toEqual([
+    expect.objectContaining({ role: 'user', content: 'stop me' }),
+  ])
   releaseStream()
+})
+
+test('clearing an in-flight chat aborts it and ignores a late stream response', async ({ page }) => {
+  let releaseStream!: () => void
+  const heldStream = new Promise<void>((resolve) => { releaseStream = resolve })
+
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      await heldStream
+      return sse(route, 'data:too late\n\n').catch(() => {})
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'discard this')
+  await expect(page.locator('.bubble--assistant')).toHaveCount(1)
+
+  await page.locator('.chatview__bar button').click()
+  await expect(page.locator('.bubble')).toHaveCount(0)
+
+  releaseStream()
+  await page.waitForTimeout(100)
+  await expect(page.locator('.bubble')).toHaveCount(0)
+  await expect(page.locator('.bubble--error')).toHaveCount(0)
+})
+
+test('leaving chat aborts an in-flight request without persisting its empty placeholder', async ({ page }) => {
+  let releaseStream!: () => void
+  const heldStream = new Promise<void>((resolve) => { releaseStream = resolve })
+
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      await heldStream
+      return sse(route, 'data:too late\n\n').catch(() => {})
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'leave this')
+  await expect(page.locator('.bubble--assistant')).toHaveCount(1)
+
+  await page.getByTestId('nav-documents').click()
+  releaseStream()
+  await page.waitForTimeout(100)
+  await page.getByTestId('nav-chat').click()
+
+  await expect(page.locator('.bubble--assistant')).toHaveCount(0)
+  await expect(page.locator('.bubble--error')).toHaveCount(0)
+  await expect.poll(() => readKey(page, MESSAGES_KEY)).not.toContain('too late')
 })
 
 test('a stream sent without a stored session omits Bearer and still renders a mid-stream error', async ({ page }) => {

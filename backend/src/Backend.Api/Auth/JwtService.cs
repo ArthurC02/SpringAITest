@@ -6,21 +6,17 @@ using Microsoft.IdentityModel.Tokens;
 
 namespace Backend.Api.Auth;
 
-/// <summary>
-/// HS256 JWT 簽發。金鑰用 UTF-8 bytes 當 HMAC key、claims sub/role/tenantCode + iat、exp = now+24h。
-/// 與 platform 現行 JwtService 位元相容(platform 只驗不簽):claim 名稱、順序、notBefore/expires 皆一致。
-/// backend 只簽發(login),不驗證(對內以 X-Internal-Token + 身分 header 授權)。
-/// </summary>
+/// <summary>Issues ES256 JWTs with strict issuer, audience and active key id.</summary>
 public sealed class JwtService
 {
     public const int MaxAuthorizationValueBytes = 7 * 1_024;
 
-    private readonly string _secret;
+    private readonly JwtSigningConfiguration _configuration;
     private readonly TimeSpan _expiration;
 
-    public JwtService(string secret, TimeSpan expiration)
+    public JwtService(JwtSigningConfiguration configuration, TimeSpan expiration)
     {
-        _secret = secret;
+        _configuration = configuration;
         _expiration = expiration;
     }
 
@@ -30,13 +26,9 @@ public sealed class JwtService
         IReadOnlyCollection<string>? groups = null)
     {
         var now = DateTime.UtcNow;
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_secret));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        // 既有 4 個 claim(sub/role/tenantCode/iat)名稱與順序**位元相容**:platform 只驗不簽,
-        // 舊 token 一位元都不能變。capabilities(如 workflow.manage,02-spec §9)只在使用者實際具備時
-        // 才**附加在最後**(空/無 → 不加任何欄位 → token 與過去逐位元相同);tenant ADMIN 不自動取得 —
-        // 呼叫端只在 principal 真正持有該 capability 時才傳入。多值以重複 claim 名輸出成 JSON 陣列。
+        var credentials = new SigningCredentials(
+            _configuration.SigningKey,
+            SecurityAlgorithms.EcdsaSha256);
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, username),
@@ -77,14 +69,15 @@ public sealed class JwtService
         }
 
         var token = new JwtSecurityToken(
+            issuer: _configuration.Issuer,
+            audience: _configuration.Audience,
             claims: claims,
             notBefore: now,
             expires: now.Add(_expiration),
             signingCredentials: credentials);
 
         var encoded = new JwtSecurityTokenHandler().WriteToken(token);
-        if (Encoding.ASCII.GetByteCount("Bearer " + encoded)
-            >= MaxAuthorizationValueBytes)
+        if (Encoding.ASCII.GetByteCount("Bearer " + encoded) >= MaxAuthorizationValueBytes)
         {
             throw new InvalidOperationException(
                 "Issued JWT exceeds the deployed Authorization header budget");

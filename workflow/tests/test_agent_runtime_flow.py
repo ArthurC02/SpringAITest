@@ -22,6 +22,7 @@ from app.runtime.flow_harness import (
     invoke_pinned_flow,
 )
 from app.runtime.models import RuntimeCommand
+from tests.conftest import default_engine_deps
 from tests.test_agent_runtime import (
     FakeArtifactReader,
     FakeModel,
@@ -390,7 +391,7 @@ async def test_pinned_flow_allows_pinned_script_packages() -> None:
                 tools=["local.calculator"], with_skill=True, skill_kind="flow"
             ),
             rule_tools=None,
-            deps=SimpleNamespace(max_retrieval_attempts=1),
+            deps=default_engine_deps(max_retrieval_attempts=1),
             timeout_seconds=2,
             recursion_cap=20,
             remaining_tool_rounds=4,
@@ -738,7 +739,7 @@ async def test_pinned_flow_executes_sequence_and_branch_steps() -> None:
         result = await invoke_pinned_flow(
             artifact=artifact, raw_input={},
             snapshot=snapshot(with_skill=True, skill_kind="flow"),
-            rule_tools=None, deps=None, timeout_seconds=2,
+            rule_tools=None, deps=default_engine_deps(), timeout_seconds=2,
             recursion_cap=20, remaining_tool_rounds=4,
         )
         assert result.status == "completed"

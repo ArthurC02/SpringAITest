@@ -1,5 +1,6 @@
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
+using Platform.Web.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,6 +10,7 @@ namespace Platform.Web.Controllers;
 [ApiController]
 [Route("api/auth")]
 [AllowAnonymous]
+[ServiceFilter(typeof(AuthRateLimitFilter), Order = -3000)]
 public sealed class AuthController : ControllerBase
 {
     private readonly IAuthService _auth;

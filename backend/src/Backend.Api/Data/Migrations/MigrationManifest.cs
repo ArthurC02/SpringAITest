@@ -52,14 +52,14 @@ public sealed class MigrationManifest
     private static readonly Regex EnvironmentSubstitution = new(@"\$\{|\{\{", RegexOptions.Compiled);
 
     /// <summary>
-    /// SpringAITest 自有物件白名單(05-ledger §1.1 的 50 張表基線)。
+    /// SpringAITest 自有物件白名單(05-ledger §1.1 的基線，加上現行 document_ingest intake 表)。
     /// 這是 hard reset 分類與 extras 比對的輸入,不是 SQL —— 生產 SQL 在 P3 才出貨。
     /// 表所擁有的 identity/serial sequence 不必列名:分類查詢會把「被表擁有的 sequence」
     /// 視為該表的實作細節排除掉,擁有者本身不在白名單時那張表已經先觸發中止。
     /// </summary>
     public static readonly string[] SpringAITestLegacyObjects =
     [
-        "tenants", "users", "user_group_membership", "conversations", "rag_documents", "rag_chunks",
+        "tenants", "users", "user_group_membership", "conversations", "rag_documents", "document_ingest", "rag_chunks",
         "app_config", "skill", "skill_revision", "configuration_set", "agent", "agent_revision",
         "agent_revision_skill", "workflow", "workflow_revision", "orchestrator", "orchestrator_revision",
         "agent_run", "agent_run_approval", "agent_run_approval_decision", "agent_run_write_effect",

@@ -55,11 +55,24 @@ public static class DbBootstrap
         ALTER TABLE conversations ADD COLUMN IF NOT EXISTS tenant_id text NOT NULL DEFAULT '';
         ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id text NOT NULL DEFAULT '';
         CREATE INDEX IF NOT EXISTS conversations_tenant_user_idx ON conversations (tenant_id, user_id);
+        CREATE INDEX IF NOT EXISTS conversations_history_page_idx
+          ON conversations (tenant_id, user_id, created_at DESC, id DESC);
         CREATE TABLE IF NOT EXISTS rag_documents (
           id uuid PRIMARY KEY, tenant_id text NOT NULL, title text NOT NULL,
           chunk_count int NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
         -- 非同步處理:新增 status 欄位;舊資料自動視為 ready(冪等)。
         ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'ready';
+        -- Publish 前持久配置文件 identity。只保存 SHA-256，不保存 raw Idempotency-Key 或文件全文。
+        -- rag_documents 的 deleted tombstone 必須保留，才能讓相同 key 永久 fail closed。
+        CREATE TABLE IF NOT EXISTS document_ingest (
+          document_id uuid PRIMARY KEY REFERENCES rag_documents (id),
+          tenant_id text NOT NULL,
+          user_id text NOT NULL,
+          idempotency_key_sha256 text NOT NULL,
+          request_sha256 text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT uq_document_ingest_identity
+            UNIQUE (tenant_id, user_id, idempotency_key_sha256));
         CREATE TABLE IF NOT EXISTS rag_chunks (
           id uuid PRIMARY KEY,
           document_id uuid REFERENCES rag_documents (id) ON DELETE CASCADE,
@@ -617,6 +630,14 @@ public static class DbBootstrap
         END $orchestrator_child_lineage$;
         CREATE INDEX IF NOT EXISTS ix_agent_run_orchestrator_root
           ON agent_run(orchestrator_root_run_id) WHERE orchestrator_root_run_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS checkpoint_retention_ack (
+          kind text NOT NULL CHECK(kind IN ('agent_thread','root_context')),
+          run_id uuid NOT NULL,
+          deleted_threads integer NOT NULL CHECK(deleted_threads>=0),
+          deleted_root_contexts integer NOT NULL CHECK(deleted_root_contexts>=0),
+          evidence_ref text,
+          completed_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY(kind,run_id));
         ALTER TABLE agent_run
           ADD COLUMN IF NOT EXISTS execution_snapshot_canonical bytea,
           ADD COLUMN IF NOT EXISTS lease_generation bigint NOT NULL DEFAULT 0,

@@ -301,4 +301,27 @@ public sealed class AuthApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("輸入驗證失敗", body["message"]!.GetValue<string>());
         Assert.Equal("username 不可包含冒號", body["fieldErrors"]!["username"]!.GetValue<string>());
     }
+
+    [Fact]
+    public async Task AuthIdentifiers_RejectLengthAbove128()
+    {
+        var client = _factory.CreateInternalClient();
+        var oversized = new string('a', 129);
+
+        var login = await client.PostAsJsonAsync("/api/auth/login",
+            new { username = oversized, password = "password123" });
+        Assert.Equal(HttpStatusCode.BadRequest, login.StatusCode);
+        Assert.NotNull((await login.ReadJsonAsync())["fieldErrors"]!["username"]);
+
+        var register = await client.PostAsJsonAsync("/api/auth/register",
+            new
+            {
+                username = "bounded-user",
+                password = "password123",
+                tenantCode = oversized,
+                inviteCode = "invite",
+            });
+        Assert.Equal(HttpStatusCode.BadRequest, register.StatusCode);
+        Assert.NotNull((await register.ReadJsonAsync())["fieldErrors"]!["tenantCode"]);
+    }
 }

@@ -10,12 +10,24 @@ namespace Backend.Api.Files;
 /// </summary>
 public interface IRagRepository
 {
+    /// <summary>
+    /// Atomically allocate the pending document row and its hashed idempotency identity. A replay
+    /// returns the original id; a changed payload or tombstoned document returns a conflict status.
+    /// </summary>
+    Task<DocumentIngestAllocation> AllocateDocumentAsync(
+        string tenantId,
+        string userId,
+        string idempotencyKeyHash,
+        string requestHash,
+        string title,
+        CancellationToken ct);
+
     /// <summary>取得文件現況 status;文件不存在(或非本租戶)回 null。供消費者判斷重複投遞。</summary>
     Task<string?> GetDocumentStatusAsync(string documentId, string tenantId, CancellationToken ct);
 
-    /// <summary>建立文件列(chunk_count=0、status='processing');id 由發佈端(platform)生成的 GUID。
-    /// 重複投遞冪等:id 已存在則不動(ON CONFLICT DO NOTHING)。</summary>
-    Task InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct);
+    /// <summary>建立 legacy 文件列，或把 pending_publish/failed 轉成 processing。
+    /// ready/deleted 與其他租戶的同 id 均不動。</summary>
+    Task<bool> InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct);
 
     /// <summary>清掉舊切塊(重跑冪等)後寫入切塊 + 更新 chunk_count 與 status='ready'(單一交易)。
     /// 文件列已被刪除則不影響任何列。</summary>
@@ -28,7 +40,7 @@ public interface IRagRepository
     /// <summary>列出租戶文件(僅中繼資料,含 status),created_at ASC。</summary>
     Task<IReadOnlyList<DocumentInfo>> ListDocumentsAsync(string tenantId, CancellationToken ct);
 
-    /// <summary>刪除租戶文件;成功回 true,找不到(含非本租戶或 id 非法)回 false。</summary>
+    /// <summary>交易內 tombstone 文件並清除切塊;成功回 true,找不到/已刪除回 false。</summary>
     Task<bool> DeleteDocumentAsync(string tenantId, string docId, CancellationToken ct);
 
     /// <summary>向量相似度檢索,依 cosine distance 由近到遠,score = 1 - distance。</summary>

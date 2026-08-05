@@ -30,11 +30,12 @@ namespace Backend.Api.Tests;
 /// </summary>
 public class TestWebAppFactory : WebApplicationFactory<Program>
 {
-    public const string InternalToken = "internal-dev-token";
+    public const string InternalToken = "backend-test-internal-token";
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        ConfigureCredentials(builder);
         builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", "true");
         builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", "true");
         builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", "true");
@@ -99,6 +100,17 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
             services.RemoveAll<ISkillPackageValidator>();
             services.AddSingleton<ISkillPackageValidator, FakeSkillPackageValidator>();
         });
+    }
+
+    internal static void ConfigureCredentials(IWebHostBuilder builder)
+    {
+        builder.UseSetting("DB_CONNECTION_STRING", "Host=db.test;Port=5432;Username=backend-test-user;Password=backend-test-password;Database=backend_test");
+        builder.UseSetting("INTERNAL_API_TOKEN", InternalToken);
+        builder.UseSetting("JWT_ISSUER", TestJwtSigningKeys.Issuer);
+        builder.UseSetting("JWT_AUDIENCE", TestJwtSigningKeys.Audience);
+        builder.UseSetting("JWT_ACTIVE_KID", TestJwtSigningKeys.ActiveKid);
+        builder.UseSetting("JWT_PRIVATE_KEY_PEM_BASE64", TestJwtSigningKeys.PrivateKeySetting);
+        builder.UseSetting("RABBITMQ_URL", "amqp://backend-test-user:backend-test-password@rabbit.test:5672/test");
     }
 
     /// <summary>取單例 fake(斷言 revision 稽核列/validate 呼叫紀錄用)。</summary>

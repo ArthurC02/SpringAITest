@@ -2,6 +2,7 @@ using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Web.Auth;
 using Microsoft.AspNetCore.Authorization;
+using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 
@@ -104,5 +105,16 @@ public sealed class ChatController : ControllerBase
     {
         var history = await _chat.HistoryAsync(MaybeUserContext(), ct);
         return Ok(history);
+    }
+
+    /// <summary>Additive keyset-paginated history. The legacy array endpoint is unchanged.</summary>
+    [HttpGet("history/page")]
+    public async Task<ActionResult<ChatHistoryPage>> HistoryPage(
+        [FromQuery, Range(1, 100)] int limit = 50,
+        [FromQuery] string? before = null,
+        CancellationToken ct = default)
+    {
+        var page = await _chat.HistoryPageAsync(limit, before, MaybeUserContext(), ct);
+        return Ok(page);
     }
 }

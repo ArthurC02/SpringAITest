@@ -1,4 +1,7 @@
+using System.Net;
 using Platform.Service.Abstractions;
+using Platform.Web.Infrastructure;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Agents.AI.Hosting;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -27,6 +30,10 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
     private readonly bool _agentChatEnabled;
     private readonly string _agentChatTenantAllowlist = string.Empty;
     private readonly IMem0Client? _mem0Override;
+    private readonly string _trustedProxyCidr = string.Empty;
+    private readonly IPAddress? _remoteIpAddress;
+    private readonly AuthRateLimiter? _authRateLimiterOverride;
+    private readonly IAuthService? _authServiceOverride;
 
     public TestWebAppFactory()
     {
@@ -39,7 +46,10 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         bool multiAgentDispatchEnabled = false, bool contextEnrichmentEnabled = false,
         bool agentWriteToolsEnabled = false,
         bool agentChatEnabled = false, string agentChatTenantAllowlist = "",
-        IMem0Client? mem0Override = null)
+        IMem0Client? mem0Override = null,
+        string trustedProxyCidr = "", IPAddress? remoteIpAddress = null,
+        AuthRateLimiter? authRateLimiterOverride = null,
+        IAuthService? authServiceOverride = null)
     {
         _enableRateLimiting = enableRateLimiting;
         _removeSessionIsolationProvider = removeSessionIsolationProvider;
@@ -53,6 +63,10 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         _agentChatEnabled = agentChatEnabled;
         _agentChatTenantAllowlist = agentChatTenantAllowlist;
         _mem0Override = mem0Override;
+        _trustedProxyCidr = trustedProxyCidr;
+        _remoteIpAddress = remoteIpAddress;
+        _authRateLimiterOverride = authRateLimiterOverride;
+        _authServiceOverride = authServiceOverride;
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -63,6 +77,12 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseEnvironment(_useDevelopmentEnvironment
             ? "Development"
             : _enableRateLimiting ? "RateLimitingTesting" : "Testing");
+        builder.UseSetting("INTERNAL_API_TOKEN", "platform-test-internal-token");
+        builder.UseSetting("JWT_ISSUER", TestTokens.Issuer);
+        builder.UseSetting("JWT_AUDIENCE", TestTokens.Audience);
+        builder.UseSetting("JWT_PUBLIC_KEY_RING_JSON", TestTokens.PublicKeyRingJson);
+        builder.UseSetting("RABBITMQ_URL", "amqp://platform-test-user:platform-test-password@rabbit.test:5672/test");
+        builder.UseSetting("TRUSTED_PROXY_CIDR", _trustedProxyCidr);
         // Agent Builder feature flag(D1):預設關閉(fail-closed);需要走 /api/agents* 代理的測試以此開啟。
         builder.UseSetting("AGENT_BUILDER_ENABLED", _agentBuilderEnabled ? "true" : "false");
         builder.UseSetting("AGENT_TEST_RUN_ENABLED", _agentTestRunEnabled ? "true" : "false");
@@ -76,6 +96,16 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("AGENT_CHAT_TENANT_ALLOWLIST", _agentChatTenantAllowlist);
         builder.ConfigureTestServices(services =>
         {
+            if (_remoteIpAddress is not null)
+            {
+                services.AddSingleton<IStartupFilter>(new RemoteIpAddressStartupFilter(_remoteIpAddress));
+            }
+            if (_authRateLimiterOverride is not null)
+            {
+                services.RemoveAll<AuthRateLimiter>();
+                services.AddSingleton(_authRateLimiterOverride);
+            }
+
             // 每個 factory 一份的重置權杖:fake 的 static 呼叫紀錄第一次被這個 factory 碰到時清空,
             // 讓「一個測試一個 factory」的類別不會讀到前一個測試的殘留(見 FakeCallScope)。
             services.AddSingleton<FakeCallScope>();
@@ -112,7 +142,14 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
             services.AddScoped<IConversationStore, FakeConversationStore>();
 
             services.RemoveAll<IAuthService>();
-            services.AddScoped<IAuthService, FakeAuthService>();
+            if (_authServiceOverride is not null)
+            {
+                services.AddSingleton(_authServiceOverride);
+            }
+            else
+            {
+                services.AddScoped<IAuthService, FakeAuthService>();
+            }
 
             services.RemoveAll<IWorkflowEngineClient>();
             services.AddScoped<IWorkflowEngineClient, FakeWorkflowEngineClient>();
@@ -160,4 +197,18 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
             tenantCode,
             capabilities: capabilities,
             groups: groups);
+}
+
+internal sealed class RemoteIpAddressStartupFilter(IPAddress remoteIpAddress) : IStartupFilter
+{
+    public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+        => app =>
+        {
+            app.Use(async (context, following) =>
+            {
+                context.Connection.RemoteIpAddress = remoteIpAddress;
+                await following();
+            });
+            next(app);
+        };
 }

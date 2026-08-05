@@ -1,9 +1,26 @@
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
+from typing import Literal
+
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_DEVELOPMENT_INTERNAL_API_TOKEN = "internal-dev-token"
+_DEVELOPMENT_CHECKPOINT_HMAC_KEY = "agent-run-checkpoint-dev-key"
+_PRODUCTION_INTERNAL_API_TOKEN_ERROR = (
+    "Production INTERNAL_API_TOKEN must be configured with a non-development value"
+)
+_PRODUCTION_CHECKPOINT_HMAC_KEY_ERROR = (
+    "Production runtime features require a non-development CHECKPOINT_HMAC_KEY"
+)
+_CHECKPOINT_RETENTION_EVIDENCE_ERROR = (
+    "CHECKPOINT_RETENTION_MODE=delete requires a backup/restore evidence provider"
+)
 
 
 class Settings(BaseSettings):
     """集中管理環境變數設定；欄位名稱會自動對應到大寫的環境變數（如 LLM_BASE_URL）。"""
+
+    model_config = SettingsConfigDict(hide_input_in_errors=True)
 
     llm_base_url: str = "http://localhost:4000"   # LiteLLM 閘道
     llm_api_key: str = "sk-1234"                  # LiteLLM 虛擬金鑰
@@ -16,16 +33,15 @@ class Settings(BaseSettings):
     # 本服務呼叫 backend 的資料檢索 API 時，同一組 token 也當成出站憑證使用。
     internal_api_token: str = "internal-dev-token"
 
-    @field_validator("internal_api_token")
+    # An unset deployment is production, never an implicit local-development
+    # process.  Script steps therefore require the isolated adapter unless a
+    # local operator explicitly sets APP_ENVIRONMENT=development.
+    app_environment: Literal["development", "production"] = "production"
+
+    @field_validator("app_environment", mode="before")
     @classmethod
-    def validate_internal_api_token(cls, value: str) -> str:
-        """顯式空值不得關閉服務間信任邊界；未設環境變數仍沿用 dev 預設。"""
-        if not value.strip():
-            raise ValueError(
-                "INTERNAL_API_TOKEN 不可為空字串(留空等於關閉服務間信任邊界);"
-                "請設定非空 token 或移除該環境變數以使用 dev 預設。"
-            )
-        return value
+    def normalize_app_environment(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
 
     # 資料檢索：核心商業邏輯（含向量庫）已搬到 backend/，本服務只負責呼叫。
     backend_base_url: str = "http://localhost:8002"
@@ -75,9 +91,19 @@ class Settings(BaseSettings):
     multi_agent_context_top_k: int = Field(default=4, ge=1, le=20)
     checkpoint_database_url: str | None = None
     checkpoint_hmac_key: str = "agent-run-checkpoint-dev-key"
+    checkpoint_retention_mode: Literal["off", "report", "delete"] = "off"
+    checkpoint_retention_ttl_days: int = Field(default=30, ge=7, le=3650)
+    checkpoint_retention_grace_days: int = Field(default=7, ge=1, le=90)
     runtime_lease_seconds: int = Field(default=30, ge=5, le=300)
     runtime_recovery_interval_seconds: float = Field(default=10.0, ge=1, le=300)
     runtime_recovery_batch_size: int = Field(default=20, ge=1, le=100)
+    # Audited process-local ceilings: keep a bad deployment value from turning
+    # recovery or interactive traffic into an unbounded in-process backlog.
+    runtime_admission_mode: Literal["off", "observe", "enforce"] = "enforce"
+    runtime_root_active_limit: int = Field(default=8, ge=1, le=64)
+    runtime_root_queue_limit: int = Field(default=16, ge=0, le=256)
+    runtime_direct_active_limit: int = Field(default=16, ge=1, le=64)
+    runtime_direct_queue_limit: int = Field(default=32, ge=0, le=256)
     runtime_cancel_grace_seconds: float = Field(default=2.0, gt=0, le=30)
     runtime_default_timeout_seconds: int = Field(default=60, ge=1, le=600)
     runtime_default_step_budget: int = Field(default=24, ge=1, le=200)
@@ -92,12 +118,56 @@ class Settings(BaseSettings):
         default=4_096, ge=1, le=1_000_000
     )
 
-    @field_validator("checkpoint_hmac_key")
-    @classmethod
-    def validate_checkpoint_hmac_key(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("CHECKPOINT_HMAC_KEY must not be blank")
-        return value
+    @model_validator(mode="after")
+    def validate_deployment_credentials(self) -> "Settings":
+        internal_token = self.internal_api_token.strip()
+        if not internal_token:
+            message = (
+                _PRODUCTION_INTERNAL_API_TOKEN_ERROR
+                if self.app_environment == "production"
+                else "INTERNAL_API_TOKEN must not be blank"
+            )
+            raise ValueError(message)
+
+        if (
+            self.app_environment == "production"
+            and internal_token == _DEVELOPMENT_INTERNAL_API_TOKEN
+        ):
+            raise ValueError(_PRODUCTION_INTERNAL_API_TOKEN_ERROR)
+
+        checkpoint_key_required = any(
+            (
+                self.agent_test_run_enabled,
+                self.multi_agent_dispatch_enabled,
+                self.agent_write_tools_enabled,
+                self.checkpoint_retention_mode != "off",
+            )
+        )
+        checkpoint_key = self.checkpoint_hmac_key.strip()
+        if (
+            self.app_environment == "production"
+            and checkpoint_key_required
+            and (
+                not checkpoint_key
+                or checkpoint_key == _DEVELOPMENT_CHECKPOINT_HMAC_KEY
+            )
+        ):
+            raise ValueError(_PRODUCTION_CHECKPOINT_HMAC_KEY_ERROR)
+
+        if self.checkpoint_retention_grace_days > self.checkpoint_retention_ttl_days:
+            raise ValueError("CHECKPOINT_RETENTION_GRACE_DAYS must not exceed TTL")
+        if self.checkpoint_retention_mode != "off" and not (
+            self.checkpoint_database_url and self.checkpoint_database_url.strip()
+        ):
+            raise ValueError(
+                "CHECKPOINT_DATABASE_URL is required when checkpoint retention is enabled"
+            )
+        if self.checkpoint_retention_mode == "delete":
+            # Wave4-B deliberately ships no production backup/restore evidence
+            # adapter. Wave4-C must wire one before this gate may be relaxed.
+            raise ValueError(_CHECKPOINT_RETENTION_EVIDENCE_ERROR)
+
+        return self
 
 
 settings = Settings()

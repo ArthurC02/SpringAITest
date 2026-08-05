@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -16,6 +17,58 @@ from app.settings import settings
 
 class State(TypedDict, total=False):
     value: str
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_schema_setup_is_concurrent_and_reopen_safe() -> None:
+    dsn = _live_dsn()
+    store = PostgresCheckpointStore(dsn)
+    concurrent_store = PostgresCheckpointStore(dsn)
+    first, concurrent = await asyncio.gather(
+        store.open(), concurrent_store.open()
+    )
+    assert first is not concurrent
+    await asyncio.gather(store.close(), concurrent_store.close())
+
+    reopened = await store.open()
+    assert reopened is not first
+    try:
+        reference, _ = await store.put_root_context_checkpoint(
+            {"scope": "schema-reopen"}
+        )
+        assert await store.get_root_context_checkpoint(reference) == {
+            "scope": "schema-reopen"
+        }
+        inventory = await store.checkpoint_inventory(
+            include_threads=True, include_references=True
+        )
+        assert inventory["terminal_authority"] == "unavailable"
+        assert all(
+            item["classification"] == "unclassified"
+            and "eligible" not in item
+            for item in inventory["items"]
+        )
+        assert {
+            "checkpoint_migrations",
+            "checkpoints",
+            "checkpoint_blobs",
+            "checkpoint_writes",
+            "workflow_root_context_checkpoint",
+        } <= {
+            item["name"]
+            for item in inventory["items"]
+            if item["scope"] == "table"
+        }
+        assert inventory["measurement"]["reclaimable"] is False
+        blob_table = next(
+            item
+            for item in inventory["items"]
+            if item["scope"] == "table" and item["name"] == "checkpoint_blobs"
+        )
+        assert blob_table["oldest_at"] is None
+        assert blob_table["age_basis"] == "unavailable"
+    finally:
+        await store.close()
 
 
 def _live_dsn() -> str:

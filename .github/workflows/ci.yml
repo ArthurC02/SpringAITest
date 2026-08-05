@@ -119,8 +119,183 @@ jobs:
           EVIDENCE_CHECKPOINT_HMAC_KEY: ci-not-a-secret
           EVIDENCE_DB_NAME: ci_evidence
         run: |
-          docker compose --env-file infra/.env.example -f infra/docker-compose.yml config --quiet
-          docker compose --env-file infra/.env.example -f infra/docker-compose.yml -f infra/docker-compose.evidence.yml config --quiet
+          env -u ASPNETCORE_ENVIRONMENT -u APP_ENVIRONMENT docker compose --profile '*' --env-file /dev/null -f infra/docker-compose.yml config --format json > "$RUNNER_TEMP/compose-base-production.json"
+          env -u ASPNETCORE_ENVIRONMENT -u APP_ENVIRONMENT docker compose --profile '*' --env-file /dev/null -f infra/docker-compose.yml -f infra/docker-compose.evidence.yml config --format json > "$RUNNER_TEMP/compose-evidence-production.json"
+          docker compose --profile '*' --env-file infra/.env.example -f infra/docker-compose.yml config --format json > "$RUNNER_TEMP/compose-base-development.json"
+          docker compose --profile '*' --env-file infra/.env.example -f infra/docker-compose.yml -f infra/docker-compose.evidence.yml config --format json > "$RUNNER_TEMP/compose-evidence-development.json"
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          environment_expectations = {
+              "compose-base-production.json": ("Production", {
+                  "platform": ("ASPNETCORE_ENVIRONMENT", "Production"),
+                  "backend": ("ASPNETCORE_ENVIRONMENT", "Production"),
+                  "workflow": ("APP_ENVIRONMENT", "Production"),
+              }),
+              "compose-evidence-production.json": ("Production", {
+                  "platform": ("ASPNETCORE_ENVIRONMENT", "Production"),
+                  "backend": ("ASPNETCORE_ENVIRONMENT", "Production"),
+                  "workflow": ("APP_ENVIRONMENT", "Production"),
+                  "platform-evidence": ("ASPNETCORE_ENVIRONMENT", "Production"),
+                  "backend-evidence": ("ASPNETCORE_ENVIRONMENT", "Production"),
+                  "workflow-evidence": ("APP_ENVIRONMENT", "Production"),
+              }),
+              "compose-base-development.json": ("Development", {
+                  "platform": ("ASPNETCORE_ENVIRONMENT", "Development"),
+                  "backend": ("ASPNETCORE_ENVIRONMENT", "Development"),
+                  "workflow": ("APP_ENVIRONMENT", "Development"),
+              }),
+              "compose-evidence-development.json": ("Development", {
+                  "platform": ("ASPNETCORE_ENVIRONMENT", "Development"),
+                  "backend": ("ASPNETCORE_ENVIRONMENT", "Development"),
+                  "workflow": ("APP_ENVIRONMENT", "Development"),
+                  "platform-evidence": ("ASPNETCORE_ENVIRONMENT", "Development"),
+                  "backend-evidence": ("ASPNETCORE_ENVIRONMENT", "Development"),
+                  "workflow-evidence": ("APP_ENVIRONMENT", "Development"),
+              }),
+          }
+
+          configs = {}
+          for filename, (environment, services) in environment_expectations.items():
+              path = os.path.join(os.environ["RUNNER_TEMP"], filename)
+              with open(path, encoding="utf-8") as stream:
+                  config = json.load(stream)
+              configs[filename] = config
+              for service, (key, wanted) in services.items():
+                  if wanted != environment:
+                      raise SystemExit(f"{filename}: inconsistent expected environment {wanted!r}")
+                  actual = config["services"][service].get("environment", {}).get(key)
+                  if actual != wanted:
+                      raise SystemExit(
+                          f"{filename}: {service}.{key} must be {wanted!r}, got {actual!r}"
+                      )
+
+          jwt_contract = {
+              "compose-base-development.json": {
+                  "platform": {"JWT_ISSUER", "JWT_AUDIENCE", "JWT_PUBLIC_KEY_RING_JSON"},
+                  "backend": {"JWT_ISSUER", "JWT_AUDIENCE", "JWT_ACTIVE_KID", "JWT_PRIVATE_KEY_PEM_BASE64"},
+              },
+              "compose-evidence-development.json": {
+                  "platform": {"JWT_ISSUER", "JWT_AUDIENCE", "JWT_PUBLIC_KEY_RING_JSON"},
+                  "backend": {"JWT_ISSUER", "JWT_AUDIENCE", "JWT_ACTIVE_KID", "JWT_PRIVATE_KEY_PEM_BASE64"},
+                  "platform-evidence": {"JWT_ISSUER", "JWT_AUDIENCE", "JWT_PUBLIC_KEY_RING_JSON"},
+                  "backend-evidence": {"JWT_ISSUER", "JWT_AUDIENCE", "JWT_ACTIVE_KID", "JWT_PRIVATE_KEY_PEM_BASE64"},
+              },
+          }
+          for filename, services in jwt_contract.items():
+              for name, required in services.items():
+                  environment = configs[filename]["services"][name].get("environment", {})
+                  missing = {key for key in required if not environment.get(key)}
+                  if missing:
+                      raise SystemExit(f"{filename}: {name} is missing JWT contract keys: {sorted(missing)}")
+                  if name.startswith("platform") and "JWT_PRIVATE_KEY_PEM_BASE64" in environment:
+                      raise SystemExit(f"{filename}: private JWT material must not enter {name}")
+                  if name.startswith("backend") and "JWT_PUBLIC_KEY_RING_JSON" in environment:
+                      raise SystemExit(f"{filename}: Backend must receive signing configuration, not a public ring")
+
+          jwt_keys = {
+              "JWT_ISSUER", "JWT_AUDIENCE", "JWT_ACTIVE_KID",
+              "JWT_PRIVATE_KEY_PEM_BASE64", "JWT_PUBLIC_KEY_RING_JSON",
+          }
+          for filename in ("compose-base-production.json", "compose-evidence-production.json"):
+              for name in jwt_contract[filename.replace("production", "development")]:
+                  environment = configs[filename]["services"][name].get("environment", {})
+                  if any(environment.get(key) for key in jwt_keys):
+                      raise SystemExit(f"{filename}: raw Production config must not inject development JWT material into {name}")
+
+          hardened = {
+              "compose-base-development.json": {
+                  "frontend": "101",
+                  "platform": "app",
+                  "backend": "app",
+                  "workflow": "appuser",
+              },
+              "compose-evidence-development.json": {
+                  "frontend": "101",
+                  "platform": "app",
+                  "backend": "app",
+                  "workflow": "appuser",
+                  "platform-evidence": "app",
+                  "backend-evidence": "app",
+                  "workflow-evidence": "appuser",
+                  "evidence-model": "evidence",
+                  "workflow-capture-proxy": "evidence",
+                  "evidence-nginx": "101",
+                  "frontend-evidence": "101",
+              },
+          }
+
+          for filename, services in hardened.items():
+              config = configs[filename]
+              for name, wanted_user in services.items():
+                  service = config["services"][name]
+                  tmpfs = service.get("tmpfs", [])
+                  if isinstance(tmpfs, str):
+                      tmpfs = [tmpfs]
+                  checks = {
+                      "user": service.get("user") == wanted_user,
+                      "read_only": service.get("read_only") is True,
+                      "no-new-privileges": "no-new-privileges:true" in service.get("security_opt", []),
+                      "cap_drop=ALL": "ALL" in service.get("cap_drop", []),
+                      "writable /tmp": any(entry.split(":", 1)[0] == "/tmp" for entry in tmpfs),
+                      "healthcheck": bool(service.get("healthcheck", {}).get("test")),
+                  }
+                  failed = [label for label, passed in checks.items() if not passed]
+                  if failed:
+                      raise SystemExit(f"{filename}: {name} failed hardening checks: {', '.join(failed)}")
+
+          expected_ports = {
+              "frontend": 8080,
+              "evidence-nginx": 8080,
+              "frontend-evidence": 8080,
+          }
+          evidence = configs["compose-evidence-development.json"]
+          for name, target in expected_ports.items():
+              actual = {item["target"] for item in evidence["services"][name].get("ports", [])}
+              if actual != {target}:
+                  raise SystemExit(f"{name} container ports must remain {{{target}}}, got {actual}")
+
+          dockerfile_users = {
+              "platform/Dockerfile": "USER $APP_UID",
+              "backend/Dockerfile": "USER $APP_UID",
+              "frontend/Dockerfile": "USER 101",
+              "workflow/Dockerfile": "USER appuser",
+              "infra/evidence/Dockerfile": "USER evidence",
+          }
+          for path, directive in dockerfile_users.items():
+              lines = {line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines()}
+              if directive not in lines:
+                  raise SystemExit(f"{path}: missing non-root directive {directive!r}")
+
+          for path in ("frontend/nginx.conf", "infra/evidence/nginx.conf"):
+              if "listen 8080;" not in Path(path).read_text(encoding="utf-8"):
+                  raise SystemExit(f"{path}: nginx must listen on unprivileged port 8080")
+
+          local_image_refs = {"springaitest-mem0:latest"}
+          pinned_image = re.compile(r":([^/@]+)@sha256:[0-9a-f]{64}$")
+          for filename in ("compose-base-development.json", "compose-evidence-development.json"):
+              for name, service in configs[filename]["services"].items():
+                  image = service.get("image")
+                  if not image or service.get("build") or image in local_image_refs:
+                      continue
+                  if not pinned_image.search(image):
+                      raise SystemExit(
+                          f"{filename}: external image for {name} must retain a readable tag and pin an index digest"
+                      )
+
+          legacy_jwt_markers = ("JWT_SECRET", '"alg":"HS256"', "New-EvidenceJwt", "JwtSecret")
+          jwt_contract_paths = [Path("infra/docker-compose.yml"), Path("infra/docker-compose.evidence.yml")]
+          jwt_contract_paths.extend(Path("scripts").glob("*.ps1"))
+          jwt_contract_paths.extend(Path("scripts").glob("*.sh"))
+          for path in jwt_contract_paths:
+              content = path.read_text(encoding="utf-8")
+              found = [marker for marker in legacy_jwt_markers if marker in content]
+              if found:
+                  raise SystemExit(f"{path}: obsolete JWT contract marker(s): {', '.join(found)}")
+          PY
       - name: Shell syntax
         run: git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
       # 根 AGENTS.md：所有 *.sh 必須是 LF，CRLF shebang 會讓 Linux build image 裡的 ./script.sh 報 not found。
@@ -136,6 +311,28 @@ jobs:
       - name: Diff hygiene
         if: github.event_name == 'pull_request'
         run: git diff --check ${{ github.event.pull_request.base.sha }}...HEAD -- . ':(exclude)*.md'
+
+  container-hardening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash ./scripts/verify-container-hardening.sh
+
+  full-chain-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: springaitest-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run deterministic full-chain smoke
+        shell: pwsh
+        run: ./scripts/verify-copilot-shared-core.ps1 -Rebuild -CiComposeSubset
+      - name: Clean up this job's Compose resources
+        if: always()
+        working-directory: infra
+        run: docker compose --env-file .env.example --profile full down --remove-orphans
 
   # TODO(WP1-CI): 契約 snapshot 比對。各服務內以 snapshot test 形式實作
   # （backend/platform xUnit、workflow pytest），因此會直接落在上面既有的

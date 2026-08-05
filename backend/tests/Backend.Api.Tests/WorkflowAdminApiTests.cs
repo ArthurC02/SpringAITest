@@ -135,6 +135,7 @@ public sealed class WorkflowAdminApiTests(TestWebAppFactory factory) : IClassFix
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
+            TestWebAppFactory.ConfigureCredentials(builder);
             builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", "false");
             builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", multiAgentDispatch ? "true" : "false");
             builder.UseSetting("AGENT_CHAT_ENABLED", agentChat ? "true" : "false");

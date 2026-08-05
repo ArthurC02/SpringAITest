@@ -36,25 +36,28 @@ var mem0Options = new Mem0Options
 {
     BaseUrl = cfg["MEM0_BASE_URL"] ?? "http://localhost:8000",
 };
+var internalToken = cfg["INTERNAL_API_TOKEN"] ?? StartupCredentialValidator.DevelopmentInternalToken;
+var rabbitUrl = cfg["RABBITMQ_URL"] ?? StartupCredentialValidator.DevelopmentRabbitMqUrl;
+var jwtOptions = JwtOptions.Resolve(
+    cfg["JWT_ISSUER"],
+    cfg["JWT_AUDIENCE"],
+    cfg["JWT_PUBLIC_KEY_RING_JSON"]);
+StartupCredentialValidator.Validate(builder.Environment.EnvironmentName, internalToken, jwtOptions, rabbitUrl);
+
 var workflowOptions = new WorkflowOptions
 {
     BaseUrl = cfg["WORKFLOW_BASE_URL"] ?? "http://localhost:8001",
-    InternalToken = cfg["INTERNAL_API_TOKEN"] ?? "internal-dev-token",
+    InternalToken = internalToken,
 };
 var backendOptions = new BackendOptions
 {
     BaseUrl = cfg["BACKEND_BASE_URL"] ?? "http://localhost:8002",
-    InternalToken = cfg["INTERNAL_API_TOKEN"] ?? "internal-dev-token",
+    InternalToken = internalToken,
 };
 var rabbitMqOptions = new RabbitMqOptions
 {
-    Url = cfg["RABBITMQ_URL"] ?? "amqp://app:app-dev-password@localhost:5672",
+    Url = rabbitUrl,
 };
-var jwtOptions = new JwtOptions
-{
-    Secret = cfg["JWT_SECRET"] ?? "dev-jwt-secret-change-me-0123456789abcdef",
-};
-
 // Agent Builder feature flag(D1):預設 false。關閉時整個 /api/agents* fail-closed 回 404(見下方中介軟體);
 // GET /api/features 只暴露這個布林旗標(AllowAnonymous)供前端決定是否顯示入口。
 var agentBuilderEnabled = string.Equals(cfg["AGENT_BUILDER_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
@@ -102,6 +105,19 @@ builder.Services.AddSingleton(backendOptions);
 builder.Services.AddSingleton(rabbitMqOptions);
 builder.Services.AddSingleton(jwtOptions);
 builder.Services.AddSingleton(agentChatOptions);
+builder.Services.AddHttpClient("health");
+builder.Services.AddSingleton(sp => new PlatformReadinessProbe(
+    sp.GetRequiredService<IHttpClientFactory>(),
+    backendOptions,
+    workflowOptions,
+    rabbitMqOptions,
+    llmOptions,
+    mem0Options,
+    mem0InMemory: string.Equals(cfg["MEM0_MODE"], "inmemory", StringComparison.OrdinalIgnoreCase),
+    telemetryEndpoint: cfg["LANGFUSE_OTEL_ENDPOINT"],
+    localTelemetry: string.Equals(cfg["OTEL_MODE"], "console", StringComparison.OrdinalIgnoreCase),
+    testing: builder.Environment.IsEnvironment("Testing")
+        || builder.Environment.IsEnvironment("RateLimitingTesting")));
 
 // ---------------------------------------------------------------------------
 // backend client:核心商業邏輯已抽到 backend(:8002)。連線逾時 5s;讀取逾時 90s
@@ -319,13 +335,13 @@ builder.Services.Configure<Microsoft.AspNetCore.Mvc.ApiBehaviorOptions>(options 
 });
 
 // ---------------------------------------------------------------------------
-// 認證/授權:JwtBearer(HS256、不驗 issuer/audience、ClockSkew=0、MapInboundClaims=false)
+// 認證/授權:JwtBearer(ES256、嚴格 issuer/audience/kid/algorithm、ClockSkew=0、MapInboundClaims=false)
 // ---------------------------------------------------------------------------
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
         options.MapInboundClaims = false;
-        options.TokenValidationParameters = JwtService.BuildValidationParameters(jwtOptions.Secret);
+        options.TokenValidationParameters = JwtService.BuildValidationParameters(jwtOptions);
         options.Events = new JwtBearerEvents
         {
             // 未認證/憑證無效:攔掉預設回應,改寫 ApiError 401。
@@ -384,16 +400,15 @@ builder.Services.AddProblemDetails();
 // Testing 環境不註冊/不套用；RateLimitingTesting 專供限流整合測試。
 // ---------------------------------------------------------------------------
 var rateLimitingEnabled = !builder.Environment.IsEnvironment("Testing");
+builder.Services.AddSingleton(new AuthRateLimiter(rateLimitingEnabled));
+builder.Services.AddScoped<AuthRateLimitFilter>();
 if (rateLimitingEnabled)
 {
     builder.Services.AddRateLimiter(options =>
     {
         options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-        options.OnRejected = (context, ct) => new ValueTask(ApiErrorWriter.WriteAsync(
-            context.HttpContext.Response,
-            StatusCodes.Status429TooManyRequests,
-            "請求過於頻繁，請稍後再試",
-            ct));
+        options.OnRejected = (context, ct) => new ValueTask(
+            RateLimitResponse.WriteAsync(context.HttpContext.Response, ct));
         options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
         {
             var path = context.Request.Path;
@@ -495,6 +510,11 @@ app.UseExceptionHandler();
 // 限流才能安全採用真實 client IP，主機直連時偽造 X-Forwarded-For 仍會被忽略。
 app.UseForwardedHeaders();
 
+// Public auth IP budget runs before MVC reads or validates the body. Account normalization happens later
+// in AuthRateLimitFilter only after this cheap gate succeeds.
+app.UseMiddleware<AuthIpRateLimitMiddleware>();
+app.UseMiddleware<AuthRequestBodyLimitMiddleware>();
+
 // 匿名 LLM 端點節流(Testing 預設不套用,見上方註冊)。
 if (rateLimitingEnabled)
 {
@@ -580,8 +600,10 @@ app.UseAuthorization();
 
 app.MapControllers();
 
-// 健康檢查:供容器探針;AllowAnonymous、免 token。OTel filter 過濾的正是這條路徑。
-app.MapGet("/actuator/health", () => Results.Ok(new { status = "UP" })).AllowAnonymous();
+// 舊 /actuator/health 保留為 liveness alias；Compose 明確使用 readiness。
+app.MapGet("/actuator/health/live", PlatformHealthEndpoints.Live).AllowAnonymous();
+app.MapGet("/actuator/health/ready", PlatformHealthEndpoints.Ready).AllowAnonymous();
+app.MapGet("/actuator/health", PlatformHealthEndpoints.Live).AllowAnonymous();
 
 // Feature flags(D1):AllowAnonymous、只暴露布林旗標,供前端決定是否顯示 Agent Builder 入口。
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。

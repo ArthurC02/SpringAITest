@@ -191,6 +191,7 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
+            TestWebAppFactory.ConfigureCredentials(builder);
             builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", "false");
         }
     }

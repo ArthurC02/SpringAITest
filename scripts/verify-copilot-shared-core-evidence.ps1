@@ -12,12 +12,13 @@ param(
     [string]$WorkflowModel = 'evidence-gpt-4o-mini-2024-07-18',
     [string]$Mem0Model = 'evidence-gpt-4o-mini-2024-07-18',
     [string]$EmbeddingModel = 'text-embedding-3-small',
-    [string]$JwtSecret = 'dev-jwt-secret-change-me-0123456789abcdef',
     [switch]$StartEvidenceProfile,
     [switch]$BuildEvidenceProfile
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_development-environment.ps1')
+. (Join-Path $PSScriptRoot '_development-jwt.ps1')
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $infraDir = Join-Path $repoRoot 'infra'
 Import-Module (Join-Path $PSScriptRoot 'EvidenceHarness.psm1') -Force
@@ -26,14 +27,6 @@ $gates = if ($Lane -eq 'Deterministic') { @('E-01', 'E-02', 'E-03', 'E-06') } el
 $run = New-EvidenceRun -RepoRoot $repoRoot -EvidenceDir $EvidenceDir -Lane $Lane -Gates $gates
 $script:evidenceViteProcess = $null
 
-function ConvertTo-Base64Url([byte[]]$Bytes) { ([Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')) }
-function New-EvidenceJwt([string]$User, [string]$Tenant) {
-    $header = ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes('{"alg":"HS256","typ":"JWT"}'))
-    $payload = ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes((@{ sub=$User; role='USER'; tenantCode=$Tenant; exp=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()+600 } | ConvertTo-Json -Compress)))
-    $unsigned = "$header.$payload"
-    $hmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($JwtSecret))
-    "$unsigned.$(ConvertTo-Base64Url ($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($unsigned))))"
-}
 function Invoke-Json([string]$Method, [string]$Url, [object]$Body = $null, [string]$Token = '') {
     $headers = @{}
     if ($Token) { $headers.Authorization = "Bearer $Token" }
@@ -358,7 +351,7 @@ function Invoke-Deterministic {
     finally { Restore-ProcessEnvironment $e01Environment }
     try {
         Reset-Captures $capture
-        $tokenA=New-EvidenceJwt $users[0] 'demo-a'; $tokenB=New-EvidenceJwt $users[1] 'demo-b'; $thread="e02-$([guid]::NewGuid().ToString('N'))"; $markerA="e02a_$([guid]::NewGuid().ToString('N'))"; $markerB="e02b_$([guid]::NewGuid().ToString('N'))"
+        $tokenA=New-DevelopmentEvidenceJwt $users[0] 'demo-a'; $tokenB=New-DevelopmentEvidenceJwt $users[1] 'demo-b'; $thread="e02-$([guid]::NewGuid().ToString('N'))"; $markerA="e02a_$([guid]::NewGuid().ToString('N'))"; $markerB="e02b_$([guid]::NewGuid().ToString('N'))"
         if ((Invoke-Agui $base $tokenA $thread @((New-UserMsg $markerA))).StatusCode -ne 200) { throw 'tenant A AG-UI failed' }
         $aCaptures=Get-Captures $capture; $aToken=Get-MarkerHmac $markerA
         if (-not @($aCaptures | Where-Object { $_.messages.tokenHmacs -contains $aToken })) { throw 'tenant A marker was absent from canonical model capture' }
@@ -428,7 +421,7 @@ function Invoke-Deterministic {
     $e06Environment = Set-ProcessEnvironment @{ EVIDENCE_USER_A=$browserUsers.a.Username; EVIDENCE_PASSWORD_A=$browserUsers.a.Password; EVIDENCE_TENANT_A=$browserUsers.a.TenantCode }
     try {
         $chatBody = @{message="e06_$([guid]::NewGuid().ToString('N'))";conversationId="e06-$([guid]::NewGuid().ToString('N'))"} | ConvertTo-Json -Compress
-        $aguiToken = New-EvidenceJwt $users[0] 'demo-a'
+        $aguiToken = New-DevelopmentEvidenceJwt $users[0] 'demo-a'
         $aguiBody = @{threadId="e06-$([guid]::NewGuid().ToString('N'))";runId=[guid]::NewGuid().ToString('N');state=@{};messages=@(@{id=[guid]::NewGuid().ToString('N');role='user';content="e06_$([guid]::NewGuid().ToString('N'))"});tools=@();context=@();forwardedProps=@{}} | ConvertTo-Json -Depth 12 -Compress
         $controlledContent = @('evidence', 'model', 'reply')
         $browserCases = @(
@@ -882,7 +875,7 @@ function Get-RealD6RunDebugStatus([string]$Tenant, [string]$User, [string]$Conve
 function Invoke-RealD6RootEvidence([string]$Base, [string]$Tenant, [string]$User) {
     try { $fixture = Provision-RealD6RootFixture $Tenant $User }
     catch { throw 'real evidence D6 fixture provisioning failed' }
-    $token = New-EvidenceJwt $User $Tenant
+    $token = New-DevelopmentEvidenceJwt $User $Tenant
     $chatPrompt = "D6 chat correlation $([guid]::NewGuid().ToString('N'))"
     $chatWireConversation = "d6-chat-$([guid]::NewGuid().ToString('N'))"
     try { $chat = Invoke-Json POST "$Base/api/chat" @{ message=$chatPrompt; conversationId=$chatWireConversation } $token }
@@ -959,7 +952,7 @@ function Invoke-RealModel {
         Add-EvidenceNote -Run $run -Note 'Chat and AG-UI both allocated an isolated, pinned D6 Root Orchestrator run; no legacy fallback was observed.'
 
         try {
-            $e04Token = New-EvidenceJwt $e04User $tenant
+            $e04Token = New-DevelopmentEvidenceJwt $e04User $tenant
             $historyBefore = Invoke-Json GET "$base/api/chat/history" $null $e04Token
             if ($historyBefore.StatusCode -ne 200) { throw "history precheck returned HTTP $($historyBefore.StatusCode)" }
             $agui = Invoke-Agui $base $e04Token "e04-$([guid]::NewGuid().ToString('N'))" @((New-UserMsg "My favorite project codename is $e04Marker. Please remember this durable preference."))
@@ -995,7 +988,7 @@ function Invoke-RealModel {
         }
 
         try {
-            $e05Token = New-EvidenceJwt $e05User $tenant
+            $e05Token = New-DevelopmentEvidenceJwt $e05User $tenant
             # Keep the numeric fixture short enough that a real model will not
             # regroup or truncate it while still providing ample run uniqueness.
             $number = (Get-Random -Minimum 10000000 -Maximum 99999999).ToString()

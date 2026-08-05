@@ -134,7 +134,7 @@ def test_cold_start_compiles_every_template(name):
 
 
 def test_health_ok_after_templates_loaded():
-    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health").json()["status"] == "UP"
 
 
 # ---------------------------------------------------------------------------

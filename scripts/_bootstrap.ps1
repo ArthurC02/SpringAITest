@@ -1,5 +1,6 @@
 ﻿# 共用前置：切到 infra\、檢查 .env、先起 postgres 並備妥 mem0 需要的庫。
 # 由 start-infra.ps1 / start-full.ps1 以 dot-source（.）載入——cd 與 exit 都作用在呼叫端。
+. (Join-Path $PSScriptRoot '_development-environment.ps1')
 Set-Location (Join-Path $PSScriptRoot '..' 'infra')
 
 if (-not (Test-Path .env)) {

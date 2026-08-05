@@ -10,6 +10,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEVELOPMENT_ENVIRONMENT_IGNORE_DOT_ENV=true
+. "$SCRIPT_DIR/_development-environment.sh"
+unset DEVELOPMENT_ENVIRONMENT_IGNORE_DOT_ENV
 RUN_DIR="$REPO_ROOT/.lite"   # 執行期產物（log / pid）集中處，已 gitignore
 mkdir -p "$RUN_DIR"
 PIDS_FILE="$RUN_DIR/start-lite.pids"
@@ -67,13 +70,14 @@ echo "  起 backend   :8002 …"
 ( cd "$REPO_ROOT/backend"
   DB_PROVIDER=inmemory EMBEDDINGS_PROVIDER=fake \
   ASPNETCORE_URLS=http://localhost:8002 \
-  ASPNETCORE_ENVIRONMENT=Development \
+  ASPNETCORE_ENVIRONMENT="$ASPNETCORE_ENVIRONMENT" \
   nohup dotnet run --no-launch-profile --project src/Backend.Api/Backend.Api.csproj \
     > "$RUN_DIR/backend.log" 2>&1 &
   echo $! >> "$PIDS_FILE" )
 
 echo "  起 workflow  :8001 …"
 ( cd "$REPO_ROOT/workflow"
+  APP_ENVIRONMENT="$APP_ENVIRONMENT" \
   BACKEND_BASE_URL=http://localhost:8002 \
   LLM_BASE_URL=http://localhost:4000 \
   LLM_MODEL=mock-gpt \
@@ -86,7 +90,7 @@ echo "  起 platform  :8080 …"
 ( cd "$REPO_ROOT/platform"
   MEM0_MODE=inmemory OTEL_MODE=console CHAT_MODEL=mock-gpt \
   ASPNETCORE_URLS=http://localhost:8080 \
-  ASPNETCORE_ENVIRONMENT=Development \
+  ASPNETCORE_ENVIRONMENT="$ASPNETCORE_ENVIRONMENT" \
   nohup dotnet run --no-launch-profile --project src/Platform.Web/Platform.Web.csproj \
     > "$RUN_DIR/platform.log" 2>&1 &
   echo $! >> "$PIDS_FILE" )

@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import time
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 from langgraph.errors import GraphDrained
 from langgraph.runtime import RunControl
 from langgraph.types import Command
 
 from app.runtime.artifacts import RevisionArtifactReader
+from app.runtime.admission import AdmissionClosed, AdmissionCoordinator, AdmissionLease
 from app.runtime.backend import (
     BackendRunClient,
     BackendRunConflict,
@@ -60,6 +62,10 @@ class RuntimeManagerError(RuntimeError):
 
 
 class RuntimeManagerConflict(RuntimeManagerError):
+    pass
+
+
+class RuntimeAdmissionRejected(RuntimeManagerError):
     pass
 
 
@@ -118,10 +124,17 @@ class _RunHandle:
     lease_lost: bool = False
     shutdown_requested: bool = False
     state_lock: asyncio.Lock = None  # type: ignore[assignment]
+    admission_lease: AdmissionLease | None = None
 
     def __post_init__(self) -> None:
         if self.state_lock is None:
             self.state_lock = asyncio.Lock()
+
+
+@dataclass
+class _RunLockEntry:
+    lock: asyncio.Lock
+    references: int = 0
 
 
 class RuntimeRunManager:
@@ -139,6 +152,7 @@ class RuntimeRunManager:
         model: RuntimeModel | None = None,
         artifact_reader: RevisionArtifactReader | None = None,
         deps: Any = None,
+        admission: AdmissionCoordinator | None = None,
     ):
         self.graph = compile_runtime_graph(checkpointer)
         self.checkpointer = checkpointer
@@ -146,15 +160,54 @@ class RuntimeRunManager:
         self.model = model or LangChainRuntimeModel()
         self.artifact_reader = artifact_reader or RevisionArtifactReader()
         self.deps = deps
+        self.admission = admission or AdmissionCoordinator(
+            mode=settings.runtime_admission_mode,
+            root_active=settings.runtime_root_active_limit,
+            root_queue=settings.runtime_root_queue_limit,
+            direct_active=settings.runtime_direct_active_limit,
+            direct_queue=settings.runtime_direct_queue_limit,
+        )
         self._handles: dict[str, _RunHandle] = {}
-        self._run_locks: dict[str, asyncio.Lock] = {}
+        self._run_locks: dict[str, _RunLockEntry] = {}
+        self._recovery_admission: dict[str, AdmissionLease] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
     async def dispatch_command(
         self, run_id: str, command_id: str, ctx: RequestContext
     ) -> RuntimeRunResult:
-        async with await self._run_lock(run_id):
+        async with self._direct_admission() as admission_lease:
+            return await self._dispatch_command_admitted(
+                run_id, command_id, ctx, admission_lease
+            )
+
+    @asynccontextmanager
+    async def _direct_admission(self) -> AsyncIterator[AdmissionLease]:
+        if self._closed:
+            raise RuntimeManagerError("runtime manager is shutting down")
+        admission_lease = self.admission.reserve("direct")
+        if admission_lease is None:
+            raise RuntimeAdmissionRejected("Direct-Agent runtime capacity is full")
+        try:
+            try:
+                await admission_lease.wait()
+            except AdmissionClosed as exc:
+                raise RuntimeAdmissionRejected(
+                    "Direct-Agent runtime is shutting down"
+                ) from exc
+            yield admission_lease
+        finally:
+            if not admission_lease.transferred:
+                admission_lease.release()
+
+    async def _dispatch_command_admitted(
+        self,
+        run_id: str,
+        command_id: str,
+        ctx: RequestContext,
+        admission_lease: AdmissionLease,
+    ) -> RuntimeRunResult:
+        async with self._run_lock(run_id):
             command = await self.backend.claim_command(run_id, command_id, ctx)
             if command is None:
                 record = await self.backend.get_run(run_id, ctx)
@@ -188,9 +241,12 @@ class RuntimeRunManager:
                         ctx,
                         operation="start",
                         claimed_command=command,
+                        admission_lease=admission_lease,
                     )
                 elif command.command_type == "resume":
-                    await self._recover_resume_locked(command, ctx)
+                    await self._recover_resume_locked(
+                        command, ctx, admission_lease=admission_lease
+                    )
                     record = await self.backend.get_run(run_id, ctx)
                     result = RuntimeRunResult(
                         run_id=run_id,
@@ -395,7 +451,7 @@ class RuntimeRunManager:
         message: str,
         ctx: RequestContext,
     ) -> RuntimeRunResult:
-        async with await self._run_lock(snapshot.run_id):
+        async with self._run_lock(snapshot.run_id):
             return await self._start_locked(snapshot, message, ctx)
 
     async def _start_locked(
@@ -406,6 +462,7 @@ class RuntimeRunManager:
         *,
         operation: Literal["start", "recovery"] = "start",
         claimed_command: RecoveryCommand | None = None,
+        admission_lease: AdmissionLease | None = None,
     ) -> RuntimeRunResult:
         if snapshot.run_id == "" or not message.strip():
             raise RuntimeManagerError("run and message are required")
@@ -456,6 +513,7 @@ class RuntimeRunManager:
             graph_input=None if recovering else initial_state(snapshot, message.strip()),
             operation=operation,
             claimed_command=claimed_command,
+            admission_lease=admission_lease,
         )
 
     async def resume(
@@ -465,7 +523,7 @@ class RuntimeRunManager:
         expected_checkpoint_version: int,
         ctx: RequestContext,
     ) -> RuntimeRunResult:
-        async with await self._run_lock(run_id):
+        async with self._run_lock(run_id):
             return await self._resume_locked(
                 run_id, message, expected_checkpoint_version, ctx
             )
@@ -477,6 +535,7 @@ class RuntimeRunManager:
         ctx: RequestContext,
         *,
         execution_claim_token: str | None = None,
+        admission_lease: AdmissionLease | None = None,
     ) -> RuntimeRunResult:
         """Execute D7's one write boundary under a fenced durable command claim.
 
@@ -484,7 +543,30 @@ class RuntimeRunManager:
         crash after that write but before the terminal run transition therefore
         replays only the bookkeeping path, never the business side effect.
         """
-        async with await self._run_lock(run_id):
+        if admission_lease is not None:
+            return await self._execute_approved_write_admitted(
+                run_id,
+                approval_id,
+                ctx,
+                execution_claim_token=execution_claim_token,
+            )
+        async with self._direct_admission():
+            return await self._execute_approved_write_admitted(
+                run_id,
+                approval_id,
+                ctx,
+                execution_claim_token=execution_claim_token,
+            )
+
+    async def _execute_approved_write_admitted(
+        self,
+        run_id: str,
+        approval_id: str,
+        ctx: RequestContext,
+        *,
+        execution_claim_token: str | None,
+    ) -> RuntimeRunResult:
+        async with self._run_lock(run_id):
             if execution_claim_token is None:
                 execution_claim_token = (await self.backend.claim_approval_execution(run_id, approval_id, ctx)).claim_token
             try:
@@ -652,7 +734,7 @@ class RuntimeRunManager:
         *,
         expected_state_version: int | None,
     ) -> RuntimeRunResult:
-        async with await self._run_lock(run_id):
+        async with self._run_lock(run_id):
             return await self._cancel_locked(
                 run_id, ctx, expected_state_version=expected_state_version
             )
@@ -762,6 +844,7 @@ class RuntimeRunManager:
 
     async def close(self) -> None:
         self._closed = True
+        self.admission.close("direct")
         async with self._lock:
             handles = list(self._handles.values())
         for handle in handles:
@@ -796,6 +879,7 @@ class RuntimeRunManager:
         graph_input: Any,
         operation: Literal["start", "resume", "recovery"],
         claimed_command: RecoveryCommand | None = None,
+        admission_lease: AdmissionLease | None = None,
     ) -> RuntimeRunResult:
         if self._closed:
             raise RuntimeManagerError("runtime manager is shutting down")
@@ -1008,9 +1092,12 @@ class RuntimeRunManager:
                 ),
                 control=RunControl(),
                 operation=operation,
+                admission_lease=admission_lease,
             )
+            if admission_lease is not None:
+                admission_lease.transfer()
             handle.task = asyncio.create_task(
-                self._supervise(handle, graph_input),
+                self._supervise_admitted(handle, graph_input),
                 name=f"agent-run:{snapshot.run_id}",
             )
             self._handles[snapshot.run_id] = handle
@@ -1020,6 +1107,13 @@ class RuntimeRunManager:
             snapshot_hash=snapshot.snapshot_hash,
             checkpoint_version=running.checkpoint_version,
         )
+
+    async def _supervise_admitted(self, handle: _RunHandle, graph_input: Any) -> None:
+        try:
+            await self._supervise(handle, graph_input)
+        finally:
+            if handle.admission_lease is not None:
+                handle.admission_lease.release()
 
     async def _supervise(self, handle: _RunHandle, graph_input: Any) -> None:
         lease_task = asyncio.create_task(self._renew_lease(handle))
@@ -1405,17 +1499,60 @@ class RuntimeRunManager:
                 checkpoint_version=handle.checkpoint_version,
             )
 
-    async def _run_lock(self, run_id: str) -> asyncio.Lock:
+    @asynccontextmanager
+    async def _run_lock(self, run_id: str) -> AsyncIterator[None]:
+        # Register before waiting so the current owner cannot remove an entry
+        # that already has a waiter.  Never await the keyed lock while holding
+        # _lock: operation bodies acquire _lock while owning their keyed lock,
+        # so doing both here in the opposite order would create an ABBA cycle.
         async with self._lock:
-            return self._run_locks.setdefault(run_id, asyncio.Lock())
+            if self._closed:
+                raise RuntimeManagerError("runtime manager is shutting down")
+            entry = self._run_locks.get(run_id)
+            if entry is None:
+                entry = _RunLockEntry(asyncio.Lock())
+                self._run_locks[run_id] = entry
+            entry.references += 1
+        try:
+            await entry.lock.acquire()
+            try:
+                yield
+            finally:
+                entry.lock.release()
+        finally:
+            # This also runs when cancellation interrupts lock acquisition.
+            # Identity protects a newer entry for the same run from a stale
+            # guard; zero references plus an unlocked lock means no owner or
+            # registered waiter remains.
+            async with self._lock:
+                entry.references -= 1
+                if (
+                    entry.references == 0
+                    and not entry.lock.locked()
+                    and self._run_locks.get(run_id) is entry
+                ):
+                    self._run_locks.pop(run_id)
 
     async def recover_once(self) -> int:
-        claimed = await self.backend.claim_recovery_commands(
-            limit=settings.runtime_recovery_batch_size,
-            lease_seconds=settings.runtime_lease_seconds,
+        leases = self.admission.reserve_recovery(
+            "direct", settings.runtime_recovery_batch_size
         )
+        if not leases:
+            return 0
+        try:
+            claimed = await self.backend.claim_recovery_commands(
+                limit=len(leases),
+                lease_seconds=settings.runtime_lease_seconds,
+            )
+        except BaseException:
+            for lease in leases:
+                lease.release()
+            raise
+        for lease in leases[len(claimed.items) :]:
+            lease.release()
         completed = 0
-        for command in claimed.items:
+        for command, admission_lease in zip(claimed.items, leases):
+            self._recovery_admission[command.command_id] = admission_lease
             ctx = RequestContext(
                 tenant_id=command.tenant_id,
                 user_id=command.user_id,
@@ -1471,12 +1608,19 @@ class RuntimeRunManager:
                     },
                 )
                 continue
+            finally:
+                self._recovery_admission.pop(command.command_id, None)
+                if not admission_lease.transferred:
+                    admission_lease.release()
         return completed
 
     async def _dispatch_recovery(
-        self, command: RecoveryCommand, ctx: RequestContext
+        self,
+        command: RecoveryCommand,
+        ctx: RequestContext,
     ) -> None:
-        async with await self._run_lock(command.run_id):
+        admission_lease = self._recovery_admission[command.command_id]
+        async with self._run_lock(command.run_id):
             if command.command_type == "start":
                 envelope = SnapshotCanonicalEnvelope.model_validate(command.snapshot)
                 snapshot = envelope.decode()
@@ -1486,9 +1630,12 @@ class RuntimeRunManager:
                     ctx,
                     operation="recovery",
                     claimed_command=command,
+                    admission_lease=admission_lease,
                 )
             elif command.command_type == "resume":
-                await self._recover_resume_locked(command, ctx)
+                await self._recover_resume_locked(
+                    command, ctx, admission_lease=admission_lease
+                )
             else:
                 if command.lease_generation > 0:
                     await self._cleanup_claimed_command(command, ctx)
@@ -1621,7 +1768,11 @@ class RuntimeRunManager:
         )
 
     async def _recover_resume_locked(
-        self, command: RecoveryCommand, ctx: RequestContext
+        self,
+        command: RecoveryCommand,
+        ctx: RequestContext,
+        *,
+        admission_lease: AdmissionLease | None = None,
     ) -> None:
         message = str(command.input.get("message") or "").strip()
         expected_checkpoint_version = int(
@@ -1757,6 +1908,7 @@ class RuntimeRunManager:
             claimed_command=(
                 launch_command if command.lease_generation > 0 else None
             ),
+            admission_lease=admission_lease,
         )
 
     async def _lineage_progress(
@@ -1859,21 +2011,65 @@ class RuntimeRunManager:
             parent_config = parent.parent_config
         return False
 
+    async def recover_approved_writes_once(self) -> int:
+        leases = self.admission.reserve_recovery(
+            "direct", settings.runtime_recovery_batch_size
+        )
+        if not leases:
+            return 0
+        try:
+            items = await self.backend.claim_approval_recovery(limit=len(leases))
+        except BaseException:
+            for lease in leases:
+                lease.release()
+            raise
+        for lease in leases[len(items) :]:
+            lease.release()
+
+        admitted = list(zip(items, leases))
+        try:
+            results = await asyncio.gather(
+                *(
+                    self._recover_approved_write(item, admission_lease)
+                    for item, admission_lease in admitted
+                )
+            )
+            return sum(results)
+        finally:
+            # Also covers cancellation before a child coroutine's first step.
+            for _, admission_lease in admitted:
+                admission_lease.release()
+
+    async def _recover_approved_write(
+        self, item: dict[str, Any], admission_lease: AdmissionLease
+    ) -> int:
+        try:
+            ctx = RequestContext(
+                tenant_id=str(item["tenant_id"]),
+                user_id=str(item["approver_id"]),
+                role="USER",
+            )
+            await self.execute_approved_write(
+                str(item["run_id"]),
+                str(item["approval_id"]),
+                ctx,
+                execution_claim_token=str(item["claim_token"]),
+                admission_lease=admission_lease,
+            )
+            return 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Approved write recovery failed")
+            return 0
+        finally:
+            admission_lease.release()
+
     async def recovery_loop(self) -> None:
         while not self._closed:
             if settings.agent_write_tools_enabled:
                 try:
-                    for item in await self.backend.claim_approval_recovery():
-                        try:
-                            ctx = RequestContext(tenant_id=str(item["tenant_id"]), user_id=str(item["approver_id"]), role="USER")
-                            await self.execute_approved_write(
-                                str(item["run_id"]),
-                                str(item["approval_id"]),
-                                ctx,
-                                execution_claim_token=str(item["claim_token"]),
-                            )
-                        except Exception:
-                            logger.exception("Approved write recovery failed")
+                    await self.recover_approved_writes_once()
                 except Exception:
                     logger.exception("Approved write recovery claim failed")
             try:

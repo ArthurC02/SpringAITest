@@ -1,41 +1,41 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Platform.Web.Tests;
 
-/// <summary>
-/// 測試用的 token 鑄造器。platform 已不再簽發 token(改由 backend 簽),此處以與 backend 位元相容的格式
-/// (HS256、claims sub/role/tenantCode)自行簽出,供整合測試的 Bearer 中介軟體驗證。
-/// 預設 secret 與 app 在 Testing 環境使用的 JWT_SECRET 預設值一致。
-/// </summary>
 internal static class TestTokens
 {
-    public const string DefaultSecret = "dev-jwt-secret-change-me-0123456789abcdef";
+    public const string Issuer = "platform-tests-issuer";
+    public const string Audience = "platform-tests-audience";
+    public const string ActiveKid = "platform-tests-es256";
+    public static TestJwtKeyPair ActiveKey { get; } = TestJwtKeyPair.Create();
+    public static string PublicKeyRingJson => ActiveKey.PublicKeyRingJson(ActiveKid);
 
     public static string Mint(
         string username = "user-a",
         string role = "USER",
         string tenantCode = "demo-a",
-        string? secret = null,
         DateTime? notBefore = null,
         DateTime? expires = null,
         IReadOnlyCollection<string>? capabilities = null,
-        IReadOnlyCollection<string>? groups = null)
+        IReadOnlyCollection<string>? groups = null,
+        TestJwtKeyPair? keyPair = null,
+        string? issuer = null,
+        string? audience = null,
+        string? kid = null)
     {
         var now = DateTime.UtcNow;
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret ?? DefaultSecret));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
+        var key = (keyPair ?? ActiveKey).CreatePrivateSecurityKey(kid ?? ActiveKid);
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, username),
             new("role", role),
             new("tenantCode", tenantCode),
         };
-        // 與 backend JwtService 完全相同：每個 capability 產生一個同名 claim，
-        // JwtSecurityTokenHandler 會把多值序列化成 JSON array；null/空值不產生 claim。
         if (capabilities is not null)
         {
             foreach (var capability in capabilities
@@ -56,20 +56,18 @@ internal static class TestTokens
         }
 
         var token = new JwtSecurityToken(
+            issuer: issuer ?? Issuer,
+            audience: audience ?? Audience,
             claims: claims,
             notBefore: notBefore ?? now,
             expires: expires ?? now.AddHours(24),
-            signingCredentials: credentials);
-
+            signingCredentials: new SigningCredentials(key, SecurityAlgorithms.EcdsaSha256));
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    /// <summary>簽章與期限均有效、但刻意缺少聊天 identity claim 的 JWT，用來釘住 fail-closed 邊界。</summary>
     public static string MintMissingChatIdentityClaim(bool omitSubject)
     {
         var now = DateTime.UtcNow;
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(DefaultSecret));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
         var claims = new List<Claim> { new("role", "USER") };
         if (omitSubject)
         {
@@ -81,10 +79,46 @@ internal static class TestTokens
         }
 
         var token = new JwtSecurityToken(
+            issuer: Issuer,
+            audience: Audience,
             claims: claims,
             notBefore: now,
             expires: now.AddHours(24),
-            signingCredentials: credentials);
+            signingCredentials: new SigningCredentials(
+                ActiveKey.CreatePrivateSecurityKey(ActiveKid),
+                SecurityAlgorithms.EcdsaSha256));
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
+}
+
+internal sealed class TestJwtKeyPair
+{
+    private readonly string _privatePem;
+    private readonly string _publicPemBase64;
+
+    private TestJwtKeyPair(string privatePem, string publicPemBase64)
+    {
+        _privatePem = privatePem;
+        _publicPemBase64 = publicPemBase64;
+    }
+
+    public static TestJwtKeyPair Create()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        return new TestJwtKeyPair(
+            key.ExportPkcs8PrivateKeyPem(),
+            Convert.ToBase64String(Encoding.UTF8.GetBytes(key.ExportSubjectPublicKeyInfoPem())));
+    }
+
+    public ECDsaSecurityKey CreatePrivateSecurityKey(string kid)
+    {
+        var key = ECDsa.Create();
+        key.ImportFromPem(_privatePem);
+        return new ECDsaSecurityKey(key) { KeyId = kid };
+    }
+
+    public string PublicKeyRingJson(string kid)
+        => JsonSerializer.Serialize(new Dictionary<string, string> { [kid] = _publicPemBase64 });
+
+    public string PublicPemBase64 => _publicPemBase64;
 }

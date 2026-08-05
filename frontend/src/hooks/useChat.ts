@@ -1,126 +1,287 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { streamChat, newConversation } from '../api/chat'
-import { getChatPersistenceGeneration, persistChatMessages } from '../chatPersistence'
-import { CHAT_MESSAGES_KEY } from '../storageKeys'
-import type { Message } from '../types'
+import { getChatHistoryPage, streamChat, newConversation } from '../api/chat'
+import {
+  getChatPersistenceGeneration,
+  loadPersistedChatMessages,
+  persistChatMessages,
+} from '../chatPersistence'
+import { createChatChunkBatcher, type ChatChunkBatcher } from '../chatChunkBatcher'
+import { runGuardedChatRequest } from '../chatRequestLifecycle'
+import { mergeInitialMessages, mergeOlderMessages } from '../chatHistory'
+import type { Message, Session } from '../types'
 
-function loadMessages(): Message[] {
-  try {
-    const raw = localStorage.getItem(CHAT_MESSAGES_KEY)
-    return raw ? (JSON.parse(raw) as Message[]) : []
-  } catch {
-    return []
-  }
+interface ActiveRequest {
+  controller: AbortController
+  assistantId: string
+  batcher: ChatChunkBatcher
 }
 
-/**
- * 聊天狀態與行為的集中處：訊息清單、送出、清除，並把對話保存在 localStorage，
- * 重新整理頁面後仍在。元件只需呼叫 send()/clear() 並渲染 messages。
- */
-export function useChat(orchestratorId: string | null = null) {
+function loadMessages(): Message[] {
+  return loadPersistedChatMessages()
+}
+
+function removeEmptyAssistantPlaceholder(messages: Message[], assistantId: string): Message[] {
+  const message = messages.find((item) => item.id === assistantId)
+  return message?.content === ''
+    ? messages.filter((item) => item.id !== assistantId)
+    : messages
+}
+
+/** Owns chat UI state, SSE request lifetime, and debounced local persistence. */
+export function useChat(
+  orchestratorId: string | null = null,
+  session: Session | null = null,
+) {
   const [messages, setMessages] = useState<Message[]>(loadMessages)
   const [loading, setLoading] = useState(false)
-  // 登出會使此實例的世代失效，杜絕任何較晚發生的 lifecycle flush 回寫舊訊息。
+  const [persistenceWarning, setPersistenceWarning] = useState<string | null>(null)
   const persistenceGenerationRef = useRef(getChatPersistenceGeneration())
-  // 串流中的 AbortController，供「停止產生」中止 fetch 用。
-  const abortRef = useRef<AbortController | null>(null)
-  // 最新 messages 的鏡像，供 debounce timer 與卸載時的 flush 讀取。
+  const activeRequestRef = useRef<ActiveRequest | null>(null)
   const messagesRef = useRef(messages)
   messagesRef.current = messages
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const quotaSignaledRef = useRef(false)
+  const terminalPersistedMessagesRef = useRef<Message[] | null>(null)
+  const historyRequestRef = useRef<AbortController | null>(null)
+  const historyGenerationRef = useRef(0)
+  const historyBusyRef = useRef(false)
+  const nextCursorRef = useRef<string | null>(null)
+  const [historyLoadingKind, setHistoryLoadingKind] = useState<'initial' | 'older' | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [hasMoreHistory, setHasMoreHistory] = useState(false)
 
-  // 串流時逐 token 寫 localStorage 太頻繁；改為 500ms debounce，只在停止變動後才落地。
-  // 錯誤/中止的最終狀態同樣是「一次 setMessages 後停止變動」，會經此持久化。
+  const commitMessages = useCallback((update: (current: Message[]) => Message[]) => {
+    const next = update(messagesRef.current)
+    messagesRef.current = next
+    setMessages(next)
+  }, [])
+
+  const persist = useCallback((showWarning: boolean) => {
+    const result = persistChatMessages(messagesRef.current, persistenceGenerationRef.current)
+    if (result === 'quota_failed' && showWarning && !quotaSignaledRef.current) {
+      quotaSignaledRef.current = true
+      setPersistenceWarning('聊天記錄暫時無法儲存在此瀏覽器')
+    }
+  }, [])
+
+  const abortActiveRequest = useCallback((removeEmptyPlaceholder: boolean) => {
+    const activeRequest = activeRequestRef.current
+    if (!activeRequest) return
+
+    activeRequest.batcher.flush()
+    activeRequestRef.current = null
+    activeRequest.controller.abort()
+    if (removeEmptyPlaceholder) {
+      commitMessages((current) => removeEmptyAssistantPlaceholder(current, activeRequest.assistantId))
+    }
+  }, [commitMessages])
+
+  const abortActiveRequestOnUnmount = useCallback(() => {
+    const activeRequest = activeRequestRef.current
+    if (!activeRequest) return
+
+    activeRequest.batcher.flush()
+    activeRequestRef.current = null
+    activeRequest.controller.abort()
+    // The cleanup flush must not persist an empty placeholder from the cancelled request.
+    messagesRef.current = removeEmptyAssistantPlaceholder(
+      messagesRef.current,
+      activeRequest.assistantId,
+    )
+  }, [])
+
+  const cancelHistoryRequest = useCallback(() => {
+    historyGenerationRef.current += 1
+    historyRequestRef.current?.abort()
+    historyRequestRef.current = null
+    historyBusyRef.current = false
+    setHistoryLoadingKind(null)
+  }, [])
+
+  const sessionKey = session
+    ? `${session.tenantCode}\0${session.username}\0${session.token}`
+    : null
+
+  const requestHistoryPage = useCallback(async (before?: string) => {
+    if (!sessionKey || historyBusyRef.current) return
+
+    const generation = ++historyGenerationRef.current
+    const controller = new AbortController()
+    historyRequestRef.current?.abort()
+    historyRequestRef.current = controller
+    historyBusyRef.current = true
+    setHistoryLoadingKind(before === undefined ? 'initial' : 'older')
+    setHistoryError(null)
+    try {
+      const page = await getChatHistoryPage(before, controller.signal)
+      if (controller.signal.aborted || historyGenerationRef.current !== generation) return
+      commitMessages((current) => before === undefined
+        ? mergeInitialMessages(current, page.items, page.hasMore)
+        : mergeOlderMessages(current, page.items))
+      nextCursorRef.current = page.nextCursor
+      setHasMoreHistory(page.hasMore)
+    } catch (error) {
+      if (controller.signal.aborted || historyGenerationRef.current !== generation) return
+      setHistoryError(error instanceof Error ? error.message : '載入聊天記錄失敗')
+    } finally {
+      if (historyGenerationRef.current === generation) {
+        historyRequestRef.current = null
+        historyBusyRef.current = false
+        setHistoryLoadingKind(null)
+      }
+    }
+  }, [commitMessages, sessionKey])
+
+  useEffect(() => {
+    cancelHistoryRequest()
+    nextCursorRef.current = null
+    setHasMoreHistory(false)
+    setHistoryError(null)
+    if (sessionKey) void requestHistoryPage()
+    return cancelHistoryRequest
+  }, [cancelHistoryRequest, requestHistoryPage, sessionKey])
+
   useEffect(() => {
     clearTimeout(timerRef.current)
+    if (terminalPersistedMessagesRef.current === messages) {
+      terminalPersistedMessagesRef.current = null
+      timerRef.current = undefined
+      return
+    }
+    terminalPersistedMessagesRef.current = null
     timerRef.current = setTimeout(
-      () => persistChatMessages(messagesRef.current, persistenceGenerationRef.current),
+      () => persist(true),
       500,
     )
-  }, [messages])
+  }, [messages, persist])
 
-  // 卸載或關閉分頁時把最新狀態立即 flush，涵蓋 debounce 視窗內離開而尚未落地的情況。
   useEffect(() => {
-    const flush = () =>
-      persistChatMessages(messagesRef.current, persistenceGenerationRef.current)
+    const flush = () => persist(false)
     window.addEventListener('beforeunload', flush)
     return () => {
+      abortActiveRequestOnUnmount()
       clearTimeout(timerRef.current)
       flush()
       window.removeEventListener('beforeunload', flush)
     }
-  }, [])
+  }, [abortActiveRequestOnUnmount, persist])
 
   const send = useCallback(async (text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
 
-    // 先放使用者訊息，再放一個空的 AI 佔位泡泡，串流的 token 會逐步填進這個泡泡。
+    // Defensive replacement support for callers that race the composer's disabled state.
+    abortActiveRequest(true)
+
     const assistantId = crypto.randomUUID()
-    setMessages((m) => [
-      ...m,
+    commitMessages((current) => [
+      ...current,
       { id: crypto.randomUUID(), role: 'user', content: trimmed },
       { id: assistantId, role: 'assistant', content: '' },
     ])
     setLoading(true)
-    const controller = new AbortController()
-    abortRef.current = controller
-    try {
-      await streamChat(
+
+    let request!: ActiveRequest
+    const batcher = createChatChunkBatcher(
+      () => activeRequestRef.current === request,
+      (content) => {
+        commitMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId
+              ? { ...message, content: message.content + content }
+              : message,
+          ),
+        )
+      },
+    )
+    request = { controller: new AbortController(), assistantId, batcher }
+    activeRequestRef.current = request
+    await runGuardedChatRequest(
+      request,
+      () => activeRequestRef.current === request,
+      (onToken) => streamChat(
         trimmed,
-        (chunk) => {
-          setMessages((m) =>
-            m.map((msg) =>
-              msg.id === assistantId
-                ? { ...msg, content: msg.content + chunk }
-                : msg,
-            ),
-          )
-        },
-        controller.signal,
+        onToken,
+        request.controller.signal,
         orchestratorId,
-      )
-    } catch (e) {
-      if ((e as Error).name === 'AbortError') {
-        // 使用者中止：保留已收到的 token；若一個字都還沒收到就移除空佔位泡泡。
-        setMessages((m) => {
-          const msg = m.find((x) => x.id === assistantId)
-          return msg && msg.content === '' ? m.filter((x) => x.id !== assistantId) : m
-        })
-      } else {
-        // 串流失敗：已收到的部分內容保留（platform 契約是 token 在前、error frame 在後），
-        // 另附一顆錯誤泡泡；一個字都沒收到才把空佔位泡泡改成錯誤訊息。
-        setMessages((m) => {
-          const partial = m.find((x) => x.id === assistantId)
-          if (partial && partial.content !== '') {
-            return [
-              ...m,
-              { id: crypto.randomUUID(), role: 'assistant' as const, content: (e as Error).message, error: true },
-            ]
-          }
-          return m.map((msg) =>
-            msg.id === assistantId
-              ? { ...msg, content: (e as Error).message, error: true }
-              : msg,
-          )
-        })
-      }
-    } finally {
-      setLoading(false)
-      abortRef.current = null
-    }
-  }, [orchestratorId])
+      ),
+      {
+        onToken: (chunk) => request.batcher.append(chunk),
+        onAbort: () => {
+          request.batcher.flush()
+          commitMessages((current) => removeEmptyAssistantPlaceholder(current, assistantId))
+        },
+        onError: (error) => {
+          request.batcher.flush()
+          commitMessages((current) => {
+            const partial = current.find((item) => item.id === assistantId)
+            if (partial?.content) {
+              return [
+                ...current,
+                {
+                  id: crypto.randomUUID(),
+                  role: 'assistant' as const,
+                  content: error.message,
+                  error: true,
+                },
+              ]
+            }
+            return current.map((message) =>
+              message.id === assistantId
+                ? { ...message, content: error.message, error: true }
+                : message,
+            )
+          })
+        },
+        onFinish: () => {
+          request.batcher.flush()
+          clearTimeout(timerRef.current)
+          timerRef.current = undefined
+          terminalPersistedMessagesRef.current = messagesRef.current
+          persist(true)
+          setLoading(false)
+          activeRequestRef.current = null
+        },
+      },
+    )
+  }, [abortActiveRequest, commitMessages, orchestratorId, persist])
 
-  // 停止產生：中止進行中的串流（AbortError 由 send 的 catch 當作正常中止處理）。
   const stop = useCallback(() => {
-    abortRef.current?.abort()
+    activeRequestRef.current?.controller.abort()
   }, [])
 
-  // 清除對話：同時換新 conversationId，讓後端短期記憶也一起重置。
   const clear = useCallback(() => {
+    abortActiveRequest(false)
+    cancelHistoryRequest()
+    nextCursorRef.current = null
+    setHasMoreHistory(false)
+    setHistoryError(null)
     newConversation()
-    setMessages([])
-  }, [])
+    commitMessages(() => [])
+    setLoading(false)
+  }, [abortActiveRequest, cancelHistoryRequest, commitMessages])
 
-  return { messages, loading, send, stop, clear }
+  const loadOlder = useCallback(() => {
+    const cursor = nextCursorRef.current
+    if (cursor) void requestHistoryPage(cursor)
+  }, [requestHistoryPage])
+
+  const retryHistory = useCallback(() => {
+    void requestHistoryPage(nextCursorRef.current ?? undefined)
+  }, [requestHistoryPage])
+
+  return {
+    messages,
+    loading,
+    persistenceWarning,
+    historyLoading: historyLoadingKind !== null,
+    loadingOlderHistory: historyLoadingKind === 'older',
+    historyError,
+    hasMoreHistory,
+    send,
+    stop,
+    clear,
+    loadOlder,
+    retryHistory,
+  }
 }

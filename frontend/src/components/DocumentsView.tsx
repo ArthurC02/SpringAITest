@@ -1,5 +1,6 @@
-import { useState, type ChangeEvent, type FormEvent } from 'react'
+import { useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import type { useDocuments } from '../hooks/useDocuments'
+import { isConflict } from '../api/http'
 import { fmtDate } from '../format'
 import ErrorText from './ErrorText'
 import { useConfirm } from './ConfirmDialog'
@@ -30,10 +31,19 @@ export default function DocumentsView({ documents }: Props) {
   const [busy, setBusy] = useState(false)
   const [fileName, setFileName] = useState('')
   const [mode, setMode] = useState<'file' | 'text'>('file')
+  const attemptRef = useRef<{ title: string; text: string; key: string } | null>(null)
+  const formVersionRef = useRef(0)
+
+  function formChanged() {
+    formVersionRef.current += 1
+    attemptRef.current = null
+    setSubmitError(null)
+  }
 
   // 切換內容來源時清掉另一模式的內容,避免「送出的到底是哪份」的混淆。
   function switchMode(m: 'file' | 'text') {
     if (m === mode) return
+    formChanged()
     setMode(m)
     setText('')
     setTextErr('')
@@ -48,16 +58,30 @@ export default function DocumentsView({ documents }: Props) {
     setTitleErr(te)
     setTextErr(xe)
     if (te || xe) return
+    const normalizedTitle = title.trim()
+    const normalizedText = text.trim()
+    const previousAttempt = attemptRef.current
+    const attempt = previousAttempt?.title === normalizedTitle && previousAttempt.text === normalizedText
+      ? previousAttempt
+      : { title: normalizedTitle, text: normalizedText, key: crypto.randomUUID() }
+    attemptRef.current = attempt
+    const submittedFormVersion = formVersionRef.current
     setBusy(true)
     setSubmitError(null)
     try {
-      await create(title.trim(), text.trim())
-      setTitle('')
-      setText('')
-      setFileName('')
-      toast('已送出,處理中', 'success')
+      await create(attempt.title, attempt.text, attempt.key)
+      attemptRef.current = null
+      if (formVersionRef.current === submittedFormVersion) {
+        setTitle('')
+        setText('')
+        setFileName('')
+        toast('已送出,處理中', 'success')
+      }
     } catch (err) {
-      setSubmitError((err as Error).message)
+      if (isConflict(err)) attemptRef.current = null
+      if (formVersionRef.current === submittedFormVersion) {
+        setSubmitError((err as Error).message)
+      }
     } finally {
       setBusy(false)
     }
@@ -68,6 +92,7 @@ export default function DocumentsView({ documents }: Props) {
     const f = e.target.files?.[0]
     e.target.value = '' // 允許重選同一檔案
     if (!f) return
+    formChanged()
     setText(await f.text())
     setFileName(f.name)
     setTextErr('')
@@ -101,6 +126,7 @@ export default function DocumentsView({ documents }: Props) {
             className="input"
             value={title}
             onChange={(e) => {
+              formChanged()
               setTitle(e.target.value)
               if (titleErr && e.target.value.trim()) setTitleErr('')
             }}
@@ -167,6 +193,7 @@ export default function DocumentsView({ documents }: Props) {
               className="textarea"
               value={text}
               onChange={(e) => {
+                formChanged()
                 setText(e.target.value)
                 if (textErr && e.target.value.trim()) setTextErr('')
               }}
@@ -182,7 +209,7 @@ export default function DocumentsView({ documents }: Props) {
           </div>
         )}
         <button className="btn btn--info" type="submit" disabled={busy}>
-          {busy ? '送出中…' : '新增文件'}
+          {busy ? '送出中…' : submitError && attemptRef.current ? '再試一次' : '新增文件'}
         </button>
         <ErrorText msg={submitError} />
       </form>

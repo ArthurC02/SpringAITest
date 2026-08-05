@@ -14,6 +14,7 @@ namespace Backend.Api.Auth;
 /// </summary>
 public sealed record RegisterRequest(
     [NotBlank(ErrorMessage = "username 不可為空")]
+    [StringLength(AuthIdentityLimits.MaximumLength, ErrorMessage = "username 長度不可超過 128")]
     [RegularExpression(IdentityRules.NoColon, ErrorMessage = "username 不可包含冒號")]
     string? Username,
 
@@ -22,6 +23,7 @@ public sealed record RegisterRequest(
     string? Password,
 
     [NotBlank(ErrorMessage = "tenantCode 不可為空")]
+    [StringLength(AuthIdentityLimits.MaximumLength, ErrorMessage = "tenantCode 長度不可超過 128")]
     [RegularExpression(IdentityRules.NoColon, ErrorMessage = "tenantCode 不可包含冒號")]
     string? TenantCode,
 
@@ -31,11 +33,17 @@ public sealed record RegisterRequest(
 /// <summary>登入請求(同一組身分值的另一個入口,同樣不得含 ':')。</summary>
 public sealed record LoginRequest(
     [NotBlank(ErrorMessage = "username 不可為空")]
+    [StringLength(AuthIdentityLimits.MaximumLength, ErrorMessage = "username 長度不可超過 128")]
     [RegularExpression(IdentityRules.NoColon, ErrorMessage = "username 不可包含冒號")]
     string? Username,
 
     [NotBlank(ErrorMessage = "password 不可為空")]
     string? Password);
+
+internal static class AuthIdentityLimits
+{
+    public const int MaximumLength = 128;
+}
 
 /// <summary>身分欄位的格式規則(register/login 共用,避免兩個入口各自維護一份 pattern)。</summary>
 internal static class IdentityRules

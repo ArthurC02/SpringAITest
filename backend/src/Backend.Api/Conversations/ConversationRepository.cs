@@ -31,4 +31,34 @@ public sealed class ConversationRepository : IConversationRepository
                 new { tenantId, userId }, cancellationToken: ct));
         return rows.AsList();
     }
+
+    public async Task<IReadOnlyList<ConversationItem>> ListPageDescAsync(
+        string tenantId,
+        string userId,
+        ConversationPosition? before,
+        int take,
+        CancellationToken ct)
+    {
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        var sql = "SELECT id, reply, created_at AS CreatedAt FROM conversations"
+            + " WHERE tenant_id = @tenantId AND user_id = @userId";
+        if (before is not null)
+        {
+            sql += " AND (created_at, id) < (@beforeCreatedAt, @beforeId)";
+        }
+        sql += " ORDER BY created_at DESC, id DESC LIMIT @take";
+        var rows = await conn.QueryAsync<ConversationItem>(
+            new CommandDefinition(
+                sql,
+                new
+                {
+                    tenantId,
+                    userId,
+                    beforeCreatedAt = before?.CreatedAt,
+                    beforeId = before?.Id,
+                    take,
+                },
+                cancellationToken: ct));
+        return rows.AsList();
+    }
 }

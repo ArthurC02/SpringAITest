@@ -243,6 +243,10 @@ public sealed class ChatServiceTests
             ListCalls.Add(ctx);
             return Task.FromResult<IReadOnlyList<ChatResponse>>(Items);
         }
+
+        public Task<ChatHistoryPage> ListPageAsync(
+            int limit, string? before, UserContext ctx, CancellationToken ct = default)
+            => throw new NotSupportedException("本 fake 只服務舊歷史查詢");
     }
 
     [Fact]
@@ -262,6 +266,26 @@ public sealed class ChatServiceTests
         Assert.Same(UserA, Assert.Single(store.ListCalls));
         Assert.Equal(new[] { 1L, 2L }, history.Select(h => h.Id).ToArray());
         Assert.Equal(new[] { "r1", "r2" }, history.Select(h => h.Reply).ToArray());
+    }
+
+    [Fact]
+    public async Task HistoryPage_AnonymousReturnsEmptyWithoutStoreCall_LoggedInDelegates()
+    {
+        var store = new FakeConversationStore();
+        store.Items.Add(new ChatResponse(1, "r1", DateTime.UtcNow));
+        var (hostAgent, _, _) = TestChatAgent.Build();
+        var service = new ChatService(
+            hostAgent, store, new FakeChatIdentityAccessor(), new LlmOptions(), NullLogger<ChatService>.Instance);
+
+        var anonymous = await service.HistoryPageAsync(50, "ignored", null);
+        Assert.Empty(anonymous.Items);
+        Assert.Null(anonymous.NextCursor);
+        Assert.False(anonymous.HasMore);
+        Assert.Equal(0, store.PageCalls);
+
+        var loggedIn = await service.HistoryPageAsync(50, null, UserA);
+        Assert.Single(loggedIn.Items);
+        Assert.Equal(1, store.PageCalls);
     }
 
     // ---- H1:uid / cid fallback 決策表(NormalizeUser:空白→"default";NormalizeConversation:空白→uid) ----

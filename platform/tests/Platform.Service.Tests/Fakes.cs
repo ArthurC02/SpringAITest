@@ -57,6 +57,7 @@ internal static class TestHttp
 public sealed class FakeDocumentQueue : IDocumentQueue
 {
     public DocumentMessage? Last { get; private set; }
+    public List<DocumentMessage> Published { get; } = new();
     public bool ThrowOnPublish { get; set; }
 
     public Task PublishAsync(DocumentMessage message, CancellationToken ct = default)
@@ -67,6 +68,7 @@ public sealed class FakeDocumentQueue : IDocumentQueue
         }
 
         Last = message;
+        Published.Add(message);
         return Task.CompletedTask;
     }
 }
@@ -81,6 +83,7 @@ public sealed class FakeConversationStore : IConversationStore
     public List<ChatTurnMetadata?> SavedMetadata { get; } = new();
     public List<ChatResponse> Items { get; } = new();
     public bool ThrowOnAdd { get; set; }
+    public int PageCalls { get; private set; }
     private long _nextId = 1;
 
     public Task<ChatResponse> AddAsync(
@@ -101,6 +104,15 @@ public sealed class FakeConversationStore : IConversationStore
     public Task<IReadOnlyList<ChatResponse>> ListDescAsync(UserContext ctx, CancellationToken ct = default)
         => Task.FromResult<IReadOnlyList<ChatResponse>>(
             Items.OrderByDescending(c => c.CreatedAt).ThenByDescending(c => c.Id).ToList());
+
+    public Task<ChatHistoryPage> ListPageAsync(
+        int limit, string? before, UserContext ctx, CancellationToken ct = default)
+    {
+        PageCalls++;
+        var items = Items.OrderByDescending(c => c.CreatedAt).ThenByDescending(c => c.Id)
+            .Take(limit).ToList();
+        return Task.FromResult(new ChatHistoryPage(items, null, false));
+    }
 }
 
 /// <summary>

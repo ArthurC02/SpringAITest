@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 from app.runtime.manager import RuntimeRunManager
+from app.runtime.admission import AdmissionCoordinator, AdmissionLease
 from app.runtime.checkpoints import PostgresCheckpointStore
 from app.runtime.orchestrator_backend import (
     OrchestratorBackendClient,
@@ -30,6 +33,13 @@ class RootRuntimeSupervisor:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
         self._recovery_task: asyncio.Task[None] | None = None
+        self.admission = getattr(manager, "admission", None) or AdmissionCoordinator(
+            mode=settings.runtime_admission_mode,
+            root_active=settings.runtime_root_active_limit,
+            root_queue=settings.runtime_root_queue_limit,
+            direct_active=settings.runtime_direct_active_limit,
+            direct_queue=settings.runtime_direct_queue_limit,
+        )
 
     def start(self) -> None:
         if self._recovery_task is None:
@@ -42,12 +52,32 @@ class RootRuntimeSupervisor:
         existing = self._tasks.get(key)
         if existing is not None and not existing.done():
             return False
+        admission_lease = self.admission.reserve("root")
+        if admission_lease is None:
+            return False
         task = asyncio.create_task(
-            self._claim_and_run(run_id, command_id, ctx), name=f"root:{key}"
+            self._run_admitted(
+                admission_lease,
+                lambda: self._claim_and_run(run_id, command_id, ctx),
+            ),
+            name=f"root:{key}",
         )
         self._tasks[key] = task
-        task.add_done_callback(lambda done: self._finished(key, done))
+        task.add_done_callback(
+            lambda done: self._finished_admitted(key, done, admission_lease)
+        )
         return True
+
+    async def _run_admitted(
+        self,
+        admission_lease: AdmissionLease,
+        operation: Callable[[], Awaitable[None]],
+    ) -> None:
+        try:
+            await admission_lease.wait()
+            await operation()
+        finally:
+            admission_lease.release()
 
     async def _claim_and_run(
         self, run_id: str, command_id: str, ctx: RequestContext
@@ -196,20 +226,56 @@ class RootRuntimeSupervisor:
             )
 
     async def recover_once(self) -> None:
-        response = await self.backend.claim_recovery()
-        for item in response.items:
+        leases = self.admission.reserve_recovery(
+            "root", settings.runtime_recovery_batch_size
+        )
+        if not leases:
+            return
+        try:
+            claim_recovery = self.backend.claim_recovery
+            if "limit" in inspect.signature(claim_recovery).parameters:
+                response = await claim_recovery(limit=len(leases))
+            else:  # Compatibility for hand-written test/extension clients.
+                response = await claim_recovery()
+        except BaseException:
+            for lease in leases:
+                lease.release()
+            raise
+        for lease in leases[len(response.items) :]:
+            lease.release()
+        for item, admission_lease in zip(response.items, leases):
             key = f"{item.claim.run_id}:{item.claim.command_id}"
             if key in self._tasks and not self._tasks[key].done():
+                admission_lease.release()
                 continue
             ctx = RequestContext(
                 tenant_id=item.tenant_id, user_id=item.user_id, role=item.role
             )
-            task = asyncio.create_task(self._run_claim(item.claim, ctx))
+            task = asyncio.create_task(
+                self._run_admitted(
+                    admission_lease,
+                    lambda item=item, ctx=ctx: self._run_claim(item.claim, ctx),
+                )
+            )
             self._tasks[key] = task
-            task.add_done_callback(lambda done, key=key: self._finished(key, done))
+            task.add_done_callback(
+                lambda done, key=key, lease=admission_lease: self._finished_admitted(
+                    key, done, lease
+                )
+            )
+
+    def _finished_admitted(
+        self, key: str, task: asyncio.Task[None], admission_lease: AdmissionLease
+    ) -> None:
+        # A task cancelled before its first interpreter step never enters the
+        # coroutine's finally block. The callback owns the same idempotent lease
+        # identity, so both that edge and ordinary completion release exactly once.
+        admission_lease.release()
+        self._finished(key, task)
 
     def _finished(self, key: str, task: asyncio.Task[None]) -> None:
-        self._tasks.pop(key, None)
+        if self._tasks.get(key) is task:
+            self._tasks.pop(key, None)
         if task.cancelled():
             return
         error = task.exception()
@@ -231,6 +297,7 @@ class RootRuntimeSupervisor:
 
     async def close(self) -> None:
         self._closed = True
+        self.admission.close("root")
         if self._recovery_task is not None:
             self._recovery_task.cancel()
         tasks = [*self._tasks.values()]

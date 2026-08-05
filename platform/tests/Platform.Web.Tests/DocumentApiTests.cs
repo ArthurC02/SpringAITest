@@ -31,14 +31,59 @@ public sealed class DocumentApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Create_Returns202_WithStatusProcessing()
     {
-        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents",
-            new { title = "標題", text = "內容" });
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/documents")
+        {
+            Content = JsonContent.Create(new { title = "標題", text = "內容" }),
+        };
+        request.Headers.Add("Idempotency-Key", "logical-attempt-1");
+        var resp = await _factory.UserClient().SendAsync(request);
 
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        Assert.Equal("logical-attempt-1", FakeDocumentService.LastIdempotencyKey);
         var body = await resp.ReadJsonAsync();
         Assert.Equal("doc-1", body["id"]!.GetValue<string>());
         Assert.Equal("標題", body["title"]!.GetValue<string>());
         Assert.Equal("processing", body["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Create_WithoutIdempotencyKey_UsesCompatibilityKey()
+    {
+        var resp = await _factory.UserClient().PostAsJsonAsync("/api/documents",
+            new { title = "標題", text = "內容" });
+
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+        Assert.Matches("^[0-9a-f]{32}$", FakeDocumentService.LastIdempotencyKey!);
+    }
+
+    [Fact]
+    public async Task Create_WithDuplicateIdempotencyKey_Returns400()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/documents")
+        {
+            Content = JsonContent.Create(new { title = "標題", text = "內容" }),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", new[] { "attempt-1", "attempt-2" });
+
+        var resp = await _factory.UserClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        (await resp.ReadJsonAsync()).AssertApiError(400, "validation_failed");
+    }
+
+    [Fact]
+    public async Task Create_WithInvalidIdempotencyKey_Returns400()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/documents")
+        {
+            Content = JsonContent.Create(new { title = "標題", text = "內容" }),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", new string('a', 129));
+
+        var resp = await _factory.UserClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        (await resp.ReadJsonAsync()).AssertApiError(400, "validation_failed");
     }
 
     // NotBlank 的三個等價類(欄位缺漏 / 空字串 / 全空白)× 兩個必填欄位:title 與 text 各自掛

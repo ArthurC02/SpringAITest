@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 
@@ -12,20 +13,28 @@ public sealed class DocumentServiceTests
         => new(TestBackend.Client(stub), queue ?? new FakeDocumentQueue());
 
     [Fact]
-    public async Task Create_PublishesMessage_ReturnsProcessing()
+    public async Task Create_AllocatesStableId_ThenPublishesMessage_ReturnsProcessing()
     {
-        // 建立不再打 backend HTTP;stub 若被呼叫即為錯誤(回 500 讓測試容易發現)。
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(
+            HttpStatusCode.Created,
+            "{\"id\":\"stable-doc-1\",\"title\":\"標題\",\"status\":\"processing\"}"));
         var queue = new FakeDocumentQueue();
-        var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)), queue);
+        var svc = Build(stub, queue);
 
-        var accepted = await svc.CreateAsync(new DocumentCreateRequest("標題", "內容"), Ctx);
+        var accepted = await svc.CreateAsync(
+            new DocumentCreateRequest("標題", "內容"), Ctx, "logical-attempt-1");
 
         Assert.Equal("processing", accepted.Status);
         Assert.Equal("標題", accepted.Title);
-        Assert.False(string.IsNullOrWhiteSpace(accepted.Id));
-        Assert.True(Guid.TryParse(accepted.Id, out _));
+        Assert.Equal("stable-doc-1", accepted.Id);
+        Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
+        Assert.Equal("http://backend/api/documents/ingest-intents", stub.LastRequest.RequestUri!.ToString());
+        Assert.Equal("logical-attempt-1", stub.Header("Idempotency-Key"));
+        Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        using var allocationBody = JsonDocument.Parse(stub.LastBody!);
+        Assert.Equal("標題", allocationBody.RootElement.GetProperty("title").GetString());
+        Assert.Equal("內容", allocationBody.RootElement.GetProperty("text").GetString());
 
-        // 訊息內容:documentId 與回傳 id 一致;身分/內容原樣帶入。
         var msg = queue.Last!;
         Assert.Equal(accepted.Id, msg.DocumentId);
         Assert.Equal("demo-a", msg.TenantId);
@@ -38,11 +47,73 @@ public sealed class DocumentServiceTests
     public async Task Create_PublishFails_ThrowsWorkflowInvocation_QueuePrefix()
     {
         var queue = new FakeDocumentQueue { ThrowOnPublish = true };
-        var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)), queue);
+        var svc = Build(new StubHttpMessageHandler(_ => TestHttp.Json(
+            HttpStatusCode.Created,
+            "{\"id\":\"stable-doc-1\",\"title\":\"標題\",\"status\":\"processing\"}")), queue);
 
         var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(() =>
-            svc.CreateAsync(new DocumentCreateRequest("標題", "內容"), Ctx));
+            svc.CreateAsync(new DocumentCreateRequest("標題", "內容"), Ctx, "logical-attempt-1"));
         Assert.StartsWith("文件佇列服務呼叫失敗：", ex.Message);
+    }
+
+    [Fact]
+    public async Task Create_LostAllocationConfirmation_RetryWithSameKeyPublishesStableId()
+    {
+        var calls = 0;
+        var stub = new StubHttpMessageHandler(_ =>
+        {
+            calls += 1;
+            if (calls == 1) throw new HttpRequestException("connection closed after allocation");
+            return TestHttp.Json(
+                HttpStatusCode.OK,
+                "{\"id\":\"stable-doc-1\",\"title\":\"標題\",\"status\":\"processing\"}");
+        });
+        var queue = new FakeDocumentQueue();
+        var svc = Build(stub, queue);
+
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() =>
+            svc.CreateAsync(new DocumentCreateRequest("標題", "內容"), Ctx, "logical-attempt-1"));
+        Assert.Empty(queue.Published);
+
+        var accepted = await svc.CreateAsync(
+            new DocumentCreateRequest("標題", "內容"), Ctx, "logical-attempt-1");
+
+        Assert.Equal("stable-doc-1", accepted.Id);
+        Assert.Equal("logical-attempt-1", stub.Header("Idempotency-Key"));
+        Assert.Equal("stable-doc-1", Assert.Single(queue.Published).DocumentId);
+    }
+
+    [Fact]
+    public async Task Create_ReplayResponse_ReusesStableIdForQueueMessage()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(
+            HttpStatusCode.OK,
+            "{\"id\":\"stable-doc-1\",\"title\":\"標題\",\"status\":\"processing\"}"));
+        var queue = new FakeDocumentQueue();
+        var svc = Build(stub, queue);
+
+        var first = await svc.CreateAsync(
+            new DocumentCreateRequest("標題", "內容"), Ctx, "logical-attempt-1");
+        var replay = await svc.CreateAsync(
+            new DocumentCreateRequest("標題", "內容"), Ctx, "logical-attempt-1");
+
+        Assert.Equal(first.Id, replay.Id);
+        Assert.Equal(2, queue.Published.Count);
+        Assert.All(queue.Published, message => Assert.Equal("stable-doc-1", message.DocumentId));
+    }
+
+    [Fact]
+    public async Task Create_Backend409_MapsConflict_AndDoesNotPublish()
+    {
+        var queue = new FakeDocumentQueue();
+        var svc = Build(new StubHttpMessageHandler(_ =>
+            TestHttp.Error(HttpStatusCode.Conflict, "Idempotency-Key 已用於不同內容")), queue);
+
+        var ex = await Assert.ThrowsAsync<DownstreamConflictException>(() =>
+            svc.CreateAsync(new DocumentCreateRequest("標題", "不同內容"), Ctx, "logical-attempt-1"));
+
+        Assert.Equal("Idempotency-Key 已用於不同內容", ex.Message);
+        Assert.Empty(queue.Published);
     }
 
     // A1:List 原樣穿透 backend JSON(snake_case),backend 新增欄位不被 DTO 靜默吃掉。

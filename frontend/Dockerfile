@@ -12,8 +12,9 @@ RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
 
-# ---- serve 階段：nginx 提供靜態檔 + /api 反向代理 ----
-FROM nginx:1.27-alpine
+# ---- serve 階段：非 root nginx 提供靜態檔 + /api 反向代理 ----
+FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
+USER 101
+EXPOSE 8080

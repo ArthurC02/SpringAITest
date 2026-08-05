@@ -30,28 +30,45 @@ public sealed class DocumentProcessor
     private readonly IRagRepository _rag;
     private readonly IEmbeddingProvider _embeddings;
     private readonly ILogger<DocumentProcessor> _logger;
+    private readonly DocumentIngestMetrics _metrics;
 
-    public DocumentProcessor(IRagRepository rag, IEmbeddingProvider embeddings, ILogger<DocumentProcessor> logger)
+    public DocumentProcessor(
+        IRagRepository rag,
+        IEmbeddingProvider embeddings,
+        ILogger<DocumentProcessor> logger,
+        DocumentIngestMetrics? metrics = null)
     {
         _rag = rag;
         _embeddings = embeddings;
         _logger = logger;
+        _metrics = metrics ?? DocumentIngestMetrics.Shared;
     }
 
     public async Task<DocumentProcessingOutcome> ProcessAsync(DocumentMessage message, int retryCount, CancellationToken ct)
     {
         try
         {
-            // at-least-once 重複投遞:已 ready 直接跳過(避免把已完成的文件重跑/誤標);
-            // processing/failed 則往下重跑,CompleteDocumentAsync 會先清舊切塊確保冪等。
+            // at-least-once 重複投遞:ready 已完成、deleted 是不可復活的 tombstone,兩者都略過。
+            // pending_publish/processing/failed 往下重跑,CompleteDocumentAsync 以 row lock + status fence
+            // 確保與刪除競爭時不會在 tombstone 後重新寫回 chunks/ready。
             var existing = await _rag.GetDocumentStatusAsync(message.DocumentId, message.TenantId, ct);
-            if (existing == "ready")
+            if (existing is "ready" or "deleted")
             {
-                _logger.LogInformation("文件已處理完成,重複投遞略過:documentId={DocumentId}", message.DocumentId);
+                _logger.LogInformation(
+                    "文件處於不可重跑狀態 {Status},重複投遞略過:documentId={DocumentId}",
+                    existing,
+                    message.DocumentId);
                 return DocumentProcessingOutcome.Success;
             }
 
-            await _rag.InsertProcessingDocumentAsync(message.DocumentId, message.TenantId, message.Title, ct);
+            // Deletion inventory / producer-cutover compatibility: old Platform binaries publish a
+            // fresh document id without first calling ingest-intents, so a missing row must still be
+            // created here. Removal gate: this content-free counter must remain at usage=0 through
+            // the agreed observation and rollback window after producer cutover.
+            if (await _rag.InsertProcessingDocumentAsync(message.DocumentId, message.TenantId, message.Title, ct))
+            {
+                _metrics.RecordLegacyCreate();
+            }
 
             // 切塊;整體切完為空時退回原文(去頭尾空白),與原 create_document 行為一致。
             var chunks = Chunking.SplitText(message.Text);

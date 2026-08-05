@@ -233,14 +233,14 @@ class OrchestratorBackendClient:
         except ValueError as exc:
             raise OrchestratorBackendError("Backend returned an invalid Root claim") from exc
 
-    async def claim_recovery(self) -> RootRecoveryResponse:
+    async def claim_recovery(self, *, limit: int | None = None) -> RootRecoveryResponse:
         try:
             response = await get_client().post(
                 "/api/orchestrator-runs/recovery/claim",
                 headers={"X-Internal-Token": settings.internal_api_token},
                 json={
                     "worker_id": self.owner,
-                    "limit": settings.runtime_recovery_batch_size,
+                    "limit": limit or settings.runtime_recovery_batch_size,
                     "lease_seconds": settings.multi_agent_root_lease_seconds,
                 },
                 timeout=httpx.Timeout(10.0),

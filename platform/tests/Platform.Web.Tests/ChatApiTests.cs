@@ -317,6 +317,66 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     }
 
     [Fact]
+    public async Task HistoryPage_Anonymous_ReturnsEmptyCamelCaseEnvelope()
+    {
+        var response = await _factory.CreateClient().GetAsync("/api/chat/history/page?before=bad");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Empty(body["items"]!.AsArray());
+        Assert.Null(body["nextCursor"]);
+        Assert.False(body["hasMore"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task HistoryPage_Authenticated_FirstAndNextPageUseEnvelope()
+    {
+        var client = _factory.CreateClient().WithToken(
+            _factory.IssueToken(username: "page-web-user", tenantCode: "demo-a"));
+        var ids = new List<long>();
+        for (var i = 0; i < 3; i++)
+        {
+            var response = await client.PostAsJsonAsync("/api/chat", new { message = $"m{i}" });
+            ids.Add((await response.ReadJsonAsync())["id"]!.GetValue<long>());
+        }
+
+        var first = await (await client.GetAsync("/api/chat/history/page?limit=2")).ReadJsonAsync();
+        Assert.Equal(ids.TakeLast(2).Reverse(), first["items"]!.AsArray().Select(x => x!["id"]!.GetValue<long>()));
+        Assert.True(first["hasMore"]!.GetValue<bool>());
+        var cursor = first["nextCursor"]!.GetValue<string>();
+
+        var next = await (await client.GetAsync(
+            "/api/chat/history/page?limit=2&before=" + Uri.EscapeDataString(cursor))).ReadJsonAsync();
+        Assert.Equal(new[] { ids[0] }, next["items"]!.AsArray().Select(x => x!["id"]!.GetValue<long>()));
+        Assert.False(next["hasMore"]!.GetValue<bool>());
+        Assert.Null(next["nextCursor"]);
+    }
+
+    [Fact]
+    public async Task HistoryPage_MalformedCursor_ReturnsStableApiError400()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
+
+        var response = await client.GetAsync("/api/chat/history/page?before=bad");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal("validation_failed", body["code"]!.GetValue<string>());
+        Assert.Equal("聊天歷史游標無效", body["message"]!.GetValue<string>());
+        Assert.NotNull(body["correlationId"]);
+        Assert.NotNull(body["fieldErrors"]);
+    }
+
+    [Fact]
+    public async Task HistoryPage_LimitAbove100_ReturnsValidationApiError()
+    {
+        var response = await _factory.CreateClient().GetAsync("/api/chat/history/page?limit=101");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("validation_failed", (await response.ReadJsonAsync())["code"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Stream_WithInvalidToken_HasAuthInvalidHeader()
     {
         var token = TestTokens.Mint() + "x"; // 竄改簽章尾段。

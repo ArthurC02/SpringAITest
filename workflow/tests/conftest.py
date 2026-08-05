@@ -2,14 +2,21 @@
 
 import asyncio
 import dataclasses
+import os
 from contextlib import contextmanager
 from types import SimpleNamespace
 
 import httpx
 
+# Unit tests intentionally exercise the zero-configuration local-development
+# profile. Production credential validation is covered with explicit Settings
+# instances in the focused settings tests.
+os.environ["APP_ENVIRONMENT"] = "development"
+
 from app import skills
 from app.engine import compiler
 from app.engine import skill as skill_mod
+from app.engine.script_runner import RestrictedInProcessRunner
 from app.engine.skill import Skill
 from app.nodes.kbquery.adapters import StaticGlossary
 from tests.kbquery_fakes import RecordingAuditRepo
@@ -118,6 +125,7 @@ def default_engine_deps(**extra):
         "llm": None,
         "glossary": StaticGlossary(),
         "max_retrieval_attempts": 2,
+        "script_runner": RestrictedInProcessRunner(),
     }
     return SimpleNamespace(**{**fields, **extra})
 

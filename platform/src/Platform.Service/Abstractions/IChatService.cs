@@ -19,4 +19,11 @@ public interface IChatService
     /// userCtx 為 null(匿名)時直接回空清單,不呼叫 backend。
     /// </summary>
     Task<IReadOnlyList<ChatResponse>> HistoryAsync(UserContext? userCtx = null, CancellationToken ct = default);
+
+    /// <summary>Keyset-paginated history; anonymous callers receive an empty page.</summary>
+    Task<ChatHistoryPage> HistoryPageAsync(
+        int limit,
+        string? before,
+        UserContext? userCtx = null,
+        CancellationToken ct = default);
 }

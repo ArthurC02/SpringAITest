@@ -7,7 +7,7 @@ namespace Backend.Api.Common;
 /// </summary>
 public static class InternalTokenResolver
 {
-    public const string DevDefault = "internal-dev-token";
+    public const string DevDefault = StartupCredentialValidator.DevelopmentInternalToken;
 
     public static string Resolve(string? configuredValue)
     {

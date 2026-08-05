@@ -11,13 +11,17 @@ public sealed class InMemoryConversationRepository : IConversationRepository
     private readonly List<(string Tenant, string User, ConversationItem Item)> _items = new();
     private long _seq;
     private readonly Lock _lockObj = new();
+    private readonly TimeProvider _timeProvider;
+
+    public InMemoryConversationRepository(TimeProvider? timeProvider = null)
+        => _timeProvider = timeProvider ?? TimeProvider.System;
 
     public Task<ConversationCreated> AddAsync(string tenantId, string userId, string prompt, string reply, CancellationToken ct)
     {
         lock (_lockObj)
         {
             var id = ++_seq;
-            var now = DateTime.UtcNow;
+            var now = _timeProvider.GetUtcNow().UtcDateTime;
             _items.Add((tenantId, userId, new ConversationItem(id, reply, now)));
             return Task.FromResult(new ConversationCreated(id, now));
         }
@@ -30,6 +34,32 @@ public sealed class InMemoryConversationRepository : IConversationRepository
             return Task.FromResult<IReadOnlyList<ConversationItem>>(
                 _items.Where(e => e.Tenant == tenantId && e.User == userId).Select(e => e.Item)
                     .OrderByDescending(i => i.CreatedAt).ThenByDescending(i => i.Id).ToList());
+        }
+    }
+
+    public Task<IReadOnlyList<ConversationItem>> ListPageDescAsync(
+        string tenantId,
+        string userId,
+        ConversationPosition? before,
+        int take,
+        CancellationToken ct)
+    {
+        lock (_lockObj)
+        {
+            var query = _items
+                .Where(e => e.Tenant == tenantId && e.User == userId)
+                .Select(e => e.Item);
+            if (before is not null)
+            {
+                query = query.Where(i => i.CreatedAt < before.CreatedAt
+                    || i.CreatedAt == before.CreatedAt && i.Id < before.Id);
+            }
+
+            return Task.FromResult<IReadOnlyList<ConversationItem>>(query
+                .OrderByDescending(i => i.CreatedAt)
+                .ThenByDescending(i => i.Id)
+                .Take(take)
+                .ToList());
         }
     }
 }

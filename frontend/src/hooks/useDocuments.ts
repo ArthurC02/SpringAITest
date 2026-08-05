@@ -83,9 +83,9 @@ export function useDocuments() {
   }, [fetchList, startPolling])
 
   const create = useCallback(
-    async (title: string, text: string): Promise<void> => {
+    async (title: string, text: string, idempotencyKey: string = crypto.randomUUID()): Promise<void> => {
       const lifecycleGeneration = lifecycleGenerationRef.current
-      const created = await createDocument(title, text)
+      const created = await createDocument(title, text, idempotencyKey)
       if (lifecycleGenerationRef.current !== lifecycleGeneration) return
       const optimistic: DocumentInfo = {
         id: created.id,
@@ -96,7 +96,7 @@ export function useDocuments() {
       }
       deletedRef.current.delete(optimistic.id)
       pendingRef.current.set(optimistic.id, optimistic)
-      setDocs((previous) => [optimistic, ...previous])
+      setDocs((previous) => [optimistic, ...previous.filter((document) => document.id !== optimistic.id)])
       startPolling()
     },
     [startPolling],

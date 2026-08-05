@@ -24,25 +24,88 @@ public sealed class InMemoryRagRepository : IRagRepository
         public List<(string Id, string Content, float[] Embedding)> Chunks { get; set; } = new();
     }
 
+    private sealed record Ingest(string DocumentId, string RequestHash);
+
     private readonly ConcurrentDictionary<string, Doc> _docs = new();
+    private readonly Dictionary<(string TenantId, string UserId, string KeyHash), Ingest> _ingests = new();
     private readonly Lock _lockObj = new();
 
-    public Task<string?> GetDocumentStatusAsync(string documentId, string tenantId, CancellationToken ct)
-        => Task.FromResult(_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId ? d.Status : null);
-
-    public Task InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct)
+    public Task<DocumentIngestAllocation> AllocateDocumentAsync(
+        string tenantId,
+        string userId,
+        string idempotencyKeyHash,
+        string requestHash,
+        string title,
+        CancellationToken ct)
     {
-        // ON CONFLICT (id) DO NOTHING:已存在則保留(重複投遞不覆寫既有狀態)。
-        _docs.TryAdd(documentId, new Doc
+        lock (_lockObj)
         {
-            Id = documentId,
-            TenantId = tenantId,
-            Title = title,
-            CreatedAt = DateTime.UtcNow,
-            ChunkCount = 0,
-            Status = "processing",
-        });
-        return Task.CompletedTask;
+            var key = (tenantId, userId, idempotencyKeyHash);
+            if (_ingests.TryGetValue(key, out var prior))
+            {
+                var document = _docs[prior.DocumentId];
+                var status = document.Status == "deleted"
+                    ? DocumentIngestAllocationStatus.DeletedConflict
+                    : string.Equals(prior.RequestHash, requestHash, StringComparison.Ordinal)
+                        ? DocumentIngestAllocationStatus.Replay
+                        : DocumentIngestAllocationStatus.PayloadConflict;
+                return Task.FromResult(new DocumentIngestAllocation(status, document.Id, document.Title));
+            }
+
+            var documentId = Guid.NewGuid().ToString("D");
+            _docs[documentId] = new Doc
+            {
+                Id = documentId,
+                TenantId = tenantId,
+                Title = title,
+                CreatedAt = DateTime.UtcNow,
+                ChunkCount = 0,
+                Status = "pending_publish",
+            };
+            _ingests[key] = new Ingest(documentId, requestHash);
+            return Task.FromResult(new DocumentIngestAllocation(
+                DocumentIngestAllocationStatus.Created,
+                documentId,
+                title));
+        }
+    }
+
+    public Task<string?> GetDocumentStatusAsync(string documentId, string tenantId, CancellationToken ct)
+    {
+        lock (_lockObj)
+        {
+            return Task.FromResult(
+                _docs.TryGetValue(documentId, out var document) && document.TenantId == tenantId
+                    ? document.Status
+                    : null);
+        }
+    }
+
+    public Task<bool> InsertProcessingDocumentAsync(string documentId, string tenantId, string title, CancellationToken ct)
+    {
+        lock (_lockObj)
+        {
+            if (_docs.TryGetValue(documentId, out var existing))
+            {
+                if (existing.TenantId == tenantId
+                    && existing.Status is "pending_publish" or "processing" or "failed")
+                {
+                    existing.Status = "processing";
+                }
+                return Task.FromResult(false);
+            }
+
+            _docs[documentId] = new Doc
+            {
+                Id = documentId,
+                TenantId = tenantId,
+                Title = title,
+                CreatedAt = DateTime.UtcNow,
+                ChunkCount = 0,
+                Status = "processing",
+            };
+            return Task.FromResult(true);
+        }
     }
 
     public Task CompleteDocumentAsync(
@@ -50,7 +113,7 @@ public sealed class InMemoryRagRepository : IRagRepository
     {
         lock (_lockObj)
         {
-            if (_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId)
+            if (_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId && d.Status != "deleted")
             {
                 d.Chunks = chunks.Zip(embeddings, (c, e) => (Guid.NewGuid().ToString("D"), c, e)).ToList();
                 d.ChunkCount = chunks.Count;
@@ -65,7 +128,9 @@ public sealed class InMemoryRagRepository : IRagRepository
     {
         lock (_lockObj)
         {
-            if (_docs.TryGetValue(documentId, out var d) && d.TenantId == tenantId)
+            if (_docs.TryGetValue(documentId, out var d)
+                && d.TenantId == tenantId
+                && d.Status is "pending_publish" or "processing" or "failed")
             {
                 d.Status = "failed";
             }
@@ -75,18 +140,39 @@ public sealed class InMemoryRagRepository : IRagRepository
     }
 
     public Task<IReadOnlyList<DocumentInfo>> ListDocumentsAsync(string tenantId, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<DocumentInfo>>(
-            _docs.Values.Where(d => d.TenantId == tenantId).OrderBy(d => d.CreatedAt)
-                .Select(d => new DocumentInfo(d.Id, d.Title, d.ChunkCount, d.CreatedAt, d.Status)).ToList());
+    {
+        lock (_lockObj)
+        {
+            return Task.FromResult<IReadOnlyList<DocumentInfo>>(
+                _docs.Values.Where(d => d.TenantId == tenantId && d.Status is not ("pending_publish" or "deleted"))
+                    .OrderBy(d => d.CreatedAt)
+                    .Select(d => new DocumentInfo(d.Id, d.Title, d.ChunkCount, d.CreatedAt, d.Status)).ToList());
+        }
+    }
 
     public Task<bool> DeleteDocumentAsync(string tenantId, string docId, CancellationToken ct)
-        => Task.FromResult(_docs.TryGetValue(docId, out var d) && d.TenantId == tenantId && _docs.TryRemove(docId, out _));
+    {
+        lock (_lockObj)
+        {
+            if (!_docs.TryGetValue(docId, out var document)
+                || document.TenantId != tenantId
+                || document.Status == "deleted")
+            {
+                return Task.FromResult(false);
+            }
+
+            document.Status = "deleted";
+            document.ChunkCount = 0;
+            document.Chunks.Clear();
+            return Task.FromResult(true);
+        }
+    }
 
     public Task<IReadOnlyList<RetrievedChunk>> SearchAsync(string tenantId, float[] queryEmbedding, int topK, CancellationToken ct)
     {
         lock (_lockObj)
         {
-            var hits = _docs.Values.Where(d => d.TenantId == tenantId)
+            var hits = _docs.Values.Where(d => d.TenantId == tenantId && d.Status == "ready")
                 .SelectMany(d => d.Chunks.Select(c => (DocumentId: d.Id, ChunkId: c.Id, d.Title, c.Content, c.Embedding)))
                 .Select(x => (x.DocumentId, x.ChunkId, x.Title, x.Content, Score: Cosine(queryEmbedding, x.Embedding)))
                 .Where(x => x.Score is not null)
@@ -117,7 +203,7 @@ public sealed class InMemoryRagRepository : IRagRepository
         lock (_lockObj)
         {
             var hits = _docs.Values
-                .Where(d => d.TenantId == tenantId && allowed.Contains(d.Id))
+                .Where(d => d.TenantId == tenantId && d.Status == "ready" && allowed.Contains(d.Id))
                 .SelectMany(d => d.Chunks.Select(c => (DocumentId: d.Id, ChunkId: c.Id, d.Title, c.Content, c.Embedding)))
                 .Select(x => (x.DocumentId, x.ChunkId, x.Title, x.Content, Score: Cosine(queryEmbedding, x.Embedding)))
                 .Where(x => x.Score is not null)
@@ -131,9 +217,14 @@ public sealed class InMemoryRagRepository : IRagRepository
 
     public Task<AnalysisSummary> SummaryAsync(string tenantId, CancellationToken ct)
     {
-        var mine = _docs.Values.Where(d => d.TenantId == tenantId).ToList();
-        var titles = mine.OrderByDescending(d => d.CreatedAt).Take(5).Select(d => d.Title).ToList();
-        return Task.FromResult(new AnalysisSummary(mine.Count, mine.Sum(d => d.ChunkCount), titles));
+        lock (_lockObj)
+        {
+            var mine = _docs.Values
+                .Where(d => d.TenantId == tenantId && d.Status is not ("pending_publish" or "deleted"))
+                .ToList();
+            var titles = mine.OrderByDescending(d => d.CreatedAt).Take(5).Select(d => d.Title).ToList();
+            return Task.FromResult(new AnalysisSummary(mine.Count, mine.Sum(d => d.ChunkCount), titles));
+        }
     }
 
     /// <summary>Lite-only chunk authority check for <see cref="InMemoryContextRepository"/>; the Dapper

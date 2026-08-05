@@ -9,6 +9,8 @@ RUN dotnet publish src/Backend.Api -c Release -o /app /p:UseAppHost=false
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 COPY --from=build /app .
+# .NET runtime images provide the non-root `app` user through APP_UID.
+USER $APP_UID
 # 對外只跑 http:8080(容器內不做 HTTPS)。
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080

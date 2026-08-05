@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from app import skills
 from app.engine import compiler
+from app.engine.script_runner import RestrictedInProcessRunner
 from app.nodes.kbquery.adapters import ScoreReranker, StaticGlossary
 from app.nodes.kbquery.locators import (
     StructuredDataLocator,
@@ -181,6 +182,7 @@ def make_deps(
         audit_repo=audit_repo or RecordingAuditRepo(),
         default_top_k=8,
         max_retrieval_attempts=max_attempts,
+        script_runner=RestrictedInProcessRunner(),
     )
 
 

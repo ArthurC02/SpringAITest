@@ -35,6 +35,7 @@ from app.runtime.events import MAX_EVENT_PAYLOAD_JSON_BYTES, runtime_event
 from app.runtime.facts import ProposedAction, caller_envelopes
 from app.runtime.manager import (
     RuntimeLineageInvalid,
+    RuntimeManagerError,
     RuntimeManagerConflict,
     RuntimeRunManager,
 )
@@ -2703,3 +2704,232 @@ async def test_approved_write_dead_letters_terminal_run_and_fails_when_tool_rais
     )
     assert approval_backend.last_write_status() is None
     await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_lock_registry_returns_to_zero_after_many_unique_runs():
+    manager = RuntimeRunManager(checkpointer=InMemorySaver())
+
+    async def use_lock(run_id: str) -> None:
+        async with manager._run_lock(run_id):
+            await asyncio.sleep(0)
+
+    await asyncio.gather(*(use_lock(f"unique-{index}") for index in range(1_000)))
+
+    assert manager._run_locks == {}
+    await manager.close()
+
+
+class DispatchLockBackend:
+    def __init__(self) -> None:
+        self.claim_order: list[str] = []
+        self.entered: dict[str, asyncio.Event] = {}
+        self.blockers: dict[str, asyncio.Event] = {}
+        self.failures: set[str] = set()
+
+    async def claim_command(self, run_id, command_id, ctx):
+        self.claim_order.append(command_id)
+        self.entered.setdefault(command_id, asyncio.Event()).set()
+        blocker = self.blockers.get(command_id)
+        if blocker is not None:
+            await blocker.wait()
+        if command_id in self.failures:
+            raise RuntimeError(f"claim failed: {command_id}")
+        return None
+
+    async def get_run(self, run_id, ctx):
+        return RunRecord(
+            id=run_id,
+            snapshot_hash="a" * 64,
+            status="running",
+            state_version=0,
+            checkpoint_ref=None,
+            checkpoint_version=0,
+            cancel_requested=False,
+        )
+
+
+async def wait_for_run_lock_references(
+    manager: RuntimeRunManager, run_id: str, wanted: int
+) -> None:
+    for _ in range(100):
+        entry = manager._run_locks.get(run_id)
+        if entry is not None and entry.references == wanted:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"run lock did not reach {wanted} references")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_serializes_backend_claims_for_the_same_run():
+    backend = DispatchLockBackend()
+    backend.blockers["first"] = asyncio.Event()
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(), backend=backend  # type: ignore[arg-type]
+    )
+
+    first = asyncio.create_task(
+        manager.dispatch_command("run", "first", request_context())
+    )
+    await backend.entered.setdefault("first", asyncio.Event()).wait()
+    second = asyncio.create_task(
+        manager.dispatch_command("run", "second", request_context())
+    )
+    await wait_for_run_lock_references(manager, "run", 2)
+
+    assert backend.claim_order == ["first"]
+    backend.blockers["first"].set()
+    await asyncio.gather(first, second)
+
+    assert backend.claim_order == ["first", "second"]
+    assert manager._run_locks == {}
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_backend_exception_releases_run_lock_entry():
+    backend = DispatchLockBackend()
+    backend.failures.add("broken")
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(), backend=backend  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="claim failed: broken"):
+        await manager.dispatch_command("run", "broken", request_context())
+
+    assert manager._run_locks == {}
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_cancellation_while_backend_waits_releases_entry():
+    backend = DispatchLockBackend()
+    backend.blockers["blocked"] = asyncio.Event()
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(), backend=backend  # type: ignore[arg-type]
+    )
+    dispatch = asyncio.create_task(
+        manager.dispatch_command("run", "blocked", request_context())
+    )
+    await backend.entered.setdefault("blocked", asyncio.Event()).wait()
+
+    dispatch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+
+    assert manager._run_locks == {}
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_lock_serializes_same_run_and_allows_different_runs_in_parallel():
+    manager = RuntimeRunManager(checkpointer=InMemorySaver())
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    same_run_order: list[str] = []
+
+    async def first() -> None:
+        async with manager._run_lock("same"):
+            same_run_order.append("first")
+            first_entered.set()
+            await release_first.wait()
+
+    async def second() -> None:
+        async with manager._run_lock("same"):
+            same_run_order.append("second")
+
+    first_task = asyncio.create_task(first())
+    await first_entered.wait()
+    second_task = asyncio.create_task(second())
+    await asyncio.sleep(0)
+    assert same_run_order == ["first"]
+
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+    assert same_run_order == ["first", "second"]
+
+    parallel_entered = {run_id: asyncio.Event() for run_id in ("left", "right")}
+    release_parallel = asyncio.Event()
+
+    async def parallel(run_id: str) -> None:
+        async with manager._run_lock(run_id):
+            parallel_entered[run_id].set()
+            await release_parallel.wait()
+
+    parallel_tasks = [
+        asyncio.create_task(parallel(run_id)) for run_id in parallel_entered
+    ]
+    await asyncio.wait_for(
+        asyncio.gather(*(event.wait() for event in parallel_entered.values())),
+        timeout=1,
+    )
+    release_parallel.set()
+    await asyncio.gather(*parallel_tasks)
+
+    assert manager._run_locks == {}
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_lock_waiter_releases_its_reference():
+    manager = RuntimeRunManager(checkpointer=InMemorySaver())
+    owner_entered = asyncio.Event()
+    release_owner = asyncio.Event()
+
+    async def owner() -> None:
+        async with manager._run_lock("run"):
+            owner_entered.set()
+            await release_owner.wait()
+
+    async def waiter() -> None:
+        async with manager._run_lock("run"):
+            raise AssertionError("cancelled waiter acquired the lock")
+
+    owner_task = asyncio.create_task(owner())
+    await owner_entered.wait()
+    waiter_task = asyncio.create_task(waiter())
+    for _ in range(100):
+        entry = manager._run_locks.get("run")
+        if entry is not None and entry.references == 2:
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("waiter did not register its lock reference")
+
+    waiter_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter_task
+    assert manager._run_locks["run"].references == 1
+
+    release_owner.set()
+    await owner_task
+    assert manager._run_locks == {}
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_close_rejects_new_dispatch_while_admitted_dispatches_drain():
+    backend = DispatchLockBackend()
+    backend.blockers["owner"] = asyncio.Event()
+    manager = RuntimeRunManager(
+        checkpointer=InMemorySaver(), backend=backend  # type: ignore[arg-type]
+    )
+    owner_task = asyncio.create_task(
+        manager.dispatch_command("run", "owner", request_context())
+    )
+    await backend.entered.setdefault("owner", asyncio.Event()).wait()
+    waiter_task = asyncio.create_task(
+        manager.dispatch_command("run", "waiter", request_context())
+    )
+    await wait_for_run_lock_references(manager, "run", 2)
+
+    await manager.close()
+    assert manager._run_locks["run"].references == 2
+    with pytest.raises(RuntimeManagerError, match="shutting down"):
+        await manager.dispatch_command("new-run", "new", request_context())
+    assert "new-run" not in manager._run_locks
+
+    backend.blockers["owner"].set()
+    await asyncio.gather(owner_task, waiter_task)
+    assert backend.claim_order == ["owner", "waiter"]
+    assert manager._run_locks == {}
