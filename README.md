@@ -164,6 +164,20 @@ npm install && npm run dev                # :5173（Vite proxy /api → :8080）
 
 `start-full` 會先執行 `docker compose build backend workflow platform frontend`，再以 `docker compose --profile full up -d --no-build` 啟動，避免 Compose 錯誤拉取 image-only mem0。全容器模式：核心服務 `:8002` 與平台閘道 `:8080` 容器均發佈到主機；**容器內前端 nginx 反代** `/api` **走 compose service DNS** `http://platform:8080` **（不經主機，於容器間直連）**，單一 nginx 配置同時支援兩種模式（模式 A 時 Vite dev proxy 連 host :8080，模式 B 時 nginx 連 service DNS）。改碼後可先執行 `docker compose build platform`（或 `backend`、`workflow`、`frontend`），再執行 `docker compose --profile full up -d --no-build`。
 
+### 資源校準（探索性基線）
+
+目前僅建立資源量測契約，尚未核准或套用任何容器 CPU、記憶體或 PID ceiling。清單涵蓋 22 個 Compose services，全部為 `calibration_pending`；四個 versioned steady-running lanes（default、full、evidence、evidence-real）均採 60 秒、60 次 aggregate peak samples。先驗證契約，再以 `collect` 對已穩定運行的單一 lane 收集本機基線；輸出放在已忽略的 `artifacts/resource-calibration/`，不可提交。
+
+`validate-compose` 會比對四份由 Compose `config --format json` 產生的 Production／Development、base／evidence 快照；完整操作參數見 [infra/AGENTS.md](infra/AGENTS.md)。
+
+```powershell
+python scripts/resource_calibration.py validate --inventory infra/resource-calibration-inventory.json
+New-Item -ItemType Directory -Force artifacts/resource-calibration
+python scripts/resource_calibration.py collect --inventory infra/resource-calibration-inventory.json --workload-id steady-running-full-v1 --compose-file infra/docker-compose.yml --output artifacts/resource-calibration/full.json
+```
+
+Docker daemon 不可用時，收集會以 exit code 3 安全停止，且不會建立或覆寫 bundle；這只能表示該次環境無法量測，不能據此推論 repository 的長期狀態。
+
 ### 各服務位置
 
 | 服務                    | 位置                                                                                       |

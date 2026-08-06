@@ -55,7 +55,7 @@
 - OTLP 目標: `LANGFUSE_OTEL_ENDPOINT=http://localhost:3000/api/public/otel/v1/traces`(容器內 Langfuse)
 - Testing 環境跳過
 
-**backend/workflow 無 OTel** —— workflow/app/settings.py:13 的 `LANGFUSE_ENABLED=false` 預設,tracing 失敗靜默降級
+**backend/workflow 無 OTel** —— workflow/app/settings.py:13 的 `LANGFUSE_ENABLED=false` 預設；tracing 在啟用後若 handler 初始化失敗，會降級但只發出一則固定、無內容警告，並累計程序內失敗次數。
 
 **Lite 模式需求:** Console exporter + 自訂 ring-buffer(保留最近 N=200 spans),可供聊天中的 agent 讀取。
 

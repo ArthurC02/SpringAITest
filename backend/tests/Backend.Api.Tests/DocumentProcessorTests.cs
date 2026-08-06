@@ -138,6 +138,95 @@ public sealed class DocumentProcessorTests
     }
 
     [Fact]
+    public async Task ProcessingOutcomeMetric_RecordsEachFinalOutcomeOnce_WithOnlyAllowedOutcomeTag()
+    {
+        var meterName = DocumentIngestMetrics.MeterName + ".outcomes.tests." + Guid.NewGuid().ToString("N");
+        using var metrics = new DocumentIngestMetrics(meterName);
+        using var listener = new MeterListener();
+        var measurements = new List<(long Value, string Key, string? ValueTag)>();
+        listener.InstrumentPublished = (instrument, current) =>
+        {
+            if (instrument.Meter.Name == meterName
+                && instrument.Name == DocumentIngestMetrics.ProcessingOutcomeCounterName)
+            {
+                current.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
+        {
+            Assert.Equal(1, tags.Length);
+            measurements.Add((value, tags[0].Key, tags[0].Value?.ToString()));
+        });
+        listener.Start();
+
+        var successful = new DocumentProcessor(
+            new FakeRagRepository(),
+            new FakeEmbeddingProvider(8),
+            NullLogger<DocumentProcessor>.Instance,
+            metrics);
+        var id = Guid.NewGuid().ToString();
+        Assert.Equal(DocumentProcessingOutcome.Success, await successful.ProcessAsync(Message(id), 0, default));
+        Assert.Equal(DocumentProcessingOutcome.Success, await successful.ProcessAsync(Message(id), 1, default));
+
+        var retryable = new DocumentProcessor(
+            new FakeRagRepository(),
+            new TransientThrowingEmbeddingProvider(),
+            NullLogger<DocumentProcessor>.Instance,
+            metrics);
+        Assert.Equal(
+            DocumentProcessingOutcome.RetryableFailure,
+            await retryable.ProcessAsync(Message(Guid.NewGuid().ToString()), 0, default));
+
+        var terminal = new DocumentProcessor(
+            new FakeRagRepository(),
+            new ThrowingEmbeddingProvider(),
+            NullLogger<DocumentProcessor>.Instance,
+            metrics);
+        Assert.Equal(
+            DocumentProcessingOutcome.TerminalFailure,
+            await terminal.ProcessAsync(Message(Guid.NewGuid().ToString()), 0, default));
+
+        Assert.Equal(4, measurements.Count);
+        Assert.All(measurements, measurement =>
+        {
+            Assert.Equal(1, measurement.Value);
+            Assert.Equal("outcome", measurement.Key);
+            Assert.Contains(measurement.ValueTag, new[] { "success", "retryable_failure", "terminal_failure" });
+        });
+        Assert.Equal(2, measurements.Count(measurement => measurement.ValueTag == "success"));
+        Assert.Single(measurements, measurement => measurement.ValueTag == "retryable_failure");
+        Assert.Single(measurements, measurement => measurement.ValueTag == "terminal_failure");
+    }
+
+    [Fact]
+    public async Task ProcessingOutcomeMetric_ListenerFailure_DoesNotChangeProcessingResult()
+    {
+        var meterName = DocumentIngestMetrics.MeterName + ".listener-failure.tests." + Guid.NewGuid().ToString("N");
+        using var metrics = new DocumentIngestMetrics(meterName);
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, current) =>
+        {
+            if (instrument.Meter.Name == meterName
+                && instrument.Name == DocumentIngestMetrics.ProcessingOutcomeCounterName)
+            {
+                current.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, _, _, _) => throw new InvalidOperationException("listener failure"));
+        listener.Start();
+
+        var processor = new DocumentProcessor(
+            new FakeRagRepository(),
+            new FakeEmbeddingProvider(8),
+            NullLogger<DocumentProcessor>.Instance,
+            metrics);
+
+        Assert.Equal(
+            DocumentProcessingOutcome.Success,
+            await processor.ProcessAsync(Message(Guid.NewGuid().ToString()), 0, default));
+    }
+
+    [Fact]
     public async Task Process_RedeliveryAfterDelete_DoesNotRecreateOrEmbed()
     {
         var repo = new FakeRagRepository();

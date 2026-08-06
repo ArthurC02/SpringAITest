@@ -1,6 +1,8 @@
 # Architecture Hard Reset — Analysis
 
-> Status: approved plan, not implemented. This document records the target architecture and the evidence that motivated it. No production destructive migration exists until the P3 atomic cutover bundle is implemented and reviewed.
+> Status: historical target-analysis, reconciled 2026-08-06. This document records the target architecture and the evidence that motivated it. The executable P3 authority is now [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md); no production destructive migration exists until its post-P5/C8 readiness and applicable route gates pass.
+
+> Reconciliation note: this dossier was written for an earlier hard-cutover assumption. Current root and area contracts retain `/api/skills*` Business Workflow compatibility, the unified internal `/skills/{name}/invoke`, and `/skills/validate` as a same-handler compatibility alias. Cleanup C8 may narrow public `/api/skills*` to Agent-Skill-only by removing only Business Workflow compatibility operations; Agent Skill endpoints remain. Alias and unified-invoke retirement each require their own later consumer/usage/rollback approval. Physical artifact separation remains a possible post-P5/C8 target and may preserve compatibility facades.
 
 ## 1. Decision summary
 
@@ -16,7 +18,7 @@ Browser -> Platform -> Backend
 - Workflow owns compilation and governed execution, but not durable business authority.
 - Frontend remains a thin administrative and chat client.
 
-The repository is still under development. Existing API and development data compatibility are deliberately not constraints. The cutover therefore changes the existing routes and schema in place, resets application data through an explicit migration, and updates every in-repo consumer in one integration tranche. It does not add `/v2`, dual-write, compatibility adapters, or a rollback window.
+The repository is still under development, but current cross-service contracts deliberately retain specified compatibility routes and a rollback window. Cleanup C8 can authorize only removal of Business Workflow compatibility operations from `/api/skills*` after flow-write usage `= 0`, consumer cutover, an observation/rollback window, and manual approval; Agent Skill `/api/skills*` endpoints remain. Alias and unified-invoke retirement remain separate future decisions; a physical split can preserve them behind facades.
 
 ## 2. Confirmed findings
 

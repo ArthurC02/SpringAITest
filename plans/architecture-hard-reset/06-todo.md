@@ -2,7 +2,7 @@
 
 > **維護規則(強制):** 每完成一項工作,實作該項的變更必須在**同一個 commit** 將對應條目從 `- [ ]` 改為 `- [x]`,條目尾端註記完成日期(commit hash 由該條目的 git 歷史可溯,不必手寫)。任何 session 開始實作前先讀本檔確認下一個未完成項;發現與現況不符的條目,先修正條目再動工。Phase gate 條目未全勾之前,不得開始下一 phase 的破壞性工作(P1 內六個工作包可並行)。
 >
-> Baseline: commit `8652528`(2026-08-03),四服務測試基準見 P0-B4。
+> Baseline: historical P0 evidence is `8652528`(2026-08-03); P3 planning baseline is now `44f9de4`(2026-08-06). Existing uncommitted Wave4/5 work is outside P3 and must be preserved. See [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
 
 ## P0 — 計畫收尾
 - [x] P0-A1 Ledger 依 8652528 偵察結果修正(50 表、14/32/5 檔數、SkillHash 10 模組、新增 AgentEditor/ChatOrchestratorController/ensure-mem0-db/correlation-ID 條目)— 2026-08-03
@@ -66,21 +66,17 @@
 - [x] P2-5 runner 不含任何 seed;`DbBootstrap.SeedAsync` 維持生產 seed 權威且冪等(P3 再搬出為獨立命令)— 2026-08-03
 - [x] P2-G backend 1308/1308(含全部 SkippableFact 真跑)、platform 893/893;code-reviewer 3 中 7 低全數修復;正常啟動路徑無任何生產 schema 變更可達 — 2026-08-03
 
-## P3 — Schema 與 artifact 硬切換(單一 tranche;先決策後動工)
-### 前置規格決策(已定案回寫 02-spec,見各節「Decided 2026-08-03」)
-- [x] P3-D1 `simple_form` 只留 `business_workflow`(UI-only、不參與 revision hash);Agent Skill 側含 wire DTO 欄位一併刪除 — 2026-08-03
-- [x] P3-D2 catalog 拆兩個:`/api/skills/catalog` Agent-Skill-only、新增 `/api/business-workflows/catalog`(含 12 builtin);前端三處呼叫點按 domain 改打;workflow 統一 `GET /skills` 廢除 — 2026-08-03
-- [x] P3-D3 snapshot 允許同時 pin 兩種 artifact,以 `agentSkills`/`businessWorkflows` 兩個 typed 集合承載;Workflow 側模型兩型兩集合、按集合路由、禁 kind 字串比較 — 2026-08-03
-- [x] P3-D4 `SkillMetadata` union 刪除,Business Workflow 與 Agent Skill package 各自獨立 metadata 型別(02-spec 新增 §3.4)— 2026-08-03
-### Tranche 分支內順序(每段 commit 必須可編譯)
-- [ ] P3-1 runner + 生產 0001–0003 SQL bundle + lock/checksum(含 P3-00 重放 P2 矩陣)
-- [ ] P3-2 fixture 切換到 runner + 一次性開發者 migrate 步驟(14 個 Postgres 測試檔、32 處 RunAsync 直呼、刪 DbBootstrap)
-- [ ] P3-3 Backend schema/repositories/controllers/FK 重建(50 表 allowlist;SkillHash 搬遷 24 檔 10 模組;SkillNameRules 含 DbBootstrap 使用點)
-- [ ] P3-4 Workflow 路由與 loader 拆分(agent-skills/business-workflows 四路由;kind dispatch 五縫;Harness kind routing)
-- [ ] P3-5 Platform services/controllers(SkillDtos 拆兩 record family;刪 /api/skills/validate;BusinessWorkflow proxy 補齊)
-- [ ] P3-6 Frontend types/API/元件拆分(types.ts Skill* 家族;三處 catalog 呼叫點)
-- [ ] P3-7 測試清理 + 文件同步(刪 dual-track/410/alias 測試;seed 命令含 SeedAsync 全量內容 + D5 Root/Worker/Verifier/binding)
-- [ ] P3-G P3 gate:fresh/reset fingerprint 相等;P3-01~P3-11 全過;e2e-verifier 通過
+## P3 — Reconciliation、readiness 與延後的硬切換
+### P3-R0 — complete
+- [x] P3-R0 authority reconciliation: `44f9de4` current contracts supersede old destructive route/alias claims; original P3 becomes deferred P3-X. Independent planning review PASS — 2026-08-06
+
+### 下一批可執行規劃工作
+- [ ] P3-R1（PENDING）機械化 current-baseline inventory/fingerprint validation（無 production SQL、無破壞性 migration）；核實 52 張 application tables、可選 checkpoint tables、`conversations_history_page_idx`，並讓 allowlist/manifest 差異阻擋執行。P4 可在此與 current runtime prerequisites 完成後開始。
+- [ ] P3-R2（PENDING，design + evidence）C8 public-narrowing evidence contract：可信 runtime flow write/read/invoke usage、repo/外部 consumer report、觀察與 rollback owner/window、簽署核准；C8 僅移除 `/api/skills*` 的 Business Workflow 相容操作，Agent Skill endpoints 必須保留並有正向行為驗收；只能做 planning/telemetry，不能以 compile-time inventory 冒充使用證據；可與 R1/P4/P5 並行成熟。
+- [ ] P3-R3（BLOCKED until P5/C8）post-C8 target decision sheet：typed table/FK/snapshot/eval/operations identity、跨 type 同名政策、seed authority、package hash、canary retention，以及必須保留的 alias/unified-invoke facade；未凍結前不寫 SQL。
+
+### P3-X — BLOCKED until P3-R3 and applicable route gates
+- [ ] P3-X atomic destructive execution：只有 post-C8 P3-R3 與其 facade 設計適用的 route gates 通過後，才在一個 tranche 實作 production `0001`–`0003`、runner/fixture switch、完整 consumers、seed、fresh/reset fingerprint、restore 與 full-chain gates。不得 partial deploy；C8 僅能收斂 public `/api/skills*`，alias/unified invoke 必須保留或各自通過後續獨立核准。
 
 ## P4 — 單一聊天 runtime
 - [ ] P4-1 chat/stream/history/AG-UI 強制 JWT;移除 body userId 與匿名連續性;`turnId` 必填 + `X-Conversation-Id`(注意 `ChatServiceTests` 匿名連續性測試同 tranche 處理)

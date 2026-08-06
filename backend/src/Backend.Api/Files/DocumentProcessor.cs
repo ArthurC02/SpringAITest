@@ -58,7 +58,7 @@ public sealed class DocumentProcessor
                     "文件處於不可重跑狀態 {Status},重複投遞略過:documentId={DocumentId}",
                     existing,
                     message.DocumentId);
-                return DocumentProcessingOutcome.Success;
+                return ReportOutcome(DocumentProcessingOutcome.Success);
             }
 
             // Deletion inventory / producer-cutover compatibility: old Platform binaries publish a
@@ -79,7 +79,7 @@ public sealed class DocumentProcessor
 
             var embeddings = await _embeddings.EmbedDocumentsAsync(chunks, ct);
             await _rag.CompleteDocumentAsync(message.DocumentId, message.TenantId, chunks, embeddings, ct);
-            return DocumentProcessingOutcome.Success;
+            return ReportOutcome(DocumentProcessingOutcome.Success);
         }
         catch (Exception ex)
         {
@@ -88,7 +88,7 @@ public sealed class DocumentProcessor
                 _logger.LogWarning(
                     ex, "文件處理暫時性失敗,將重新投遞(第 {NextAttempt} 次重試):documentId={DocumentId}",
                     retryCount + 1, message.DocumentId);
-                return DocumentProcessingOutcome.RetryableFailure;
+                return ReportOutcome(DocumentProcessingOutcome.RetryableFailure);
             }
 
             // 終態:非暫時性錯誤,或暫時性錯誤已達重試上限。標記為 failed(best effort,markFailed
@@ -103,8 +103,14 @@ public sealed class DocumentProcessor
                 _logger.LogError(markEx, "標記文件 failed 狀態時發生錯誤:documentId={DocumentId}", message.DocumentId);
             }
 
-            return DocumentProcessingOutcome.TerminalFailure;
+            return ReportOutcome(DocumentProcessingOutcome.TerminalFailure);
         }
+    }
+
+    private DocumentProcessingOutcome ReportOutcome(DocumentProcessingOutcome outcome)
+    {
+        _metrics.RecordProcessingOutcome(outcome);
+        return outcome;
     }
 
     /// <summary>

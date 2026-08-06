@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "phase": "exploratory_no_ceilings",
+  "measurement_contract": {
+    "baseline_only": true,
+    "ceiling_approving": false
+  },
+  "compose_snapshots": {
+    "base-production": ["default", "full"],
+    "evidence-production": ["default", "full", "evidence", "evidence-real"],
+    "base-development": ["default", "full"],
+    "evidence-development": ["default", "full", "evidence", "evidence-real"]
+  },
+  "workloads": [
+    {"id": "steady-running-default-v1", "version": 1, "lane": "default", "kind": "steady_running", "sample_window_seconds": 60, "samples": 60, "ceiling_approving": false},
+    {"id": "steady-running-full-v1", "version": 1, "lane": "full", "kind": "steady_running", "sample_window_seconds": 60, "samples": 60, "ceiling_approving": false},
+    {"id": "steady-running-evidence-v1", "version": 1, "lane": "evidence", "kind": "steady_running", "sample_window_seconds": 60, "samples": 60, "ceiling_approving": false},
+    {"id": "steady-running-evidence-real-v1", "version": 1, "lane": "evidence-real", "kind": "steady_running", "sample_window_seconds": 60, "samples": 60, "ceiling_approving": false}
+  ],
+  "services": [
+    {"service": "appdb", "service_class": "datastore", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "backend", "service_class": "application", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "counterpart_candidate", "counterpart": "backend-evidence", "calibration_status": "calibration_pending"},
+    {"service": "backend-evidence", "service_class": "application", "execution_scopes": ["evidence-real"], "comparison_scope": "counterpart_candidate", "counterpart": "backend", "calibration_status": "calibration_pending"},
+    {"service": "clickhouse", "service_class": "datastore", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "evidence-model", "service_class": "evidence_support", "execution_scopes": ["evidence", "evidence-real"], "comparison_scope": "distinct_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "evidence-nginx", "service_class": "evidence_support", "execution_scopes": ["evidence", "evidence-real"], "comparison_scope": "distinct_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "frontend", "service_class": "frontend", "execution_scopes": ["full"], "comparison_scope": "counterpart_candidate", "counterpart": "frontend-evidence", "calibration_status": "calibration_pending"},
+    {"service": "frontend-evidence", "service_class": "frontend", "execution_scopes": ["evidence", "evidence-real"], "comparison_scope": "counterpart_candidate", "counterpart": "frontend", "calibration_status": "calibration_pending"},
+    {"service": "langfuse-web", "service_class": "observability", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "langfuse-worker", "service_class": "observability", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "litellm", "service_class": "model_gateway", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "mem0", "service_class": "memory_service", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "minio", "service_class": "datastore", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "platform", "service_class": "application", "execution_scopes": ["full"], "comparison_scope": "counterpart_candidate", "counterpart": "platform-evidence", "calibration_status": "calibration_pending"},
+    {"service": "platform-evidence", "service_class": "application", "execution_scopes": ["evidence", "evidence-real"], "comparison_scope": "counterpart_candidate", "counterpart": "platform", "calibration_status": "calibration_pending"},
+    {"service": "postgres", "service_class": "datastore", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "rabbitmq", "service_class": "broker", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "distinct_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "rabbitmq-evidence", "service_class": "broker", "execution_scopes": ["evidence-real"], "comparison_scope": "distinct_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "redis", "service_class": "datastore", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "shared_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "workflow", "service_class": "application", "execution_scopes": ["default", "full", "evidence", "evidence-real"], "comparison_scope": "counterpart_candidate", "counterpart": "workflow-evidence", "calibration_status": "calibration_pending"},
+    {"service": "workflow-capture-proxy", "service_class": "evidence_support", "execution_scopes": ["evidence", "evidence-real"], "comparison_scope": "distinct_workload", "counterpart": null, "calibration_status": "calibration_pending"},
+    {"service": "workflow-evidence", "service_class": "application", "execution_scopes": ["evidence-real"], "comparison_scope": "counterpart_candidate", "counterpart": "workflow", "calibration_status": "calibration_pending"}
+  ]
+}

@@ -1,6 +1,6 @@
 # Architecture Hard Reset — Acceptance Tests
 
-> Status: approved target, not executed. These gates become authoritative only with their implementation phase.
+> Status: reconciled acceptance plan, not executed. The former P3 flow-compatibility route-absence and destructive-cutover matrix is deferred to P3-X; current readiness gates are defined below and in [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
 
 > A phase is not complete because implementation exists. It is complete only when its listed evidence passes against the current integrated repository.
 
@@ -8,7 +8,7 @@
 
 | ID | Scenario | Expected evidence |
 | --- | --- | --- |
-| P0-01 | Plan files and index | All six documents link correctly; no broken relative links |
+| P0-01 | Plan files and index | The explicit current `00`–`08` plan set links correctly; no broken relative links |
 | P0-02 | Superseded rules | P5/C8/R6 historical files point to this plan without erasing their rationale |
 | P0-03 | Inventory | Every old route, table, FK, flag, runtime branch, test, and external state has a ledger disposition |
 | P0-04 | Baseline | Full Backend, Platform, Workflow, Frontend and config/script checks are recorded before implementation |
@@ -55,7 +55,19 @@ P2 executes this matrix only with test-only manifests and synthetic allowlisted 
 
 Migration tests must use disposable databases with allowlisted generated names. They may not target the normal `springaitest` appdb.
 
-## P3 — artifact hard cutover
+## P3-R0–R3 — reconciliation and readiness
+
+| ID | Scenario | Expected result |
+| --- | --- | --- |
+| P3-R0-01 | Authority reconciliation | `44f9de4` baseline, current contracts, retained compatibility, and stop gates are recorded and reviewed. |
+| P3-R1-01 | Mechanical baseline inventory | The application-table set is verified as 52 (`50` historical tables plus `document_ingest` and `checkpoint_retention_ack`), optional checkpoint tables are accounted for, and `conversations_history_page_idx` is part of fingerprint/postconditions. |
+| P3-R1-02 | Manifest and classification parity | `MigrationManifest` allowlist/fingerprint/classification inputs are compared to the baseline; the missing `checkpoint_retention_ack` allowlist entry is an execution blocker, not silently repaired. |
+| P3-R2-01 | C8 public-narrowing evidence | Trustworthy runtime evidence reports flow write/read/invoke use, in-repository and external consumers, observation duration, rollback owner/window, and C8 approval to remove only Business Workflow compatibility operations from `/api/skills*`. Compile-time legacy inventory is not accepted as usage evidence. |
+| P3-R3-01 | Post-C8 target decision sheet | After P5/C8, typed table/FK/snapshot/eval/operations identities, cross-type same-name semantics, seed authority, package hashes, canary retention, and required alias/unified-invoke facades are frozen without SQL. |
+
+## P3-X — deferred artifact hard cutover
+
+Blocked until post-C8 P3-R3 plus any route gates applicable to its facade design pass. P3-00 through P3-11 below are retained as deferred P3-X tests except claims that conflict with the current retained compatibility routes.
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
@@ -64,7 +76,7 @@ Migration tests must use disposable databases with allowlisted generated names. 
 | P3-02 | Business Workflow CRUD/revision/export/validate/invoke | Uses only Business Workflow tables and endpoints |
 | P3-03 | Agent Skill endpoint receives flow content | Controlled validation failure; no sniffed dispatch |
 | P3-04 | Business Workflow endpoint receives package | Controlled validation failure |
-| P3-05 | Removed aliases/routes | Return 404 and have no registered endpoint metadata |
+| P3-05 | Separate retirement phases only | After C8's specific gate, route-absence assertions apply only to removed Business Workflow compatibility operations under `/api/skills*`; Agent Skill endpoints require positive existence/behavior assertions. `/skills/validate` and unified `/skills/{name}/invoke` are invalid route-absence targets until each has its own later consumer/usage/rollback approval. |
 | P3-06 | Database catalog inspection | No `skill`, `skill_revision`, mixed `kind`, or old FK remains |
 | P3-07 | Snapshot/binding inspection | Agent Skills and Business Workflows use distinct typed references |
 | P3-08 | Static consumer inventory | No production reference to removed DTOs, routes, repositories, or discriminators |

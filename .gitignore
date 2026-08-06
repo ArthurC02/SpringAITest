@@ -36,3 +36,6 @@ pnpm-debug.log*
 
 # Local release evidence may contain request/trace projections; never commit it.
 artifacts/copilot-shared-core/
+
+# Local resource-calibration bundles contain machine-specific measurements.
+artifacts/resource-calibration/

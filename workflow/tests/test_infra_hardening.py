@@ -1,12 +1,13 @@
-"""基礎設施加固的護欄：共用 HTTP client 單例、LLM 逾時/重試、tracing 靜默降級。
+"""基礎設施加固的護欄：共用 HTTP client 單例、LLM 逾時/重試、tracing 安全降級。
 
 對應修復項：
 - backend_http 的 module 級共用 AsyncClient（get_client 單例、aclose 後重建）。
 - build_llm 顯式帶 timeout / max_retries（可經 settings 覆寫）。
-- tracing.runnable_config 任何載入失敗（不限 ImportError）一律降級為 {}。
+- tracing.runnable_config 在 handler 初始化失敗時安全降級並保留低噪訊號。
 """
 
 import asyncio
+import logging
 
 import httpx
 import pytest
@@ -94,33 +95,130 @@ def test_build_llm_timeout_override_via_settings(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# tracing：非 ImportError 的失敗也要靜默降級（不只 ImportError）
+# tracing：handler 初始化失敗時安全降級、每 process 僅一則無內容警告
 # ---------------------------------------------------------------------------
 
 
-def test_runnable_config_swallows_non_import_errors(monkeypatch):
-    """LANGFUSE_ENABLED 時 _handler 拋任意例外（如金鑰未設 RuntimeError）→ 仍回 {}。"""
+@pytest.fixture
+def reset_tracing_failure_state(monkeypatch):
+    """隔離 process 級降級計數與一次性警告狀態，避免測試依賴執行順序。"""
+    monkeypatch.setattr(tracing, "_handler_failure_count", 0)
+    monkeypatch.setattr(tracing, "_handler_failure_warning_emitted", False)
+
+
+def test_runnable_config_failure_degrades_counts_and_logs_once_without_exception_content(
+    monkeypatch, caplog, reset_tracing_failure_state
+):
+    """不同的敏感例外皆降級；只留固定警告，失敗數仍準確累加。"""
+    monkeypatch.setattr(settings, "langfuse_enabled", True)
+    first_secret = "langfuse-secret-one"
+    second_secret = "langfuse-secret-two"
+    failures = iter((RuntimeError(first_secret), ValueError(second_secret)))
+
+    def _boom():
+        raise next(failures)
+
+    monkeypatch.setattr(tracing, "_handler", _boom)
+    with caplog.at_level(logging.WARNING, logger=tracing.__name__):
+        assert tracing.runnable_config() == {}
+        assert tracing.runnable_config() == {}
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == tracing.__name__ and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == "Langfuse tracing unavailable; continuing without tracing."
+    assert first_secret not in caplog.text
+    assert second_secret not in caplog.text
+    assert tracing.handler_failure_count() == 2
+
+
+def test_runnable_config_logging_handler_can_read_counter_and_reenter(
+    monkeypatch, reset_tracing_failure_state
+):
+    """logging 在鎖外執行：handler 可讀 counter 並重入，而不會死鎖或重複警告。"""
     monkeypatch.setattr(settings, "langfuse_enabled", True)
 
     def _boom():
-        raise RuntimeError("langfuse 金鑰未設")
+        raise RuntimeError("handler initialization failed")
+
+    class _ReentrantHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.observed_counts: list[int] = []
+            self.reentrant_configs: list[dict] = []
+
+        def emit(self, record):
+            self.observed_counts.append(tracing.handler_failure_count())
+            self.reentrant_configs.append(tracing.runnable_config())
 
     monkeypatch.setattr(tracing, "_handler", _boom)
-    assert tracing.runnable_config() == {}
+    logger = logging.getLogger(tracing.__name__)
+    handler = _ReentrantHandler()
+    logger.addHandler(handler)
+    try:
+        assert tracing.runnable_config() == {}
+    finally:
+        logger.removeHandler(handler)
+
+    assert handler.observed_counts == [1]
+    assert handler.reentrant_configs == [{}]
+    assert tracing.handler_failure_count() == 2
 
 
-def test_runnable_config_enabled_returns_callbacks_with_handler(monkeypatch):
+def test_runnable_config_ignores_failing_logging_handler(
+    monkeypatch, reset_tracing_failure_state
+):
+    """logging.Handler.handleError 不會替 emit 例外提供保證，故 tracing 必須自行隔離。"""
+    monkeypatch.setattr(settings, "langfuse_enabled", True)
+
+    def _boom():
+        raise RuntimeError("handler initialization failed")
+
+    class _FailingHandler(logging.Handler):
+        def emit(self, record):
+            raise RuntimeError("logging handler failure")
+
+    monkeypatch.setattr(tracing, "_handler", _boom)
+    logger = logging.getLogger(tracing.__name__)
+    handler = _FailingHandler()
+    logger.addHandler(handler)
+    try:
+        assert tracing.runnable_config() == {}
+    finally:
+        logger.removeHandler(handler)
+
+    assert tracing.handler_failure_count() == 1
+
+
+def test_runnable_config_enabled_returns_callbacks_with_handler(
+    monkeypatch, reset_tracing_failure_state
+):
     """決策表最後一格：開啟且 _handler 正常 → 唯一回非空 dict 的那支。"""
     monkeypatch.setattr(settings, "langfuse_enabled", True)
     handler = object()
     monkeypatch.setattr(tracing, "_handler", lambda: handler)
     assert tracing.runnable_config() == {"callbacks": [handler]}
+    assert tracing.handler_failure_count() == 0
 
 
-def test_runnable_config_disabled_returns_empty():
-    """決策表另一半：關閉時本來就回 {}（不觸發任何 langfuse 載入）。"""
-    # settings.langfuse_enabled 預設 False；不 monkeypatch，直接驗預設路徑
-    assert tracing.runnable_config() == {}
+def test_runnable_config_disabled_skips_handler_logging_and_failure_count(
+    monkeypatch, caplog, reset_tracing_failure_state
+):
+    """關閉時不載入 handler、不警告，也不累計降級失敗。"""
+    monkeypatch.setattr(settings, "langfuse_enabled", False)
+
+    def _must_not_run():
+        raise AssertionError("disabled path must not initialize Langfuse")
+
+    monkeypatch.setattr(tracing, "_handler", _must_not_run)
+    with caplog.at_level(logging.WARNING, logger=tracing.__name__):
+        assert tracing.runnable_config() == {}
+
+    assert caplog.records == []
+    assert tracing.handler_failure_count() == 0
 
 
 # ---------------------------------------------------------------------------

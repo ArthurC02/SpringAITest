@@ -14,10 +14,12 @@ Every wave must provide:
 
 Skipped tests are evidence only when the skip is itself expected and separately recorded. A green suite that skipped the only production integration path does not pass the gate.
 
-## 2. Wave4-B closure gate
+## 2. Wave4-B reopened closure gate
 
-Wave4-B is COMPLETE subject to integration reconciliation:
+Wave4-B paging correction passed this gate on 2026-08-06:
 
+- 101+ candidates are traversed across all pages without omission or duplication;
+- malformed, repeated, or non-progressing cursors fail closed;
 - attach its final focused/full test commands and results;
 - inspect the claimed owned files and confirm no temp artifacts or accidental cross-wave edits;
 - rerun any focused test affected by later shared-file changes;
@@ -27,17 +29,20 @@ Its dead-code inventory must identify any superseded helper, fallback, compatibi
 
 ## 3. Wave5-B gate
 
-Wave5-B remains PENDING until all of the following pass:
+Wave5-B is split. Tracing may complete independently, but the overall wave remains incomplete until calibration, telemetry, and calibrated ceilings pass.
+
+Wave5-B0a contract tooling passed independent review on 2026-08-06. Its versioned steady-running manifests are explicitly exploratory and `ceiling_approving=false`; they provide comparable baseline collection only. Runtime calibration remains blocked until reviewed workloads execute with a reachable Docker daemon.
 
 ### Compose and CI
 
+- A reviewed measurement bundle records workload, engine/host metadata, sample window, and peak Docker memory-usage/CPU/PID evidence before any default is introduced. Docker `MemUsage` must not be represented as process RSS.
 - Expanded base and evidence Compose JSON contains the approved default memory, CPU, and PID ceilings for every calibrated target.
 - Environment overrides change the effective values without editing YAML.
 - Evidence counterparts match their normal-service class unless an evidence-specific measured override is supplied.
 - Read-only root filesystem, non-root user, `no-new-privileges`, dropped capabilities, bounded `/tmp`, and healthchecks remain present for application containers.
 - Langfuse, ClickHouse, Redis, MinIO, mem0, and every other unmeasured service appear in an executable `calibration_pending` inventory. Partial guessed limits fail CI.
 
-Failure injection: set one override per resource dimension, expand Compose, and assert the effective JSON value. Supply malformed/blank values and require Compose/CI to fail rather than silently discard the ceiling.
+Failure injection: before calibration, prove every unmeasured service remains `calibration_pending`. After calibration, set one override per resource dimension, expand Compose, and assert the effective JSON value. Supply malformed/blank values and require Compose/CI to fail rather than silently discard the ceiling.
 
 Rollback: remove the override to return to the reviewed default. If a default causes OOM, PID exhaustion, sustained throttling, or healthcheck instability under the deterministic smoke workload, stop rollout and restore the prior Compose revision; do not raise ceilings without evidence.
 
@@ -52,13 +57,17 @@ Failure injection: make the handler raise two distinguishable secret-bearing exc
 
 Rollback: disabling the existing tracing flag returns to the no-handler path without requiring service redeploy logic beyond configuration.
 
-### Backend built-in telemetry
+### Backend built-in telemetry — Wave5-B2 COMPLETE (2026-08-06)
 
-- Use existing `ILogger`, `Meter`, and `Activity` facilities only; no new observability package.
-- Metrics attach only at natural health/admission/document/checkpoint decisions, have bounded enumerated tags, and do not duplicate durable operations/evidence ledgers.
-- Tests observe instruments with built-in listeners and assert exact low-cardinality dimensions.
+- Only built-in `Meter` facilities are used; no observability package was added.
+- `backend.document_processing.outcomes` has exactly one `outcome` tag whose only values are `success`, `retryable_failure`, and `terminal_failure`. It emits exactly once for every final `DocumentProcessor` result, including an idempotent ready/deleted success.
+- `backend.health.readiness.checks` has exactly one `status` tag whose only values are `up` and `down`. It emits only for an actual fresh database-required probe: cache hits, database-optional mode, cancelled owners/waiters, and singleflight joiners emit nothing; bounded timeout and internal exception probes emit `down`.
+- Instrument-listener failure cannot change document-processing or readiness behavior. Neither metric carries tenant, user, document/run/checkpoint ID, free-form error text, prompt/content, route, tool, or model dimensions.
+- Built-in listener tests assert the exact instruments and low-cardinality dimensions. The focused set passed 31 tests; the full Backend suite passed 1205. The independent initial review correction fixed non-cooperative owner-cancellation mutation and supplied timeout/internal-exception coverage; delta and post-simplification reviews passed.
 
-Stop if a proposed metric needs tenant, user, document/run/checkpoint ID, free-form error text, prompt/content, or an unbounded route/tool/model tag.
+Workflow intentionally adds no telemetry adapter: its existing admission snapshots remain the source of truth, and no approved sink, exporter, or public endpoint exists for a duplicate adapter.
+
+Stop any future metric proposal that needs an identifier, free-form error text, content, or an unbounded route/tool/model tag.
 
 Dead-code inventory: update stale "silent tracing" comments/tests, consolidate duplicated Compose resource maps into reviewed anchors, and list any superseded one-off metric helper. Preserve durable ledgers and release evidence.
 
@@ -93,4 +102,3 @@ Release requires:
 8. Dirty worktree partitioned into reviewable intended changes; no unexplained files and no false "workspace clean" claim.
 
 Any failed real-model release gate, unauditable routing/tracing capture, skipped production checkpoint/database test, or unresolved high-risk review finding blocks release even when deterministic unit suites are green.
-

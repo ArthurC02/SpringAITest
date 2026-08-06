@@ -1,5 +1,7 @@
 # P3 盤點 dossier(2026-08-05,baseline b93b63c)
 
+> **Historical dossier — superseded for execution by [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).** This 209KB record remains useful evidence of the `b93b63c` target investigation, but it must not authorize P3 SQL, physical split, route/alias removal, or deletion claims. Its later route-absence references are historical: C8 can remove only Business Workflow compatibility operations from public `/api/skills*`, while Agent Skill endpoints remain; alias and unified invoke have separate gates. Re-validate from `44f9de4` under P3-R1; current compatibility contracts and C8 gates control.
+
 > 本文件由六份平行盤點子代理報告整合而成,是 P3-1~P3-7 派工的事實依據。
 > 所有 file:line 以 HEAD b93b63c 驗證;施工前若 HEAD 前進須重驗。
 >

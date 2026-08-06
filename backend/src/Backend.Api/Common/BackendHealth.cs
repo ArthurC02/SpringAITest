@@ -14,12 +14,19 @@ internal sealed class BackendReadinessProbe
     private static readonly TimeSpan CacheDuration = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(1);
     private readonly Func<CancellationToken, Task<bool>> _check;
+    private readonly bool _databaseRequired;
+    private readonly BackendHealthMetrics _metrics;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private HealthReport? _cached;
     private DateTime _cachedAt;
 
-    public BackendReadinessProbe(bool databaseRequired, NpgsqlDataSource? dataSource)
+    public BackendReadinessProbe(
+        bool databaseRequired,
+        NpgsqlDataSource? dataSource,
+        BackendHealthMetrics? metrics = null)
     {
+        _databaseRequired = databaseRequired;
+        _metrics = metrics ?? BackendHealthMetrics.Shared;
         _check = !databaseRequired
             ? _ => Task.FromResult(true)
             : async ct =>
@@ -38,8 +45,14 @@ internal sealed class BackendReadinessProbe
             };
     }
 
-    internal BackendReadinessProbe(Func<CancellationToken, Task<bool>> check)
-        => _check = check;
+    internal BackendReadinessProbe(
+        Func<CancellationToken, Task<bool>> check,
+        BackendHealthMetrics? metrics = null)
+    {
+        _check = check;
+        _databaseRequired = true;
+        _metrics = metrics ?? BackendHealthMetrics.Shared;
+    }
 
     public async Task<HealthReport> CheckAsync(CancellationToken ct)
     {
@@ -74,6 +87,15 @@ internal sealed class BackendReadinessProbe
             catch
             {
                 healthy = false;
+            }
+
+            // A non-cooperative check can return after the caller has cancelled. The caller's
+            // cancellation still wins over a fresh result: do not publish or cache it.
+            ct.ThrowIfCancellationRequested();
+
+            if (_databaseRequired)
+            {
+                _metrics.RecordReadinessCheck(healthy);
             }
 
             _cached = new HealthReport(

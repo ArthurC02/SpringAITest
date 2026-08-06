@@ -296,6 +296,16 @@ jobs:
               if found:
                   raise SystemExit(f"{path}: obsolete JWT contract marker(s): {', '.join(found)}")
           PY
+      - name: Resource calibration contract
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_resource_calibration.py' -v
+          python3 scripts/resource_calibration.py validate --inventory infra/resource-calibration-inventory.json
+          python3 scripts/resource_calibration.py validate-compose \
+            --inventory infra/resource-calibration-inventory.json \
+            --base-production-json "$RUNNER_TEMP/compose-base-production.json" \
+            --evidence-production-json "$RUNNER_TEMP/compose-evidence-production.json" \
+            --base-development-json "$RUNNER_TEMP/compose-base-development.json" \
+            --evidence-development-json "$RUNNER_TEMP/compose-evidence-development.json"
       - name: Shell syntax
         run: git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
       # 根 AGENTS.md：所有 *.sh 必須是 LF，CRLF shebang 會讓 Linux build image 裡的 ./script.sh 報 not found。

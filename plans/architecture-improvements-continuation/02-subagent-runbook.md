@@ -23,8 +23,11 @@ Parallelism is for independent work, not for multiple agents editing the same sh
 
 | Tranche | Owner A | Owner B | Owner C / reviewer | Files that must not overlap |
 | --- | --- | --- | --- | --- |
-| Wave4-B evidence reconciliation | Root/read-only verifier | — | Terra reviewer | No product edits; only inspect originating report and owned diff. |
-| Wave5-B resources | Infra Terra | Workflow Terra | Backend Terra or reviewer | Infra owns `infra/docker-compose*.yml`, CI, and hardening scripts; Workflow owns `workflow/app/tracing.py` and tracing tests; Backend owns only built-in telemetry files/tests. |
+| Wave4-B paging correction | Workflow Terra | Backend read-only verifier | Terra reviewer | Workflow owns retention paging and tests; Backend cursor contract remains frozen unless a verified defect requires a separate task. |
+| Wave5-B1 tracing | Workflow Terra | — | Terra reviewer | Only `workflow/app/tracing.py` and its focused tests. |
+| Wave5-B0 calibration | Infra Terra | E2E Terra | Root verifier | Evidence/measurement scripts and plans only; no guessed Compose ceilings. |
+| Wave5-B2 telemetry — COMPLETE | Backend Terra | Workflow scope verifier | Terra reviewer | Backend owns the two built-in bounded counters and tests; Workflow confirms existing admission snapshots remain authoritative and adds no adapter without an approved sink/exporter/public endpoint. |
+| Wave5-B3 resources | Infra Terra | CI Terra | E2E verifier | Infra owns `infra/docker-compose*.yml` and resource anchors; CI owns expansion assertions; no application edits. |
 | Wave6/P3 foundation | Backend Terra | Workflow Terra | Sol reviewer | Backend owns SQL/migration/schema/repositories; Workflow owns split runtime contracts; no Platform/Frontend edits yet. |
 | Wave6/P3 consumers | Platform Terra | Frontend Terra | Backend/Workflow verifier | Platform and Frontend consume frozen contracts; schema/runtime owners are read-only during this step. |
 | Final closure | Docs Terra | E2E Terra | Sol only for residual high-risk review | Docs owner edits docs only; E2E owner edits no product files unless given a separate repair task. |
@@ -55,4 +58,3 @@ The root spot-checks, rather than trusting, claims that:
 - warnings and metrics contain no prompts, payloads, identity, IDs, tokens, or exception text.
 
 Use literal search for exact symbols and routes. Use the repository's semantic-search mechanism for behavioral callers. A reviewer finding reopens the owning tranche; it is not appended as undocumented cleanup.
-

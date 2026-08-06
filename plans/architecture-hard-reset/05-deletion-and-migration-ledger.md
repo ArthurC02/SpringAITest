@@ -1,6 +1,18 @@
 # Architecture Hard Reset — Deletion and Migration Ledger
 
-> Status: planning inventory. Before implementation, line references must be refreshed against the baseline commit. A row is complete only when its replacement and acceptance evidence exist in the same phase. Line references refreshed against baseline commit `8652528` (2026-08-03).
+> Status: historical inventory with a 2026-08-06 reconciliation overlay. Before implementation, line references must be refreshed against baseline `44f9de4`. A row is complete only when its replacement and acceptance evidence exist in the same phase. See [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
+
+## 0. Reconciliation overlay — P3-X only
+
+| Earlier ledger disposition | Reconciled status |
+| --- | --- |
+| Physical `skill`/`skill_revision` split, mixed-pin/eval/operations rewrites, seed move, and `DbBootstrap` replacement | `BLOCKED` until post-P5/C8 P3-R3; preserve the migration-runner/advisory-lock/checksum/classification/fingerprint/disposable-restore design, but do not imply production SQL is ready. P3-X may retain facades. |
+| Public `/api/skills*` narrowing | C8 may approve removal of Business Workflow compatibility operations only after its flow-write/cutover/rollback/manual gate; Agent Skill endpoints remain and require positive behavior evidence. |
+| `/skills/validate` alias removal and unified-invoke split | Each is a separate later retirement decision requiring its own consumer/usage/rollback approval; retain them and their tests otherwise, including through a physical split. |
+| Current production consumers | Retain `SkillController`, `SkillService`, `WorkflowEngineClient`, `SkillRoutingAgent`, unified frontend skills API/types/history/run UI, Workflow compatibility handler/custom loader/unified invoke, `agent_skill_graph`, `flow_harness`, runtime graph/checkpoints, eval wire kind, and their tests. No relevant production source is dead today. |
+| Future cleanup candidates | Only after the relevant replacement proof and gate: C8 for public narrowing; independent approval for alias/unified-invoke retirement; then shared storage/repositories/kind DTOs, mixed pin tables/collections/kind branches, and flow-package parser/tests may be evaluated. |
+
+The current schema baseline is 52 application tables: the historical 50 plus `document_ingest` and `checkpoint_retention_ack`; Workflow checkpoint tables may also exist. `conversations_history_page_idx` is a required fingerprint/postcondition input. `MigrationManifest` includes `document_ingest` but currently misses `checkpoint_retention_ack`; that mismatch blocks P3-X execution and is not fixed by this planning tranche.
 
 ## 1. Database and migration
 
@@ -141,7 +153,7 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | Item | Phase | Disposition |
 | --- | --- | --- |
 | Dual-track equivalence and 410 compatibility tests | P3 | Delete; the relationship no longer exists. |
-| Alias-preservation tests | P3 | Delete and replace with route-absence assertions. |
+| Alias-preservation tests | Separate later alias-retirement gate | Retain. Replace only after the alias's own consumer/usage/rollback approval; C8 public narrowing does not authorize its absence assertion. |
 | Anonymous chat and legacy fallback tests | P4 | Delete; replace with 401/unavailable/no-downstream tests. |
 | Skill package migration tests for old rows | P3 | Delete; destructive reset does not rewrite old packages. |
 | InMemory/PostgreSQL behavior divergence tests | P1/P5 | Replace with one shared contract suite, not implementation-specific expectations. |

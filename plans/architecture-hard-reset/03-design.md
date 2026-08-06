@@ -1,8 +1,10 @@
 # Architecture Hard Reset — Design
 
-> Status: approved target, not implemented. Current source and executable tests remain authoritative until the corresponding phase gate passes.
+> Status: historical post-C8 target design, not implemented. Current source and executable tests remain authoritative. Production manifest `bundleThroughVersion=0`, `DbBootstrap`, and the P2 fixture-only runner design remain current; no P3 SQL is ready or registered. See [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
 
 ## 1. Migration architecture
+
+> Cutover deferral: no part of this design authorizes production `0001`–`0003`, runner activation, fixture switching, or a schema drop before P3-R1, P5/C8, and post-C8 P3-R3. C8 may remove only Business Workflow compatibility operations from public `/api/skills*`; Agent Skill endpoints remain. Alias and unified-invoke retirement need separate gates and may remain as P3-X facades. Unknown schema, allowlist, or fingerprint mismatches stop execution; partial database/consumer deployment is prohibited.
 
 ### 1.1 Runner and ownership
 

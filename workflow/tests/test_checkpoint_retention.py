@@ -26,9 +26,16 @@ class _Response:
 
 
 class _Backend:
-    def __init__(self, candidates: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        candidates: list[dict[str, Any]] | None = None,
+        *,
+        pages: dict[str | None, _Response] | None = None,
+    ) -> None:
         self.candidates = candidates
+        self.pages = pages
         self.get_calls = 0
+        self.get_params: list[dict[str, Any]] = []
         self.acks: list[dict[str, Any]] = []
         self.fail_acks = 0
 
@@ -37,6 +44,9 @@ class _Backend:
         assert path == "/api/internal/checkpoint-retention/candidates"
         assert kwargs["params"]["limit"] == 100
         assert set(kwargs["headers"]) == {"X-Internal-Token"}
+        self.get_params.append(kwargs["params"])
+        if self.pages is not None:
+            return self.pages[kwargs["params"].get("cursor")]
         return _Response({"items": self.candidates, "has_more": False})
 
     async def post(self, path: str, **kwargs: Any) -> _Response:
@@ -174,6 +184,134 @@ async def test_report_and_delete_use_same_authority_selection(
     assert deleted["deleted_root_contexts"] == 2
     assert len(backend.acks) == 2
     assert evidence.before == evidence.after == report["candidate_ids"]
+
+
+@pytest.mark.asyncio
+async def test_report_reads_all_candidate_pages_in_backend_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_page = [_candidate(f"candidate-{index}") for index in range(100)]
+    second_page = [_candidate("candidate-100")]
+    backend = _Backend(
+        pages={
+            None: _Response(
+                {"items": first_page, "has_more": True, "next_cursor": "cursor-100"}
+            ),
+            "cursor-100": _Response({"items": second_page, "has_more": False}),
+        }
+    )
+    monkeypatch.setattr(backend_http, "get_client", lambda: backend)
+    monkeypatch.setattr(settings, "checkpoint_retention_mode", "report")
+
+    result = await CheckpointRetentionService(_Store()).run_once()  # type: ignore[arg-type]
+
+    assert result["candidate_count"] == 101
+    assert result["candidate_ids"] == [
+        f"candidate-{index}" for index in range(101)
+    ]
+    assert [params.get("cursor") for params in backend.get_params] == [None, "cursor-100"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_pagination_cursor_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _Backend(
+        pages={
+            None: _Response(
+                {"items": [_candidate("candidate-1")], "has_more": True, "next_cursor": "cursor-1"}
+            ),
+            "cursor-1": _Response(
+                {"items": [_candidate("candidate-2")], "has_more": True, "next_cursor": "cursor-1"}
+            ),
+        }
+    )
+    monkeypatch.setattr(backend_http, "get_client", lambda: backend)
+    monkeypatch.setattr(settings, "checkpoint_retention_mode", "report")
+
+    with pytest.raises(RuntimeError, match="repeated a cursor"):
+        await CheckpointRetentionService(_Store()).run_once()  # type: ignore[arg-type]
+
+    assert backend.get_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_next_cursor_or_empty_page_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _Backend(
+        pages={
+            None: _Response({"items": [], "has_more": True, "next_cursor": "cursor-1"})
+        }
+    )
+    monkeypatch.setattr(backend_http, "get_client", lambda: backend)
+    monkeypatch.setattr(settings, "checkpoint_retention_mode", "report")
+
+    with pytest.raises(RuntimeError, match="made no progress"):
+        await CheckpointRetentionService(_Store()).run_once()  # type: ignore[arg-type]
+
+    backend.pages = {None: _Response({"items": [_candidate("candidate")], "has_more": True})}
+    with pytest.raises(RuntimeError, match="no next cursor"):
+        await CheckpointRetentionService(_Store()).run_once()  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_non_boolean_has_more_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _Backend(
+        pages={None: _Response({"items": [], "has_more": 1, "next_cursor": "cursor-1"})}
+    )
+    monkeypatch.setattr(backend_http, "get_client", lambda: backend)
+    monkeypatch.setattr(settings, "checkpoint_retention_mode", "report")
+    store = _Store()
+
+    with pytest.raises(RuntimeError, match="response is invalid"):
+        await CheckpointRetentionService(store).run_once()  # type: ignore[arg-type]
+
+    assert store.inventory_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_page_duplicate_candidate_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate("candidate")
+    backend = _Backend(
+        pages={
+            None: _Response(
+                {"items": [candidate], "has_more": True, "next_cursor": "cursor-1"}
+            ),
+            "cursor-1": _Response({"items": [candidate], "has_more": False}),
+        }
+    )
+    monkeypatch.setattr(backend_http, "get_client", lambda: backend)
+    monkeypatch.setattr(settings, "checkpoint_retention_mode", "report")
+
+    with pytest.raises(RuntimeError, match="repeated a candidate"):
+        await CheckpointRetentionService(_Store()).run_once()  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_later_candidate_page_failure_never_returns_partial_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _Backend(
+        pages={
+            None: _Response(
+                {"items": [_candidate("candidate")], "has_more": True, "next_cursor": "cursor-1"}
+            ),
+            "cursor-1": _Response(error=True),
+        }
+    )
+    monkeypatch.setattr(backend_http, "get_client", lambda: backend)
+    monkeypatch.setattr(settings, "checkpoint_retention_mode", "report")
+    store = _Store()
+
+    with pytest.raises(RuntimeError, match="acknowledgement failed"):
+        await CheckpointRetentionService(store).run_once()  # type: ignore[arg-type]
+
+    assert store.inventory_calls == 0
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 # Architecture Hard Reset — Target Specification
 
-> This is the target contract after P3/P4. Until those gates pass, current source and tests remain authoritative.
+> This is a historical post-C8 target specification, not the current contract. C8 can authorize only removal of Business Workflow compatibility operations from public `/api/skills*`; Agent Skill endpoints remain. Current source and tests retain unified internal `/skills/{name}/invoke` and `/skills/validate` as the same-handler compatibility alias until their separate later consumer/usage/rollback gates pass. See [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
 
 ## 1. Service authority
 
@@ -80,6 +80,10 @@ Existing `workflow` and `workflow_revision` remain the D4 Graph IR authority for
 Agent bindings reference `agent_skill`; Business Workflow pins and flow-run artifacts reference `business_workflow`. **Decided 2026-08-03:** Any execution snapshot may simultaneously pin both artifact kinds using independent, strongly-typed `agentSkills` and `businessWorkflows` collections (not a kind-discriminated union). Workflow-side types `PinnedSkillSummary`, `ActiveSkillScope`, and `DirectAgentExecutionSnapshot.skills` are partitioned into two variants serving their respective collections; routing dispatch is collection-aware and must never rely on `kind` field string comparison.
 
 ## 3. HTTP contracts
+
+### 3.0 Current compatibility contract versus post-C8 target
+
+The routes below describe a possible post-C8 target only. C8 may remove only Business Workflow compatibility operations from public `/api/skills*` after its explicit flow-write/cutover/rollback/manual gate; Agent Skill `/api/skills*` endpoints remain and require positive existence/behavior acceptance. C8 does not retire `/skills/validate` or unified `/skills/{name}/invoke`; each needs a separate later consumer/usage/rollback approval. A physical split may retain either internal surface through compatibility facades. No implementation may infer early alias or route removal.
 
 ### 3.1 Platform public API
 
