@@ -20,9 +20,9 @@ Keep the migration-runner, advisory-lock, checksum, database classification, fin
 
 - Production manifest remains `bundleThroughVersion=0`; `DbBootstrap` remains startup and seed authority.
 - `ProductionManifestAbsenceTests` correctly assert that no production SQL is currently shipped. This plan does not claim P3 SQL is ready.
-- Current application schema baseline is 52 tables: the earlier 50 plus `document_ingest` and `checkpoint_retention_ack`. Workflow checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) may exist and remain classification inputs.
+- Current Backend application schema baseline is 52 tables: the earlier 50 plus `document_ingest` and `checkpoint_retention_ack`. Five Workflow-owned checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`, `workflow_root_context_checkpoint`) may exist and remain classification inputs.
 - `conversations_history_page_idx` must be added to target fingerprint/postconditions.
-- `MigrationManifest` permits `document_ingest` but misses `checkpoint_retention_ack`; that is an execution blocker until P3-R1 resolves the evidence and target, not a silent planning fix.
+- P3-R1 added the verified `checkpoint_retention_ack` entry to `MigrationManifest` and pinned the complete current inventory with executable tests; future drift is an execution blocker.
 - Prompt manifests, evals, Context E1/E3, D3–D7, document-ingest idempotency, conversation history, and retention ACK are retained design inputs.
 
 The read-only inventory commands used for this reconciliation inspected `git status`, the baseline plan set, current continuation plans, and literal plan/source references. They establish planning inputs only; they are not product test PASS evidence.
@@ -53,7 +53,7 @@ Stop immediately on any of the following:
 | Package | State | Scope and exit evidence |
 | --- | --- | --- |
 | P3-R0 — authority reconciliation | COMPLETE | This document and synchronized historical plan notices passed independent planning review; no source change. |
-| P3-R1 — mechanical current-baseline inventory/fingerprint validation | PENDING | Validate the 52-table baseline, optional checkpoint presence, `conversations_history_page_idx`, manifest allowlist/classification, and fingerprint inputs. No destructive SQL. |
+| P3-R1 — mechanical current-baseline inventory/fingerprint validation | COMPLETE (2026-08-07) | Executable tests pin the 52-table baseline, five optional checkpoint tables, `conversations_history_page_idx`, and `plpgsql`/`vector`; production manifest remains bundle 0 with no SQL. Migration suite: 66 passed, 1 Docker dump/restore skip. |
 | P3-R2 — C8 public-narrowing evidence contract | PENDING (design + evidence) | Define/collect trustworthy runtime flow write/read/invoke evidence; report in-repo and external consumers, observation/rollback owner and window, then obtain C8 approval for public narrowing only. Planning/telemetry only; it may mature alongside P4/P5. |
 | P3-R3 — post-C8 target decision sheet | BLOCKED until P5/C8 | Freeze typed tables/FKs/snapshots/eval/operations identity, same-name semantics, seed authority, package hashes, canary retention, and required facades. No SQL before all decisions are frozen. |
 | P3-X — destructive execution | BLOCKED until P3-R3 + applicable route gates | Atomically add production `0001`–`0003`, activate runner and fixtures, update every consumer/seed, and prove fresh/reset fingerprint, restore, and full-chain acceptance. Alias/unified-invoke facades remain unless their independent gates passed. |

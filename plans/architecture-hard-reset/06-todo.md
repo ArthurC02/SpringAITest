@@ -71,7 +71,7 @@
 - [x] P3-R0 authority reconciliation: `44f9de4` current contracts supersede old destructive route/alias claims; original P3 becomes deferred P3-X. Independent planning review PASS — 2026-08-06
 
 ### 下一批可執行規劃工作
-- [ ] P3-R1（PENDING）機械化 current-baseline inventory/fingerprint validation（無 production SQL、無破壞性 migration）；核實 52 張 application tables、可選 checkpoint tables、`conversations_history_page_idx`，並讓 allowlist/manifest 差異阻擋執行。P4 可在此與 current runtime prerequisites 完成後開始。
+- [x] P3-R1（COMPLETE）機械化 current-baseline inventory/fingerprint validation：固定 52 張 application tables、5 張可選 Workflow checkpoint tables（補列 `workflow_root_context_checkpoint`）、`conversations_history_page_idx` 與 `plpgsql`/`vector` extension allowlist；production manifest 維持 bundle 0、無 SQL。Migration suite 66 passed / 1 Docker dump-restore skipped，code review PASS — 2026-08-07。
 - [ ] P3-R2（PENDING，design + evidence）C8 public-narrowing evidence contract：可信 runtime flow write/read/invoke usage、repo/外部 consumer report、觀察與 rollback owner/window、簽署核准；C8 僅移除 `/api/skills*` 的 Business Workflow 相容操作，Agent Skill endpoints 必須保留並有正向行為驗收；只能做 planning/telemetry，不能以 compile-time inventory 冒充使用證據；可與 R1/P4/P5 並行成熟。
 - [ ] P3-R3（BLOCKED until P5/C8）post-C8 target decision sheet：typed table/FK/snapshot/eval/operations identity、跨 type 同名政策、seed authority、package hash、canary retention，以及必須保留的 alias/unified-invoke facade；未凍結前不寫 SQL。
 

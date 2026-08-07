@@ -46,7 +46,7 @@ internal static class MigrationFixtures
             ResourceRoot + postconditionFolder,
             bundleThroughVersion,
             LegacyAllowlist,
-            ["vector"]);
+            ["plpgsql", "vector"]);
 
     public static string ResourcePrefix(string folder) => ResourceRoot + folder;
 

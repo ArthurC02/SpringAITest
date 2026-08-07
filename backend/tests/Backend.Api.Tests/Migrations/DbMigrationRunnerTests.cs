@@ -312,7 +312,7 @@ public sealed class DbMigrationRunnerTests(PostgresFixture fixture)
             MigrationFixtures.ResourcePrefix("Postconditions."),
             bundleThroughVersion: 3,
             MigrationManifest.SpringAITestLegacyObjects,
-            ["vector"]);
+            ["plpgsql", "vector"]);
 
         var ex = await Assert.ThrowsAsync<DbMigrationException>(() =>
             Runner(manifest).RunAsync(db.ConnectionString, MigrationMode.Startup));

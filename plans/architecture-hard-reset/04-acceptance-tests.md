@@ -61,7 +61,7 @@ Migration tests must use disposable databases with allowlisted generated names. 
 | --- | --- | --- |
 | P3-R0-01 | Authority reconciliation | `44f9de4` baseline, current contracts, retained compatibility, and stop gates are recorded and reviewed. |
 | P3-R1-01 | Mechanical baseline inventory | The application-table set is verified as 52 (`50` historical tables plus `document_ingest` and `checkpoint_retention_ack`), optional checkpoint tables are accounted for, and `conversations_history_page_idx` is part of fingerprint/postconditions. |
-| P3-R1-02 | Manifest and classification parity | `MigrationManifest` allowlist/fingerprint/classification inputs are compared to the baseline; the missing `checkpoint_retention_ack` allowlist entry is an execution blocker, not silently repaired. |
+| P3-R1-02 | Manifest and classification parity | `MigrationManifest` allowlist/fingerprint/classification inputs match the executable baseline, including `checkpoint_retention_ack`; any future difference blocks execution. |
 | P3-R2-01 | C8 public-narrowing evidence | Trustworthy runtime evidence reports flow write/read/invoke use, in-repository and external consumers, observation duration, rollback owner/window, and C8 approval to remove only Business Workflow compatibility operations from `/api/skills*`. Compile-time legacy inventory is not accepted as usage evidence. |
 | P3-R3-01 | Post-C8 target decision sheet | After P5/C8, typed table/FK/snapshot/eval/operations identities, cross-type same-name semantics, seed authority, package hashes, canary retention, and required alias/unified-invoke facades are frozen without SQL. |
 

@@ -57,7 +57,7 @@ public sealed class MigrationManifest
     /// 表所擁有的 identity/serial sequence 不必列名:分類查詢會把「被表擁有的 sequence」
     /// 視為該表的實作細節排除掉,擁有者本身不在白名單時那張表已經先觸發中止。
     /// </summary>
-    public static readonly string[] SpringAITestLegacyObjects =
+    public static readonly string[] SpringAITestApplicationTables =
     [
         "tenants", "users", "user_group_membership", "conversations", "rag_documents", "document_ingest", "rag_chunks",
         "app_config", "skill", "skill_revision", "configuration_set", "agent", "agent_revision",
@@ -70,14 +70,21 @@ public sealed class MigrationManifest
         "agent_run_command", "context_policy", "source_catalog", "metric_definition", "context_revision",
         "context_evidence", "context_view", "context_request", "context_delta", "eval_suite",
         "eval_suite_revision", "eval_run", "eval_case_result", "prompt_component_revision",
-        "prompt_manifest_revision",
+        "prompt_manifest_revision", "checkpoint_retention_ack",
+    ];
 
-        // LangGraph AsyncPostgresSaver 的四張表。它們不是 Backend 建的,但
-        // workflow/app/runtime/checkpoints.py 的 saver.setup() 就建在同一個 springaitest 庫的 public 內,
+    public static readonly string[] OptionalWorkflowCheckpointTables =
+    [
+        // Workflow owns these five checkpoint tables. They are not Backend application tables, but
+        // workflow/app/runtime/checkpoints.py creates them in the same springaitest public schema,
         // 所以 legacy 庫裡出現它們是預期而非 unknown。hard reset 一併刪除是刻意的:
         // 執行狀態(未完成的 run/interrupt)綁在被重置的 schema 上,留著只會指向已不存在的資料。
         "checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations",
+        "workflow_root_context_checkpoint",
     ];
+
+    public static readonly string[] SpringAITestLegacyObjects =
+        [.. SpringAITestApplicationTables, .. OptionalWorkflowCheckpointTables];
 
     private MigrationManifest(
         IReadOnlyList<MigrationScript> scripts,
@@ -129,7 +136,7 @@ public sealed class MigrationManifest
         postconditionPrefix: "Backend.Api.Data.Migrations.Postconditions.",
         bundleThroughVersion: 0,
         legacyObjectAllowlist: SpringAITestLegacyObjects,
-        allowedExtensions: new[] { "vector" });
+        allowedExtensions: new[] { "plpgsql", "vector" });
 
     /// <summary>
     /// 由 assembly 的 embedded resources 建 manifest。resource 名稱即檔名,
