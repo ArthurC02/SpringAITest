@@ -251,12 +251,15 @@ public sealed class FakeWorkflowEngineClient : IWorkflowEngineClient
     /// 收集器同一慣例)。測試須自行在案例開頭/結尾清空,避免跨測試污染。
     /// </summary>
     public static readonly List<(string Name, Dictionary<string, JsonElement> Input)> SkillInvokes = new();
+    public static readonly List<ArtifactUsageOrigin> SkillInvokeOrigins = new();
 
     public Task<JsonElement> InvokeSkillAsync(
-        string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default)
+        string name, Dictionary<string, JsonElement> input, UserContext ctx,
+        ArtifactUsageOrigin origin, CancellationToken ct = default)
     {
         EngineCalls.Add("invoke:" + name);
         SkillInvokes.Add((name, input));
+        SkillInvokeOrigins.Add(origin);
 
         // skill invoke 的錯誤碼與 /workflows/{name}/invoke 逐一相同(同一組觸發名稱)。
         switch (name)
@@ -284,7 +287,7 @@ public sealed class FakeWorkflowEngineClient : IWorkflowEngineClient
         // 引擎一律回 200,結果在 body(不合法不是 HTTP 錯誤)。
         return Task.FromResult(definition.Contains("__invalid__", StringComparison.Ordinal)
             ? Json("""{"valid":false,"errors":[{"code":"unbounded_loop","message":"loop 缺少 max_iterations","line":7}]}""")
-            : Json("""{"valid":true,"errors":[],"skill":{"name":"quarterly-qa","description":"季報問答","required_role":"USER"}}"""));
+            : Json("""{"valid":true,"errors":[],"skill":{"name":"quarterly-qa","description":"季報問答","required_role":"USER","kind":"flow"}}"""));
     }
 
     public Task<JsonElement> ValidateBusinessWorkflowAsync(

@@ -14,6 +14,7 @@ namespace Platform.Service;
 public sealed class WorkflowEngineClient : IWorkflowEngineClient
 {
     private const string FailurePrefix = "工作流服務呼叫失敗：";
+    private const string ArtifactUsageOriginHeader = "X-Artifact-Usage-Origin";
 
     private readonly HttpClient _http;
     private readonly WorkflowOptions _options;
@@ -37,9 +38,16 @@ public sealed class WorkflowEngineClient : IWorkflowEngineClient
 
     /// <summary>執行 skill:錯誤碼映射見 MapInvokeErrorAsync。</summary>
     public async Task<JsonElement> InvokeSkillAsync(
-        string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default)
+        string name, Dictionary<string, JsonElement> input, UserContext ctx,
+        ArtifactUsageOrigin origin, CancellationToken ct = default)
     {
         using var req = BuildRequest(HttpMethod.Post, $"{BaseUrl}/skills/{name}/invoke", ctx, new { input });
+        req.Headers.Add(ArtifactUsageOriginHeader, origin switch
+        {
+            ArtifactUsageOrigin.PublicSkills => "public_skills",
+            ArtifactUsageOrigin.WorkflowUnifiedInvoke => "workflow_unified_invoke",
+            _ => throw new ArgumentOutOfRangeException(nameof(origin)),
+        });
         using var resp = await SendAsync(req, FailurePrefix, ct);
 
         if (!resp.IsSuccessStatusCode)
@@ -153,6 +161,7 @@ public sealed class WorkflowEngineClient : IWorkflowEngineClient
         string path, string definition, UserContext ctx, CancellationToken ct)
     {
         using var req = BuildRequest(HttpMethod.Post, BaseUrl + path, ctx, new { definition });
+        req.Headers.Add(ArtifactUsageOriginHeader, "dependency");
         using var resp = await SendAsync(req, FailurePrefix, ct);
         if (!resp.IsSuccessStatusCode)
         {

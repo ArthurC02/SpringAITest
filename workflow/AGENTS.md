@@ -32,6 +32,7 @@ New Skill Engine endpoints (all require `X-Internal-Token` and identity headers)
 - `GET /skills` — unified catalog of Agent Skills and Business Workflows with trusted `kind`, schemas, and fail-closed `bindable`; builtin is false, custom is true only with a positive persisted `current_revision`.
 - `POST /business-workflows/validate` — validate a Business Workflow YAML definition (syntax + schema check). `POST /skills/validate` is the same-handler compatibility alias; P5/C8 do not remove it, and retirement requires a separate consumer inventory, usage-zero, and rollback gate.
 - `POST /skills/{name}/invoke` — unified execution of either stored artifact kind; Business Workflows run through the lightweight flow governance wrapper, while Agent Skills keep their separate graph bridge. Returns `{skill, output}`.
+- P3-R2 evidence counts direct validation only when it is not a marked dependency hop, counts unified invoke exactly once after trusted kind resolution, and emits the fixed-schema JSON evidence line; missing/invalid origin is `unknown_origin`, not silently treated as internal traffic. See the [runtime evidence contract](../plans/architecture-hard-reset/09-p3-r2-runtime-evidence-contract.md).
 
 Business Rule runtime endpoints (internal .NET integration contract; all require
 `X-Internal-Token` plus identity headers):

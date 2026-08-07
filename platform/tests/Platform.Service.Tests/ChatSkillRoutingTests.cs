@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
@@ -306,6 +307,9 @@ public sealed class ChatSkillRoutingTests
         Assert.Equal("比較 Q1 與 Q2", invoke.Input["question_text"].GetString());
         Assert.Equal("demo-a", invoke.Ctx.TenantCode);
         Assert.Equal("USER", invoke.Ctx.Role);
+        Assert.Equal(
+            ArtifactUsageOrigin.WorkflowUnifiedInvoke,
+            Assert.Single(wf.SkillInvokeOrigins));
     }
 
     // ---- T8 / CSR-P1-016:標準 output key 取值 ----

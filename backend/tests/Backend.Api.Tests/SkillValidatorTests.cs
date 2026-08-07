@@ -43,6 +43,9 @@ public sealed class SkillValidatorTests
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
         Assert.Equal("admin-a", stub.Header("X-User-Id"));
         Assert.Equal("ADMIN", stub.Header("X-User-Role"));
+        Assert.Equal(
+            WorkflowSkillValidator.DependencyOrigin,
+            stub.Header(WorkflowSkillValidator.ArtifactUsageOriginHeader));
         Assert.Contains("\"definition\"", stub.LastBody);
     }
 

@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from starlette.formparsers import MultiPartException, MultiPartParser as StarletteMultiPartParser
 from starlette.datastructures import FormData, UploadFile
 
-from app import backend_http, correlation, skills, tracing
+from app import backend_http, correlation, skills, tracing, usage_evidence
 from app.business_rules.catalog import catalog_response as business_rule_catalog
 from app.business_rules.models import (
     RuleCatalogResponse,
@@ -199,6 +199,47 @@ from app.health import WorkflowReadinessProbe, live_report
 logger = logging.getLogger(__name__)
 
 
+def _invoke_surface(request: Request) -> str:
+    origin = request.headers.get("X-Artifact-Usage-Origin")
+    if origin in {"public_skills", "workflow_unified_invoke"}:
+        return origin
+    return "unknown_origin"
+
+
+def _usage_outcome(status_code: int) -> str:
+    if status_code == 404:
+        return "not_found"
+    if status_code < 500:
+        return "rejected"
+    return "error"
+
+
+async def _count_unified_invoke(request: Request):
+    """只在 handler 已放入可信 artifact type 後，為一次統一 invoke 收尾計數。"""
+    outcome = "success"
+    try:
+        yield
+    except RequestValidationError:
+        outcome = "rejected"
+        raise
+    except HTTPException as exc:
+        outcome = _usage_outcome(exc.status_code)
+        raise
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        usage_evidence.record(
+            surface=_invoke_surface(request),
+            operation="invoke",
+            resolved_artifact_type=getattr(
+                request.state, "usage_resolved_artifact_type", "unknown"
+            ),
+            outcome=outcome,
+        )
+        request.state.usage_evidence_counted = True
+
+
 def _clean_skill_input(raw: dict) -> dict:
     """skill invoke 的 input 過濾：剝除保留鍵、引擎鍵與引擎內部鍵。
 
@@ -377,6 +418,27 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="springaitest-workflow", lifespan=lifespan)
 app.state.readiness_probe = WorkflowReadinessProbe()
+
+
+@app.middleware("http")
+async def count_pre_controller_invoke(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if (
+        path.startswith("/skills/")
+        and path.endswith("/invoke")
+        and response.status_code >= 400
+        and not getattr(request.state, "usage_evidence_counted", False)
+    ):
+        usage_evidence.record(
+            surface="unknown_origin",
+            operation="invoke",
+            resolved_artifact_type="unknown",
+            outcome=_usage_outcome(response.status_code),
+        )
+    return response
+
+
 app.add_middleware(JsonRequestLimitMiddleware)
 app.add_middleware(
     FeatureGateMiddleware,
@@ -407,21 +469,36 @@ async def bounded_business_rule_request_error(
     request: Request, exc: RequestValidationError
 ):
     """Do not reflect unbounded Pydantic errors or attacker-controlled inputs."""
-    if request.url.path not in {
+    if request.url.path in {
         "/business-rules/validate",
         "/business-rules/simulate",
     }:
-        return await request_validation_exception_handler(request, exc)
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": {
-                "error": "business_rule_request_invalid",
-                "message": "Business Rule request body is invalid.",
-                "field_errors": {"request": "Check the request schema and types."},
-            }
-        },
-    )
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "error": "business_rule_request_invalid",
+                    "message": "Business Rule request body is invalid.",
+                    "field_errors": {"request": "Check the request schema and types."},
+                }
+            },
+        )
+    validation_surfaces = {
+        "/skills/validate": "workflow_validate_alias",
+        "/business-workflows/validate": "workflow_business_workflows_validate",
+    }
+    surface = validation_surfaces.get(request.url.path)
+    if (
+        surface is not None
+        and request.headers.get("X-Artifact-Usage-Origin") != "dependency"
+    ):
+        usage_evidence.record(
+            surface=surface,
+            operation="validate",
+            resolved_artifact_type="unknown",
+            outcome="rejected",
+        )
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/health/live")
@@ -604,6 +681,7 @@ async def list_skills(ctx: RequestContext = Depends(get_context)) -> list[SkillI
 @app.post("/skills/validate", response_model=ValidationResult, response_model_exclude_none=True)
 async def validate_skill(
     req: SkillValidateRequest,
+    request: Request,
     ctx: RequestContext = Depends(get_context),
 ) -> ValidationResult:
     """對一份 Business Workflow 定義原文跑全部靜態驗證。
@@ -622,7 +700,31 @@ async def validate_skill(
     platform proxy 都會轉發真實作者身分），非 ADMIN 提交含 script 步驟的定義即驗證失敗。
     僅在此寫入路徑生效；不改 required_role 語意，也不影響 invoke／custom.load。
     """
-    return validate_source(req.definition, author_role=ctx.role)
+    count_usage = request.headers.get("X-Artifact-Usage-Origin") != "dependency"
+    surface = (
+        "workflow_validate_alias"
+        if request.url.path == "/skills/validate"
+        else "workflow_business_workflows_validate"
+    )
+    try:
+        result = validate_source(req.definition, author_role=ctx.role)
+    except BaseException:
+        if count_usage:
+            usage_evidence.record(
+                surface=surface,
+                operation="validate",
+                resolved_artifact_type="unknown",
+                outcome="error",
+            )
+        raise
+    if count_usage:
+        usage_evidence.record(
+            surface=surface,
+            operation="validate",
+            resolved_artifact_type="business_workflow" if result.valid else "unknown",
+            outcome="success" if result.valid else "rejected",
+        )
+    return result
 
 
 @app.post(
@@ -674,7 +776,9 @@ async def validate_package(
 async def invoke_skill(
     name: str,
     req: InvokeRequest,
+    request: Request,
     ctx: RequestContext = Depends(get_context),
+    _usage: None = Depends(_count_unified_invoke),
 ) -> SkillInvokeResponse:
     """執行指定 skill（內建或本租戶自訂）。驗證順序：
     存在（404）→ 角色（403）→ input schema（422）→ 逾時（504）／未預期例外（500）。
@@ -717,6 +821,10 @@ async def invoke_skill(
                 "skills": [s.skill.name for s in skills.all_skills()],
             },
         )
+
+    request.state.usage_resolved_artifact_type = (
+        "business_workflow" if loaded.skill.kind == "flow" else "agent_skill"
+    )
 
     _require_role(loaded.skill.required_role, ctx, name)
     _validate_input(loaded.input_model, req.input, name)

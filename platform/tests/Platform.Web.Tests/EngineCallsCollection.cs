@@ -9,7 +9,7 @@ namespace Platform.Web.Tests;
 /// (CatalogOverride/SkillInvokes 這些靜態注入點同理需要序列化;P4 起 CopilotAguiApiTests 也會
 /// 改動它們,見該類別 XML doc。)
 /// </summary>
-[CollectionDefinition("EngineCalls")]
+[CollectionDefinition("EngineCalls", DisableParallelization = true)]
 public sealed class EngineCallsCollection
 {
 }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
@@ -25,7 +26,8 @@ public sealed class WorkflowEngineClientTests
         var stub = new StubHttpMessageHandler(_ =>
             TestHttp.Json(HttpStatusCode.OK, "{\"skill\":\"quarterly-qa\",\"output\":{\"answer\":\"42\",\"trace\":[]}}"));
 
-        var result = await Build(stub).InvokeSkillAsync("quarterly-qa", Input(), Ctx);
+        var result = await Build(stub).InvokeSkillAsync(
+            "quarterly-qa", Input(), Ctx, ArtifactUsageOrigin.PublicSkills);
 
         Assert.Equal("http://downstream/skills/quarterly-qa/invoke", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
@@ -33,6 +35,7 @@ public sealed class WorkflowEngineClientTests
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
         Assert.Equal("alice", stub.Header("X-User-Id"));
         Assert.Equal("USER", stub.Header("X-User-Role"));
+        Assert.Equal("public_skills", stub.Header("X-Artifact-Usage-Origin"));
 
         // 引擎輸出原樣穿透(含 trace 這類代理層不認識的鍵)。
         Assert.Equal("quarterly-qa", result.GetProperty("skill").GetString());
@@ -42,6 +45,17 @@ public sealed class WorkflowEngineClientTests
         // 請求 body 是 {"input": {...}}。
         using var doc = JsonDocument.Parse(stub.LastBody!);
         Assert.Equal("hi", doc.RootElement.GetProperty("input").GetProperty("q").GetString());
+    }
+
+    [Fact]
+    public async Task InvokeSkill_ChatOrigin_SendsWorkflowUnifiedInvoke()
+    {
+        var stub = new StubHttpMessageHandler(_ => TestHttp.Json(HttpStatusCode.OK, "{}"));
+
+        await Build(stub).InvokeSkillAsync(
+            "kb-query", Input(), Ctx, ArtifactUsageOrigin.WorkflowUnifiedInvoke);
+
+        Assert.Equal("workflow_unified_invoke", stub.Header("X-Artifact-Usage-Origin"));
     }
 
     // skill invoke 的下游狀態碼映射:見 MapInvokeErrorAsync。
@@ -56,7 +70,8 @@ public sealed class WorkflowEngineClientTests
     {
         var svc = Build(new StubHttpMessageHandler(_ => new HttpResponseMessage((HttpStatusCode)status)));
 
-        var ex = await Assert.ThrowsAnyAsync<Exception>(() => svc.InvokeSkillAsync("s", Input(), Ctx));
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => svc.InvokeSkillAsync(
+            "s", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
 
         Assert.IsType(expected, ex);
     }
@@ -69,7 +84,8 @@ public sealed class WorkflowEngineClientTests
             """{"detail":{"error":"request_too_large","message":"internal parser detail","field_errors":{"secret":"must not escape"}}}""")));
 
         var error = await Assert.ThrowsAsync<WorkflowPayloadTooLargeException>(() =>
-            service.InvokeSkillAsync("quarterly-qa", Input(), Ctx));
+            service.InvokeSkillAsync(
+                "quarterly-qa", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
 
         Assert.Equal("Skill request exceeds the allowed size", error.Message);
         Assert.DoesNotContain("internal parser detail", error.Message);
@@ -83,7 +99,8 @@ public sealed class WorkflowEngineClientTests
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
             """{"detail":{"error":"workflow_input_invalid","message":"輸入資料有 2 個欄位需要修正","field_errors":{"query":"「query」為必填。","top_k":"「top_k」必須是整數。"}}}"""));
 
-        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync(
+            "s", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
 
         // message = detail.message,乾淨且不含原始 body。
         Assert.Equal("輸入資料有 2 個欄位需要修正", ex.Message);
@@ -105,7 +122,8 @@ public sealed class WorkflowEngineClientTests
     {
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422, body));
 
-        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync(
+            "s", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
 
         Assert.Equal("Skill 輸入不符合規範", ex.Message);
         Assert.Null(ex.FieldErrors);
@@ -118,7 +136,8 @@ public sealed class WorkflowEngineClientTests
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
             """{"detail":{"field_errors":{"query":"「query」為必填。"}}}"""));
 
-        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync(
+            "s", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
 
         Assert.Equal("Skill 輸入不符合規範", ex.Message);
         Assert.NotNull(ex.FieldErrors);
@@ -132,7 +151,8 @@ public sealed class WorkflowEngineClientTests
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
             """{"detail":{"error":"workflow_input_invalid","message":"輸入資料不符合 schema","field_errors":{}}}"""));
 
-        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync(
+            "s", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
 
         Assert.Equal("輸入資料不符合 schema", ex.Message);
         Assert.Null(ex.FieldErrors);
@@ -145,7 +165,8 @@ public sealed class WorkflowEngineClientTests
         var stub = new StubHttpMessageHandler(_ => TestHttp.Json((HttpStatusCode)422,
             """{"detail":{"message":"   ","field_errors":{"query":"「query」為必填。"}}}"""));
 
-        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync("s", Input(), Ctx));
+        var ex = await Assert.ThrowsAsync<WorkflowBadInputException>(() => Build(stub).InvokeSkillAsync(
+            "s", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
 
         Assert.Equal("Skill 輸入不符合規範", ex.Message);
         Assert.NotNull(ex.FieldErrors);
@@ -157,7 +178,8 @@ public sealed class WorkflowEngineClientTests
     {
         var svc = Build(new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒")));
 
-        await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.InvokeSkillAsync("s", Input(), Ctx));
+        await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.InvokeSkillAsync(
+            "s", Input(), Ctx, ArtifactUsageOrigin.PublicSkills));
     }
 
     [Fact] // 引擎契約:validate 一律回 200,valid/errors 在 body — 代理層不得把 valid:false 轉成錯誤。
@@ -171,6 +193,7 @@ public sealed class WorkflowEngineClientTests
 
         Assert.Equal("http://downstream/skills/validate", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
+        Assert.Equal("dependency", stub.Header("X-Artifact-Usage-Origin"));
         Assert.False(result.GetProperty("valid").GetBoolean());
         Assert.Equal("unbounded_loop", result.GetProperty("errors")[0].GetProperty("code").GetString());
         Assert.Equal("agentic", result.GetProperty("skill").GetProperty("kind").GetString());
@@ -202,6 +225,7 @@ public sealed class WorkflowEngineClientTests
             stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
         Assert.Equal("demo-a", stub.Header("X-Tenant-Id"));
+        Assert.Equal("dependency", stub.Header("X-Artifact-Usage-Origin"));
         Assert.True(result.GetProperty("valid").GetBoolean());
     }
 

@@ -62,6 +62,8 @@ public sealed class BusinessWorkflowController : ControllerBase
     [HttpPost("validate")]
     public async Task<ActionResult<JsonElement>> Validate(
         [FromBody] SkillUpsert request, CancellationToken ct)
-        => Ok(await _engine.ValidateBusinessWorkflowAsync(
-            request.Definition!, User.ToUserContext(), ct));
+        => Ok(await ArtifactCompatibilityUsageMetrics.TrackValidationAsync(
+            HttpContext, "public_business_workflows",
+            () => _engine.ValidateBusinessWorkflowAsync(
+                request.Definition!, User.ToUserContext(), ct)));
 }

@@ -13,6 +13,9 @@ namespace Backend.Api.BusinessWorkflows;
 /// </summary>
 public sealed class WorkflowSkillValidator(HttpClient http, string baseUrl, string internalToken) : ISkillValidator
 {
+    public const string ArtifactUsageOriginHeader = "X-Artifact-Usage-Origin";
+    public const string DependencyOrigin = "dependency";
+
     private readonly string _baseUrl = baseUrl.TrimEnd('/');
 
     public async Task<SkillValidationResult> ValidateAsync(
@@ -23,6 +26,7 @@ public sealed class WorkflowSkillValidator(HttpClient http, string baseUrl, stri
             Content = JsonContent.Create(new { definition }, options: InternalWorkflowClient.Options),
         };
         req.UseInternalIdentity(internalToken, tenantId, userId, role);
+        req.Headers.Add(ArtifactUsageOriginHeader, DependencyOrigin);
 
         var body = await http.SendJsonAsync<ValidateBody>(req, Failure, InternalWorkflowClient.Options, ct);
 

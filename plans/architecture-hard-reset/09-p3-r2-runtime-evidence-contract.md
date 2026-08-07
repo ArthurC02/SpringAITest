@@ -2,6 +2,8 @@
 
 > Status: DESIGN COMPLETE, EVIDENCE PENDING (2026-08-07). This document does not authorize C8, route removal, schema changes, or production SQL.
 
+> Implementation checkpoint (2026-08-08): bounded counters, fixed-schema JSON events, `scripts/export-artifact-compatibility-usage-v1.py`, and unit coverage are implemented. Production log retention/extraction, deployment observation, final approval-bundle assembly, external consumer attestation, rollback proof, and approval remain pending.
+
 ## 1. Decision boundary
 
 P3-R2 supplies the evidence contract for one possible cleanup only: removing Business Workflow compatibility operations from the public `/api/skills*` surface while retaining Agent Skill behavior. It does not authorize removing either Workflow-internal compatibility surface:
@@ -51,13 +53,14 @@ Artifact names, tenant IDs, user IDs, correlation IDs, revisions, request paths,
 
 ## 4. Counting authority and deduplication
 
-One user operation produces one count. Internal proxy and validation hops do not count again.
+One user operation produces one count. Internal proxy and validation hops do not count again. A mixed list is the sole set-valued exception: it emits one row for each represented bounded artifact type, so Business Workflow visibility is not collapsed into `unknown`.
 
 | Operation | Counting authority | Rule |
 | --- | --- | --- |
 | Public create/update/import/restore/delete | Backend | Resolve type first. Count success only after commit; count rejected, not-found, or error once the final result is known, using the resolved type or `unknown`. For delete, resolve type before deletion. |
-| Public list/read/export/package/revision/execution-artifact | Backend | Count once after stored metadata resolves the returned or rejected artifact type. |
+| Public list/read/export/package/revision/execution-artifact | Backend | Count once after stored metadata resolves the returned or rejected artifact type. A mixed list emits one row per represented bounded artifact type. |
 | Public validation | Outermost public service handling that request | Count once and preserve whether the caller used canonical Business Workflow validation or the Skill compatibility surface; downstream validation HTTP calls are dependencies. |
+| Public invoke rejected before Workflow | Platform | Count only pre-controller 4xx/5xx that never reach Workflow, with `unknown` type. Once the Platform action is reached, Workflow remains the sole invoke authority. |
 | Unified invoke | Workflow | Count once after the loader resolves `agent_skill` versus `business_workflow`. Platform forwards a server-derived, bounded origin (`public_skills` for its public compatibility controller; `workflow_unified_invoke` for chat/internal execution) over the trusted internal hop; it must ignore/replace any caller-supplied origin. Workflow uses that origin as `surface`. Platform and Backend lookup/proxy hops do not count. |
 | Chat routing | Workflow invoke boundary | Each actually executed artifact is one invoke. A `kb-query` then `rag-qa` fallback is two invocations, correlated by tracing rather than collapsed. |
 
@@ -112,11 +115,13 @@ The minimum observation duration is a release decision based on actual caller ca
 
 ## 7. Implementation posture
 
-Use the services' existing metrics/tracing stack and a versioned export query. Do not add a compatibility-usage database table merely to satisfy P3-R2. `operations_release_audit` and `operations_execution_metric` have different schemas and governance meaning and must not be overloaded. If production operations later require durable per-event querying beyond telemetry retention, design a separate bounded ledger as a new decision.
+Each authoritative counter also emits one redacted, fixed-schema JSON line named `artifact_compatibility_usage_total`. Deployment log collection must retain or extract those lines into per-service-instance JSONL sources covering the entire declared window. `scripts/export-artifact-compatibility-usage-v1.py` validates the source manifest, complete coverage, deployment-version consistency, bounded dimensions, counting authority, and absence of `unknown_origin`, then emits every applicable zero row. It intentionally uses only the Python standard library.
+
+Do not add a compatibility-usage database table merely to satisfy P3-R2. `operations_release_audit` and `operations_execution_metric` have different schemas and governance meaning and must not be overloaded. If production operations later require durable per-event querying beyond telemetry retention, design a separate bounded ledger as a new decision.
 
 ## 8. Exit states
 
-- **DESIGN COMPLETE, EVIDENCE PENDING:** this document is reviewed; instrumentation, observation, external attestation, or approval is incomplete.
+- **DESIGN COMPLETE, EVIDENCE PENDING:** the contract, bounded counting implementation, structured event, and versioned exporter are reviewed, but production extraction/deployment/observation, external attestation, rollback proof, or approval is incomplete.
 - **EVIDENCE COMPLETE, APPROVAL PENDING:** a valid bundle exists and all consumer entries are resolved, but no human decision is recorded.
 - **C8 APPROVED:** the evidence bundle digest and named approval are recorded after the rollback window ends. This authorizes only the public narrowing described in section 1.
 - **REJECTED/BLOCKED:** any unknown consumer, nonzero unowned use, telemetry gap, or missing rollback proof blocks narrowing without changing current routes.

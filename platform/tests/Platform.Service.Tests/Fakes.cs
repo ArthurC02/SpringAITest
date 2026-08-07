@@ -195,13 +195,14 @@ public sealed class FakeWorkflowEngineClient : IWorkflowEngineClient
 
     /// <summary>skill invoke 呼叫序:name + input 字典 + 身分,供斷言。</summary>
     public List<(string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)> SkillInvokes { get; } = new();
+    public List<ArtifactUsageOrigin> SkillInvokeOrigins { get; } = new();
 
     public (string Name, Dictionary<string, System.Text.Json.JsonElement> Input, UserContext Ctx)? LastSkillInvoke
         => SkillInvokes.Count > 0 ? SkillInvokes[^1] : null;
 
     public Task<System.Text.Json.JsonElement> InvokeSkillAsync(
         string name, Dictionary<string, System.Text.Json.JsonElement> input, UserContext ctx,
-        CancellationToken ct = default)
+        ArtifactUsageOrigin origin, CancellationToken ct = default)
     {
         if (ThrowOnSkillInvoke is not null)
         {
@@ -209,6 +210,7 @@ public sealed class FakeWorkflowEngineClient : IWorkflowEngineClient
         }
 
         SkillInvokes.Add((name, input, ctx));
+        SkillInvokeOrigins.Add(origin);
         if (SkillOutputByName is not null && SkillOutputByName.TryGetValue(name, out var byName))
         {
             return Task.FromResult(byName);

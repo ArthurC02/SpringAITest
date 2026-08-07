@@ -14,7 +14,8 @@ public interface IWorkflowEngineClient
     /// 代理層若套 DTO,引擎新增欄位就會被靜默吃掉。
     /// </summary>
     Task<JsonElement> InvokeSkillAsync(
-        string name, Dictionary<string, JsonElement> input, UserContext ctx, CancellationToken ct = default);
+        string name, Dictionary<string, JsonElement> input, UserContext ctx,
+        ArtifactUsageOrigin origin, CancellationToken ct = default);
 
     /// <summary>P2–P5/C8 前透過 /skills/validate 保留的 Business Workflow 驗證相容別名；新呼叫端使用 /business-workflows/validate。
     /// 引擎一律回 200,驗證結果({valid, errors, skill})在 body — 原樣穿透。</summary>
@@ -49,4 +50,10 @@ public interface IWorkflowEngineClient
     /// <summary>Run Workflow's production evaluator with supplied dry-run facts; never calls real tools.</summary>
     Task<JsonElement> SimulateBusinessRulesAsync(
         BusinessRuleSimulateRequest request, UserContext ctx, CancellationToken ct = default);
+}
+
+public enum ArtifactUsageOrigin
+{
+    PublicSkills,
+    WorkflowUnifiedInvoke,
 }

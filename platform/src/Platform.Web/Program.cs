@@ -595,6 +595,7 @@ UseDisabledFeatureGate(
     "功能尚未啟用");
 
 // 刻意不用 UseHttpsRedirection:容器內對外是 http(:8080)。
+app.Use(Platform.Web.Controllers.ArtifactCompatibilityUsageMetrics.CountPreControllerFailureAsync);
 app.UseAuthentication();
 app.UseAuthorization();
 

@@ -202,6 +202,7 @@ if (!builder.Environment.IsEnvironment("Testing"))
 // MVC + 驗證失敗回應(統一 ApiError)
 // ---------------------------------------------------------------------------
 builder.Services.AddControllers();
+builder.Services.AddSingleton(ArtifactCompatibilityUsageMetrics.Shared);
 builder.Services.Configure<ApiBehaviorOptions>(options =>
 {
     options.InvalidModelStateResponseFactory = ValidationErrorResponse.Create;
@@ -224,6 +225,10 @@ if (!app.Environment.IsEnvironment("Testing") && !useInMemoryDb)
 }
 
 app.UseExceptionHandler();
+
+// Complete outside MVC action instrumentation so middleware/filter/model-binding failures are
+// visible. This must run before the internal-token gate to observe rejected callers.
+app.UseMiddleware<ArtifactCompatibilityUsageMiddleware>();
 
 // 內部憑證守門(只有明確 health 端點免驗);置於例外處理之後、路由之前。
 if (!agentWriteToolsEnabled)

@@ -490,7 +490,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
             {
                 [inputKey] = JsonSerializer.SerializeToElement(arg),
             };
-            var res = await workflows.InvokeSkillAsync(name, input, userCtx, ct);
+            var res = await workflows.InvokeSkillAsync(
+                name, input, userCtx, ArtifactUsageOrigin.WorkflowUnifiedInvoke, ct);
 
             if (name == "kb-query" && IsAbstain(res))
             {
@@ -498,7 +499,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
                 {
                     ["question"] = JsonSerializer.SerializeToElement(arg),
                 };
-                var rag = await workflows.InvokeSkillAsync("rag-qa", ragInput, userCtx, ct);
+                var rag = await workflows.InvokeSkillAsync(
+                    "rag-qa", ragInput, userCtx, ArtifactUsageOrigin.WorkflowUnifiedInvoke, ct);
                 return "嚴格稽核查詢因證據不足而棄答;以下是一般知識庫檢索(不含稽核保證)的結果:"
                     + ExtractSkillAnswer(rag);
             }

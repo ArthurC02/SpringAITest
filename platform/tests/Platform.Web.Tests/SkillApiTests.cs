@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
+using Platform.Service.Abstractions;
 
 namespace Platform.Web.Tests;
 
@@ -459,13 +460,22 @@ public sealed class SkillApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Invoke_Returns200_WithEngineOutput()
     {
-        var resp = await _factory.AdminClient().PostAsJsonAsync(
-            "/api/skills/quarterly-qa/invoke", new { input = new { query = "2025Q3" } });
+        FakeWorkflowEngineClient.SkillInvokeOrigins.Clear();
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/skills/quarterly-qa/invoke")
+        {
+            Content = JsonContent.Create(new { input = new { query = "2025Q3" } }),
+        };
+        request.Headers.Add("X-Artifact-Usage-Origin", "workflow_unified_invoke");
+
+        var resp = await _factory.AdminClient().SendAsync(request);
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var body = await resp.ReadJsonAsync();
         Assert.Equal("quarterly-qa", body["skill"]!.GetValue<string>());
         Assert.Equal("42", body["output"]!["answer"]!.GetValue<string>());
+        Assert.Equal(
+            ArtifactUsageOrigin.PublicSkills,
+            Assert.Single(FakeWorkflowEngineClient.SkillInvokeOrigins));
     }
 
     // invoke body 的 input 是必填([Required]):缺欄位在 model binding 階段就被 [ApiController] 擋下,

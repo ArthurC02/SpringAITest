@@ -169,11 +169,17 @@ public sealed class SkillController : ControllerBase
     [HttpPost("validate")]
     public async Task<ActionResult<JsonElement>> Validate(
         [FromBody] SkillUpsert request, CancellationToken ct)
-        => Ok(await _engine.ValidateSkillAsync(request.Definition!, User.ToUserContext(), ct));
+        => Ok(await ArtifactCompatibilityUsageMetrics.TrackValidationAsync(
+            HttpContext, "public_skills",
+            () => _engine.ValidateSkillAsync(request.Definition!, User.ToUserContext(), ct)));
 
     /// <summary>執行 Skill;錯誤碼映射見 WorkflowEngineClient.MapInvokeErrorAsync。</summary>
     [HttpPost("{name}/invoke")]
     public async Task<ActionResult<JsonElement>> Invoke(
         string name, [FromBody] WorkflowInvokeRequest request, CancellationToken ct)
-        => Ok(await _engine.InvokeSkillAsync(name, request.Input!, User.ToUserContext(), ct));
+    {
+        ArtifactCompatibilityUsageMetrics.MarkActionReached(HttpContext);
+        return Ok(await _engine.InvokeSkillAsync(
+            name, request.Input!, User.ToUserContext(), ArtifactUsageOrigin.PublicSkills, ct));
+    }
 }

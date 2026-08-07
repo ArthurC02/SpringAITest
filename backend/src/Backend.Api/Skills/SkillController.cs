@@ -20,6 +20,7 @@ namespace Backend.Api.Skills;
 [Route("api/skills")]
 public sealed class SkillController : ControllerBase
 {
+    private const string Surface = "public_skills";
     /// <summary>
     /// 匯入上傳的傳輸層粗略上限(transport-safe pre-check,03-design §2.1)。
     /// 這**不是** archive 結構限制(檔案數/單檔/解壓/壓縮比上限由 workflow parser 單一來源持有,R2);
@@ -42,14 +43,23 @@ public sealed class SkillController : ControllerBase
 
     /// <summary>列出本租戶所有啟用中的 skill(不含 definition 內文)。</summary>
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<SkillInfo>>> List(CancellationToken ct)
-        => Ok(await _repo.ListAsync(Request.RequireTenant(), ct));
+    public Task<ActionResult<IReadOnlyList<SkillInfo>>> List(CancellationToken ct)
+        => Track("list", async usage =>
+        {
+            var skills = await _repo.ListAsync(Request.RequireTenant(), ct);
+            usage.Resolve(skills.Select(skill => skill.Kind));
+            return (ActionResult<IReadOnlyList<SkillInfo>>)Ok(skills);
+        });
 
     /// <summary>取單筆完整 skill(含 definition 原文)。package bytes 不外洩(Skill.Package 標 JsonIgnore)。</summary>
     [HttpGet("{name}")]
-    public async Task<ActionResult<Skill>> Get(string name, CancellationToken ct)
-        => Ok(await _repo.GetAsync(Request.RequireTenant(), name, ct)
-              ?? throw NotFound(name));
+    public Task<ActionResult<Skill>> Get(string name, CancellationToken ct)
+        => Track("read", async usage =>
+        {
+            var skill = await _repo.GetAsync(Request.RequireTenant(), name, ct);
+            usage.Resolve(skill?.Kind);
+            return (ActionResult<Skill>)Ok(skill ?? throw NotFound(name));
+        });
 
     /// <summary>
     /// 匯出為 zip。flow:SkillExporter 組自含式 `{name}/SKILL.md`(定義值內嵌 ```yaml block、無獨立 skill.yaml;與 GET {name} 同資料,只是打包)。
@@ -60,8 +70,16 @@ public sealed class SkillController : ControllerBase
     [HttpGet("{name}/export")]
     public async Task<IActionResult> Export(string name, CancellationToken ct)
     {
-        var skill = await _repo.GetAsync(Request.RequireTenant(), name, ct) ?? throw NotFound(name);
-        return File(skill.Package ?? SkillExporter.ToZip(skill), "application/zip", $"{skill.Name}.zip");
+        return await Track<IActionResult>("export", async usage =>
+        {
+            var skill = await _repo.GetAsync(Request.RequireTenant(), name, ct);
+            usage.Resolve(skill?.Kind);
+            if (skill is null)
+            {
+                throw NotFound(name);
+            }
+            return File(skill.Package ?? SkillExporter.ToZip(skill), "application/zip", $"{skill.Name}.zip");
+        });
     }
 
     /// <summary>
@@ -73,30 +91,38 @@ public sealed class SkillController : ControllerBase
     [HttpGet("{name}/package")]
     public async Task<IActionResult> GetPackage(string name, CancellationToken ct)
     {
-        var skill = await _repo.GetAsync(Request.RequireTenant(), name, ct);
-        if (skill is null
-            || !string.Equals(skill.Kind, "agentic", StringComparison.Ordinal)
-            || skill.Package is null)
+        return await Track<IActionResult>("package", async usage =>
         {
-            throw NotFound(name);
-        }
+            var skill = await _repo.GetAsync(Request.RequireTenant(), name, ct);
+            usage.Resolve(skill?.Kind);
+            if (skill is null
+                || !string.Equals(skill.Kind, "agentic", StringComparison.Ordinal)
+                || skill.Package is null)
+            {
+                throw NotFound(name);
+            }
 
-        return File(skill.Package, "application/zip");
+            return File(skill.Package, "application/zip");
+        });
     }
 
     /// <summary>唯讀 revision 歷史(依 revision 遞減);軟刪的 skill 其歷史仍查得到(稽核紅線)。</summary>
     [HttpGet("{name}/revisions")]
     public async Task<ActionResult<IReadOnlyList<SkillRevisionInfo>>> Revisions(string name, CancellationToken ct)
     {
-        var revisions = await _repo.ListRevisionsAsync(Request.RequireTenant(), name, ct);
-
-        // 每個 skill 建立時必寫 revision 1 → 空清單只可能是「本租戶沒有這個 skill」。
-        if (revisions.Count == 0)
+        return await Track("revision_read", async usage =>
         {
-            throw NotFound(name);
-        }
+            var revisions = await _repo.ListRevisionsAsync(Request.RequireTenant(), name, ct);
+            usage.Resolve(revisions.Select(revision => revision.Kind));
 
-        return Ok(revisions);
+            // 每個 skill 建立時必寫 revision 1 → 空清單只可能是「本租戶沒有這個 skill」。
+            if (revisions.Count == 0)
+            {
+                throw NotFound(name);
+            }
+
+            return (ActionResult<IReadOnlyList<SkillRevisionInfo>>)Ok(revisions);
+        });
     }
 
     /// <summary>
@@ -109,7 +135,10 @@ public sealed class SkillController : ControllerBase
     public async Task<ActionResult<SkillExecutionArtifact>> ExecutionArtifact(
         string name, int revision, CancellationToken ct)
     {
+        return await Track("execution_artifact", async usage =>
+        {
         var row = await _repo.GetRevisionAsync(Request.RequireTenant(), name, revision, ct);
+        usage.Resolve(row?.Kind);
         if (row is null)
         {
             throw ApiErrors.NotFound(" Skill revision", $"{name}#{revision}");
@@ -127,7 +156,7 @@ public sealed class SkillController : ControllerBase
             throw new InvalidOperationException($"Skill revision package hash mismatch：{name}#{revision}");
         }
 
-        return Ok(new SkillExecutionArtifact(
+        return (ActionResult<SkillExecutionArtifact>)Ok(new SkillExecutionArtifact(
             name,
             row.Revision,
             row.Kind,
@@ -135,6 +164,7 @@ public sealed class SkillController : ControllerBase
             row.DefinitionSha256,
             packageSha,
             row.Package is null ? null : Convert.ToBase64String(row.Package)));
+        });
     }
 
     /// <summary>建立 skill — 201(revision 1)。定義未通過引擎驗證 → 422;同名(含既有工作流)→ 409。僅 flow。</summary>
@@ -142,22 +172,26 @@ public sealed class SkillController : ControllerBase
     [AdminOnly("權限不足，無法存取 Skill")]
     public async Task<ActionResult<Skill>> Create([FromBody] SkillUpsert request, CancellationToken ct)
     {
-        var tenantId = Request.RequireTenant();
-        var meta = await ValidateAsync(request.Definition!, tenantId, ct);
-        if (SkillNameRules.ReservedBusinessWorkflowNames.Contains(meta.Name))
+        return await Track("create", async usage =>
         {
-            throw new ApiException(StatusCodes.Status409Conflict, "名稱與既有工作流同名，無法建立：" + meta.Name);
-        }
+            var tenantId = Request.RequireTenant();
+            var meta = await ValidateAsync(request.Definition!, tenantId, ct);
+            usage.Resolve(meta.Kind);
+            if (SkillNameRules.ReservedBusinessWorkflowNames.Contains(meta.Name))
+            {
+                throw new ApiException(StatusCodes.Status409Conflict, "名稱與既有工作流同名，無法建立：" + meta.Name);
+            }
 
-        var created = await _repo.CreateAsync(
-            tenantId, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
-            Request.UserIdOrEmpty(), ct);
-        if (created is null)
-        {
-            throw new ApiException(StatusCodes.Status409Conflict, "Skill 名稱已存在：" + meta.Name);
-        }
+            var created = await _repo.CreateAsync(
+                tenantId, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+                Request.UserIdOrEmpty(), ct);
+            if (created is null)
+            {
+                throw new ApiException(StatusCodes.Status409Conflict, "Skill 名稱已存在：" + meta.Name);
+            }
 
-        return Created($"/api/skills/{meta.Name}", created);
+            return Created($"/api/skills/{meta.Name}", created);
+        });
     }
 
     /// <summary>
@@ -170,34 +204,38 @@ public sealed class SkillController : ControllerBase
     public async Task<ActionResult<Skill>> Update(
         string name, [FromBody] SkillUpsert request, CancellationToken ct)
     {
-        var tenantId = Request.RequireTenant();
-        var existing = await _repo.GetAsync(tenantId, name, ct);
-        RejectAgenticDefinitionOnly(
-            string.Equals(existing?.Kind, "agentic", StringComparison.Ordinal));
-
-        var meta = await ValidateAsync(request.Definition!, tenantId, ct);
-        if (!string.Equals(meta.Name, name, StringComparison.Ordinal))
+        return await Track("update", async usage =>
         {
-            throw new ApiException(
-                StatusCodes.Status422UnprocessableEntity,
-                $"Skill 定義的 name 與路由不符：定義為 {meta.Name}，路由為 {name}")
+            var tenantId = Request.RequireTenant();
+            var existing = await _repo.GetAsync(tenantId, name, ct);
+            usage.Resolve(existing?.Kind);
+            RejectAgenticDefinitionOnly(
+                string.Equals(existing?.Kind, "agentic", StringComparison.Ordinal));
+
+            var meta = await ValidateAsync(request.Definition!, tenantId, ct);
+            if (!string.Equals(meta.Name, name, StringComparison.Ordinal))
             {
-                FieldErrors = new Dictionary<string, string>
+                throw new ApiException(
+                    StatusCodes.Status422UnprocessableEntity,
+                    $"Skill 定義的 name 與路由不符：定義為 {meta.Name}，路由為 {name}")
                 {
-                    ["name"] = $"定義的 name（{meta.Name}）必須與路由的 name（{name}）相同",
-                },
-            };
-        }
+                    FieldErrors = new Dictionary<string, string>
+                    {
+                        ["name"] = $"定義的 name（{meta.Name}）必須與路由的 name（{name}）相同",
+                    },
+                };
+            }
 
-        var updated = await _repo.UpdateAsync(
-            tenantId, name, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
-            Request.UserIdOrEmpty(), ct);
-        if (updated is null)
-        {
-            throw NotFound(name);
-        }
+            var updated = await _repo.UpdateAsync(
+                tenantId, name, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+                Request.UserIdOrEmpty(), ct);
+            if (updated is null)
+            {
+                throw NotFound(name);
+            }
 
-        return Ok(updated);
+            return Ok(updated);
+        });
     }
 
     /// <summary>
@@ -226,6 +264,8 @@ public sealed class SkillController : ControllerBase
     private async Task<ActionResult<Skill>> ImportCoreAsync(
         string? expectedName, CancellationToken ct)
     {
+        return await Track("import", async usage =>
+        {
         var tenantId = Request.RequireTenant();
 
         if (!Request.HasFormContentType)
@@ -275,6 +315,7 @@ public sealed class SkillController : ControllerBase
 
         var meta = result.Skill;
         var canonical = result.CanonicalDefinition;
+        usage.Resolve(meta.Kind);
 
         if (expectedName is null
             && (string.IsNullOrWhiteSpace(meta.Name) || !SkillNameRules.IsStandard(meta.Name)))
@@ -298,6 +339,7 @@ public sealed class SkillController : ControllerBase
 
         // ImportAsync 是 upsert(建立/更新/復活)→ 一律成功(2xx)。
         return Ok(stored);
+        });
     }
 
     /// <summary>
@@ -309,9 +351,14 @@ public sealed class SkillController : ControllerBase
     [AdminOnly("權限不足，無法存取 Skill")]
     public async Task<ActionResult<Skill>> Restore(string name, int revision, CancellationToken ct)
     {
+        return await Track("revision_restore", async usage =>
+        {
         var tenantId = Request.RequireTenant();
-        _ = await _repo.GetAsync(tenantId, name, ct) ?? throw NotFound(name);
+        var existing = await _repo.GetAsync(tenantId, name, ct);
+        usage.Resolve(existing?.Kind);
+        _ = existing ?? throw NotFound(name);
         var target = await _repo.GetRevisionAsync(tenantId, name, revision, ct);
+        usage.Resolve(target?.Kind ?? existing.Kind);
         if (target is null)
         {
             throw ApiErrors.NotFound(" Skill revision", $"{name}#{revision}");
@@ -366,6 +413,7 @@ public sealed class SkillController : ControllerBase
         var restored = await _repo.ImportAsync(
             tenantId, ToSkill(meta, canonical), package, packageSha, Request.UserIdOrEmpty(), ct);
         return Ok(restored);
+        });
     }
 
     /// <summary>停用 skill(軟刪 enabled=false)— 204;不存在(含跨租戶不可見、已停用)回 404。revision 保留供稽核。</summary>
@@ -373,13 +421,19 @@ public sealed class SkillController : ControllerBase
     [AdminOnly("權限不足，無法存取 Skill")]
     public async Task<IActionResult> Delete(string name, CancellationToken ct)
     {
-        var deleted = await _repo.DeleteAsync(Request.RequireTenant(), name, ct);
-        if (!deleted)
+        return await Track<IActionResult>("delete", async usage =>
         {
-            throw NotFound(name);
-        }
+            var tenantId = Request.RequireTenant();
+            var existing = await _repo.GetAsync(tenantId, name, ct);
+            usage.Resolve(existing?.Kind);
+            var deleted = await _repo.DeleteAsync(tenantId, name, ct);
+            if (!deleted)
+            {
+                throw NotFound(name);
+            }
 
-        return NoContent();
+            return NoContent();
+        });
     }
 
     /// <summary>
@@ -434,6 +488,9 @@ public sealed class SkillController : ControllerBase
     }
 
     private static ApiException NotFound(string name) => ApiErrors.NotFound(" Skill", name);
+
+    private Task<T> Track<T>(string operation, Func<ArtifactUsage, Task<T>> action)
+        => ArtifactCompatibilityUsageMetrics.Shared.TrackAsync(HttpContext, Surface, operation, action);
 
     /// <summary>
     /// request.SimpleForm(選填)→ 可存的原始 JSON 文字。缺席或顯式 null(含 JSON null 值)→ null,

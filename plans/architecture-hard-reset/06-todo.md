@@ -72,7 +72,7 @@
 
 ### 下一批可執行規劃工作
 - [x] P3-R1（COMPLETE）機械化 current-baseline inventory/fingerprint validation：固定 52 張 application tables、5 張可選 Workflow checkpoint tables（補列 `workflow_root_context_checkpoint`）、`conversations_history_page_idx` 與 `plpgsql`/`vector` extension allowlist；production manifest 維持 bundle 0、無 SQL。Migration suite 66 passed / 1 Docker dump-restore skipped，code review PASS — 2026-08-07。
-- [ ] P3-R2（DESIGN COMPLETE，EVIDENCE PENDING）[runtime evidence contract](09-p3-r2-runtime-evidence-contract.md) 已固定 bounded telemetry、計數責任、consumer baseline、evidence bundle、觀察/rollback 與人工核准條件；尚未完成 instrumentation、production observation、外部 consumer attestation 或 C8 approval。C8 僅能移除 `/api/skills*` 的 Business Workflow 相容操作；alias 與 unified invoke 仍各自需要獨立 gate。
+- [ ] P3-R2（DESIGN COMPLETE，EVIDENCE PENDING）[runtime evidence contract](09-p3-r2-runtime-evidence-contract.md) 已固定契約；bounded counters、fixed-schema JSON events、`scripts/export-artifact-compatibility-usage-v1.py` 與單元測試已實作。Production log retention/extraction、統一版本部署與 observation 尚未完成；外部 consumer attestation、rollback proof 與 C8 approval 亦仍 pending。C8 僅能移除 `/api/skills*` 的 Business Workflow 相容操作；alias 與 unified invoke 仍各自需要獨立 gate。
 - [ ] P3-R3（BLOCKED until P5/C8）post-C8 target decision sheet：typed table/FK/snapshot/eval/operations identity、跨 type 同名政策、seed authority、package hash、canary retention，以及必須保留的 alias/unified-invoke facade；未凍結前不寫 SQL。
 
 ### P3-X — BLOCKED until P3-R3 and applicable route gates
