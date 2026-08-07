@@ -2,7 +2,7 @@
 
 > Status: DESIGN COMPLETE, EVIDENCE PENDING (2026-08-07). This document does not authorize C8, route removal, schema changes, or production SQL.
 
-> Implementation checkpoint (2026-08-08): bounded counters, fixed-schema JSON events, `scripts/export-artifact-compatibility-usage-v1.py`, and unit coverage are implemented. Production log retention/extraction, deployment observation, final approval-bundle assembly, external consumer attestation, rollback proof, and approval remain pending.
+> Implementation checkpoint (2026-08-08): bounded counters, fixed-schema JSON events, Compose deployment-version wiring, `scripts/export-artifact-compatibility-usage-v1.py`, and unit coverage are implemented. Production instance-complete log extraction/retention proof, deployment observation, final approval-bundle assembly, external consumer attestation, rollback proof, and approval remain pending.
 
 ## 1. Decision boundary
 
@@ -115,7 +115,9 @@ The minimum observation duration is a release decision based on actual caller ca
 
 ## 7. Implementation posture
 
-Each authoritative counter also emits one redacted, fixed-schema JSON line named `artifact_compatibility_usage_total`. Deployment log collection must retain or extract those lines into per-service-instance JSONL sources covering the entire declared window. `scripts/export-artifact-compatibility-usage-v1.py` validates the source manifest, complete coverage, deployment-version consistency, bounded dimensions, counting authority, and absence of `unknown_origin`, then emits every applicable zero row. It intentionally uses only the Python standard library.
+Each authoritative counter also emits one redacted, fixed-schema JSON line named `artifact_compatibility_usage_total`. Normal Compose injects one `DEPLOYMENT_VERSION` into the three emitting services; placeholder `development` and `unknown` values cannot be exported. The repository provides no production collector. `scripts/export-artifact-compatibility-usage-v1.py` validates an externally produced source manifest, complete per-instance coverage, deployment-version consistency, bounded dimensions, counting authority, and absence of `unknown_origin`, then emits every applicable zero row. It intentionally uses only the Python standard library.
+
+Current-container snapshots or start/end comparisons are not sufficient evidence: a replica may scale out and disappear again inside the window. Production extraction must therefore come from an orchestrator or centralized-log source that retains the complete instance/lifecycle history and every event line. The release owner must prove that inventory, retention capacity, and absence of a log gap for the full window. Any gap resets the affected observation window.
 
 Do not add a compatibility-usage database table merely to satisfy P3-R2. `operations_release_audit` and `operations_execution_metric` have different schemas and governance meaning and must not be overloaded. If production operations later require durable per-event querying beyond telemetry retention, design a separate bounded ledger as a new decision.
 

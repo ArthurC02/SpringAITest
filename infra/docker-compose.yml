@@ -158,6 +158,7 @@ services:
       - frontend_platform_proxy
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      DEPLOYMENT_VERSION: ${DEPLOYMENT_VERSION:-development}
       LLM_BASE_URL: http://litellm:4000                       # 走 compose 服務名（取代主機版的 localhost:4000）
       LITELLM_KEY: ${LITELLM_KEY:-sk-1234}                    # LiteLLM 虛擬金鑰
       CHAT_MODEL: ${CHAT_MODEL:-gpt-4o-mini}                  # 須存在於 litellm-config.yaml 的 model_name；無 OpenAI 額度時可設 mock-gpt 驗證鏈路
@@ -231,6 +232,7 @@ services:
       retries: 12
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      DEPLOYMENT_VERSION: ${DEPLOYMENT_VERSION:-development}
       DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres};Database=springaitest
       RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq:5672   # 檔案處理佇列（消費端）
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
@@ -278,6 +280,7 @@ services:
       retries: 12
     environment:
       APP_ENVIRONMENT: ${APP_ENVIRONMENT:-Production}
+      DEPLOYMENT_VERSION: ${DEPLOYMENT_VERSION:-development}
       LLM_BASE_URL: http://litellm:4000              # 容器內走 compose 服務名連 LiteLLM
       LLM_API_KEY: ${LITELLM_KEY:-sk-1234}
       LLM_MODEL: ${WORKFLOW_LLM_MODEL:-mock-gpt}     # 預設走無金鑰 mock 模型，正式改 gpt-4o-mini

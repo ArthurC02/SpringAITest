@@ -88,6 +88,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
     if manifest["schemaVersion"] != 1:
         raise ExportError("manifest schemaVersion must be 1")
     deployment = _text(manifest["deploymentVersion"], "deploymentVersion")
+    if deployment in {"unknown", "development"}:
+        raise ExportError("deploymentVersion must identify one deployed build")
     disclosure = _text(manifest["retryInflationDisclosure"], "retryInflationDisclosure")
     window = _object(manifest["window"], "window")
     _exact_keys(window, {"startUtc", "endUtc"}, "window")

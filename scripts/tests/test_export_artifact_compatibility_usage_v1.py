@@ -118,6 +118,18 @@ class ExporterTests(unittest.TestCase):
             with self.assertRaisesRegex(exporter.ExportError, "include backend, platform, and workflow"):
                 exporter.export(manifest_path)
 
+    def test_rejects_placeholder_deployment_version(self) -> None:
+        for deployment in ("unknown", "development"):
+            with self.subTest(deployment=deployment):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    manifest_path, manifest = self.fixture(root)
+                    manifest["deploymentVersion"] = deployment
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                    with self.assertRaisesRegex(exporter.ExportError, "identify one deployed build"):
+                        exporter.export(manifest_path)
+
     def test_failed_cli_preserves_existing_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
