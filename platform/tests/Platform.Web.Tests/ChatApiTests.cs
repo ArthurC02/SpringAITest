@@ -16,7 +16,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Chat_Returns_IdAndReply_WithoutPromptField()
     {
-        // 匿名聊天不持久化(對話以 (tenant_id, user_id) 隔離),id 一律為 0;帶身分才驗證 backend 產生的 id。
+        // JWT-only 聊天會持久化，驗證 Backend 產生的 id。
         var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
         var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好嗎" });
@@ -35,7 +35,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Stream_ExactWireContract_RawBytes_NoSpaceAfterData()
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
         var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
 
@@ -123,7 +123,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Stream_ChunkWithNewline_SplitsIntoMultipleDataLines()
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
         var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "多行" });
 
@@ -143,7 +143,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [InlineData("/api/chat/stream", "   ")]
     public async Task ChatAndStream_Return400_WithFullApiErrorShape_WhenMessageBlank(string path, string message)
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
         var resp = await client.PostAsJsonAsync(path, new { message });
 
@@ -160,7 +160,7 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task Chat_MessageLengthBoundary_Accepts4000_Rejects4001()
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
         var atLimit = await client.PostAsJsonAsync("/api/chat", new { message = new string('a', 4000) });
         Assert.Equal(HttpStatusCode.OK, atLimit.StatusCode);
@@ -173,29 +173,30 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("message 長度不可超過 4000 字", body["fieldErrors"]!["message"]!.GetValue<string>());
     }
 
-    // 兩個選填欄位共用 StringLength(128) 的同一等價類與邊界:on-point 受理、off-point 回對應的 fieldErrors key。
     [Theory]
-    [InlineData("userId")]
-    [InlineData("conversationId")]
-    public async Task Chat_OptionalIdLengthBoundary_Accepts128_Rejects129(string field)
+    [InlineData("7f45ecbb-9041-42e4-8802-5bc751cf4941", true)]
+    [InlineData("not-a-uuid", false)]
+    [InlineData("   ", true)]
+    public async Task Chat_ConversationId_MustBeUuidOrBlank(string conversationId, bool accepted)
     {
-        var client = _factory.CreateClient();
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
 
-        var atLimit = await client.PostAsJsonAsync(
-            "/api/chat",
-            new Dictionary<string, object> { ["message"] = "你好", [field] = new string('a', 128) });
-        Assert.Equal(HttpStatusCode.OK, atLimit.StatusCode);
+        var response = await client.PostAsJsonAsync("/api/chat", new { message = "你好", conversationId });
 
-        var overLimit = await client.PostAsJsonAsync(
-            "/api/chat",
-            new Dictionary<string, object> { ["message"] = "你好", [field] = new string('a', 129) });
-
-        Assert.Equal(HttpStatusCode.BadRequest, overLimit.StatusCode);
-        var body = await overLimit.ReadJsonAsync();
-        Assert.Equal($"{field} 長度不可超過 128 字", body["fieldErrors"]![field]!.GetValue<string>());
+        Assert.Equal(accepted ? HttpStatusCode.OK : HttpStatusCode.BadRequest, response.StatusCode);
+        if (accepted)
+        {
+            Assert.True(Guid.TryParseExact(
+                Assert.Single(response.Headers.GetValues("X-Conversation-Id")), "D", out _));
+        }
+        else
+        {
+            Assert.Equal("conversationId 必須是有效 UUID",
+                (await response.ReadJsonAsync())["fieldErrors"]!["conversationId"]!.GetValue<string>());
+        }
     }
 
-    // ---- 路由目錄:帶有效 JWT 的聊天以工具目錄做路由,匿名不路由(工作流需要租戶身分) ----
+    // ---- 路由目錄:有效 JWT 的聊天以工具目錄做路由 ----
     // 新流程:工具改以「路由目錄」文字經路由呼叫傳入,故斷言 LastRoutingCatalog 而非原生 tools 引數。
 
     /// <summary>路由目錄中的工具行數(排除路由指令段)。目錄格式為「指令\n\n名稱: 說明(每行一支)」。</summary>
@@ -249,83 +250,34 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         }
     }
 
-    [Fact]
-    public async Task Chat_Anonymous_HasNoTools()
-    {
-        var agent = (FakeLlmAgent)_factory.Services.GetRequiredService<Platform.Service.Abstractions.ILlmAgent>();
-        agent.Reset();
-        var client = _factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        // 匿名不路由:沒有路由目錄。P2:純聊天改跑共用的 hosted agent(不再共用 ILlmAgent),
-        // 故匿名這輪路由專用的 ILlmAgent 完全不會被呼叫(比舊斷言「恰一次純聊天呼叫」更直接地
-        // 證明「匿名不路由」——ILlmAgent 現在只服務路由/摘要,呼叫次數為 0 才是正確語意)。
-        Assert.Null(agent.LastRoutingCatalog);
-        Assert.Equal(0, agent.CompleteCallCount);
-    }
-
-    // ---- X-Auth-Invalid：AllowAnonymous 端點永遠不回 401,靠這個 header 讓前端全域登出機制打得到 ----
-
-    [Fact]
-    public async Task Chat_WithValidToken_HasNoAuthInvalidHeader()
-    {
-        var client = _factory.CreateClient().WithToken(_factory.IssueToken());
-
-        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.False(resp.Headers.Contains("X-Auth-Invalid"));
-    }
-
-    [Fact]
-    public async Task Chat_WithoutToken_HasNoAuthInvalidHeader()
+    [Theory]
+    [InlineData("/api/chat", "POST")]
+    [InlineData("/api/chat/stream", "POST")]
+    [InlineData("/api/chat/history", "GET")]
+    [InlineData("/api/chat/history/page", "GET")]
+    public async Task ChatEndpoints_WithoutJwt_Return401(string path, string method)
     {
         var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (method == "POST")
+            request.Content = JsonContent.Create(new { message = "你好" });
 
-        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
+        var response = await client.SendAsync(request);
 
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.False(resp.Headers.Contains("X-Auth-Invalid"));
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
-    [Fact]
-    public async Task Chat_WithInvalidToken_HasAuthInvalidHeader()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Chat_JwtMissingTenantOrUser_Returns401(bool omitSubject)
     {
-        var token = TestTokens.Mint() + "x"; // 竄改簽章尾段。
-        var client = _factory.CreateClient().WithToken(token);
+        var client = _factory.CreateClient().WithToken(TestTokens.MintMissingChatIdentityClaim(omitSubject));
 
-        var resp = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
+        var response = await client.PostAsJsonAsync("/api/chat", new { message = "你好" });
 
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal("1", resp.Headers.GetValues("X-Auth-Invalid").Single());
-    }
-
-    // ---- 聊天歷史依身分過濾:匿名回空陣列(不是 401,維持 AllowAnonymous 契約) ----
-
-    [Fact]
-    public async Task History_Anonymous_ReturnsEmptyArray()
-    {
-        var client = _factory.CreateClient();
-
-        var resp = await client.GetAsync("/api/chat/history");
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var arr = (await resp.ReadJsonAsync()).AsArray();
-        Assert.Empty(arr);
-    }
-
-    [Fact]
-    public async Task HistoryPage_Anonymous_ReturnsEmptyCamelCaseEnvelope()
-    {
-        var response = await _factory.CreateClient().GetAsync("/api/chat/history/page?before=bad");
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.ReadJsonAsync();
-        Assert.Empty(body["items"]!.AsArray());
-        Assert.Null(body["nextCursor"]);
-        Assert.False(body["hasMore"]!.GetValue<bool>());
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        (await response.ReadJsonAsync()).AssertApiError(401, "authentication_required");
     }
 
     [Fact]
@@ -370,39 +322,11 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     [Fact]
     public async Task HistoryPage_LimitAbove100_ReturnsValidationApiError()
     {
-        var response = await _factory.CreateClient().GetAsync("/api/chat/history/page?limit=101");
+        var response = await _factory.CreateClient().WithToken(_factory.IssueToken())
+            .GetAsync("/api/chat/history/page?limit=101");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal("validation_failed", (await response.ReadJsonAsync())["code"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public async Task Stream_WithInvalidToken_HasAuthInvalidHeader()
-    {
-        var token = TestTokens.Mint() + "x"; // 竄改簽章尾段。
-        var client = _factory.CreateClient().WithToken(token);
-
-        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal("1", resp.Headers.GetValues("X-Auth-Invalid").Single());
-    }
-
-    // SetAuthInvalidHeaderIfNeeded 由兩個 action 各自呼叫,故三種認證狀態要在兩個端點都成對驗:
-    // 串流端點的「有效 JWT」與「完全匿名」兩格補上(header 必須不存在),與上面無效 token 那格合成決策表。
-    [Theory]
-    [InlineData(true)]   // 有效 JWT
-    [InlineData(false)]  // 真匿名(完全沒帶 Authorization)
-    public async Task Stream_WithValidTokenOrAnonymous_HasNoAuthInvalidHeader(bool withToken)
-    {
-        var client = withToken
-            ? _factory.CreateClient().WithToken(_factory.IssueToken())
-            : _factory.CreateClient();
-
-        var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "嗨" });
-
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.False(resp.Headers.Contains("X-Auth-Invalid"));
     }
 
     // A-21(b):兩個租戶各有歷史時,租戶 A 的 JWT 只讀得到租戶 A 自己的紀錄,讀不到租戶 B 的——
@@ -599,10 +523,13 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(answer, body["reply"]!.GetValue<string>());
         Assert.True(body["id"]!.GetValue<long>() > 0);   // 短路輪照樣持久化,拿得到 backend id
 
-        // 短路層收到的是伺服器推導出來的 conversationId(body 沒帶 → 退回 {tenant}:{user}),不是 wire 值。
+        var conversationId = Assert.Single(resp.Headers.GetValues("X-Conversation-Id"));
+        Assert.True(Guid.TryParseExact(conversationId, "D", out _));
+
+        // Controller 產生的 UUID 經 ChatService 加上身分隔離前綴後傳到 runtime。
         var call = Assert.Single(runtime.Calls);
         Assert.Equal("這季毛利率多少?", call.Message);
-        Assert.Equal("demo-a:user-a", call.ConversationId);
+        Assert.Equal($"demo-a:user-a:{conversationId}", call.ConversationId);
         Assert.Null(call.OrchestratorId);
 
         Assert.Single(FakeConversationStore.Saved, s => s.Response.Reply == answer);
@@ -620,8 +547,11 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
         var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "這季毛利率多少?" });
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var conversationId = Assert.Single(resp.Headers.GetValues("X-Conversation-Id"));
+        Assert.True(Guid.TryParseExact(conversationId, "D", out _));
         // D6 的答案也走同一套無空格 data: wire contract,且沒有 event:error。
         Assert.Equal($"data:{answer}\n\n", await resp.Content.ReadAsStringAsync());
+        Assert.Equal($"demo-a:user-a:{conversationId}", Assert.Single(runtime.Calls).ConversationId);
         Assert.Single(FakeConversationStore.Saved, s => s.Response.Reply == answer);
     }
 

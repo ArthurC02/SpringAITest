@@ -16,8 +16,8 @@ async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function sse(route: Route, body: string) {
-  await route.fulfill({ status: 200, contentType: 'text/event-stream', body })
+async function sse(route: Route, body: string, headers?: Record<string, string>) {
+  await route.fulfill({ status: 200, contentType: 'text/event-stream', headers, body })
 }
 
 async function login(page: Page) {
@@ -91,6 +91,37 @@ test('several data: lines inside one frame rejoin with a newline', async ({ page
   await send(page, 'list please')
 
   await expect(page.locator('.bubble--assistant .bubble__content li')).toHaveText(['alpha', 'beta'])
+})
+
+test('conversation id comes from the response and new conversation clears it', async ({ page }) => {
+  const bodies: Record<string, unknown>[] = []
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      bodies.push(route.request().postDataJSON() as Record<string, unknown>)
+      return sse(route, 'data:ok\n\n', { 'X-Conversation-Id': `server-${bodies.length}` })
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'first')
+  expect(bodies[0]).not.toHaveProperty('userId')
+  expect(bodies[0]).not.toHaveProperty('conversationId')
+  expect(await readKey(page, CONVERSATION_KEY)).toBe('server-1')
+
+  await send(page, 'second')
+  expect(bodies[1].conversationId).toBe('server-1')
+
+  await page.locator('.chatview__bar button').click()
+  expect(await readKey(page, CONVERSATION_KEY)).toBeNull()
+  await send(page, 'third')
+  expect(bodies[2]).not.toHaveProperty('conversationId')
 })
 
 test.describe('SSE render batching', () => {
@@ -317,7 +348,7 @@ test('any 401 while logged in clears the session and chat keys and shows the exp
   expect(await readKey(page, USER_ID_KEY)).toBeNull()
 })
 
-test('an X-Auth-Invalid stream response logs out even though the status is 200', async ({ page }) => {
+test('a 401 stream response uses the global logout path', async ({ page }) => {
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (!path.startsWith('/api/')) return route.continue()
@@ -326,13 +357,7 @@ test('an X-Auth-Invalid stream response logs out even though the status is 200',
     }
     if (path === '/api/features') return json(route, {})
     if (path === '/api/chat/stream') {
-      // This endpoint is AllowAnonymous, so an expired JWT never arrives as a 401 the way the
-      // apiFetch paths get one — platform flags it with this response header on a normal 200 SSE.
-      return route.fulfill({
-        status: 200,
-        headers: { 'content-type': 'text/event-stream', 'X-Auth-Invalid': '1' },
-        body: 'data:ok\n\n',
-      })
+      return json(route, { status: 401, message: '登入已過期' }, 401)
     }
     return json(route, [])
   })
@@ -345,6 +370,36 @@ test('an X-Auth-Invalid stream response logs out even though the status is 200',
   await expect(page.getByText('session 已過期，請重新登入。')).toBeVisible()
   expect(await readKey(page, SESSION_KEY)).toBeNull()
   expect(await readKey(page, MESSAGES_KEY)).toBeNull()
+})
+
+test('a late 401 from an old session does not clear a newer session', async ({ page }) => {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let streamRequests = 0
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'old-token', username: 'old', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/chat/stream') {
+      streamRequests += 1
+      await held
+      return json(route, { status: 401, message: '登入已過期' }, 401)
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await send(page, 'old request')
+  await expect.poll(() => streamRequests).toBe(1)
+  await page.evaluate((key) => localStorage.setItem(key, JSON.stringify({
+    token: 'new-token', username: 'new', role: 'USER', tenantCode: 'demo', capabilities: [],
+  })), SESSION_KEY)
+  release()
+
+  await expect.poll(() => readKey(page, SESSION_KEY)).toContain('new-token')
 })
 
 test('a stream request that fails outright shows the ApiError message, not raw JSON', async ({ page }) => {
@@ -479,9 +534,8 @@ test('leaving chat aborts an in-flight request without persisting its empty plac
   await expect.poll(() => readKey(page, MESSAGES_KEY)).not.toContain('too late')
 })
 
-test('a stream sent without a stored session omits Bearer and still renders a mid-stream error', async ({ page }) => {
-  let authHeader: string | undefined
-  const stream = `data:Hi\n\nevent:error\ndata:${STREAM_ERROR}\n\n`
+test('a stream cannot start without a stored session', async ({ page }) => {
+  let streamRequests = 0
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     if (!path.startsWith('/api/')) return route.continue()
@@ -490,21 +544,16 @@ test('a stream sent without a stored session omits Bearer and still renders a mi
     }
     if (path === '/api/features') return json(route, {})
     if (path === '/api/chat/stream') {
-      authHeader = route.request().headers()['authorization']
-      return sse(route, stream)
+      streamRequests += 1
+      return sse(route, 'data:unexpected\n\n')
     }
     return json(route, [])
   })
 
   await login(page)
-  // Logging out in another tab clears the shared key while this tab still renders the chat.
-  // streamChat re-reads localStorage per request, so this turn takes the anonymous branch.
   await page.evaluate((key) => localStorage.removeItem(key), SESSION_KEY)
-  await send(page, 'anonymous turn')
+  await send(page, 'must fail closed')
 
-  await expect(page.locator('.bubble--assistant:not(.bubble--error) .bubble__content')).toHaveText('Hi')
-  await expect(page.locator('.bubble--error .bubble__content')).toHaveText(STREAM_ERROR)
-  expect(authHeader).toBeUndefined()
-  // Anonymous chat is allowed, so a failed stream must not be mistaken for an expired session.
-  await expect(page.getByTestId('auth-page')).toHaveCount(0)
+  await expect(page.getByTestId('auth-page')).toBeVisible()
+  expect(streamRequests).toBe(0)
 })

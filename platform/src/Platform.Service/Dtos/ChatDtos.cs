@@ -9,12 +9,10 @@ public sealed record ChatRequest(
     [StringLength(4000, ErrorMessage = "message 長度不可超過 4000 字")]
     string? Message,
 
-    // 選填:mem0 長期記憶分組;空白時 service 正規化為 "default"。
-    [StringLength(128, ErrorMessage = "userId 長度不可超過 128 字")]
-    string? UserId,
-
-    // 選填:短期 ChatMemory 分組;空白時 service 退回成 userId。
+    // 選填:缺少或空白時由 Platform 產生 UUID。
     [StringLength(128, ErrorMessage = "conversationId 長度不可超過 128 字")]
+    [RegularExpression(@"^(?:\s*|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$",
+        ErrorMessage = "conversationId 必須是有效 UUID")]
     string? ConversationId,
 
     Guid? OrchestratorId = null);

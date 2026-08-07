@@ -79,7 +79,7 @@
 - [ ] P3-X atomic destructive execution：只有 post-C8 P3-R3 與其 facade 設計適用的 route gates 通過後，才在一個 tranche 實作 production `0001`–`0003`、runner/fixture switch、完整 consumers、seed、fresh/reset fingerprint、restore 與 full-chain gates。不得 partial deploy；C8 僅能收斂 public `/api/skills*`，alias/unified invoke 必須保留或各自通過後續獨立核准。
 
 ## P4 — 單一聊天 runtime
-- [ ] P4-1 chat/stream/history/AG-UI 強制 JWT;移除 body userId 與匿名連續性;`turnId` 必填 + `X-Conversation-Id`(注意 `ChatServiceTests` 匿名連續性測試同 tranche 處理)
+- [ ] P4-1 **PARTIAL**：`/api/chat`、`/stream`、`/history`、`/history/page` 已強制 JWT；已移除 body `userId`；`conversationId` 可省略/空白，由 Platform 產生 canonical UUID，blocking/streaming 皆回 `X-Conversation-Id`；Frontend 已保存該 header，new conversation 會清除 key。`turnId` 尚未交付，因此不得勾選整項。
 - [ ] P4-2 Root Orchestrator 唯一路由;fail-closed 錯誤碼;刪 D6 canary 集群(AgentChatRuntime/RoutingAgent/ChatOrchestratorController/兩 flag/`agentChatEnabled`)
 - [ ] P4-3 `withIsolation:true` + 刪 `ChatMemoryKeyDerivation` 匿名分支
 - [ ] P4-4 `X-Client-Schema-Version` + 426 + storage schema version(全新機制)

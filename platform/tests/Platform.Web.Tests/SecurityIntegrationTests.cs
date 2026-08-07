@@ -26,16 +26,16 @@ public sealed class SecurityIntegrationTests : IClassFixture<TestWebAppFactory>
         Assert.Equal("未認證或憑證無效", body["message"]!.GetValue<string>());
     }
 
-    // AllowAnonymous 端點的契約是「空陣列,不是 401」——只驗 200 會漏掉「匿名讀到別人歷史」這個等價類。
+    // P4:聊天歷史與聊天端點一樣要求 JWT。
     [Fact]
-    public async Task ChatHistory_WithoutToken_Returns200_EmptyArray()
+    public async Task ChatHistory_WithoutToken_Returns401()
     {
         var client = _factory.CreateClient();
 
         var resp = await client.GetAsync("/api/chat/history");
 
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Empty((await resp.ReadJsonAsync()).AsArray());
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        (await resp.ReadJsonAsync()).AssertApiError(401, "authentication_required");
     }
 
     [Fact]
