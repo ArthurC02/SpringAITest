@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, isConflict } from '../api/http'
 import {
   createAgent,
@@ -17,6 +17,7 @@ import { listConfig } from '../api/config'
 import type {
   AgentDraft,
   AgentExecutionRole,
+  AgentRevision,
   AgentRuntimeLimits,
   AgentToolCatalogEntry,
   AgentValidation,
@@ -60,6 +61,20 @@ const ROLES: { id: AgentExecutionRole; label: string }[] = [
   { id: 'worker', label: 'Worker' },
   { id: 'verifier', label: 'Verifier' },
 ]
+
+const RUNTIME_LIMIT_FIELDS: [keyof AgentRuntimeLimits, string][] = [
+  ['max_tool_rounds', '工具輪數'],
+  ['max_context_rounds', 'Context 輪數'],
+  ['timeout_seconds', '逾時秒數'],
+  ['token_budget', 'Token budget'],
+  ['step_budget', 'Step budget'],
+]
+
+/** 編輯器子頁籤。 */
+type EditorSub = 'edit' | 'history' | 'test'
+
+/** 每個 Skill 綁定於發布時將被固定到的 revision(從 catalog 解析);`missing` = 已失效。 */
+type SkillBindingPreview = { skill: string; pinned_revision: number | null; missing: boolean }
 
 /** 收在「進階設定」裡的欄位;這些欄位一有錯就必須自動展開,否則使用者看不到錯誤卻按不了發布。 */
 const ADVANCED_FIELDS = new Set([
@@ -291,6 +306,833 @@ function AudienceEditor({
   )
 }
 
+/** 抬頭:返回、標題與狀態徽章、子功能切換。 */
+function AgentEditorHead({
+  title,
+  creating,
+  enabled,
+  publishedRevision,
+  sub,
+  agentTestRunEnabled,
+  busy,
+  onClose,
+  onSub,
+}: {
+  title: string
+  creating: boolean
+  enabled: boolean
+  publishedRevision: number | null
+  sub: EditorSub
+  agentTestRunEnabled: boolean
+  busy: boolean
+  onClose: () => void
+  onSub: (sub: EditorSub) => void
+}) {
+  return (
+    <div className="skill-editor__head">
+      <button className="btn" type="button" onClick={onClose} disabled={busy}>
+        ← 返回清單
+      </button>
+      <h3 className="skill-editor__title">
+        {title}
+        {!creating && (
+          <>
+            <span className={`badge badge--${enabled ? 'user' : 'admin'}`}>
+              {enabled ? '啟用中' : '已停用'}
+            </span>
+            <span className="badge badge--user">
+              {publishedRevision != null ? `已發布 r${publishedRevision}` : '未發布'}
+            </span>
+          </>
+        )}
+      </h3>
+      {!creating && (
+        <div className="seg" role="group" aria-label="Agent 子功能">
+          <button className="btn" aria-pressed={sub === 'edit'} onClick={() => onSub('edit')}>
+            編輯
+          </button>
+          <button className="btn" aria-pressed={sub === 'history'} onClick={() => onSub('history')}>
+            版本控管
+          </button>
+          {agentTestRunEnabled && publishedRevision !== null && (
+            <button className="btn" aria-pressed={sub === 'test'} onClick={() => onSub('test')}>
+              測試 Run
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 唯讀 revision 歷史 + 回溯入口(僅 ADMIN,且不對最新版顯示)。 */
+function AgentRevisionHistory({
+  revisions,
+  error,
+  isAdmin,
+  busy,
+  conflict,
+  onRestore,
+}: {
+  revisions: AgentRevision[] | null
+  error: string | null
+  isAdmin: boolean
+  busy: boolean
+  conflict: boolean
+  onRestore: (revision: number) => void
+}) {
+  return (
+    <section className="skill-history">
+      <p className="muted">唯讀歷史(依 revision 遞減);回溯會以該版重新發布為新 revision。</p>
+      <ErrorText msg={error} />
+      {!revisions && !error ? (
+        <Skeleton rows={3} />
+      ) : revisions && revisions.length === 0 ? (
+        <p className="muted">尚無 revision(此 Agent 未曾發布)。</p>
+      ) : (
+        revisions?.map((r, i) => (
+          <details className="rev" key={r.revision} open={i === 0}>
+            <summary className="rev__head">
+              <span className="badge badge--user">r{r.revision}</span>
+              <span className="rev__meta">
+                {r.created_by} · {fmtDate(r.created_at)}
+              </span>
+              <code className="rev__sha">{r.definition_sha256.slice(0, 12)}</code>
+              {isAdmin && i !== 0 && (
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={busy || conflict}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onRestore(r.revision)
+                  }}
+                >
+                  回溯此版
+                </button>
+              )}
+            </summary>
+            <ul className="agent-rev__bindings">
+              {r.skill_bindings.length === 0 ? (
+                <li className="muted">無 Skill 綁定</li>
+              ) : (
+                r.skill_bindings.map((b) => (
+                  <li key={b.skill}>
+                    {b.skill} → r{b.skill_revision}
+                    {b.enabled ? '' : '(已停用)'}
+                  </li>
+                ))
+              )}
+            </ul>
+          </details>
+        ))
+      )}
+    </section>
+  )
+}
+
+/** 基本區:名稱 + 描述。 */
+function AgentIdentitySection({
+  name,
+  description,
+  locked,
+  nameError,
+  descriptionError,
+  onPatch,
+}: {
+  name: string
+  description: string
+  locked: boolean
+  nameError?: string
+  descriptionError?: string
+  onPatch: (patch: Partial<AgentDraft>) => void
+}) {
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">身分</h4>
+      <div className="field">
+        <label htmlFor="agent-name">名稱</label>
+        <input
+          id="agent-name"
+          className="input"
+          value={name}
+          disabled={locked}
+          aria-invalid={!!nameError}
+          aria-describedby={nameError ? 'agent-name-error' : undefined}
+          placeholder="租戶內顯示名稱"
+          onChange={(e) => onPatch({ name: e.target.value })}
+        />
+        {nameError && (
+          <span id="agent-name-error" className="field-error" role="alert">
+            {nameError}
+          </span>
+        )}
+      </div>
+      <div className="field">
+        <label htmlFor="agent-desc">描述</label>
+        <input
+          id="agent-desc"
+          className="input"
+          value={description}
+          disabled={locked}
+          aria-invalid={!!descriptionError}
+          aria-describedby={descriptionError ? 'agent-desc-error' : undefined}
+          placeholder="用途與適用情境"
+          onChange={(e) => onPatch({ description: e.target.value })}
+        />
+        {descriptionError && (
+          <span id="agent-desc-error" className="field-error" role="alert">
+            {descriptionError}
+          </span>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function AgentSystemPromptSection({
+  value,
+  locked,
+  error,
+  onPatch,
+}: {
+  value: string
+  locked: boolean
+  error?: string
+  onPatch: (patch: Partial<AgentDraft>) => void
+}) {
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">System Prompt</h4>
+      <div className="field">
+        <label htmlFor="agent-system-prompt">角色與行為指引</label>
+        <textarea
+          id="agent-system-prompt"
+          className="textarea"
+          value={value}
+          disabled={locked}
+          aria-invalid={!!error}
+          aria-describedby={error ? 'agent-system-prompt-error' : undefined}
+          placeholder="角色、目標、語氣、一般行為指引"
+          onChange={(e) => onPatch({ system_prompt: e.target.value })}
+        />
+        {error && (
+          <span id="agent-system-prompt-error" className="field-error" role="alert">
+            {error}
+          </span>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/** 能力綁定:依 kind 分組列出可綁 Skill,並把已失效的綁定標成不可發布。 */
+function AgentSkillBindingsSection({
+  catalog,
+  catalogError,
+  catalogLoaded,
+  preview,
+  bindings,
+  locked,
+  bindingError,
+  onToggle,
+}: {
+  catalog: SkillCatalogEntry[]
+  catalogError: string | null
+  catalogLoaded: boolean
+  preview: SkillBindingPreview[]
+  bindings: AgentDraft['skill_bindings']
+  locked: boolean
+  bindingError?: string
+  onToggle: (name: string) => void
+}) {
+  const groups = [
+    { kind: 'agentic' as const, label: '技能', entries: catalog.filter((skill) => skill.kind === 'agentic') },
+    { kind: 'flow' as const, label: '業務流程', entries: catalog.filter((skill) => skill.kind === 'flow') },
+  ]
+  const nonBindable = catalog.filter((skill) => !isSkillBindable(skill))
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">能力綁定</h4>
+      <p className="muted">
+        只顯示同租戶、可執行的技能與業務流程；發布時會把每個綁定固定到當時的確切 revision。
+      </p>
+      <ErrorText msg={catalogError} />
+      {/* 已綁定但 catalog 已無(停用/移除)的 Skill:定位為失效,禁止發布(A-UI-05)。 */}
+      {preview
+        .filter((p) => p.missing)
+        .map((p) => (
+          <p key={p.skill} className="field-error" role="alert">
+            已綁定的 Skill「{p.skill}」已失效、停用或不可固定 revision，請移除或改綁其他
+            Skill 後才能發布。
+            {!locked && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => onToggle(p.skill)}
+              >
+                移除
+              </button>
+            )}
+          </p>
+        ))}
+      {!catalogLoaded && !catalogError ? (
+        <Skeleton rows={3} />
+      ) : (
+        <div className="agent-skill-groups">
+          {groups.map((group) => group.entries.length > 0 && (
+            <section key={group.kind} aria-label={group.label}>
+              <h5 className="agent-block__title">{group.label}</h5>
+              <ul className="agent-skills">
+                {group.entries.map((c) => {
+                  const bound = bindings.some((b) => b.skill === c.name)
+                  const bindable = isSkillBindable(c)
+                  return (
+                    <li key={c.name} className="agent-skills__row">
+                      <label className="agent-check">
+                        <input
+                          type="checkbox"
+                          checked={bound}
+                          disabled={locked || !bindable}
+                          onChange={() => onToggle(c.name)}
+                        />
+                        <span className="agent-skills__name">{c.name}</span>
+                      </label>
+                      <span className="muted agent-skills__desc">{c.description}</span>
+                      <span className={`badge badge--${bindable ? 'user' : 'admin'}`}>
+                        {bindable
+                          ? c.revision != null
+                            ? `可綁 · r${c.revision}`
+                            : '可綁'
+                          : '不可綁 · 無持久 revision'}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
+      {nonBindable.length > 0 && (
+        <p className="muted" role="note">
+          內建 Skill 可直接執行，但目前沒有可固定的 persisted immutable revision，因此不能綁入
+          Agent。請先上傳為 tenant Skill。
+        </p>
+      )}
+      {bindingError && (
+        <span className="field-error" role="alert">
+          {bindingError}
+        </span>
+      )}
+    </section>
+  )
+}
+
+/** 進階區:slug(建立後不可變更)。 */
+function AgentSlugSection({
+  slug,
+  creating,
+  locked,
+  error,
+  onPatch,
+}: {
+  slug: string
+  creating: boolean
+  locked: boolean
+  error?: string
+  onPatch: (patch: Partial<AgentDraft>) => void
+}) {
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">識別字</h4>
+      <div className="field">
+        <label htmlFor="agent-slug">slug</label>
+        <input
+          id="agent-slug"
+          className="input"
+          value={slug}
+          disabled={locked || !creating}
+          aria-invalid={!!error}
+          aria-describedby={error ? 'agent-slug-error' : undefined}
+          placeholder="租戶內唯一、穩定的 API 識別字"
+          onChange={(e) => onPatch({ slug: e.target.value })}
+        />
+        {!creating && <p className="muted">slug 是穩定識別字,建立後不可變更。</p>}
+        {error && (
+          <span id="agent-slug-error" className="field-error" role="alert">
+            {error}
+          </span>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function AgentExecutionRolesSection({
+  roles,
+  locked,
+  onToggle,
+}: {
+  roles: AgentExecutionRole[]
+  locked: boolean
+  onToggle: (role: AgentExecutionRole) => void
+}) {
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">執行角色</h4>
+      <div className="agent-roles">
+        {ROLES.map((r) => (
+          <label key={r.id} className="agent-check">
+            <input
+              type="checkbox"
+              checked={roles.includes(r.id)}
+              disabled={locked}
+              onChange={() => onToggle(r.id)}
+            />
+            {r.label}
+          </label>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+/** Discovery capabilities + output contract(JSON 解析錯誤優先於伺服器欄位錯誤)。 */
+function AgentCapabilityOutputSection({
+  capabilities,
+  contractText,
+  contractParseError,
+  contractFieldError,
+  locked,
+  onCapabilities,
+  onContractText,
+}: {
+  capabilities: string[]
+  contractText: string
+  contractParseError: string | null
+  contractFieldError?: string
+  locked: boolean
+  onCapabilities: (next: string[]) => void
+  onContractText: (text: string) => void
+}) {
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">能力與輸出</h4>
+      <StringSetEditor
+        id="agent-capabilities"
+        label="Capabilities"
+        hint="供 Orchestrator discovery/selection 使用的 typed tags；空集合代表不會被能力條件選中。"
+        items={capabilities}
+        placeholder="例如 research、analysis"
+        disabled={locked}
+        onChange={onCapabilities}
+      />
+      <div className="field">
+        <label htmlFor="agent-output-contract">Output contract（JSON object）</label>
+        <textarea
+          id="agent-output-contract"
+          className="textarea code-textarea"
+          value={contractText}
+          disabled={locked}
+          aria-invalid={!!contractParseError}
+          aria-describedby={contractParseError ? 'agent-output-contract-error' : undefined}
+          onChange={(event) => onContractText(event.target.value)}
+        />
+        {contractParseError && (
+          <span id="agent-output-contract-error" className="field-error" role="alert">
+            {contractParseError}
+          </span>
+        )}
+        {!contractParseError && contractFieldError && (
+          <span className="field-error" role="alert">
+            {contractFieldError}
+          </span>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/** 工具 allowlist:只從 server Tool Catalog 勾選;不在目錄中的既有授權要能被移除。 */
+function AgentToolAllowlistSection({
+  catalog,
+  catalogError,
+  catalogLoaded,
+  allowed,
+  missingTools,
+  locked,
+  onToggle,
+}: {
+  catalog: AgentToolCatalogEntry[]
+  catalogError: string | null
+  catalogLoaded: boolean
+  allowed: string[]
+  missingTools: string[]
+  locked: boolean
+  onToggle: (name: string) => void
+}) {
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">工具 allowlist</h4>
+      <p className="muted">
+        只可從 server Tool Catalog 選取；目錄不包含 endpoint/token。空集合代表不授權任何工具。
+      </p>
+      <ErrorText msg={catalogError} />
+      {missingTools.map((name) => (
+        <p key={name} className="field-error" role="alert">
+          已允許的工具「{name}」不在目前 Tool Catalog，請移除後才能發布。
+          {!locked && (
+            <button type="button" className="btn" onClick={() => onToggle(name)}>
+              移除
+            </button>
+          )}
+        </p>
+      ))}
+      {!catalogLoaded && !catalogError ? (
+        <Skeleton rows={3} />
+      ) : catalog.length === 0 ? (
+        <p className="agent-set__empty" role="note">
+          Tool Catalog 目前沒有可選工具；此 Agent 將保持無工具權限。
+        </p>
+      ) : (
+        <ul className="agent-skills">
+          {catalog.map((tool) => (
+            <li key={tool.name} className="agent-skills__row">
+              <label className="agent-check">
+                <input
+                  type="checkbox"
+                  checked={allowed.includes(tool.name)}
+                  disabled={locked}
+                  onChange={() => onToggle(tool.name)}
+                />
+                <span className="agent-skills__name">{tool.name}</span>
+              </label>
+              <span className="muted agent-skills__desc">{tool.description}</span>
+              <span className="badge badge--user">{tool.kind}</span>
+              <span
+                className={`badge badge--${
+                  tool.risk === 'write' || tool.risk === 'privileged' ? 'admin' : 'user'
+                }`}
+                title={`回傳：${tool.returns}`}
+              >
+                風險：{tool.risk}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function AgentRuntimeLimitsSection({
+  limits,
+  runtimeWorkflow,
+  locked,
+  onChange,
+}: {
+  limits: AgentRuntimeLimits
+  runtimeWorkflow: AgentDraft['runtime_workflow']
+  locked: boolean
+  onChange: (key: keyof AgentRuntimeLimits, value: string) => void
+}) {
+  return (
+    <section className="agent-block">
+      <h4 className="agent-block__title">Runtime limits</h4>
+      <p className="muted">
+        新建時的預設值來自系統設定 `agent.defaults.*`（未設定則用內建值）；填 0
+        代表交由 Runtime 預設決定。正式 Runtime 會依 Harness 與政策交集
+        fail-closed，不會解讀成無上限。
+      </p>
+      <div className="agent-runtime-grid">
+        {RUNTIME_LIMIT_FIELDS.map(([key, label]) => (
+          <div className="field" key={key}>
+            <label htmlFor={`agent-runtime-${key}`}>{label}</label>
+            <input
+              id={`agent-runtime-${key}`}
+              className="input"
+              type="number"
+              min={0}
+              step={1}
+              value={limits[key]}
+              disabled={locked}
+              onChange={(event) => onChange(key, event.target.value)}
+            />
+          </div>
+        ))}
+      </div>
+      <p className="muted">
+        Execution Harness：
+        {runtimeWorkflow
+          ? `${runtimeWorkflow.id} · r${runtimeWorkflow.revision}`
+          : '建立／發布時由 server 固定到 Default Agent-Runtime Workflow'}
+      </p>
+    </section>
+  )
+}
+
+/** 動作列(僅 ADMIN):建立模式只有建立鈕,編輯模式是 儲存 → 驗證 → 發布預覽。 */
+function AgentEditorActions({
+  creating,
+  busy,
+  conflict,
+  hasEtag,
+  outputContractError,
+  audienceError,
+  name,
+  slug,
+  dirty,
+  canPublish,
+  validatedForCurrent,
+  onCreate,
+  onSaveDraft,
+  onValidate,
+  onPreview,
+}: {
+  creating: boolean
+  busy: boolean
+  conflict: boolean
+  hasEtag: boolean
+  outputContractError: string | null
+  audienceError: string | null
+  name: string
+  slug: string
+  dirty: boolean
+  canPublish: boolean
+  validatedForCurrent: boolean
+  onCreate: () => void
+  onSaveDraft: () => void
+  onValidate: () => void
+  onPreview: () => void
+}) {
+  return (
+    <div className="agent-actions">
+      {creating ? (
+        <button
+          className="btn btn--primary"
+          type="button"
+          onClick={onCreate}
+          disabled={
+            busy ||
+            !!outputContractError ||
+            !!audienceError ||
+            !name.trim() ||
+            !slug.trim()
+          }
+        >
+          {busy ? '建立中…' : '建立 Agent'}
+        </button>
+      ) : (
+        <>
+          <button
+            className="btn btn--primary"
+            type="button"
+            onClick={onSaveDraft}
+            disabled={
+              busy || conflict || !hasEtag || !!outputContractError || !!audienceError || !dirty
+            }
+          >
+            {busy ? '儲存中…' : '儲存草稿'}
+          </button>
+          <button
+            className="btn"
+            type="button"
+            onClick={onValidate}
+            disabled={busy || conflict || !hasEtag || dirty}
+            title={
+              conflict
+                ? '請先重新載入最新版本'
+                : dirty
+                  ? '請先儲存草稿再驗證'
+                  : !hasEtag
+                    ? '缺少 ETag，請重新載入'
+                    : undefined
+            }
+          >
+            驗證
+          </button>
+          <button
+            className="btn btn--info"
+            type="button"
+            onClick={onPreview}
+            disabled={busy || !canPublish}
+            title={!validatedForCurrent ? '請先儲存並通過驗證' : undefined}
+          >
+            發布預覽
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** 發布預覽：完整顯示 immutable revision 的權限、規則、Skill 與 runtime 摘要。 */
+function AgentPublishPreview({
+  form,
+  publishedRevision,
+  preview,
+  selectedTools,
+  outputContractFields,
+  rulesCount,
+  hasInvalidBinding,
+  busy,
+  canPublish,
+  cancelRef,
+  onCancel,
+  onPublish,
+}: {
+  form: AgentDraft
+  publishedRevision: number | null
+  preview: SkillBindingPreview[]
+  selectedTools: AgentToolCatalogEntry[]
+  outputContractFields: string[]
+  rulesCount: number
+  hasInvalidBinding: boolean
+  busy: boolean
+  canPublish: boolean
+  cancelRef: RefObject<HTMLButtonElement | null>
+  onCancel: () => void
+  onPublish: () => void
+}) {
+  return (
+    <div className="confirm-dialog agent-preview">
+      <h4 id="agent-preview-title" className="agent-block__title">
+        發布預覽
+      </h4>
+      <p className="muted">
+        發布會建立不可變的新 Agent revision；下列設定會成為本次快照。
+      </p>
+
+      <dl className="agent-preview__summary">
+        <div>
+          <dt>Agent revision</dt>
+          <dd>r{nextAgentRevision(publishedRevision)}</dd>
+        </div>
+        <div>
+          <dt>Execution roles</dt>
+          <dd>{form.execution_roles.join('、') || '無'}</dd>
+        </div>
+        <div>
+          <dt>Capabilities</dt>
+          <dd>{form.capabilities.join('、') || '無（不接受 capability discovery）'}</dd>
+        </div>
+        <div>
+          <dt>Audience</dt>
+          <dd>{form.audience.join('、') || '無（任何人都不可啟動）'}</dd>
+        </div>
+        <div>
+          <dt>Output contract</dt>
+          <dd>{outputContractFields.join('、') || '空 object'}</dd>
+        </div>
+        <div>
+          <dt>Business rules</dt>
+          <dd>{rulesCount} 條（Phase 2 公式編輯器管理）</dd>
+        </div>
+        <div>
+          <dt>Knowledge sources</dt>
+          <dd>{form.knowledge_sources.join('、') || '無'}</dd>
+        </div>
+      </dl>
+
+      <h5 className="agent-preview__heading">工具與風險</h5>
+      {selectedTools.length === 0 ? (
+        <p className="muted">此 Agent 沒有任何工具權限。</p>
+      ) : (
+        <ul className="agent-preview__list">
+          {selectedTools.map((tool) => (
+            <li key={tool.name}>
+              <span>
+                {tool.name} · {tool.description}
+              </span>
+              <span
+                className={`badge badge--${
+                  tool.risk === 'write' || tool.risk === 'privileged' ? 'admin' : 'user'
+                }`}
+              >
+                風險：{tool.risk}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h5 className="agent-preview__heading">Skill revision pins</h5>
+      {preview.length === 0 ? (
+        <p className="muted">此 Agent 沒有任何 Skill 綁定。</p>
+      ) : (
+        <ul className="agent-preview__list">
+          {preview.map((p) => (
+            <li key={p.skill}>
+              <span>{p.skill}</span>
+              {p.missing ? (
+                <span className="field-error">失效,無法固定</span>
+              ) : (
+                <span className="badge badge--user">
+                  固定到 {p.pinned_revision != null ? `r${p.pinned_revision}` : '目前 revision'}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {hasInvalidBinding && (
+        <p className="field-error" role="alert">
+          有失效的 Skill 綁定,請返回移除後再發布。
+        </p>
+      )}
+
+      <h5 className="agent-preview__heading">Runtime / Execution Harness</h5>
+      <dl className="agent-preview__summary">
+        <div>
+          <dt>工具／Context 輪數</dt>
+          <dd>
+            {form.runtime_limits.max_tool_rounds} / {form.runtime_limits.max_context_rounds}
+          </dd>
+        </div>
+        <div>
+          <dt>Timeout</dt>
+          <dd>{form.runtime_limits.timeout_seconds} 秒</dd>
+        </div>
+        <div>
+          <dt>Token / step budget</dt>
+          <dd>
+            {form.runtime_limits.token_budget} / {form.runtime_limits.step_budget}
+          </dd>
+        </div>
+        <div>
+          <dt>Workflow pin</dt>
+          <dd>
+            {form.runtime_workflow
+              ? `${form.runtime_workflow.id} · r${form.runtime_workflow.revision}`
+              : 'Default Agent-Runtime Workflow（由 server 固定）'}
+          </dd>
+        </div>
+      </dl>
+
+      <div className="confirm-dialog__actions">
+        <button
+          ref={cancelRef}
+          className="btn"
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+        >
+          取消
+        </button>
+        <button
+          className="btn btn--primary"
+          type="button"
+          onClick={onPublish}
+          disabled={busy || !canPublish}
+        >
+          {busy ? '發布中…' : '確認發布'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /**
  * Agent Builder 編輯器(建立精靈 + 草稿編輯合一)。負責:身分/System Prompt/工具/知識來源/
  * Skill 綁定表單、ETag 樂觀併發(409 提示重載)、validate(field_errors 定位欄位)、
@@ -323,7 +1165,7 @@ export default function AgentEditor({
   const [validation, setValidation] = useState<AgentValidation | null>(null)
   const [validatedVersion, setValidatedVersion] = useState<number | null>(null)
   const [conflict, setConflict] = useState(false)
-  const [sub, setSub] = useState<'edit' | 'history' | 'test'>('edit')
+  const [sub, setSub] = useState<EditorSub>('edit')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   /** 使用者一動表單就不再套用後到的系統預設值(避免蓋掉已輸入內容)。 */
@@ -335,11 +1177,6 @@ export default function AgentEditor({
     (c) => !c.name.startsWith('template-'),
   )
   const bindableSkills = catalog.filter(isSkillBindable)
-  const nonBindableSkills = catalog.filter((skill) => !isSkillBindable(skill))
-  const catalogGroups = [
-    { kind: 'agentic' as const, label: '技能', entries: catalog.filter((skill) => skill.kind === 'agentic') },
-    { kind: 'flow' as const, label: '業務流程', entries: catalog.filter((skill) => skill.kind === 'flow') },
-  ]
   const toolCatalogRes = useResource(listAgentToolCatalog)
   const toolCatalog: AgentToolCatalogEntry[] = toolCatalogRes.data ?? []
   // 規則目錄取一次,分給 BusinessRuleEditor 與副駕(兩者同時掛載,各自取會變成重複 GET)。
@@ -460,7 +1297,7 @@ export default function AgentEditor({
   const dirty = (savedDraft ? draftKey(form) !== draftKey(savedDraft) : true) || !!outputContractError
 
   // 發布預覽:每個 binding 於發布時將被固定到該 Skill 目前 revision(從 catalog 解析)。
-  const preview = form.skill_bindings.map((b) => {
+  const preview: SkillBindingPreview[] = form.skill_bindings.map((b) => {
     const entry = bindableSkills.find((c) => c.name === b.skill)
     return {
       skill: b.skill,
@@ -645,39 +1482,17 @@ export default function AgentEditor({
 
   return (
     <div className="agent-editor">
-      <div className="skill-editor__head">
-        <button className="btn" type="button" onClick={onClose} disabled={busy}>
-          ← 返回清單
-        </button>
-        <h3 className="skill-editor__title">
-          {title}
-          {!creating && (
-            <>
-              <span className={`badge badge--${enabled ? 'user' : 'admin'}`}>
-                {enabled ? '啟用中' : '已停用'}
-              </span>
-              <span className="badge badge--user">
-                {publishedRevision != null ? `已發布 r${publishedRevision}` : '未發布'}
-              </span>
-            </>
-          )}
-        </h3>
-        {!creating && (
-          <div className="seg" role="group" aria-label="Agent 子功能">
-            <button className="btn" aria-pressed={sub === 'edit'} onClick={() => setSub('edit')}>
-              編輯
-            </button>
-            <button className="btn" aria-pressed={sub === 'history'} onClick={() => setSub('history')}>
-              版本控管
-            </button>
-            {agentTestRunEnabled && publishedRevision !== null && (
-              <button className="btn" aria-pressed={sub === 'test'} onClick={() => setSub('test')}>
-                測試 Run
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+      <AgentEditorHead
+        title={title}
+        creating={creating}
+        enabled={enabled}
+        publishedRevision={publishedRevision}
+        sub={sub}
+        agentTestRunEnabled={agentTestRunEnabled}
+        busy={busy}
+        onClose={onClose}
+        onSub={setSub}
+      />
 
       {conflict && (
         <div className="agent-conflict" role="alert">
@@ -706,52 +1521,14 @@ export default function AgentEditor({
           enabled={enabled}
         />
       ) : sub === 'history' && !creating ? (
-        <section className="skill-history">
-          <p className="muted">唯讀歷史(依 revision 遞減);回溯會以該版重新發布為新 revision。</p>
-          <ErrorText msg={revisions.error} />
-          {!revisions.data && !revisions.error ? (
-            <Skeleton rows={3} />
-          ) : revisions.data && revisions.data.length === 0 ? (
-            <p className="muted">尚無 revision(此 Agent 未曾發布)。</p>
-          ) : (
-            revisions.data?.map((r, i) => (
-              <details className="rev" key={r.revision} open={i === 0}>
-                <summary className="rev__head">
-                  <span className="badge badge--user">r{r.revision}</span>
-                  <span className="rev__meta">
-                    {r.created_by} · {fmtDate(r.created_at)}
-                  </span>
-                  <code className="rev__sha">{r.definition_sha256.slice(0, 12)}</code>
-                  {isAdmin && i !== 0 && (
-                    <button
-                      className="btn"
-                      type="button"
-                      disabled={busy || conflict}
-                      onClick={(e) => {
-                        e.preventDefault()
-                        void onRestore(r.revision)
-                      }}
-                    >
-                      回溯此版
-                    </button>
-                  )}
-                </summary>
-                <ul className="agent-rev__bindings">
-                  {r.skill_bindings.length === 0 ? (
-                    <li className="muted">無 Skill 綁定</li>
-                  ) : (
-                    r.skill_bindings.map((b) => (
-                      <li key={b.skill}>
-                        {b.skill} → r{b.skill_revision}
-                        {b.enabled ? '' : '(已停用)'}
-                      </li>
-                    ))
-                  )}
-                </ul>
-              </details>
-            ))
-          )}
-        </section>
+        <AgentRevisionHistory
+          revisions={revisions.data}
+          error={revisions.error}
+          isAdmin={isAdmin}
+          busy={busy}
+          conflict={conflict}
+          onRestore={onRestore}
+        />
       ) : (
         <>
           {/* headless:讓 AI 副駕在編輯器開著時能解釋欄位、依描述填草稿、加商業規則(只改表單)。 */}
@@ -768,144 +1545,32 @@ export default function AgentEditor({
           />
 
           {/* ── 基本區:建一個可用 Agent 只需要這些 ── */}
-          <section className="agent-block">
-            <h4 className="agent-block__title">身分</h4>
-            <div className="field">
-              <label htmlFor="agent-name">名稱</label>
-              <input
-                id="agent-name"
-                className="input"
-                value={form.name}
-                disabled={locked}
-                aria-invalid={!!fieldError('name')}
-                aria-describedby={fieldError('name') ? 'agent-name-error' : undefined}
-                placeholder="租戶內顯示名稱"
-                onChange={(e) => patch({ name: e.target.value })}
-              />
-              {fieldError('name') && (
-                <span id="agent-name-error" className="field-error" role="alert">
-                  {fieldError('name')}
-                </span>
-              )}
-            </div>
-            <div className="field">
-              <label htmlFor="agent-desc">描述</label>
-              <input
-                id="agent-desc"
-                className="input"
-                value={form.description}
-                disabled={locked}
-                aria-invalid={!!fieldError('description')}
-                aria-describedby={fieldError('description') ? 'agent-desc-error' : undefined}
-                placeholder="用途與適用情境"
-                onChange={(e) => patch({ description: e.target.value })}
-              />
-              {fieldError('description') && (
-                <span id="agent-desc-error" className="field-error" role="alert">
-                  {fieldError('description')}
-                </span>
-              )}
-            </div>
-          </section>
+          <AgentIdentitySection
+            name={form.name}
+            description={form.description}
+            locked={locked}
+            nameError={fieldError('name')}
+            descriptionError={fieldError('description')}
+            onPatch={patch}
+          />
 
-          {/* ── System Prompt ── */}
-          <section className="agent-block">
-            <h4 className="agent-block__title">System Prompt</h4>
-            <div className="field">
-              <label htmlFor="agent-system-prompt">角色與行為指引</label>
-              <textarea
-                id="agent-system-prompt"
-                className="textarea"
-                value={form.system_prompt}
-                disabled={locked}
-                aria-invalid={!!fieldError('system_prompt')}
-                aria-describedby={fieldError('system_prompt') ? 'agent-system-prompt-error' : undefined}
-                placeholder="角色、目標、語氣、一般行為指引"
-                onChange={(e) => patch({ system_prompt: e.target.value })}
-              />
-              {fieldError('system_prompt') && (
-                <span id="agent-system-prompt-error" className="field-error" role="alert">
-                  {fieldError('system_prompt')}
-                </span>
-              )}
-            </div>
-          </section>
+          <AgentSystemPromptSection
+            value={form.system_prompt}
+            locked={locked}
+            error={fieldError('system_prompt')}
+            onPatch={patch}
+          />
 
-          {/* ── Skill 綁定 ── */}
-          <section className="agent-block">
-            <h4 className="agent-block__title">能力綁定</h4>
-            <p className="muted">
-              只顯示同租戶、可執行的技能與業務流程；發布時會把每個綁定固定到當時的確切 revision。
-            </p>
-            <ErrorText msg={catalogRes.error} />
-            {/* 已綁定但 catalog 已無(停用/移除)的 Skill:定位為失效,禁止發布(A-UI-05)。 */}
-            {preview
-              .filter((p) => p.missing)
-              .map((p) => (
-                <p key={p.skill} className="field-error" role="alert">
-                  已綁定的 Skill「{p.skill}」已失效、停用或不可固定 revision，請移除或改綁其他
-                  Skill 後才能發布。
-                  {!locked && (
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => toggleBinding(p.skill)}
-                    >
-                      移除
-                    </button>
-                  )}
-                </p>
-              ))}
-            {!catalogRes.data && !catalogRes.error ? (
-              <Skeleton rows={3} />
-            ) : (
-              <div className="agent-skill-groups">
-                {catalogGroups.map((group) => group.entries.length > 0 && (
-                  <section key={group.kind} aria-label={group.label}>
-                    <h5 className="agent-block__title">{group.label}</h5>
-                    <ul className="agent-skills">
-                      {group.entries.map((c) => {
-                        const bound = form.skill_bindings.some((b) => b.skill === c.name)
-                        const bindable = isSkillBindable(c)
-                        return (
-                          <li key={c.name} className="agent-skills__row">
-                            <label className="agent-check">
-                              <input
-                                type="checkbox"
-                                checked={bound}
-                                disabled={locked || !bindable}
-                                onChange={() => toggleBinding(c.name)}
-                              />
-                              <span className="agent-skills__name">{c.name}</span>
-                            </label>
-                            <span className="muted agent-skills__desc">{c.description}</span>
-                            <span className={`badge badge--${bindable ? 'user' : 'admin'}`}>
-                              {bindable
-                                ? c.revision != null
-                                  ? `可綁 · r${c.revision}`
-                                  : '可綁'
-                                : '不可綁 · 無持久 revision'}
-                            </span>
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </section>
-                ))}
-              </div>
-            )}
-            {nonBindableSkills.length > 0 && (
-              <p className="muted" role="note">
-                內建 Skill 可直接執行，但目前沒有可固定的 persisted immutable revision，因此不能綁入
-                Agent。請先上傳為 tenant Skill。
-              </p>
-            )}
-            {fieldError('skill_bindings') && (
-              <span className="field-error" role="alert">
-                {fieldError('skill_bindings')}
-              </span>
-            )}
-          </section>
+          <AgentSkillBindingsSection
+            catalog={catalog}
+            catalogError={catalogRes.error}
+            catalogLoaded={!!catalogRes.data}
+            preview={preview}
+            bindings={form.skill_bindings}
+            locked={locked}
+            bindingError={fieldError('skill_bindings')}
+            onToggle={toggleBinding}
+          />
 
           {/* ── 知識來源 ── */}
           <section className="agent-block">
@@ -944,133 +1609,40 @@ export default function AgentEditor({
             </summary>
             <p className="muted">不確定就先不用改,以上欄位都已有可用的預設值。</p>
 
-            <section className="agent-block">
-              <h4 className="agent-block__title">識別字</h4>
-              <div className="field">
-                <label htmlFor="agent-slug">slug</label>
-                <input
-                  id="agent-slug"
-                  className="input"
-                  value={form.slug}
-                  disabled={locked || !creating}
-                  aria-invalid={!!fieldError('slug')}
-                  aria-describedby={fieldError('slug') ? 'agent-slug-error' : undefined}
-                  placeholder="租戶內唯一、穩定的 API 識別字"
-                  onChange={(e) => patch({ slug: e.target.value })}
-                />
-                {!creating && <p className="muted">slug 是穩定識別字,建立後不可變更。</p>}
-                {fieldError('slug') && (
-                  <span id="agent-slug-error" className="field-error" role="alert">
-                    {fieldError('slug')}
-                  </span>
-                )}
-              </div>
-            </section>
+            <AgentSlugSection
+              slug={form.slug}
+              creating={creating}
+              locked={locked}
+              error={fieldError('slug')}
+              onPatch={patch}
+            />
 
-            <section className="agent-block">
-              <h4 className="agent-block__title">執行角色</h4>
-              <div className="agent-roles">
-                {ROLES.map((r) => (
-                  <label key={r.id} className="agent-check">
-                    <input
-                      type="checkbox"
-                      checked={form.execution_roles.includes(r.id)}
-                      disabled={locked}
-                      onChange={() => toggleRole(r.id)}
-                    />
-                    {r.label}
-                  </label>
-                ))}
-              </div>
-            </section>
+            <AgentExecutionRolesSection
+              roles={form.execution_roles}
+              locked={locked}
+              onToggle={toggleRole}
+            />
 
             {/* ── Discovery / output contract ── */}
-            <section className="agent-block">
-              <h4 className="agent-block__title">能力與輸出</h4>
-              <StringSetEditor
-                id="agent-capabilities"
-                label="Capabilities"
-                hint="供 Orchestrator discovery/selection 使用的 typed tags；空集合代表不會被能力條件選中。"
-                items={form.capabilities}
-                placeholder="例如 research、analysis"
-                disabled={locked}
-                onChange={(next) => patch({ capabilities: next })}
-              />
-              <div className="field">
-                <label htmlFor="agent-output-contract">Output contract（JSON object）</label>
-                <textarea
-                  id="agent-output-contract"
-                  className="textarea code-textarea"
-                  value={outputContractText}
-                  disabled={locked}
-                  aria-invalid={!!outputContractError}
-                  aria-describedby={outputContractError ? 'agent-output-contract-error' : undefined}
-                  onChange={(event) => patchOutputContract(event.target.value)}
-                />
-                {outputContractError && (
-                  <span id="agent-output-contract-error" className="field-error" role="alert">
-                    {outputContractError}
-                  </span>
-                )}
-                {!outputContractError && fieldError('output_contract') && (
-                  <span className="field-error" role="alert">
-                    {fieldError('output_contract')}
-                  </span>
-                )}
-              </div>
-            </section>
+            <AgentCapabilityOutputSection
+              capabilities={form.capabilities}
+              contractText={outputContractText}
+              contractParseError={outputContractError}
+              contractFieldError={fieldError('output_contract')}
+              locked={locked}
+              onCapabilities={(next) => patch({ capabilities: next })}
+              onContractText={patchOutputContract}
+            />
 
-            {/* ── 工具 allowlist ── */}
-            <section className="agent-block">
-              <h4 className="agent-block__title">工具 allowlist</h4>
-              <p className="muted">
-                只可從 server Tool Catalog 選取；目錄不包含 endpoint/token。空集合代表不授權任何工具。
-              </p>
-              <ErrorText msg={toolCatalogRes.error} />
-              {missingTools.map((name) => (
-                <p key={name} className="field-error" role="alert">
-                  已允許的工具「{name}」不在目前 Tool Catalog，請移除後才能發布。
-                  {!locked && (
-                    <button type="button" className="btn" onClick={() => toggleTool(name)}>
-                      移除
-                    </button>
-                  )}
-                </p>
-              ))}
-              {!toolCatalogRes.data && !toolCatalogRes.error ? (
-                <Skeleton rows={3} />
-              ) : toolCatalog.length === 0 ? (
-                <p className="agent-set__empty" role="note">
-                  Tool Catalog 目前沒有可選工具；此 Agent 將保持無工具權限。
-                </p>
-              ) : (
-                <ul className="agent-skills">
-                  {toolCatalog.map((tool) => (
-                    <li key={tool.name} className="agent-skills__row">
-                      <label className="agent-check">
-                        <input
-                          type="checkbox"
-                          checked={form.allowed_tools.includes(tool.name)}
-                          disabled={locked}
-                          onChange={() => toggleTool(tool.name)}
-                        />
-                        <span className="agent-skills__name">{tool.name}</span>
-                      </label>
-                      <span className="muted agent-skills__desc">{tool.description}</span>
-                      <span className="badge badge--user">{tool.kind}</span>
-                      <span
-                        className={`badge badge--${
-                          tool.risk === 'write' || tool.risk === 'privileged' ? 'admin' : 'user'
-                        }`}
-                        title={`回傳：${tool.returns}`}
-                      >
-                        風險：{tool.risk}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+            <AgentToolAllowlistSection
+              catalog={toolCatalog}
+              catalogError={toolCatalogRes.error}
+              catalogLoaded={!!toolCatalogRes.data}
+              allowed={form.allowed_tools}
+              missingTools={missingTools}
+              locked={locked}
+              onToggle={toggleTool}
+            />
 
             <BusinessRuleEditor
               value={form.business_rules}
@@ -1081,45 +1653,12 @@ export default function AgentEditor({
             />
 
             {/* ── Runtime limits / Harness pin ── */}
-            <section className="agent-block">
-              <h4 className="agent-block__title">Runtime limits</h4>
-              <p className="muted">
-                新建時的預設值來自系統設定 `agent.defaults.*`（未設定則用內建值）；填 0
-                代表交由 Runtime 預設決定。正式 Runtime 會依 Harness 與政策交集
-                fail-closed，不會解讀成無上限。
-              </p>
-              <div className="agent-runtime-grid">
-                {(
-                  [
-                    ['max_tool_rounds', '工具輪數'],
-                    ['max_context_rounds', 'Context 輪數'],
-                    ['timeout_seconds', '逾時秒數'],
-                    ['token_budget', 'Token budget'],
-                    ['step_budget', 'Step budget'],
-                  ] as const
-                ).map(([key, label]) => (
-                  <div className="field" key={key}>
-                    <label htmlFor={`agent-runtime-${key}`}>{label}</label>
-                    <input
-                      id={`agent-runtime-${key}`}
-                      className="input"
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={form.runtime_limits[key]}
-                      disabled={locked}
-                      onChange={(event) => patchRuntimeLimit(key, event.target.value)}
-                    />
-                  </div>
-                ))}
-              </div>
-              <p className="muted">
-                Execution Harness：
-                {form.runtime_workflow
-                  ? `${form.runtime_workflow.id} · r${form.runtime_workflow.revision}`
-                  : '建立／發布時由 server 固定到 Default Agent-Runtime Workflow'}
-              </p>
-            </section>
+            <AgentRuntimeLimitsSection
+              limits={form.runtime_limits}
+              runtimeWorkflow={form.runtime_workflow}
+              locked={locked}
+              onChange={patchRuntimeLimit}
+            />
           </details>
 
           {/* ── 驗證結果(非欄位級) ── */}
@@ -1147,63 +1686,23 @@ export default function AgentEditor({
 
           {/* ── 動作列(僅 ADMIN) ── */}
           {isAdmin && (
-            <div className="agent-actions">
-              {creating ? (
-                <button
-                  className="btn btn--primary"
-                  type="button"
-                  onClick={() => void onCreate()}
-                  disabled={
-                    busy ||
-                    !!outputContractError ||
-                    !!audienceError ||
-                    !form.name.trim() ||
-                    !form.slug.trim()
-                  }
-                >
-                  {busy ? '建立中…' : '建立 Agent'}
-                </button>
-              ) : (
-                <>
-                  <button
-                    className="btn btn--primary"
-                    type="button"
-                    onClick={() => void onSaveDraft()}
-                    disabled={
-                      busy || conflict || !etag || !!outputContractError || !!audienceError || !dirty
-                    }
-                  >
-                    {busy ? '儲存中…' : '儲存草稿'}
-                  </button>
-                  <button
-                    className="btn"
-                    type="button"
-                    onClick={() => void onValidate()}
-                    disabled={busy || conflict || !etag || dirty}
-                    title={
-                      conflict
-                        ? '請先重新載入最新版本'
-                        : dirty
-                          ? '請先儲存草稿再驗證'
-                          : !etag
-                            ? '缺少 ETag，請重新載入'
-                            : undefined
-                    }
-                  >
-                    驗證
-                  </button>
-                  <button
-                    className="btn btn--info"
-                    type="button"
-                    onClick={() => setShowPreview(true)}
-                    disabled={busy || !canPublish}
-                    title={!validatedForCurrent ? '請先儲存並通過驗證' : undefined}
-                  >
-                    發布預覽
-                  </button>
-                </>
-              )}
-            </div>
+            <AgentEditorActions
+              creating={creating}
+              busy={busy}
+              conflict={conflict}
+              hasEtag={!!etag}
+              outputContractError={outputContractError}
+              audienceError={audienceError}
+              name={form.name}
+              slug={form.slug}
+              dirty={dirty}
+              canPublish={canPublish}
+              validatedForCurrent={validatedForCurrent}
+              onCreate={() => void onCreate()}
+              onSaveDraft={() => void onSaveDraft()}
+              onValidate={() => void onValidate()}
+              onPreview={() => setShowPreview(true)}
+            />
           )}
           {isAdmin && !creating && dirty && (
             <p className="muted">草稿有未儲存的變更;驗證與發布需先儲存並重新驗證。</p>
@@ -1226,140 +1725,20 @@ export default function AgentEditor({
         aria-labelledby="agent-preview-title"
       >
         {showPreview && (
-          <div className="confirm-dialog agent-preview">
-            <h4 id="agent-preview-title" className="agent-block__title">
-              發布預覽
-            </h4>
-            <p className="muted">
-              發布會建立不可變的新 Agent revision；下列設定會成為本次快照。
-            </p>
-
-            <dl className="agent-preview__summary">
-              <div>
-                <dt>Agent revision</dt>
-                <dd>r{nextAgentRevision(publishedRevision)}</dd>
-              </div>
-              <div>
-                <dt>Execution roles</dt>
-                <dd>{form.execution_roles.join('、') || '無'}</dd>
-              </div>
-              <div>
-                <dt>Capabilities</dt>
-                <dd>{form.capabilities.join('、') || '無（不接受 capability discovery）'}</dd>
-              </div>
-              <div>
-                <dt>Audience</dt>
-                <dd>{form.audience.join('、') || '無（任何人都不可啟動）'}</dd>
-              </div>
-              <div>
-                <dt>Output contract</dt>
-                <dd>{outputContractFields.join('、') || '空 object'}</dd>
-              </div>
-              <div>
-                <dt>Business rules</dt>
-                <dd>{rulesCount} 條（Phase 2 公式編輯器管理）</dd>
-              </div>
-              <div>
-                <dt>Knowledge sources</dt>
-                <dd>{form.knowledge_sources.join('、') || '無'}</dd>
-              </div>
-            </dl>
-
-            <h5 className="agent-preview__heading">工具與風險</h5>
-            {selectedTools.length === 0 ? (
-              <p className="muted">此 Agent 沒有任何工具權限。</p>
-            ) : (
-              <ul className="agent-preview__list">
-                {selectedTools.map((tool) => (
-                  <li key={tool.name}>
-                    <span>
-                      {tool.name} · {tool.description}
-                    </span>
-                    <span
-                      className={`badge badge--${
-                        tool.risk === 'write' || tool.risk === 'privileged' ? 'admin' : 'user'
-                      }`}
-                    >
-                      風險：{tool.risk}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            <h5 className="agent-preview__heading">Skill revision pins</h5>
-            {preview.length === 0 ? (
-              <p className="muted">此 Agent 沒有任何 Skill 綁定。</p>
-            ) : (
-              <ul className="agent-preview__list">
-                {preview.map((p) => (
-                  <li key={p.skill}>
-                    <span>{p.skill}</span>
-                    {p.missing ? (
-                      <span className="field-error">失效,無法固定</span>
-                    ) : (
-                      <span className="badge badge--user">
-                        固定到 {p.pinned_revision != null ? `r${p.pinned_revision}` : '目前 revision'}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {hasInvalidBinding && (
-              <p className="field-error" role="alert">
-                有失效的 Skill 綁定,請返回移除後再發布。
-              </p>
-            )}
-
-            <h5 className="agent-preview__heading">Runtime / Execution Harness</h5>
-            <dl className="agent-preview__summary">
-              <div>
-                <dt>工具／Context 輪數</dt>
-                <dd>
-                  {form.runtime_limits.max_tool_rounds} / {form.runtime_limits.max_context_rounds}
-                </dd>
-              </div>
-              <div>
-                <dt>Timeout</dt>
-                <dd>{form.runtime_limits.timeout_seconds} 秒</dd>
-              </div>
-              <div>
-                <dt>Token / step budget</dt>
-                <dd>
-                  {form.runtime_limits.token_budget} / {form.runtime_limits.step_budget}
-                </dd>
-              </div>
-              <div>
-                <dt>Workflow pin</dt>
-                <dd>
-                  {form.runtime_workflow
-                    ? `${form.runtime_workflow.id} · r${form.runtime_workflow.revision}`
-                    : 'Default Agent-Runtime Workflow（由 server 固定）'}
-                </dd>
-              </div>
-            </dl>
-
-            <div className="confirm-dialog__actions">
-              <button
-                ref={previewCancelRef}
-                className="btn"
-                type="button"
-                onClick={closePreview}
-                disabled={busy}
-              >
-                取消
-              </button>
-              <button
-                className="btn btn--primary"
-                type="button"
-                onClick={() => void onPublish()}
-                disabled={busy || !canPublish}
-              >
-                {busy ? '發布中…' : '確認發布'}
-              </button>
-            </div>
-          </div>
+          <AgentPublishPreview
+            form={form}
+            publishedRevision={publishedRevision}
+            preview={preview}
+            selectedTools={selectedTools}
+            outputContractFields={outputContractFields}
+            rulesCount={rulesCount}
+            hasInvalidBinding={hasInvalidBinding}
+            busy={busy}
+            canPublish={canPublish}
+            cancelRef={previewCancelRef}
+            onCancel={closePreview}
+            onPublish={() => void onPublish()}
+          />
         )}
       </Modal>
     </div>

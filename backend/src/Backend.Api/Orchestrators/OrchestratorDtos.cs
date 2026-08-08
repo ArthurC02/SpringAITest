@@ -25,7 +25,8 @@ public interface IOrchestratorRepository
 public static class OrchestratorCanonicalizer
 {
     public const int MaxWorkers = 64, MaxContextTools = 128, MaxAudience = 256;
-    public static string Canonicalize(JsonElement x) => Canonicalize(x.GetRawText());
+    // 同一棵 canonical 樹(AgentCanonicalizer.CanonicalizeDefinition 也是它),但走得過 body 缺欄位/顯式 null。
+    public static string Canonicalize(JsonElement x) => CanonicalJsonTree.NormalizeBody(x);
     public static string Canonicalize(string x) => Backend.Api.Agents.AgentCanonicalizer.CanonicalizeDefinition(x);
     public static IReadOnlyList<string> Validate(string text)
     {
@@ -67,7 +68,7 @@ public static class OrchestratorCanonicalizer
             }
             if (!root.TryGetProperty("workerPool", out var workers) || workers.ValueKind != JsonValueKind.Array || workers.GetArrayLength() is < 1 or > MaxWorkers) errors.Add($"definition.workerPool must contain 1..{MaxWorkers} pinned workers");
             else foreach (var worker in workers.EnumerateArray()) { ValidateRefElement(worker, "workerPool", "agentId", "revision", errors); if (worker.ValueKind == JsonValueKind.Object) RejectUnknown(worker, ["agentId", "revision"], "definition.workerPool[]", errors); }
-            if (root.TryGetProperty("verifier", out var verifierRef) && Guid.TryParse(verifierRef.GetProperty("agentId").GetString(), out var verifierId) && root.TryGetProperty("workerPool", out workers) && workers.ValueKind == JsonValueKind.Array && workers.EnumerateArray().Any(w => Guid.TryParse(w.GetProperty("agentId").GetString(), out var workerId) && workerId == verifierId)) errors.Add("definition.verifier must not appear in workerPool");
+            if (root.TryGetProperty("verifier", out var verifierRef) && Guid.TryParse(AgentId(verifierRef), out var verifierId) && root.TryGetProperty("workerPool", out workers) && workers.ValueKind == JsonValueKind.Array && workers.EnumerateArray().Any(w => Guid.TryParse(AgentId(w), out var workerId) && workerId == verifierId)) errors.Add("definition.verifier must not appear in workerPool");
             if (!root.TryGetProperty("context", out var context) || context.ValueKind != JsonValueKind.Object) errors.Add("definition.context is required");
             else
             {
@@ -97,6 +98,8 @@ public static class OrchestratorCanonicalizer
         catch (Exception ex) when (ex is JsonException or InvalidOperationException) { errors.Add("definition must be valid typed JSON"); }
         return errors;
     }
+    /// <summary>pin 的 agentId,缺鍵/非物件/非字串一律 null(呼叫端的 Guid.TryParse 會擋掉);GetProperty 會對缺鍵拋。</summary>
+    private static string? AgentId(JsonElement pin) => pin.ValueKind == JsonValueKind.Object && pin.TryGetProperty("agentId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
     public static IReadOnlyList<OrchestratorAgentRef> AgentRefs(string text) { using var d = JsonDocument.Parse(text); var r = d.RootElement; var result = new List<OrchestratorAgentRef>(); var v = r.GetProperty("verifier"); result.Add(new(Guid.Parse(v.GetProperty("agentId").GetString()!), v.GetProperty("revision").GetInt32(), true)); foreach (var w in r.GetProperty("workerPool").EnumerateArray()) result.Add(new(Guid.Parse(w.GetProperty("agentId").GetString()!), w.GetProperty("revision").GetInt32(), false)); return result; }
     public static IReadOnlyList<string> ValidateContextTools(string text, IReadOnlyList<WorkflowToolInfo> catalog) { using var d = JsonDocument.Parse(text); var tools = d.RootElement.GetProperty("context").GetProperty("allowedTools").EnumerateArray().Select(x => x.GetString()!).ToArray(); var byName = catalog.GroupBy(x => x.Name, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.Ordinal); var errors = new List<string>(); foreach (var name in tools) { if (!byName.TryGetValue(name, out var matches) || matches.Length != 1) { errors.Add($"context tool {name} is unknown or ambiguous"); continue; } if (matches[0].Risk is not ("read" or "low")) errors.Add($"context tool {name} risk must be read or low"); } return errors; }
     private static void ValidateRef(JsonElement root, string field, string id, string revision, List<string> errors) { if (!root.TryGetProperty(field, out var value)) { errors.Add($"definition.{field} is required"); return; } ValidateRefElement(value, field, id, revision, errors); }

@@ -5,6 +5,7 @@ using Backend.Api.Agents;
 using Backend.Api.Common;
 using Backend.Api.Contexts;
 using Backend.Api.OrchestratorRuns;
+using Backend.Api.Orchestrators;
 using Backend.Api.Skills;
 using Backend.Api.Workflows;
 
@@ -26,6 +27,11 @@ public sealed class SharedRunPolicyTests
         Assert.Equal(
             AgentCanonicalizer.CanonicalizeDefinition(input),
             ContextCanonicalizer.CanonicalizeDefinition(document.RootElement));
+        // JsonElement 多載(body 綁定路徑)必須與 string 多載產出逐位元組相同的 canonical bytes ——
+        // 否則同一份定義經不同入口會得到不同 SHA。少了這兩行,把 JsonElement 路徑退回裸 GetRawText()
+        // (不排序)全套仍然全綠。
+        Assert.Equal(WorkflowCanonicalizer.Canonicalize(input), WorkflowCanonicalizer.Canonicalize(document.RootElement));
+        Assert.Equal(OrchestratorCanonicalizer.Canonicalize(input), OrchestratorCanonicalizer.Canonicalize(document.RootElement));
         Assert.True(JsonNode.DeepEquals(
             normalized,
             JsonNode.Parse(AgentRunSnapshotBuilder.CanonicalizeJson(input))));

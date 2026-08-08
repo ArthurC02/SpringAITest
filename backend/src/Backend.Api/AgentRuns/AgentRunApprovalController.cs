@@ -88,5 +88,6 @@ public sealed class AgentRunApprovalController(IAgentRunApprovalRepository appro
     private static AgentRunApprovalPublicResponse Public(AgentRunApprovalResponse value) => new(value.Id, value.RunId, value.Status, value.RequiredRole, value.ExpiresAt, value.SelfApprovalForbidden, value.Decision, value.DecidedAt);
     // Defense in depth: unreachable while the Program.cs D7 middleware stands in front of every
     // one of these routes, and deliberately kept so a future routing change cannot expose them.
-    private void RequireEnabled() { if (!writeTools.Enabled) throw new ApiException(404, "Feature is unavailable"); }
+    // 與 Program.cs 的 GateWhenDisabled 同一個旗標、同一個訊息:被 gate 的路由必須與不存在的路由不可區分。
+    private void RequireEnabled() { if (!writeTools.Enabled) throw new ApiException(404, "找不到資源"); }
 }

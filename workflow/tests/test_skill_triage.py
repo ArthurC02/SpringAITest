@@ -1,8 +1,8 @@
-"""Node-First 遷移（Phase 1）：triage_* 節點 + 編譯後的 app/skills/triage.yaml。
+"""triage_* 節點 + 編譯後的 app/skills/triage.yaml。
 
-語意逐字移植自 app/workflows/triage.py（手寫圖已於 Phase 3a 退役刪除）。手寫圖把「非標準輸出 → 預設 simple」放在 route()（條件邊），這裡改到
-triage_classify 節點內就正規化，因此邊界案例改對 triage_classify 的輸出斷言，
-決策表語意（含 COMPLEX 字樣 → complex；其餘含空字串 → simple）與 test_triage.py 一致。
+「非標準輸出 → 預設 simple」在 triage_classify 節點內就正規化，因此邊界案例
+對 triage_classify 的輸出斷言；決策表語意＝含 COMPLEX 字樣 → complex，
+其餘（含空字串）→ simple。
 """
 
 import asyncio

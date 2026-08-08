@@ -881,16 +881,15 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             {
                 var item = request.Events[index];
                 var eventCursor = request.EventCursorStart + index;
+                // 訊息與 Dapper(生產權威)逐字對齊:同一組條件在那邊是單一訊息,
+                // 拆成兩句會讓 lite/測試看到的錯誤字串與生產不同。
                 if (item.EventId == Guid.Empty
                     || string.IsNullOrWhiteSpace(item.EventType)
                     || item.EventType.Trim().Length > 100
-                    || !string.Equals(item.SnapshotHash, entry.SnapshotHash, StringComparison.Ordinal))
+                    || !string.Equals(item.SnapshotHash, entry.SnapshotHash, StringComparison.Ordinal)
+                    || !AgentRunEventPolicy.IsSafePayload(item.Payload))
                 {
-                    return Task.FromResult(InvalidState("event id/type/snapshot_hash 無效"));
-                }
-                if (!AgentRunEventPolicy.IsSafePayload(item.Payload))
-                {
-                    return Task.FromResult(InvalidState("event payload 含敏感欄位或超過上限"));
+                    return Task.FromResult(InvalidState("event id/type/snapshot_hash/payload 無效"));
                 }
                 var prior = entry.Events.FirstOrDefault(e => e.EventId == item.EventId);
                 if (prior is not null

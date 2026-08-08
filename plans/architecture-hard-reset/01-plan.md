@@ -1,6 +1,6 @@
 # Architecture Hard Reset — Delivery Plan
 
-> Status: reconciled planning index (2026-08-06, baseline `44f9de4`). Source code and executable tests remain authoritative. The prior P3 hard-cutover sequence is historical and is blocked by the post-P5/C8 decision sequence plus any applicable independent route gates; see [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
+> Status: reconciled planning index (P3 baseline `44f9de4`, revalidated 2026-08-08 against committed `HEAD=e24fe2b` plus the current dirty worktree). Source code and executable tests remain authoritative; uncommitted changes are not completion evidence. The prior P3 hard-cutover sequence is historical and is blocked by the post-P5/C8 decision sequence plus any applicable independent route gates; see [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
 
 ## 1. Goal and completion rule
 

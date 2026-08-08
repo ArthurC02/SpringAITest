@@ -1,7 +1,7 @@
 # Local start/evidence wrappers opt into Development without modifying infra/.env.
 param([switch]$IgnoreDotEnv)
 
-$dotEnvPath = Join-Path $PSScriptRoot '..' 'infra' '.env'
+$dotEnvPath = Join-Path (Join-Path (Join-Path $PSScriptRoot '..') 'infra') '.env'   # PS 5.1 僅支援 2-arg Join-Path
 function Test-DotEnvKey([string]$Name) {
     if (-not (Test-Path -LiteralPath $dotEnvPath)) { return $false }
     $escaped = [Regex]::Escape($Name)

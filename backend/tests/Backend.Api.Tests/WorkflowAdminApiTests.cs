@@ -185,6 +185,87 @@ public sealed class WorkflowAdminApiTests(TestWebAppFactory factory) : IClassFix
         Assert.Equal(HttpStatusCode.Conflict, (await c.SendAsync(publish)).StatusCode);
     }
     private static HttpContent OrchestratorBody(string name, string definition) => JsonContent.Create(new { name, description = "", definition = JsonNode.Parse(definition) });
+
+    // 信任邊界的畸形 body:缺屬性讓 JsonElement 綁成 Undefined(GetRawText 拋 InvalidOperationException),
+    // 顯式 null 則讓 JsonNode.Parse("null") 回 null、撞上 canonicalizer 的 `!`(NullReferenceException)。
+    // 兩者過去都在任何驗證之前炸成 500,被 platform 映成 502。必須走 controller 既有的 422 驗證錯誤形狀。
+    [Theory]
+    [InlineData("""{"name":"Root","description":""}""")]
+    [InlineData("""{"name":"Root","description":"","definition":null}""")]
+    public async Task Orchestrator_DefinitionMissingOrNull_IsValidationErrorNot500(string body)
+    {
+        var c = Admin();
+
+        var create = await c.PostAsync("/api/admin/orchestrators", Json(body));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        var error = await create.ReadJsonAsync();
+        error.AssertApiError(422, "unprocessable_entity");
+        Assert.Contains("definition must be an object", error["fieldErrors"]!.ToJsonString());
+
+        // draft 寫入的驗證早於 If-Match 求值,所以畸形 body 在這裡是 422 而不是 428。
+        var update = await c.PutAsync($"/api/admin/orchestrators/{Guid.NewGuid()}/draft", Json(body));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, update.StatusCode);
+        Assert.Contains("definition must be an object", (await update.ReadJsonAsync())["fieldErrors"]!.ToJsonString());
+    }
+
+    // 同一等價類的姊妹路由:WorkflowUpsert 有兩個非可空 JsonElement 欄位,兩個都是同一個咽喉。
+    [Theory]
+    [InlineData("""{"name":"W","kind":"orchestrator","ui_metadata":{}}""", "definition")]
+    [InlineData("""{"name":"W","kind":"orchestrator","definition":null,"ui_metadata":{}}""", "definition")]
+    [InlineData("""{"name":"W","kind":"orchestrator","definition":{"schemaVersion":1,"kind":"orchestrator","nodes":[],"edges":[]}}""", "ui_metadata")]
+    [InlineData("""{"name":"W","kind":"orchestrator","definition":{"schemaVersion":1,"kind":"orchestrator","nodes":[],"edges":[]},"ui_metadata":null}""", "ui_metadata")]
+    public async Task Workflow_DefinitionOrUiMetadataMissingOrNull_IsValidationErrorNot500(string body, string field)
+    {
+        var c = Admin();
+        var id = (await (await c.PostAsJsonAsync("/api/admin/workflows", Draft("Malformed " + Guid.NewGuid()))).ReadJsonAsync())["id"]!.GetValue<string>();
+
+        var create = await c.PostAsync("/api/admin/workflows", Json(body));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, create.StatusCode);
+        var error = await create.ReadJsonAsync();
+        error.AssertApiError(422, "unprocessable_entity");
+        Assert.Equal($"{field} must be a JSON object", error["fieldErrors"]![field]!.GetValue<string>());
+
+        var update = await c.PutAsync($"/api/admin/workflows/{id}/draft", Json(body));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, update.StatusCode);
+        Assert.Equal($"{field} must be a JSON object", (await update.ReadJsonAsync())["fieldErrors"]![field]!.GetValue<string>());
+    }
+
+    // 同病的第二種型態:definition 在,但巢狀必填欄位缺席/型別錯。JsonElement.GetProperty 對缺鍵拋
+    // KeyNotFoundException(不在 Orchestrator 的 catch filter 內),GetString() 對非字串拋
+    // InvalidOperationException(不在 Workflow 的 catch filter 內)—— 一樣是畸形 body → 500。
+    [Theory]
+    [InlineData("""{"verifier":{}}""")]
+    [InlineData("""{"verifier":{"agentId":"11111111-1111-4111-8111-111111111111","revision":1},"workerPool":[{"revision":1}]}""")]
+    public void Orchestrator_NestedPinWithoutAgentId_IsValidationErrorNotCrash(string fragment)
+    {
+        var errors = OrchestratorCanonicalizer.Validate(fragment);
+        Assert.NotEmpty(errors);
+        // 錯誤必須來自逐欄驗證,不是 catch 的 fallback:退回裸 GetProperty 的話這條會紅。
+        Assert.DoesNotContain("definition must be valid typed JSON", errors);
+    }
+
+    [Fact]
+    public async Task Orchestrator_VerifierWithoutAgentId_IsUnprocessableNot500()
+    {
+        var c = Admin();
+        var response = await c.PostAsync("/api/admin/orchestrators", Json("""{"name":"Root","description":"","definition":{"verifier":{}}}"""));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        (await response.ReadJsonAsync()).AssertApiError(422, "unprocessable_entity");
+    }
+
+    [Fact]
+    public async Task Workflow_NonStringGraphKind_IsUnprocessableNot500()
+    {
+        var c = Admin();
+        var response = await c.PostAsync("/api/admin/workflows", Json("""{"name":"W","kind":"orchestrator","definition":{"schemaVersion":1,"kind":7,"nodes":[],"edges":[]},"ui_metadata":{}}"""));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        var error = await response.ReadJsonAsync();
+        error.AssertApiError(422, "unprocessable_entity");
+        Assert.Equal("Graph kind must match workflow kind", error["fieldErrors"]!["definition.kind"]!.GetValue<string>());
+    }
+
+    private static HttpContent Json(string body) => new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+
     [Fact] public void Orchestrator_VerifierCannotAlsoBeWorker() { var id = Guid.NewGuid(); var json = ValidDefinition(id, id); Assert.Contains(OrchestratorCanonicalizer.Validate(json), x => x.Contains("must not appear")); }
     [Fact] public void Orchestrator_UnknownPolicyFieldIsRejected() { var json = ValidDefinition(Guid.NewGuid(), Guid.NewGuid()).Replace("\"denialPolicy\":\"fail-closed\"", "\"denialPolicy\":\"fail-closed\",\"python\":\"bad\""); Assert.Contains(OrchestratorCanonicalizer.Validate(json), x => x.Contains("not allowed")); }
     [Fact] public void Orchestrator_NestedUnknownFieldIsRejected() { var json = ValidDefinition(Guid.NewGuid(), Guid.NewGuid()).Replace("\"allowedTools\":[]", "\"allowedTools\":[],\"escape\":true"); Assert.Contains(OrchestratorCanonicalizer.Validate(json), x => x.Contains("escape is not allowed")); }

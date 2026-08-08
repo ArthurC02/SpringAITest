@@ -3,6 +3,15 @@ using System.Text;
 
 namespace Backend.Api.Agents;
 
+/// <summary>
+/// 契約鏡像:group id 的 regex、<see cref="MaxGroupIdLength"/>、<see cref="MaxCallerGroups"/>
+/// (platform 端名為 <c>MaxGroups</c>)、<see cref="MaxGroupsWireUtf8Bytes"/> 與
+/// <see cref="IsCanonicalGroupSet"/> 的四段條件,與
+/// platform/src/Platform.Service/Dtos/UserContext.cs 的 <c>UserGroupContract</c> 刻意逐字一致
+/// (跨服務各自部署,無法共用 assembly),改任一邊須同步另一邊 —— 這是安全 wire 契約:
+/// 任一邊放寬,另一邊就會靜默丟棄整組 group(而非回錯),使用者的授權會無聲消失。
+/// 兩側各有一支釘常數測試(<c>AgentAudienceTests</c> / <c>UserGroupContractTests</c>),單邊漂移會變紅。
+/// </summary>
 public static partial class AgentAudience
 {
     public const int MaxGroupIdLength = 128;

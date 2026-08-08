@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Web.Auth;
+using Platform.Web.Infrastructure;
 
 namespace Platform.Web.Controllers;
 

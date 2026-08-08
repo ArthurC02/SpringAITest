@@ -1,8 +1,7 @@
 """kb_query 族節點共用的依賴容器與正式環境組裝：Skill 引擎的 DI 組裝點。
 
-KbQueryDeps 與 _default_deps 原本活在已退役的手寫圖（app/workflows/kb_query.py +
-app/kbquery/graph.py）；Node-First 遷移後這裡是唯一的組裝點，節點不碰全域 settings
-或單例，全部由這裡注入（app/skills/__init__.py、custom.py、config_apply.py 共用同一份）。
+這裡是 kb_query 族的唯一組裝點：節點不碰全域 settings 或單例，一律由這裡注入
+（app/skills/__init__.py、custom.py、config_apply.py 共用同一份）。
 """
 
 from dataclasses import dataclass, field

@@ -34,6 +34,24 @@ public sealed class OperationsGovernanceApiTests
     }
 
     [Fact]
+    public async Task FeatureOff_UsesSameNotFoundContractAsUnknownRoute()
+    {
+        using var factory = new TestWebAppFactory();
+        using var client = factory.CreateClient();
+        using var gated = await client.GetAsync("/api/admin/operations/metrics");
+        using var unknown = await client.GetAsync("/api/not-a-route");
+
+        Assert.Equal(HttpStatusCode.NotFound, gated.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        var gatedBody = await gated.ReadJsonAsync();
+        var unknownBody = await unknown.ReadJsonAsync();
+        gatedBody.AssertApiError(404, "not_found");
+        unknownBody.AssertApiError(404, "not_found");
+        Assert.Equal(gatedBody["message"]!.GetValue<string>(), unknownBody["message"]!.GetValue<string>());
+        Assert.Equal(gated.Content.Headers.ContentType?.MediaType, unknown.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
     public async Task FlagOn_AnonymousReturns401()
     {
         using var factory = TestWebAppFactory.WithFlags("AGENT_WRITE_TOOLS_ENABLED");

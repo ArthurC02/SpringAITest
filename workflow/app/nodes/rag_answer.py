@@ -1,9 +1,9 @@
-"""rag_answer 節點：逐字移植 app/workflows/rag_qa.py::answer() 到 Node-First 引擎。
+"""rag_answer 節點：app/skills/rag-qa.yaml 的作答步驟（依檢索到的 docs 回答問題）。
 
-為什麼改用 llm.structured 而不是手寫圖的 get_llm().ainvoke(...)：節點不得碰全域
-settings 或單例（見 app/engine/node_registry.py 的 deps 慣例），LLM 一律由 deps
-注入，呼叫方式對齊既有 nl_logic/nl_extract 節點（StructuredLLMPort.structured）。
-prompt 文字（system/user）與「docs 為空 → 固定文案、不呼叫 LLM」的守衛逐字保留。
+為什麼用 llm.structured 而不是自己取全域 LLM：節點不得碰全域 settings 或單例
+（見 app/engine/node_registry.py 的 deps 慣例），LLM 一律由 deps 注入，呼叫方式
+對齊 nl_logic/nl_extract 節點（StructuredLLMPort.structured）。
+「docs 為空 → 固定文案、不呼叫 LLM」是節點內的確定性守衛。
 """
 
 from pydantic import BaseModel
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.engine.node_registry import node
 from app.nodes._llm_input import format_docs_context, structured_field
 
-# 手寫圖 rag_qa.py 的固定文案，逐字保留。
+# 檢索不到任何 docs 時的固定回覆文案（不呼叫 LLM）。
 _NOT_FOUND_ANSWER = "在你的租戶資料中找不到相關內容，請先上傳文件。"
 
 

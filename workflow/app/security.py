@@ -1,11 +1,20 @@
 """服務間認證與多租戶 context 解析。
 
-所有 /workflows* 與 /documents* 端點皆須通過這裡的兩道檢查：
-1. require_internal：驗證 platform 端（.NET，env 驅動）與本服務共享的內部密鑰（X-Internal-Token）。
-2. get_context：解析 platform 端轉送過來的租戶／使用者／角色資訊，組成 RequestContext。
+除了三條 /health* 探針與 FastAPI 內建的 schema 路由（/openapi.json、/docs、
+/docs/oauth2-redirect、/redoc；服務僅綁 127.0.0.1，schema 對內網以外不可達），
+本服務每一條 API 路由都要通過這裡的檢查：
+1. require_internal：驗證 platform／backend（.NET，env 驅動）與本服務共享的內部密鑰
+   （X-Internal-Token）。只掛這一道的目前只有 /checkpoint-retention/run（維運端點，
+   沒有租戶語意）。
+2. get_context：解析轉送過來的租戶／使用者／角色資訊，組成 RequestContext。
+   /nodes、/tools、/skills*、/business-workflows/validate、/business-rules/*、
+   /workflow-designer/*、/evals/run 都掛 `Depends(get_context)`。
 
 get_context 內部相依 require_internal，因此只要路由掛上 `Depends(get_context)`，
 就能保證「先驗證內部密鑰、再解析 context」的順序，不需要在每個路由重複宣告兩個依賴。
+沒有集中式 middleware 攔截（對照 backend 的 InternalTokenMiddleware），所以
+tests/test_internal_auth_boundary.py 逐條列舉 app.routes 釘住「每條路由都掛了」，
+新路由漏掛依賴時測試會變紅。
 
 旗標保護的內部 runtime 端點（D3 /agent-runs、D5 /orchestrator-runs）另有兩道共用閘門：
 FeatureGateMiddleware（路由與 body 解析之前就回 404）與 require_runtime_context

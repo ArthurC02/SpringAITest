@@ -16,20 +16,23 @@ function Get-DevelopmentJwtFileSetting([string]$Path, [string]$Name) {
     return $value
 }
 
+# PS 5.1 僅支援 2-arg Join-Path，infra 路徑先組好共用。
+$script:developmentJwtInfraDir = Join-Path (Join-Path $PSScriptRoot '..') 'infra'
+
 function Get-DevelopmentJwtSetting([string]$Name) {
     $processItem = Get-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
     if ($null -ne $processItem) {
         if (-not [string]::IsNullOrWhiteSpace($processItem.Value)) { return $processItem.Value }
         # An explicitly empty Compose value reaches the application as empty;
         # Development then resolves its committed fallback rather than .env.
-        $fallback = Get-DevelopmentJwtFileSetting (Join-Path $PSScriptRoot '..' 'infra' '.env.example') $Name
+        $fallback = Get-DevelopmentJwtFileSetting (Join-Path $script:developmentJwtInfraDir '.env.example') $Name
         if (-not [string]::IsNullOrWhiteSpace($fallback)) { return $fallback }
         throw "Missing committed development JWT fallback: $Name"
     }
 
-    $infraValue = Get-DevelopmentJwtFileSetting (Join-Path $PSScriptRoot '..' 'infra' '.env') $Name
+    $infraValue = Get-DevelopmentJwtFileSetting (Join-Path $script:developmentJwtInfraDir '.env') $Name
     if (-not [string]::IsNullOrWhiteSpace($infraValue)) { return $infraValue }
-    $fallback = Get-DevelopmentJwtFileSetting (Join-Path $PSScriptRoot '..' 'infra' '.env.example') $Name
+    $fallback = Get-DevelopmentJwtFileSetting (Join-Path $script:developmentJwtInfraDir '.env.example') $Name
     if ([string]::IsNullOrWhiteSpace($fallback)) { throw "Missing development JWT setting: $Name" }
     return $fallback
 }

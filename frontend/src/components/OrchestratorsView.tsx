@@ -30,12 +30,40 @@ import { listWorkflowNodeCatalog, listWorkflowRevisions } from '../api/workflows
 import WorkflowDesigner from '../workflowDesigner/WorkflowDesigner'
 
 const emptyDraft = (): OrchestratorDraft => ({
-  name: '', description: '', instructions: '', policy: { dispatchMode: 'bounded-parallel', joinPolicy: 'fail-fast', repairPolicy: 'fail', aggregationPolicy: 'verified-only', denialPolicy: 'fail-closed' }, workflow: { id: '', revision: 0 },
-  workerPool: [], workerPolicy: { requiredAudience: [], requiredCapabilities: [], selection: 'pinned-only' }, context: { readOnly: true, allowedTools: [], knowledgeSources: [] },
-  audience: [], capabilities: [],
-  verifier: { agentId: '', revision: 0, variant: 'read-only', outputContract: { type: 'verification-report' }, independent: true },
-  budgets: { maxContextRounds: 2, maxTasks: 8, maxChildRuns: 9, maxConcurrency: 4, maxRepairRounds: 1, tokenBudget: 10000, timeoutSeconds: 300 },
+  name: '',
+  description: '',
+  instructions: '',
+  policy: {
+    dispatchMode: 'bounded-parallel',
+    joinPolicy: 'fail-fast',
+    repairPolicy: 'fail',
+    aggregationPolicy: 'verified-only',
+    denialPolicy: 'fail-closed',
+  },
+  workflow: { id: '', revision: 0 },
+  workerPool: [],
+  workerPolicy: { requiredAudience: [], requiredCapabilities: [], selection: 'pinned-only' },
+  context: { readOnly: true, allowedTools: [], knowledgeSources: [] },
+  audience: [],
+  capabilities: [],
+  verifier: {
+    agentId: '',
+    revision: 0,
+    variant: 'read-only',
+    outputContract: { type: 'verification-report' },
+    independent: true,
+  },
+  budgets: {
+    maxContextRounds: 2,
+    maxTasks: 8,
+    maxChildRuns: 9,
+    maxConcurrency: 4,
+    maxRepairRounds: 1,
+    tokenBudget: 10000,
+    timeoutSeconds: 300,
+  },
 })
+
 function storageScope(): string {
   const session = getSession()
   return session ? `${session.tenantCode}:${session.username}` : 'anonymous'
@@ -53,18 +81,68 @@ function runtimeNodeTrace(events: AgentRunEvent[]): WorkflowTraceEntry[] {
   return [...trace.values()]
 }
 
-function TraceOverlay({ run, events, definition, metadata, catalog }: { run: AgentRun; events: AgentRunEvent[]; definition: WorkflowDefinition | null; metadata: WorkflowUiMetadata | null; catalog: WorkflowNodeType[] }) {
+function TraceOverlay({ run, events, definition, metadata, catalog }: {
+  run: AgentRun
+  events: AgentRunEvent[]
+  definition: WorkflowDefinition | null
+  metadata: WorkflowUiMetadata | null
+  catalog: WorkflowNodeType[]
+}) {
   const budget = safeOrchestratorBudget(run)
-  return <details className="agent-test-console__trace" open><summary>Redacted root / child trace</summary>
-    <dl className="agent-test-console__summary"><div><dt>Root run</dt><dd><code>{run.runId}</code></dd></div><div><dt>Status</dt><dd>{run.status}</dd></div><div><dt>Workflow revision</dt><dd>{run.pinnedWorkflowRevision ?? '?'}</dd></div></dl>
-    {budget.length > 0 && <dl className="agent-test-console__summary">{budget.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value ?? '?')}</dd></div>)}</dl>}
+  return <details className="agent-test-console__trace" open>
+    <summary>Redacted root / child trace</summary>
+    <dl className="agent-test-console__summary">
+      <div><dt>Root run</dt><dd><code>{run.runId}</code></dd></div>
+      <div><dt>Status</dt><dd>{run.status}</dd></div>
+      <div><dt>Workflow revision</dt><dd>{run.pinnedWorkflowRevision ?? '?'}</dd></div>
+    </dl>
+    {budget.length > 0 && (
+      <dl className="agent-test-console__summary">
+        {budget.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value ?? '?')}</dd></div>)}
+      </dl>
+    )}
     <ol className="agent-test-console__events">{events.map((event) => {
       const item = toOrchestratorTraceEvent(event); const child = item.child
-      return <li key={item.sequence}><div className="agent-test-console__event-head"><code>#{item.sequence}</code><strong>{item.eventType}</strong>{item.rootStatus && <span>root: {item.rootStatus}</span>}</div>
-        {child && <dl className="agent-test-console__summary"><div><dt>Child run</dt><dd>{child.childId ?? '?'}</dd></div><div><dt>Task / attempt</dt><dd>{child.taskId ?? '?'} / {child.attempt ?? '?'}</dd></div><div><dt>Kind / status</dt><dd>{child.kind ?? '?'} / {child.status ?? '?'}</dd></div><div><dt>Agent</dt><dd>{child.agentId ?? '?'}{child.agentRevision === null ? '' : ` r${child.agentRevision}`}</dd></div>{child.verdict && <div><dt>Verdict</dt><dd>{child.verdict}</dd></div>}{child.citations.length > 0 && <div><dt>Citations</dt><dd>{child.citations.map((citation) => <span key={citation.id}>{citation.id}{citation.title ? ` (${citation.title})` : ''} </span>)}</dd></div>}</dl>}
+      return <li key={item.sequence}>
+        <div className="agent-test-console__event-head">
+          <code>#{item.sequence}</code>
+          <strong>{item.eventType}</strong>
+          {item.rootStatus && <span>root: {item.rootStatus}</span>}
+        </div>
+        {child && (
+          <dl className="agent-test-console__summary">
+            <div><dt>Child run</dt><dd>{child.childId ?? '?'}</dd></div>
+            <div><dt>Task / attempt</dt><dd>{child.taskId ?? '?'} / {child.attempt ?? '?'}</dd></div>
+            <div><dt>Kind / status</dt><dd>{child.kind ?? '?'} / {child.status ?? '?'}</dd></div>
+            <div><dt>Agent</dt><dd>{child.agentId ?? '?'}{child.agentRevision === null ? '' : ` r${child.agentRevision}`}</dd></div>
+            {child.verdict && <div><dt>Verdict</dt><dd>{child.verdict}</dd></div>}
+            {child.citations.length > 0 && (
+              <div>
+                <dt>Citations</dt>
+                <dd>
+                  {child.citations.map((citation) => <span key={citation.id}>{citation.id}{citation.title ? ` (${citation.title})` : ''} </span>)}
+                </dd>
+              </div>
+            )}
+          </dl>
+        )}
       </li>
     })}</ol>
-    {definition && metadata && catalog.length > 0 && <section aria-label="Pinned workflow runtime trace"><h5>Pinned workflow trace</h5><WorkflowDesigner definition={definition} uiMetadata={metadata} catalog={catalog} validation={null} simulation={null} runtimeTrace={runtimeNodeTrace(events)} disabled onChange={() => {}} /></section>}
+    {definition && metadata && catalog.length > 0 && (
+      <section aria-label="Pinned workflow runtime trace">
+        <h5>Pinned workflow trace</h5>
+        <WorkflowDesigner
+          definition={definition}
+          uiMetadata={metadata}
+          catalog={catalog}
+          validation={null}
+          simulation={null}
+          runtimeTrace={runtimeNodeTrace(events)}
+          disabled
+          onChange={() => {}}
+        />
+      </section>
+    )}
   </details>
 }
 
@@ -152,7 +230,17 @@ function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator }) {
     const reusable = recordRef.current?.runId === null && recordRef.current.messageFingerprint === fingerprint
     const record: StoredOrchestratorRun = reusable && recordRef.current
       ? recordRef.current
-      : { version: 1, orchestratorId: orchestrator.id, runId: null, conversationId: globalThis.crypto.randomUUID(), startKey: newIdempotencyKey(), messageFingerprint: fingerprint, eventCursor: 0, cancelKey: null, cancelAccepted: false }
+      : {
+          version: 1,
+          orchestratorId: orchestrator.id,
+          runId: null,
+          conversationId: globalThis.crypto.randomUUID(),
+          startKey: newIdempotencyKey(),
+          messageFingerprint: fingerprint,
+          eventCursor: 0,
+          cancelKey: null,
+          cancelAccepted: false,
+        }
     persist(record); cursorRef.current = 0; runIdRef.current = null; setRun(null); setEvents([]); setStarting(true); setError(null)
     try {
       const started = await startOrchestratorRun(orchestrator.id, trimmed, record.conversationId, record.startKey)
@@ -183,16 +271,99 @@ function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator }) {
 
   if (orchestrator.published_revision == null) return <p className="muted">Publish a revision before test-running.</p>
   const active = !!run && !TERMINAL_RUN_STATUSES.has(run.status)
-  return <section className="agent-block agent-test-console"><h4>System-admin test run</h4><textarea className="input" value={message} disabled={active || starting || cancelling} onChange={(event) => setMessage(event.target.value)} placeholder="Test message" /><div className="agent-actions"><button className="btn btn--primary" disabled={!message.trim() || active || starting || cancelling} onClick={() => void start()}>{starting ? 'Starting…' : 'Start'}</button>{run && <button className="btn btn--danger" disabled={!active || cancelling} onClick={() => void cancel()}>{cancelling || run.status === 'cancelling' ? 'Cancelling…' : 'Cancel'}</button>}</div>{run && <p className="muted"><code>{run.runId}</code> · {run.status} · workflow r{run.pinnedWorkflowRevision ?? '?'}</p>}<ErrorText msg={error} />{run && <TraceOverlay run={run} events={events} definition={pinnedWorkflow?.definition ?? null} metadata={pinnedWorkflow?.ui_metadata ?? null} catalog={workflowCatalog} />}</section>
+  return <section className="agent-block agent-test-console">
+    <h4>System-admin test run</h4>
+    <textarea
+      className="input"
+      value={message}
+      disabled={active || starting || cancelling}
+      onChange={(event) => setMessage(event.target.value)}
+      placeholder="Test message"
+    />
+    <div className="agent-actions">
+      <button
+        className="btn btn--primary"
+        disabled={!message.trim() || active || starting || cancelling}
+        onClick={() => void start()}
+      >{starting ? 'Starting…' : 'Start'}</button>
+      {run && (
+        <button className="btn btn--danger" disabled={!active || cancelling} onClick={() => void cancel()}>
+          {cancelling || run.status === 'cancelling' ? 'Cancelling…' : 'Cancel'}
+        </button>
+      )}
+    </div>
+    {run && <p className="muted"><code>{run.runId}</code> · {run.status} · workflow r{run.pinnedWorkflowRevision ?? '?'}</p>}
+    <ErrorText msg={error} />
+    {run && (
+      <TraceOverlay
+        run={run}
+        events={events}
+        definition={pinnedWorkflow?.definition ?? null}
+        metadata={pinnedWorkflow?.ui_metadata ?? null}
+        catalog={workflowCatalog}
+      />
+    )}
+  </section>
 }
 
 function PolicyEditor({ value, disabled = false, onChange }: { value: OrchestratorDraft['policy']; disabled?: boolean; onChange: (value: OrchestratorDraft['policy']) => void }) {
-  return <div className="agent-runtime-grid"><div className="field"><label>Join policy<select className="input" disabled={disabled} value={value.joinPolicy} onChange={(e) => onChange({ ...value, joinPolicy: e.target.value as OrchestratorDraft['policy']['joinPolicy'] })}><option value="fail-fast">fail-fast</option><option value="allow-partial">allow-partial</option><option value="repair">repair</option></select></label></div><div className="field"><label>Repair policy<select className="input" disabled={disabled} value={value.repairPolicy} onChange={(e) => onChange({ ...value, repairPolicy: e.target.value as OrchestratorDraft['policy']['repairPolicy'] })}><option value="fail">fail</option><option value="redispatch">redispatch</option></select></label></div><p className="muted">dispatch=bounded-parallel · aggregation=verified-only · denial=fail-closed</p></div>
+  return <div className="agent-runtime-grid">
+    <div className="field">
+      <label>Join policy
+        <select
+          className="input"
+          disabled={disabled}
+          value={value.joinPolicy}
+          onChange={(e) => onChange({ ...value, joinPolicy: e.target.value as OrchestratorDraft['policy']['joinPolicy'] })}
+        >
+          <option value="fail-fast">fail-fast</option>
+          <option value="allow-partial">allow-partial</option>
+          <option value="repair">repair</option>
+        </select>
+      </label>
+    </div>
+    <div className="field">
+      <label>Repair policy
+        <select
+          className="input"
+          disabled={disabled}
+          value={value.repairPolicy}
+          onChange={(e) => onChange({ ...value, repairPolicy: e.target.value as OrchestratorDraft['policy']['repairPolicy'] })}
+        >
+          <option value="fail">fail</option>
+          <option value="redispatch">redispatch</option>
+        </select>
+      </label>
+    </div>
+    <p className="muted">dispatch=bounded-parallel · aggregation=verified-only · denial=fail-closed</p>
+  </div>
 }
 
 function WorkerPolicyEditor({ value, disabled = false, onChange }: { value: OrchestratorDraft['workerPolicy']; disabled?: boolean; onChange: (value: OrchestratorDraft['workerPolicy']) => void }) {
   const lines = (text: string) => text.split('\n').map((x) => x.trim()).filter(Boolean)
-  return <div className="agent-runtime-grid"><div className="field"><label>Worker required audience<textarea className="input" disabled={disabled} value={value.requiredAudience.join('\n')} onChange={(e) => onChange({ ...value, requiredAudience: lines(e.target.value) })} /></label></div><div className="field"><label>Worker required capabilities<textarea className="input" disabled={disabled} value={value.requiredCapabilities.join('\n')} onChange={(e) => onChange({ ...value, requiredCapabilities: lines(e.target.value) })} /></label></div><p className="muted">selection=pinned-only</p></div>
+  return <div className="agent-runtime-grid">
+    <div className="field">
+      <label>Worker required audience
+        <textarea
+          className="input"
+          disabled={disabled}
+          value={value.requiredAudience.join('\n')}
+          onChange={(e) => onChange({ ...value, requiredAudience: lines(e.target.value) })}
+        />
+      </label>
+    </div>
+    <div className="field">
+      <label>Worker required capabilities
+        <textarea
+          className="input"
+          disabled={disabled}
+          value={value.requiredCapabilities.join('\n')}
+          onChange={(e) => onChange({ ...value, requiredCapabilities: lines(e.target.value) })}
+        />
+      </label>
+    </div>
+    <p className="muted">selection=pinned-only</p>
+  </div>
 }
 
 const JSON_FIELD_ERROR = 'JSON 格式錯誤,請修正後才能繼續。'
@@ -250,29 +421,122 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
   // 守衛不成立 = UI 狀態與寫入前提脫節（disabled 失守），一律拋錯而非靜默返回。
   async function save() { await putOrchestratorDraft(id, requireLoaded(draft, '草稿'), requireLoaded(etag, '草稿版本')); await load() }
   async function validate() { const result = await validateOrchestrator(id, requireLoaded(etag, '草稿版本')); setErrors(result.errors.map((x) => x.message)) }
-  return <><div className="view__head"><h2 className="view__title">{item.name}</h2><button className="btn" onClick={onClose}>返回清單</button></div>
+  return <>
+    <div className="view__head"><h2 className="view__title">{item.name}</h2><button className="btn" onClick={onClose}>返回清單</button></div>
     {blocked && <div className="agent-errors" role="alert">草稿已過期，已鎖定所有寫入。<button className="btn" onClick={() => void load()}>重新載入</button></div>}
-    <section className="agent-block"><div className="field"><label htmlFor="orchestrator-name">名稱</label><input id="orchestrator-name" className="input" disabled={disabled} value={draft.name} onChange={(e) => update({ name: e.target.value })} /></div><div className="field"><label htmlFor="orchestrator-description">說明</label><input id="orchestrator-description" className="input" disabled={disabled} value={draft.description} onChange={(e) => update({ description: e.target.value })} /></div><div className="field"><label htmlFor="orchestrator-instructions">Root instructions</label><textarea id="orchestrator-instructions" className="input" disabled={disabled} value={draft.instructions} onChange={(e) => update({ instructions: e.target.value })} /></div>
+    <section className="agent-block">
+      <div className="field">
+        <label htmlFor="orchestrator-name">名稱</label>
+        <input id="orchestrator-name" className="input" disabled={disabled} value={draft.name} onChange={(e) => update({ name: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor="orchestrator-description">說明</label>
+        <input id="orchestrator-description" className="input" disabled={disabled} value={draft.description} onChange={(e) => update({ description: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor="orchestrator-instructions">Root instructions</label>
+        <textarea id="orchestrator-instructions" className="input" disabled={disabled} value={draft.instructions} onChange={(e) => update({ instructions: e.target.value })} />
+      </div>
       <p className="muted">Read-only Context、pinned Worker pool、Verifier 與 Root Workflow revision 由 server 在 validate/publish 時做 tenant、published 與角色相容性檢查。</p>
       <PolicyEditor value={draft.policy} disabled={disabled} onChange={(policy) => update({ policy })} />
-      <div className="agent-runtime-grid"><div className="field"><label htmlFor="orchestrator-workflow-id">Pinned Workflow id</label><input id="orchestrator-workflow-id" className="input" disabled={disabled} value={draft.workflow.id} onChange={(e) => update({ workflow: { ...draft.workflow, id: e.target.value } })} /></div><div className="field"><label htmlFor="orchestrator-workflow-revision">Workflow revision</label><input id="orchestrator-workflow-revision" className="input" type="number" min={1} disabled={disabled} value={draft.workflow.revision} onChange={(e) => update({ workflow: { ...draft.workflow, revision: Number(e.target.value) } })} /></div></div>
-      <div className="field"><label htmlFor="orchestrator-audience">Audience（每行一項）</label><textarea id="orchestrator-audience" className="input" disabled={disabled} value={draft.audience.join('\n')} onChange={(e) => update({ audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></div>
-      <div className="field"><label htmlFor="orchestrator-capabilities">Capabilities（每行一項）</label><textarea id="orchestrator-capabilities" className="input" disabled={disabled} value={draft.capabilities.join('\n')} onChange={(e) => update({ capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></div>
+      <div className="agent-runtime-grid">
+        <div className="field">
+          <label htmlFor="orchestrator-workflow-id">Pinned Workflow id</label>
+          <input
+            id="orchestrator-workflow-id"
+            className="input"
+            disabled={disabled}
+            value={draft.workflow.id}
+            onChange={(e) => update({ workflow: { ...draft.workflow, id: e.target.value } })}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="orchestrator-workflow-revision">Workflow revision</label>
+          <input
+            id="orchestrator-workflow-revision"
+            className="input"
+            type="number"
+            min={1}
+            disabled={disabled}
+            value={draft.workflow.revision}
+            onChange={(e) => update({ workflow: { ...draft.workflow, revision: Number(e.target.value) } })}
+          />
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor="orchestrator-audience">Audience（每行一項）</label>
+        <textarea
+          id="orchestrator-audience"
+          className="input"
+          disabled={disabled}
+          value={draft.audience.join('\n')}
+          onChange={(e) => update({ audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="orchestrator-capabilities">Capabilities（每行一項）</label>
+        <textarea
+          id="orchestrator-capabilities"
+          className="input"
+          disabled={disabled}
+          value={draft.capabilities.join('\n')}
+          onChange={(e) => update({ capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })}
+        />
+      </div>
       <JsonField id="orchestrator-context" label="Context (JSON)" disabled={disabled} text={texts.context ?? ''} error={jsonErrors.context} onChange={(text) => editJson('context', text)} />
-      <JsonField id="orchestrator-worker-pool" label="Worker pool (JSON)" disabled={disabled} text={texts.workerPool ?? ''} error={jsonErrors.workerPool} onChange={(text) => editJson('workerPool', text)} />
+      <JsonField
+        id="orchestrator-worker-pool"
+        label="Worker pool (JSON)"
+        disabled={disabled}
+        text={texts.workerPool ?? ''}
+        error={jsonErrors.workerPool}
+        onChange={(text) => editJson('workerPool', text)}
+      />
       <WorkerPolicyEditor value={draft.workerPolicy} disabled={disabled} onChange={(workerPolicy) => update({ workerPolicy })} />
       <JsonField id="orchestrator-verifier" label="Verifier (JSON)" disabled={disabled} text={texts.verifier ?? ''} error={jsonErrors.verifier} onChange={(text) => editJson('verifier', text)} />
       <JsonField id="orchestrator-budgets" label="Budgets (JSON)" disabled={disabled} text={texts.budgets ?? ''} error={jsonErrors.budgets} onChange={(text) => editJson('budgets', text)} />
-    </section><div className="agent-actions"><button className="btn btn--primary" disabled={disabled || jsonInvalid} onClick={() => void runWithToast(toast, save, { success: '草稿已儲存', onConflict })}>儲存</button><button className="btn" disabled={disabled || jsonInvalid} onClick={() => void runWithToast(toast, validate, { success: '驗證完成', onConflict })}>驗證</button><button className="btn btn--info" disabled={disabled || jsonInvalid || errors.length > 0} onClick={() => void runWithToast(toast, async () => { await publishOrchestrator(id, item.draft_version, requireLoaded(etag, '草稿版本')) }, { success: '已發布', onSuccess: () => load(), onConflict })}>發布</button></div>
+    </section>
+    <div className="agent-actions">
+      <button
+        className="btn btn--primary"
+        disabled={disabled || jsonInvalid}
+        onClick={() => void runWithToast(toast, save, { success: '草稿已儲存', onConflict })}
+      >儲存</button>
+      <button
+        className="btn"
+        disabled={disabled || jsonInvalid}
+        onClick={() => void runWithToast(toast, validate, { success: '驗證完成', onConflict })}
+      >驗證</button>
+      <button
+        className="btn btn--info"
+        disabled={disabled || jsonInvalid || errors.length > 0}
+        onClick={() => void runWithToast(
+          toast,
+          async () => { await publishOrchestrator(id, item.draft_version, requireLoaded(etag, '草稿版本')) },
+          { success: '已發布', onSuccess: () => load(), onConflict },
+        )}
+      >發布</button>
+    </div>
     {errors.length > 0 && <ul className="agent-errors">{errors.map((error) => <li key={error}>{error}</li>)}</ul>}
     {multiAgentDispatchEnabled && item.enabled && <TestRunConsole orchestrator={item} />}
-    <section className="agent-block"><h4>Revision history</h4><RevisionList loading={revisions.loading} revisions={revisions.data ?? []} successMessage="已建立新 revision" onRestore={(revision) => restoreOrchestratorRevision(id, revision)} onRestored={() => { void load(); void revisions.reload() }} /></section>
+    <section className="agent-block">
+      <h4>Revision history</h4>
+      <RevisionList
+        loading={revisions.loading}
+        revisions={revisions.data ?? []}
+        successMessage="已建立新 revision"
+        onRestore={(revision) => restoreOrchestratorRevision(id, revision)}
+        onRestored={() => { void load(); void revisions.reload() }}
+      />
+    </section>
   </>
 }
 
 export default function OrchestratorsView({ multiAgentDispatchEnabled = false }: { multiAgentDispatchEnabled?: boolean }) {
-  const toast = useToast(); const resource = useResource(listOrchestrators); const [editing, setEditing] = useState<string | null>(null); const [create, setCreate] = useState(false); const [draft, setDraft] = useState(emptyDraft)
-  const [workerPoolText, setWorkerPoolText] = useState(() => JSON.stringify(emptyDraft().workerPool, null, 2)); const [workerPoolError, setWorkerPoolError] = useState<string | undefined>(undefined)
+  const toast = useToast(); const resource = useResource(listOrchestrators); const [editing, setEditing] = useState<string | null>(null)
+  const [create, setCreate] = useState(false); const [draft, setDraft] = useState(emptyDraft)
+  const [workerPoolText, setWorkerPoolText] = useState(() => JSON.stringify(emptyDraft().workerPool, null, 2))
+  const [workerPoolError, setWorkerPoolError] = useState<string | undefined>(undefined)
   if (editing) return <Editor id={editing} multiAgentDispatchEnabled={multiAgentDispatchEnabled} onClose={() => { setEditing(null); void resource.reload() }} />
   const editWorkerPool = (text: string) => {
     setWorkerPoolText(text)
@@ -281,6 +545,104 @@ export default function OrchestratorsView({ multiAgentDispatchEnabled = false }:
     setWorkerPoolError(undefined)
     setDraft({ ...draft, workerPool: parsed as OrchestratorDraft['workerPool'] })
   }
-  const refsReady =!!draft.workflow.id && draft.workflow.revision > 0 && !!draft.verifier.agentId && draft.verifier.revision > 0 && draft.workerPool.length > 0
-  return <><div className="skills__bar"><button className="btn btn--info" onClick={() => setCreate(!create)}>＋ 建立</button></div>{create && <section className="agent-block"><div className="field"><label>名稱<input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label></div><div className="field"><label>說明<input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label></div><div className="agent-runtime-grid"><div className="field"><label>Root Workflow id<input className="input" value={draft.workflow.id} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, id: e.target.value } })} /></label></div><div className="field"><label>Workflow revision<input className="input" type="number" min={1} value={draft.workflow.revision} onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, revision: Number(e.target.value) } })} /></label></div><div className="field"><label>Verifier Agent id<input className="input" value={draft.verifier.agentId} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, agentId: e.target.value } })} /></label></div><div className="field"><label>Verifier revision<input className="input" type="number" min={1} value={draft.verifier.revision} onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, revision: Number(e.target.value) } })} /></label></div></div><JsonField id="orchestrator-create-worker-pool" label="Worker pool (JSON)" text={workerPoolText} error={workerPoolError} onChange={editWorkerPool} /><PolicyEditor value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} /><WorkerPolicyEditor value={draft.workerPolicy} onChange={(workerPolicy) => setDraft({ ...draft, workerPolicy })} /><div className="field"><label>Audience（每行一項）<textarea className="input" value={draft.audience.join('\n')} onChange={(e) => setDraft({ ...draft, audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><div className="field"><label>Capabilities（每行一項）<textarea className="input" value={draft.capabilities.join('\n')} onChange={(e) => setDraft({ ...draft, capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })} /></label></div><button className="btn btn--primary" disabled={!draft.name.trim() || !refsReady || !!workerPoolError} onClick={() => void runWithToast(toast, async () => { const item = await createOrchestrator(draft); setEditing(item.id) }, { success: '已建立 Orchestrator 草稿' })}>建立</button><p className="muted">建立前需提供 pinned Workflow、至少一個 pinned Worker 與 pinned read-only Verifier；revision 必須明確指定，不使用 latest 或硬編碼。</p></section>}<ErrorText msg={resource.error} />{resource.loading ? <Skeleton rows={3} /> : <div className="table-wrap"><table className="table"><thead><tr><th>名稱</th><th>發布</th><th>操作</th></tr></thead><tbody>{(resource.data ?? []).map((row) => <tr key={row.id}><td>{row.name}<br /><span className="muted">{row.description}</span></td><td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td><td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td></tr>)}</tbody></table></div>}</>
+  const refsReady = !!draft.workflow.id && draft.workflow.revision > 0 && !!draft.verifier.agentId && draft.verifier.revision > 0 && draft.workerPool.length > 0
+  return <>
+    <div className="skills__bar"><button className="btn btn--info" onClick={() => setCreate(!create)}>＋ 建立</button></div>
+    {create && (
+      <section className="agent-block">
+        <div className="field">
+          <label>名稱<input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label>
+        </div>
+        <div className="field">
+          <label>說明<input className="input" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></label>
+        </div>
+        <div className="agent-runtime-grid">
+          <div className="field">
+            <label>Root Workflow id
+              <input
+                className="input"
+                value={draft.workflow.id}
+                onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, id: e.target.value } })}
+              />
+            </label>
+          </div>
+          <div className="field">
+            <label>Workflow revision
+              <input
+                className="input"
+                type="number"
+                min={1}
+                value={draft.workflow.revision}
+                onChange={(e) => setDraft({ ...draft, workflow: { ...draft.workflow, revision: Number(e.target.value) } })}
+              />
+            </label>
+          </div>
+          <div className="field">
+            <label>Verifier Agent id
+              <input
+                className="input"
+                value={draft.verifier.agentId}
+                onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, agentId: e.target.value } })}
+              />
+            </label>
+          </div>
+          <div className="field">
+            <label>Verifier revision
+              <input
+                className="input"
+                type="number"
+                min={1}
+                value={draft.verifier.revision}
+                onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, revision: Number(e.target.value) } })}
+              />
+            </label>
+          </div>
+        </div>
+        <JsonField id="orchestrator-create-worker-pool" label="Worker pool (JSON)" text={workerPoolText} error={workerPoolError} onChange={editWorkerPool} />
+        <PolicyEditor value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} />
+        <WorkerPolicyEditor value={draft.workerPolicy} onChange={(workerPolicy) => setDraft({ ...draft, workerPolicy })} />
+        <div className="field">
+          <label>Audience（每行一項）
+            <textarea
+              className="input"
+              value={draft.audience.join('\n')}
+              onChange={(e) => setDraft({ ...draft, audience: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })}
+            />
+          </label>
+        </div>
+        <div className="field">
+          <label>Capabilities（每行一項）
+            <textarea
+              className="input"
+              value={draft.capabilities.join('\n')}
+              onChange={(e) => setDraft({ ...draft, capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })}
+            />
+          </label>
+        </div>
+        <button
+          className="btn btn--primary"
+          disabled={!draft.name.trim() || !refsReady || !!workerPoolError}
+          onClick={() => void runWithToast(toast, async () => { const item = await createOrchestrator(draft); setEditing(item.id) }, { success: '已建立 Orchestrator 草稿' })}
+        >建立</button>
+        <p className="muted">建立前需提供 pinned Workflow、至少一個 pinned Worker 與 pinned read-only Verifier；revision 必須明確指定，不使用 latest 或硬編碼。</p>
+      </section>
+    )}
+    <ErrorText msg={resource.error} />
+    {resource.loading ? <Skeleton rows={3} /> : (
+      <div className="table-wrap">
+        <table className="table">
+          <thead><tr><th>名稱</th><th>發布</th><th>操作</th></tr></thead>
+          <tbody>
+            {(resource.data ?? []).map((row) => (
+              <tr key={row.id}>
+                <td>{row.name}<br /><span className="muted">{row.description}</span></td>
+                <td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td>
+                <td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
+  </>
 }

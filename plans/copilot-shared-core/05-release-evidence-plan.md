@@ -1,18 +1,18 @@
 # Release Evidence Execution Record — Copilot Shared Core
 
-> 狀態：**已執行，但 release blocked/failed。** 現有 evidence 不得作為 release sign-off，也不得以 smoke 8/8 或局部 gate PASS 取代未通過的 gates。
+> 狀態：**已有 RealModel PASS evidence，但 release sign-off 仍 blocked。** 現存 PASS bundle 只證明 `E-04`／`E-05`；不得以該 bundle、smoke 8/8 或局部 gate PASS 取代同一組最新 rerun、完整 regression、獨立 review 與 fresh-image e2e。
 
 ## 結論
 
-release evidence harness 已可產生可重跑、去識別化 bundle；最新 Deterministic lane 的 `E-01`、`E-02`、`E-03`、`E-06` 全部 PASS，但 RealModel lane 的 `E-04`、`E-05` 未達 PASS。因此 Copilot Shared Core 的 release 目標尚未完成。
+release evidence harness 已可產生可重跑、去識別化 bundle。Workspace 中最後一次、也是唯一一次 RealModel PASS bundle 為 `20260725T111722672Z-90c9119f`，其中 `E-04`、`E-05` 均 PASS；較早的 22 次 RealModel 嘗試為 FAIL/BLOCKED。這份 PASS bundle 並未與最新 Deterministic lane、完整 regression、獨立 reviewer 與 fresh-image e2e 組成同一組可稽核 sign-off，因此 Copilot Shared Core 的 release 目標尚未完成。
 
 | Gate | 結果 | 已執行的證據 | 阻擋原因／後續修復門檻 |
 | --- | --- | --- | --- |
 | `E-01 / B-P1-08` | PASS | 真 browser account switch 與 AG-UI 真實 401 logout；僅保留 token fingerprint、JUnit 與安全截圖。 | 保留於後續 full rerun。 |
 | `E-02 / C-03` | PASS | 同 thread、跨 tenant 的 canonical model-input keyed-HMAC 投影與 trait tests。 | 保留於後續 full rerun。 |
 | `E-03 / C-04` | PASS | full-array resend、assistant ID fallback、真 browser client-tool 流程；canonical model input 為一組 call／一個 logical wire result，且無 orphan result。 | 保留於後續 full rerun。 |
-| `E-04 / C-05` | FAIL | 固定 snapshot 的真模型 preflight、authenticated AG-UI persistence、bounded mem0 search。 | mem0 未在時限內取回 authenticated fact；必須確認寫入、索引／抽取與 `{tenant}:{user}` scope 後重新通過。 |
-| `E-05 / C-07` | FAIL | 第一輪 chat 最終回覆未包含 fixture 數字，runner 因而 fail-closed 停止。 | 現有 bundle 未保存可稽核的 routing capture；必須修正 fixture 到檢索／生成答案的路徑，完成三輪回答與兩鏈路 capture 後才可 PASS。 |
+| `E-04 / C-05` | PASS | `20260725T111722672Z-90c9119f` 證明 authenticated AG-UI persistence 與 `{tenant}:{user}` scoped real mem0 recall。 | 必須納入同一組最新 full rerun 與 sign-off 證據；單獨 PASS 不解除 release block。 |
+| `E-05 / C-07` | PASS | 同一 bundle 保存三次符合 fixture number 的 real-model routing captures。 | 必須納入同一組最新 full rerun 與 sign-off 證據；單獨 PASS 不解除 release block。 |
 | `E-06 / C-08` | PASS | nginx、Vite、curl 與 browser `ReadableStream` 的受控 3-frame streaming 檢查。 | 保留於後續 full rerun。 |
 
 ## 已保存的 evidence
@@ -55,7 +55,7 @@ pwsh -File scripts\verify-copilot-shared-core-evidence.ps1 `
 3. real-model lane 的固定模型／embedding 設定、provider 實際 model ID（及可用時 fingerprint）、image identity 與 bundle 路徑均記入 manifest；capture 與 bundle secret scan 均通過。
 4. `code-reviewer` 與 fresh-image `e2e-verifier` 完成獨立檢查，確認沒有 response-only 假綠、重複 tool result、cross-tenant 漏洩或測試資料 cleanup 遺留。
 
-在上述條件完成前，release 保持 **blocked/failed**。
+在上述條件完成前，release 保持 **blocked**。
 
 ## Reconciliation Status (2026-07-29)
 

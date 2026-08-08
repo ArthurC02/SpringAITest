@@ -41,7 +41,13 @@ public static class UserCapabilityContract
     public const int MaxCapabilitiesWireUtf8Bytes = 2_048;
 }
 
-/// <summary>Shared Platform-side validation for signed D3 group membership claims.</summary>
+/// <summary>
+/// Shared Platform-side validation for signed D3 group membership claims.
+/// 契約鏡像:與 backend/src/Backend.Api/Agents/AgentAudience.cs 的同名常數/regex/IsCanonicalGroupSet
+/// 刻意逐字一致(跨服務各自部署,無法共用 assembly),改任一邊須同步另一邊 —— 這是安全 wire 契約:
+/// 任一邊放寬,另一邊就會靜默丟棄整組 group(而非回錯),使用者的授權會無聲消失。
+/// 兩側各有一支釘常數測試(<c>UserGroupContractTests</c> / <c>AgentAudienceTests</c>),單邊漂移會變紅。
+/// </summary>
 public static partial class UserGroupContract
 {
     public const int MaxGroups = 256;

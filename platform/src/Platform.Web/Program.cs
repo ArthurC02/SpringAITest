@@ -271,11 +271,10 @@ var copilotAgent = builder.Services.AddAIAgent(
 // ——不得吃到副駕的 copilotInstructions(僅副駕,02-spec §3.1 拓樸注記),故另注一顆無 instructions 的
 // named agent。AddAIAgent 只把 (AIAgent, AgentSessionStore) 註冊成 keyed service,並不會自動組成
 // AIHostAgent——手動組裝一顆供 ChatService 使用(反編譯實證)。
-// withIsolation:false(刻意與 AG-UI 不同)——ChatService 傳入的 conversationId(cid)已由
-// DeriveMemoryKeys 保證跨租戶/跨使用者不撞(登入時含租戶:使用者前綴),不像 AG-UI 的 wire threadId
-// 完全不帶身分安全語意。疊上 IsolationKeyScopedAgentSessionStore(Strict=true)只會讓匿名對談
-// fail-closed,是對現行「匿名短期記憶仍可延續」行為的回歸(ChatServiceTests.
-// Chat_ShortTermMemory_CarriesPriorExchange 等既有測試皆假設匿名也有連續性)。
+// withIsolation:false(刻意與 AG-UI 不同)——目前唯一依據是 ChatMemoryKeyDerivation 已用認證身分
+// 前綴 cid({tenant}:{user}:{conversationId}),保證跨租戶/跨使用者不撞 key,不像 AG-UI 的 wire
+// threadId 完全不帶身分安全語意。P4-1 之後 /api/chat* 全數 [Authorize],匿名路徑已不存在,
+// 因此「疊 Strict 會讓匿名對談 fail-closed」不再是理由 —— P4-3 可直接評估改 withIsolation:true。
 // pipeline:ChatTurnRecorder → SkillRoutingAgent → ChatClientAgent(掛 ChatContextProvider)——鏈路 A
 // 沒有 AguiWireDedupAgent 那一層(ChatService 每輪只送本輪新訊息,不會重送完整陣列)。
 builder.Services.AddAIAgent(
@@ -397,8 +396,9 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
 // ---------------------------------------------------------------------------
-// LLM 端點的 per-IP 節流(修成本放大 / DoS):/api/chat、/api/chat/stream 為 AllowAnonymous,
-// /api/copilot/agui 為 P1 後要求認證但仍會打真模型,三者皆未授權/授權後仍可迴圈燒額度、壓連線。
+// LLM 端點的 per-IP 節流(修成本放大 / DoS):/api/chat、/api/chat/stream、/api/copilot/agui
+// 三者現在都要求 JWT(ChatController 類別層 [Authorize];AG-UI 端點 RequireAuthorization()),
+// 但認證只證明「是誰」不限制「打幾次」—— 已登入者仍可迴圈燒模型額度、壓住連線。
 // 固定視窗每 IP 每分鐘 30 次,超限回 429。
 // GlobalLimiter 對非這三條路徑一律 NoLimiter 放行(不必逐端點掛 policy,MapAGUI 這種 minimal API 端點也涵蓋)。
 // Testing 環境不註冊/不套用；RateLimitingTesting 專供限流整合測試。
@@ -482,11 +482,13 @@ var app = builder.Build();
 // 使用者/租戶/聊天歷史/文件/組態皆改存 backend(postgres),platform 不再自帶 DB,啟動時無建表/種子。
 
 // Disabled feature families must remain hidden before authentication. Keep every route predicate
-// at its call site so each rollout's deliberately distinct scope and response stay reviewable.
-void UseDisabledFeatureGate(
-    bool enabled,
-    Func<HttpContext, bool> matchesRoute,
-    string unavailableMessage)
+// at its call site so each rollout's deliberately distinct scope stays reviewable — but the
+// **response deliberately is not** per-gate: every gate answers with the same 404 ApiError message
+// as an ordinary missing resource, so a gated route is indistinguishable from one that never
+// existed. Six gates previously carried four different strings in two languages, which leaked
+// exactly what the gate is for ("這裡有個關著的功能"). The message is hardcoded here rather than
+// passed in precisely so it cannot drift apart again.
+void UseDisabledFeatureGate(bool enabled, Func<HttpContext, bool> matchesRoute)
 {
     if (enabled)
     {
@@ -500,7 +502,7 @@ void UseDisabledFeatureGate(
             await ApiErrorWriter.WriteAsync(
                 context.Response,
                 StatusCodes.Status404NotFound,
-                unavailableMessage);
+                "找不到資源");
             return;
         }
 
@@ -519,7 +521,7 @@ app.UseForwardedHeaders();
 app.UseMiddleware<AuthIpRateLimitMiddleware>();
 app.UseMiddleware<AuthRequestBodyLimitMiddleware>();
 
-// 匿名 LLM 端點節流(Testing 預設不套用,見上方註冊)。
+// LLM 端點節流(Testing 預設不套用,見上方註冊)。
 if (rateLimitingEnabled)
 {
     app.UseRateLimiter();
@@ -527,11 +529,10 @@ if (rateLimitingEnabled)
 
 // Agent Builder feature flag(D1):關閉時整個 /api/agents* fail-closed 回 404,且置於認證之前 ——
 // 匿名或已登入一律看不到端點存在(不洩漏「這裡有個需要授權的功能」)。開啟時直接放行,交由 controller 的
-// [Authorize]/backend 角色把關。回應維持 ApiError 形狀。
+// [Authorize]/backend 角色把關。回應維持 ApiError 形狀,訊息與一般 404 相同(見上方 helper)。
 UseDisabledFeatureGate(
     agentBuilderEnabled,
-    context => context.Request.Path.StartsWithSegments("/api/agents"),
-    "找不到資源");
+    context => context.Request.Path.StartsWithSegments("/api/agents"));
 
 // Direct Agent test execution has its own rollout gate and also depends on Builder being enabled.
 // Fail closed before authentication for both the start route and the /api/runs family.
@@ -552,8 +553,7 @@ UseDisabledFeatureGate(
                 StringComparison.OrdinalIgnoreCase)
             && normalizedPath.EndsWith("/runs", StringComparison.OrdinalIgnoreCase);
         return isRunRoute || isAgentRunStart;
-    },
-    "找不到資源");
+    });
 
 // D7 write actions/approvals are independently fail-closed before authentication.  Do not
 // fold this into Builder or workflow.manage: approvers are ordinary authenticated users and
@@ -566,8 +566,7 @@ UseDisabledFeatureGate(
         return path.StartsWith("/api/runs/", StringComparison.OrdinalIgnoreCase)
                && path.Contains("/approvals", StringComparison.OrdinalIgnoreCase)
             || path.StartsWith("/api/admin/operations", StringComparison.OrdinalIgnoreCase);
-    },
-    "Feature is unavailable");
+    });
 
 UseDisabledFeatureGate(
     multiAgentDispatchEnabled,
@@ -577,8 +576,7 @@ UseDisabledFeatureGate(
         return context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
             || path.StartsWith("/api/admin/orchestrators/", StringComparison.OrdinalIgnoreCase)
                && path.TrimEnd('/').EndsWith("/runs", StringComparison.OrdinalIgnoreCase);
-    },
-    "Feature is unavailable");
+    });
 
 // Context Enrichment 沒有 Platform controller；這個前置 gate 仍保護 Context API
 // 路徑，避免日後新增 proxy 時在未啟用的 rollout 狀態意外暴露端點。D5 的既有
@@ -587,21 +585,32 @@ UseDisabledFeatureGate(
     contextEnrichmentEnabled,
     context => context.Request.Path.StartsWithSegments("/api/contexts")
         || context.Request.Path.StartsWithSegments("/api/context-views")
-        || context.Request.Path.StartsWithSegments("/api/context-policies"),
-    "Feature is unavailable");
+        || context.Request.Path.StartsWithSegments("/api/context-policies"));
 
 // D4 authoring surfaces are independently fail-closed before authentication. This keeps
 // capability-bearing principals from discovering disabled management endpoints.
 UseDisabledFeatureGate(
     workflowDesignerEnabled,
     context => context.Request.Path.StartsWithSegments("/api/admin/workflows")
-        || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"),
-    "功能尚未啟用");
+        || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"));
 
 // 刻意不用 UseHttpsRedirection:容器內對外是 http(:8080)。
-app.Use(Platform.Web.Controllers.ArtifactCompatibilityUsageMetrics.CountPreControllerFailureAsync);
+app.Use(ArtifactCompatibilityUsageMetrics.CountPreControllerFailureAsync);
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Fill only an otherwise-empty 404 after routing. Unlike MapFallback, this preserves the
+// framework's 405 response when a path exists but the HTTP method is wrong.
+app.Use(async (context, next) =>
+{
+    await next();
+    if (context.Response.StatusCode == StatusCodes.Status404NotFound
+        && !context.Response.HasStarted)
+    {
+        await ApiErrorWriter.WriteAsync(
+            context.Response, StatusCodes.Status404NotFound, "找不到資源");
+    }
+});
 
 app.MapControllers();
 
@@ -619,8 +628,9 @@ app.MapGet(
 
 // ---------------------------------------------------------------------------
 // AG-UI 端點:CopilotKit 前端經此與「操作助理」對話(HTTP POST + SSE)。
-// 與 /api/chat 的 AllowAnonymous 姿態刻意不同:副駕是操作應用程式/查租戶資料,
-// 匿名副駕沒有有意義的行為,故要求認證——未帶/帶無效 JWT 一律 401。
+// 認證姿態與 /api/chat* 一致(四個 chat endpoint 由 ChatController 類別層 [Authorize] 全數要求 JWT):
+// 未帶/帶無效 JWT 一律 401。AG-UI 另外多一道 —— session isolation key 取自 JWT 的 tenant/user claim,
+// 任一為空即 fail-closed(JwtTenantIsolationKeyProvider),絕不退回共用/部分鍵。
 // ---------------------------------------------------------------------------
 app.MapAGUI(copilotAgent, "/api/copilot/agui").RequireAuthorization();
 

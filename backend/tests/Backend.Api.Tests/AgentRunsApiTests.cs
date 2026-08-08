@@ -841,7 +841,8 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(2, events["next_sequence"]!.GetValue<long>());
 
         // 敏感 payload 規則:除了 payload 之外一切合法(已知 event_type、有 node_id、cursor 連續),
-        // 唯一拒因就是 payload 帶 prompt。訊息也一併比對,避免將來被別的規則「順便」擋掉而假綠。
+        // 唯一拒因就是 payload 帶 prompt。訊息與 Dapper(生產權威)相同的合併字串 —— 它已不再單獨
+        // 指認 payload,所以「拒因確實是 payload」改由下方對照組(同批次、乾淨 payload → 200)證明。
         object SensitiveBatch(object payload) => new
         {
             expected_version = 2,
@@ -864,7 +865,7 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
             $"/api/agent-runs/{runId}/events", SensitiveBatch(new { prompt = "secret" }));
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
         Assert.Equal(
-            "event payload 含敏感欄位或超過上限",
+            "event id/type/snapshot_hash/payload 無效",
             (await rejected.ReadJsonAsync())["message"]!.GetValue<string>());
 
         // 對照組:同一批次換成不含敏感欄位的 payload 就會被接受 —— 證明拒因確實是 payload。

@@ -1,7 +1,4 @@
-"""Node-First 遷移（Phase 1）：summarize_text 節點 + 編譯後的 app/skills/summarize.yaml。
-
-語意逐字移植自 app/workflows/summarize.py（手寫圖已於 Phase 3a 退役刪除）。
-"""
+"""summarize_text 節點 + 編譯後的 app/skills/summarize.yaml。"""
 
 import asyncio
 import dataclasses

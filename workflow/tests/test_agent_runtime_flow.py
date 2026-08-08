@@ -642,6 +642,43 @@ async def test_pinned_flow_budget_exhaustion_is_controlled() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pinned_flow_tool_budget_exhaustion_prevents_side_effects() -> None:
+    calls: list[str] = []
+    name = "test.pinned-budget"
+
+    @tool_registry.tool(
+        name=name,
+        kind="http",
+        description="test tool capability",
+        args_schema={"expression": str},
+        returns="none",
+        risk="read",
+    )
+    async def probe_tool(ctx, expression: str):
+        calls.append(expression)
+
+    try:
+        result = await invoke_pinned_flow(
+            artifact=flow_artifact(tool=name),
+            raw_input={},
+            snapshot=snapshot(tools=[name], with_skill=True, skill_kind="flow"),
+            rule_tools=None,
+            deps=None,
+            timeout_seconds=2,
+            recursion_cap=20,
+            remaining_tool_rounds=0,
+            remaining_steps=10,
+        )
+
+        assert result.status == "budget_exhausted"
+        assert result.tool_calls_bound == 1
+        assert (result.steps_consumed, result.tool_rounds_consumed) == (0, 0)
+        assert calls == []
+    finally:
+        tool_registry._REGISTRY.pop(name, None)
+
+
+@pytest.mark.asyncio
 async def test_pinned_script_tool_must_be_in_effective_set() -> None:
     artifact = replace(
         flow_artifact(),

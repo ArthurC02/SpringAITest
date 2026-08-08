@@ -2,7 +2,7 @@
 
 > **維護規則(強制):** 每完成一項工作,實作該項的變更必須在**同一個 commit** 將對應條目從 `- [ ]` 改為 `- [x]`,條目尾端註記完成日期(commit hash 由該條目的 git 歷史可溯,不必手寫)。任何 session 開始實作前先讀本檔確認下一個未完成項;發現與現況不符的條目,先修正條目再動工。Phase gate 條目未全勾之前,不得開始下一 phase 的破壞性工作(P1 內六個工作包可並行)。
 >
-> Baseline: historical P0 evidence is `8652528`(2026-08-03); P3 planning baseline is now `44f9de4`(2026-08-06). Existing uncommitted Wave4/5 work is outside P3 and must be preserved. See [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
+> Baseline: historical P0 evidence is `8652528` (2026-08-03); P3 reconciliation baseline remains `44f9de4` (2026-08-06). Current implementation audit is committed `HEAD=e24fe2b` (2026-08-08) plus a pre-existing dirty worktree; preserve those changes and do not treat them as completion evidence. See [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
 
 ## P0 — 計畫收尾
 - [x] P0-A1 Ledger 依 8652528 偵察結果修正(50 表、14/32/5 檔數、SkillHash 10 模組、新增 AgentEditor/ChatOrchestratorController/ensure-mem0-db/correlation-ID 條目)— 2026-08-03
@@ -53,7 +53,7 @@
 - [x] P1-IN4 docs 同步:`infra/AGENTS.md` gate 敘述與 compose 收斂一致(D5 的 backend gate 疊層敘述改由 P1-PL2 對應的 docs 批次處理)— 2026-08-03
 ### WP1-CI
 - [x] P1-CI1 GitHub Actions:四服務 build/test(backend 帶 pgvector service container + psql 可達性防呆,杜絕誠實-skip 假綠)+ compose 展開驗證 + shell 語法/LF + diff hygiene + `permissions: contents: read` — 2026-08-03
-- [ ] P1-CI2 契約 snapshot 測試:各服務內以 snapshot test 形式實作(platform 公開路由、backend 路由、workflow FastAPI 路由對 checked-in 清單比對),落在既有 test 步驟內(自 P1-CI1 拆出)
+- [ ] P1-CI2（IMPLEMENTED IN WORKTREE，COMMIT PENDING）契約 snapshot 測試已落在既有 backend/platform/workflow test job：Platform 公開路由、Backend `/api/*` 路由與 Workflow FastAPI/OpenAPI 路由均對 checked-in 清單比對；本項依本檔維護規則，須與實作同一 commit 後才改勾選。
 - [ ] P1-CI3(選配)compose env 矩陣可執行驗證:`docker compose config --format json` 對 checked-in 清單比對各服務 gate(審查 L2;成本/價值待評)
 ### P1 gate
 - [x] P1-G 四套件全綠(backend 1243、platform 893、workflow 1643、frontend logic 115/UI 98);e2e-verifier 對 HEAD 原生程序驗證 API 層全 PASS(envelope 6 欄、409+ETag、workflow 安全 500 真實觸發、RBAC、SSE/AG-UI、202→ready、rag-qa);orchestrator ETag 同機制與 SSE error frame 為 covered-by-unit — 2026-08-03
@@ -72,7 +72,7 @@
 
 ### 下一批可執行規劃工作
 - [x] P3-R1（COMPLETE）機械化 current-baseline inventory/fingerprint validation：固定 52 張 application tables、5 張可選 Workflow checkpoint tables（補列 `workflow_root_context_checkpoint`）、`conversations_history_page_idx` 與 `plpgsql`/`vector` extension allowlist；production manifest 維持 bundle 0、無 SQL。Migration suite 66 passed / 1 Docker dump-restore skipped，code review PASS — 2026-08-07。
-- [ ] P3-R2（DESIGN COMPLETE，EVIDENCE PENDING）[runtime evidence contract](09-p3-r2-runtime-evidence-contract.md) 已固定契約；bounded counters、fixed-schema JSON events、Compose deployment-version wiring、versioned exporter 與單元測試已實作。Production instance-complete extraction/retention proof、統一版本部署與 observation 尚未完成；外部 consumer attestation、rollback proof 與 C8 approval 亦仍 pending。C8 僅能移除 `/api/skills*` 的 Business Workflow 相容操作；alias 與 unified invoke 仍各自需要獨立 gate。
+- [ ] P3-R2（DESIGN COMPLETE，EVIDENCE PENDING）[runtime evidence contract](09-p3-r2-runtime-evidence-contract.md) 已固定契約；bounded counters、fixed-schema JSON events、Compose deployment-version wiring、versioned exporter 與 focused unit coverage 已實作，目前 dirty worktree 另含尚未提交的 hardening。尚缺 production instance-complete extraction/retention proof、單一 immutable version 的全實例 deployment/observation window、external consumer attestation、rollback proof、evidence-bundle digest 與 named C8 approval。C8 僅能移除 `/api/skills*` 的 Business Workflow 相容操作；alias 與 unified invoke 仍各自需要獨立 gate。
 - [ ] P3-R3（BLOCKED until P5/C8）post-C8 target decision sheet：typed table/FK/snapshot/eval/operations identity、跨 type 同名政策、seed authority、package hash、canary retention，以及必須保留的 alias/unified-invoke facade；未凍結前不寫 SQL。
 
 ### P3-X — BLOCKED until P3-R3 and applicable route gates
@@ -81,7 +81,7 @@
 ## P4 — 單一聊天 runtime
 - [ ] P4-1 **PARTIAL**：`/api/chat`、`/stream`、`/history`、`/history/page` 已強制 JWT；已移除 body `userId`；`conversationId` 可省略/空白，由 Platform 產生 canonical UUID，blocking/streaming 皆回 `X-Conversation-Id`；Frontend 已保存該 header，new conversation 會清除 key。`turnId` 尚未交付，因此不得勾選整項。
 - [ ] P4-2 Root Orchestrator 唯一路由;fail-closed 錯誤碼;刪 D6 canary 集群(AgentChatRuntime/RoutingAgent/ChatOrchestratorController/兩 flag/`agentChatEnabled`)
-- [ ] P4-3 `withIsolation:true` + 刪 `ChatMemoryKeyDerivation` 匿名分支
+- [ ] P4-3 將 `ChatAssistant` 改為 `withIsolation:true`，以非空 JWT `{tenant}:{user}` fail-closed；移除 `ChatMemoryKeyDerivation` 的 `userCtx is null` legacy fallback，並在新 session-store contract 不再需要時刪除或縮減該 derivation path。
 - [ ] P4-4 `X-Client-Schema-Version` + 426 + storage schema version(全新機制)
 - [ ] P4-5 Workflow 公開 engine 契約;刪 flow_harness 的 kb-query import 與 `compiler._script_contract` 私有依賴
 - [ ] P4-G P4 gate:P4-01~P4-15 全過;legacy 路徑搜尋零殘留
@@ -91,5 +91,5 @@
 - [ ] P5-2 Platform 組合根拆分
 - [ ] P5-3 Workflow lifecycle/recovery/execution 拆分;測試 registry invocation-local(conftest `skills._SKILLS` 直寫改 fixture 隔離)
 - [ ] P5-4 Frontend feature-local types/API/state 拆分
-- [ ] P5-5 image digest pin(現況零 digest,含註解記錄的三個)+ 生產 profile 拒絕開發預設
+- [ ] P5-5 **PARTIAL**：外部 Compose images 已以 tag + `sha256` pin，生產 profile 已預設 Production 並由各服務 startup gate 拒絕開發憑證；本機建置的 `springaitest-mem0:latest` 仍是 tag-only，尚需固定其 immutable image identity，並補齊最終 production-profile／image-policy acceptance evidence。
 - [ ] P5-G 最終 release gate(04-acceptance「Final release gate」全項)

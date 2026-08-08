@@ -1,6 +1,8 @@
 # Architecture Hard Reset — Deletion and Migration Ledger
 
 > Status: historical inventory with a 2026-08-06 reconciliation overlay. Before implementation, line references must be refreshed against baseline `44f9de4`. A row is complete only when its replacement and acceptance evidence exist in the same phase. See [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md).
+>
+> **Document-wide reconciliation rule (2026-08-08):** Unless a row is explicitly marked current or complete, every P3 deletion/split row in this ledger is a historical P3-X input, not executable P3-R0–R3 work. C8 may only narrow Business Workflow compatibility on public `/api/skills*`; `/skills/validate` and unified `/skills/{name}/invoke` each require independent later consumer/usage/rollback approval. Physical schema, DTO, reader, dispatch, frontend, and test cleanup remains a post-C8 P3-R3/P3-X decision, with compatibility facades retained wherever that later decision requires them.
 
 ## 0. Reconciliation overlay — P3-X only
 
@@ -68,6 +70,8 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 
 ## 3. Workflow
 
+> **Reconciliation overlay (2026-08-08):** Rows 73–89 are historical P3-X target inputs, not executable P3-R0–R3 instructions. Retain public and internal compatibility through C8: C8 may only narrow public `/api/skills*`; `/skills/validate` and unified `/skills/{name}/invoke` each require their own later consumer/usage/rollback approval, while shared readers and kind dispatch remain post-C8 P3-R3/P3-X decisions. [08-p3-reconciliation-44f9de4.md](08-p3-reconciliation-44f9de4.md) is the current authority.
+
 | Item | Current location | Phase | Disposition |
 | --- | --- | --- | --- |
 | `/skills/validate` compatibility alias | `workflow/app/main.py` | P3 | Delete route and alias tests. Keep only `/business-workflows/validate`. |
@@ -91,6 +95,8 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 
 ## 4. Platform and public API
 
+> **Reconciliation overlay (2026-08-08, applies to sections 4–5):** P3 rows below are historical P3-X target inputs, not instructions for P3-R0–R3. C8 may only narrow Business Workflow compatibility on public `/api/skills*`; it does not authorize retirement of `/skills/validate` or unified invoke. Public DTO, routing, catalog, and frontend splits remain post-C8 P3-R3/P3-X decisions and may retain compatibility facades if the later decision sheet requires them.
+
 | Item | Current location | Phase | Disposition |
 | --- | --- | --- | --- |
 | Skill service/client mixed DTO and invoke | `Platform.Service/SkillService.cs`, `WorkflowEngineClient.cs` | P3 | Agent-Skill-only service plus explicit Business Workflow methods. |
@@ -103,13 +109,13 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | Legacy `ChatAssistant`/Skill-routing brain | Platform chat composition and tests | P4 | Delete after Chat and AG-UI share Root runtime. Keep transport/session adapters only where still used. |
 | Anonymous chat/history contract | Chat controller, DTO, tests | P4 | Require JWT; remove body `userId` and anonymous continuity/history behavior. |
 | Giant composition root | `Platform.Web/Program.cs` | P5 | Split registration by responsibility without moving domain rules into extensions. |
-| Partial public error envelope | Platform `ApiErrorWriter`, controllers, API clients/tests | P1 | Add stable code/correlation ID everywhere and migrate all endpoint contract tests before later phases add domain-specific codes. |
-| `ChatOrchestratorController.cs:23` bare `NotFound()` | `platform/src/Platform.Web/Controllers/ChatOrchestratorController.cs:23` | P1 | Seventh public error exit; returns empty 404 body outside ApiError envelope. P1 error-envelope migration must cover it; otherwise contract tests miss this path. |
+| Public error envelope | Platform `ApiErrorWriter`, controllers, API clients/tests | P1 COMPLETE | Resolved: public errors use the standard ApiError code/correlation contract. Retain this row only as historical deletion evidence; do not reopen P1. |
+| `ChatOrchestratorController` not-found path | `platform/src/Platform.Web/Controllers/ChatOrchestratorController.cs` | P1 COMPLETE | Resolved: the controller throws `WorkflowNotFoundException`, which the standard error pipeline maps to ApiError. The former bare `NotFound()` no longer exists. |
 | D6 canary chat runtime cluster | `Platform.Service/AgentChatRuntime.cs`, `Abstractions/IAgentChatRuntime.cs`, `Options/ServiceOptions.cs` (`AgentChatOptions`), `Platform.Web/Controllers/ChatOrchestratorController.cs` | P4 | Row 62 named only the thin `AgentChatRoutingAgent` shell. `AgentChatRuntime` holds the actual `IsCanaryTenant` / `mode == "legacy"` / return-null-to-fall-back logic; `IAgentChatRuntime` must fail with stable error codes instead of returning null. Decide whether `ChatOrchestratorController` is re-gated or deleted. |
-| `ChatAssistant` session store `withIsolation:false` | `Platform.Web/Program.cs:247-287` | P4 | The inline comment documents `false` as deliberate **because anonymous continuity must be preserved**. P4 removes anonymous chat, so the justification expires and this should become `withIsolation:true` (Strict, fail-closed) like AG-UI. Note: `Program.cs:254-255` comments name test cases (e.g., `ChatServiceTests.Chat_ShortTermMemory_CarriesPriorExchange`) that assume anonymous continuity; changing to `withIsolation:true` and deleting the anonymous branch must be coordinated with those tests in the same tranche. |
-| `ChatMemoryKeyDerivation` anonymous branch | `Platform.Service/Abstractions/ChatMemoryKeyDerivation.cs` | P4 | Delete the `userCtx is null` branch (`NormalizeUser`/`NormalizeConversation`) once chat requires JWT. |
-| `ChatRequest.TurnId` and `X-Conversation-Id` response header | `Platform.Service/Dtos/ChatDtos.cs`, `Platform.Web/Controllers/ChatController.cs` | P4 | 02-spec §4 requires a mandatory UUID `turnId` and a server-generated conversationId returned as `X-Conversation-Id`. Neither exists today; both are additions, not deletions. |
-| `WORKFLOW_DESIGNER_ENABLED` x `MULTI_AGENT_DISPATCH_ENABLED` coupling | `Platform.Web/Program.cs:67-68` | P1/P4 | Current code makes dispatch require the designer gate; 02-spec §8 explicitly removes `WORKFLOW_DESIGNER_ENABLED` from runtime readiness dependencies. Direct code/spec conflict. Additional: `contextEnrichmentEnabled` flows through `Program.cs:63→67→71` with three-layer dependency on `WORKFLOW_DESIGNER_ENABLED`; when decoupling dispatch, E1/E3 validity conditions and their interconnection must be revisited, and the refactor scope expands to include context enrichment feature completeness. |
+| `ChatAssistant` session store `withIsolation:false` | `Platform.Web/Program.cs:274-309` | P4 | Public chat is already JWT-only; the remaining `false` plus identity-prefixed key arrangement is legacy session-key compatibility, not anonymous continuity. Change to `withIsolation:true` with strict JWT `{tenant}:{user}` isolation, retire the null-identity fallback, and update session-continuity tests in the same tranche. |
+| `ChatMemoryKeyDerivation` null-identity fallback | `Platform.Service/Abstractions/ChatMemoryKeyDerivation.cs:11-28` | P4 | `userCtx is null` plus `NormalizeUser`/`NormalizeConversation` remains despite the JWT boundary. Delete it after `ChatAssistant` uses strict framework isolation; retain only derivation still required for durable conversation persistence. |
+| `ChatRequest.TurnId` and `X-Conversation-Id` response header | `Platform.Service/Dtos/ChatDtos.cs`, `Platform.Web/Controllers/ChatController.cs` | P4 | `X-Conversation-Id` and server-generated canonical `conversationId` now exist. Mandatory UUID `turnId` remains the missing addition for durable idempotency. |
+| `WORKFLOW_DESIGNER_ENABLED` x `MULTI_AGENT_DISPATCH_ENABLED` coupling | Platform/Backend composition roots | P1 COMPLETE | Resolved: dispatch is independent of the designer gate; Context Enrichment depends on dispatch plus its own flag, not on designer availability. Retain as historical evidence only. |
 | Shared union `Skill`/`SkillUpsert`/`BusinessWorkflowCreated` DTOs | `Platform.Service/Dtos/SkillDtos.cs` | P3 | One DTO with a `[JsonRequired]` `Kind`, asserted to different subsets by `SkillService.ReadSkillAsync` and `BusinessWorkflowService.EnsureFlowKind`. Split into two record families. |
 | `agentChatEnabled` in `GET /api/features` | `Platform.Web/Program.cs:587`; frontend Features consumers | P4 | Wire-contract shape change when the flag is deleted. |
 
@@ -130,7 +136,7 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | `useSkillSelection.ts` unconditional catalog call | `frontend/src/hooks/useSkillSelection.ts:3,100` (`onHistoryReverted`) | P3 | Same catalog-domain mismatch during revision restore; the `kind` branch above it does not cover this call. |
 | `SimpleSkillEditor.tsx` template skeleton source | `frontend/src/components/SimpleSkillEditor.tsx:3,74` (`loadSkeleton`) | P3 | A Business-Workflow-only editor reads `template-*` skeletons from the Agent Skill catalog endpoint. |
 | Storage/build schema version mechanism | Verified absent: no `X-Client-Schema-Version` header, no 426 handling, no storage version constant | P4 | Rows in §4/§5 reference this as an existing mechanism. It does not exist — this is a feature to add per 03-design §6 / 02-spec §5, not cleanup. |
-| `springai-chat:conversationId` client-generated UUID | `frontend/src/api/chat.ts:28-35` (`getConversationId`) | P4 | Client pre-generates the id; 02-spec §4 makes the server authoritative via `X-Conversation-Id`. Reconcile which side generates on the first turn. |
+| `springai-chat:conversationId` browser storage | `frontend/src/api/chat.ts:53-77` | P4 | Browser no longer generates the initial ID: it omits the value, stores the server-returned `X-Conversation-Id`, and reuses it. Add `turnId` and storage-version migration without deleting unrelated keys. |
 
 ## 6. Infrastructure and data cleanup
 
@@ -140,7 +146,7 @@ Row 21 covers checkpoints/conversations/runs/approvals/audit/outbox generically,
 | PowerShell native failures ignored | `scripts/ensure-mem0-db.ps1` and callers | P1 | Check exit codes and fail with context. |
 | `ensure-mem0-db.ps1` CREATE DATABASE exit code unchecked | `scripts/ensure-mem0-db.ps1:31-32` | P1 | CREATE DATABASE can fail but the script still prints success and exits 0; the `.sh` version is protected by `set -e` fail-fast. Add `$LASTEXITCODE` check. |
 | Lite health failure returns success | `scripts/start-lite.*` | P1 | Aggregate required health failures and exit nonzero. |
-| Mutable deployment image tags | Compose services | P5 | Pin reviewed deployment images by digest; local mem0 image gets an existence check. |
+| Deployment image identity | Compose services | P5 | All external registry images in base/evidence Compose now use reviewed digests. The intentionally local `springaitest-mem0:latest` is an explicit CI allowlist exception and requires a reproducible local identity-build check; finish the policy proof rather than claiming zero digest coverage. |
 | Normal appdb pollution/container drift by evidence scripts | D3/D5/D6 and all other verifier service chains | P2/P5 | Use a generated allowlisted per-run DB actually wired into every evidence service; restore prior container state. D7 is the reference pattern. |
 | mem0 development data | mem0 history/vector storage | P2 | Delete only through confirmed `reset-development-data.*`. |
 | RabbitMQ development jobs | application queues | P2 | Purge named queues after writers stop; do not delete unrelated vhosts/volumes. |

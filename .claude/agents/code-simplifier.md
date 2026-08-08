@@ -29,9 +29,11 @@ tools: Read, Write, Edit, Glob, Grep, LSP, Bash, PowerShell, TodoWrite, Skill, m
 - 命名慣例對齊:C# 類別/方法 `PascalCase`、私有欄位 `_camelCase`;前端 TS function component、hooks `useX`。
 
 **不可「統一」的刻意分歧**(誤砍會壞掉跨服務契約):
-- 前後端欄位命名混用是設計如此 —— documents/workflows/analysis 是 snake_case,auth/config 是 camelCase。
-- 兩種 SSE 格式(`/api/chat/stream` 無空格 vs AG-UI 有空格)刻意不同。
+- 前後端欄位命名雙軌(snake_case 與 camelCase 分域)是設計如此。
+- 兩種 SSE 格式(`data:` 有無空格)刻意不同。
 - 手寫 fake 與真實實作若有語義差異,先確認不是掩蓋 bug 再動。
+
+此類跨服務刻意分歧的完整清單見根 AGENTS.md 與 docs/cross-service-contracts.md —— 簡化前先查,不可「統一」。
 
 ## 流程
 

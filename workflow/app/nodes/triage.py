@@ -1,9 +1,9 @@
-"""triage_* 節點：逐字移植 app/workflows/triage.py 的 classify/quick_answer/deep_answer。
+"""triage_* 節點：app/skills/triage.yaml 的 classify / quick_answer / deep_answer。
 
-手寫圖把「LLM 回覆非標準字串 → 預設 simple」這個確定性預設放在 route()（條件邊）；
-Node-First 版本改在 triage_classify 節點內就把 category 正規化成 'SIMPLE'/'COMPLEX'
-兩個字面值（同一套判斷規則：不分大小寫含 COMPLEX 字樣才算 complex），讓 YAML 的
-branch when 只需比較 state.category == 'COMPLEX' 這種簡單、可靠的條件式
+「LLM 回覆非標準字串 → 預設 simple」這個確定性預設放在 triage_classify 節點內，
+由節點把 category 正規化成 'SIMPLE'/'COMPLEX' 兩個字面值（判斷規則：不分大小寫含
+COMPLEX 字樣才算 complex），讓 YAML 的 branch when 只需比較
+state.category == 'COMPLEX' 這種簡單、可靠的條件式
 （app/engine/expressions.py 的白名單只認 state.<key> 比較字面量，不支援字串方法
 呼叫，因此正規化必須在節點內做，不能留給條件式做）。
 """

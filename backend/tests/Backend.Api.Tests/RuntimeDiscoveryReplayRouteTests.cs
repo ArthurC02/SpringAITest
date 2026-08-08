@@ -207,7 +207,7 @@ public sealed class RuntimeDiscoveryReplayRouteTests : IClassFixture<RuntimeDisc
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        Assert.Equal("Feature is unavailable", body.RootElement.GetProperty("message").GetString());
+        Assert.Equal("找不到資源", body.RootElement.GetProperty("message").GetString());
     }
 
     private HttpClient Authenticated(string key = "route-attempt")

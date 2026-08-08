@@ -3,9 +3,6 @@ using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Service.Exceptions;
 using Platform.Service.Options;
-using Microsoft.Agents.AI;
-using Microsoft.Agents.AI.Hosting;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Platform.Service.Tests;
@@ -27,13 +24,7 @@ public sealed class ChatSkillRoutingTests
     private static readonly UserContext AdminA = new("admin-a", "demo-a", "ADMIN");
 
     private static ChatService Build(FakeLlmAgent agent, FakeWorkflowEngineClient workflows, FakeChatClient? chatClient = null)
-    {
-        var mem0 = new FakeMem0Client();
-        var convos = new FakeConversationStore();
-        var identity = new FakeChatIdentityAccessor();
-        var (hostAgent, _, _) = TestChatAgent.Build(chatClient, mem0, convos, identity, agent, workflows);
-        return new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
-    }
+        => BuildRouting(agent, workflows, chatClient).Service;
 
     /// <summary>
     /// P4:路由(BuildToolsAsync/tool.InvokeAsync)搬進 SkillRoutingAgent,測試斷言面不變,只搬構造——

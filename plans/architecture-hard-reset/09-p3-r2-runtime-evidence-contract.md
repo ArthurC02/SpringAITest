@@ -1,6 +1,6 @@
 # P3-R2 Runtime Usage Evidence Contract
 
-> Status: DESIGN COMPLETE, EVIDENCE PENDING (2026-08-07). This document does not authorize C8, route removal, schema changes, or production SQL.
+> Status: DESIGN COMPLETE, EVIDENCE PENDING — revalidated 2026-08-08 against committed `HEAD=e24fe2b` plus the audited dirty worktree. This implementation checkpoint is an audit observation, not release evidence, and does not authorize C8, route removal, schema changes, or production SQL.
 
 > Implementation checkpoint (2026-08-08): bounded counters, fixed-schema JSON events, Compose deployment-version wiring, `scripts/export-artifact-compatibility-usage-v1.py`, and unit coverage are implemented. Production instance-complete log extraction/retention proof, deployment observation, final approval-bundle assembly, external consumer attestation, rollback proof, and approval remain pending.
 

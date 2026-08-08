@@ -1,7 +1,7 @@
 ﻿# 共用前置：切到 infra\、檢查 .env、先起 postgres 並備妥 mem0 需要的庫。
 # 由 start-infra.ps1 / start-full.ps1 以 dot-source（.）載入——cd 與 exit 都作用在呼叫端。
 . (Join-Path $PSScriptRoot '_development-environment.ps1')
-Set-Location (Join-Path $PSScriptRoot '..' 'infra')
+Set-Location (Join-Path (Join-Path $PSScriptRoot '..') 'infra')   # 巢狀兩參數版：PS 5.1 不支援 3-arg Join-Path
 
 if (-not (Test-Path .env)) {
     Write-Error "找不到 infra\.env。請先建立：copy .env.example .env 後填入 OPENAI_API_KEY"

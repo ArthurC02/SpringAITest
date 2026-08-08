@@ -4,7 +4,7 @@
 
 ### C0 — Rebase the continuation baseline
 
-The previous dirty-worktree handoff is obsolete: the work is now in clean `HEAD=44f9de4`. Record that baseline and reconcile every future diff against it.
+The original continuation wave was rebased into clean `44f9de4`, which remains its historical baseline. The current audit is committed `HEAD=e24fe2b` plus a dirty worktree; record both states and do not use uncommitted files as completion evidence.
 
 Reassessment reopened one Wave4-B defect: retention candidate retrieval processed only the first 100 rows. The dedicated correction below repaired and independently reviewed it; it was not folded into Wave5-B or P3.
 
@@ -20,9 +20,9 @@ Replace silent enabled-tracing initialization failure with one content-free warn
 
 The checked-in contract now inventories all 22 services, four versioned steady-running lanes, service classes, candidate counterpart relationships, and the four CI Compose snapshots. The zero-dependency collector records exploratory Docker CPU, memory-usage, and PID peaks without container identity or content data. Static validation rejects inventory drift and any pre-calibration resource limit. It never approves ceilings.
 
-### C2b — Wave5-B0: execute reviewed runtime calibration — BLOCKED
+### C2b — Wave5-B0: execute reviewed runtime calibration — PENDING
 
-Run each approved workload manifest with a usable Docker daemon and a controlled host/workload window. Review the generated exploratory bundles before defining any ceiling-approving workload. The current host has no reachable Docker daemon, so no runtime bundle was produced and no default can be approved.
+Docker `29.6.2` is reachable in the current audit environment, but no approved workload has executed and no runtime bundle has been reviewed. Run each approved workload manifest only in a controlled host/workload window, then review the generated exploratory bundles before defining any ceiling-approving workload. Daemon reachability is not approval, and no default is currently approved.
 
 ### C3 — Wave5-B2: bounded built-in telemetry — COMPLETE (2026-08-06)
 
@@ -39,7 +39,7 @@ Only after C2b has approved values:
 
 Wave5-B must inventory old comments/tests that describe tracing failure as "silent" and any duplicated resource-limit declarations made obsolete by shared anchors.
 
-The next independent work is non-destructive P3-R1 baseline validation or P3-R2 evidence-contract design if authorized. Otherwise, resume C2b when a Docker daemon is reachable; do not invent or approve ceilings before reviewed runtime calibration.
+P3-R1 baseline validation and the repository-side P3-R2 evidence implementation are complete. The next independent P3-R2 work is production instance/lifecycle extraction and retention proof, a single-version observation window, consumer attestations, rollback proof, and named approval. Independently schedule C2b now that Docker is reachable, but do not invent or approve ceilings before controlled collection and review.
 
 ### C5 — Architecture Hard Reset P3 readiness and deferred execution
 
@@ -52,7 +52,7 @@ P3-R0 reconciliation is complete. Follow the reconciled work packages and stop g
 - [Historical P3 inventory](../architecture-hard-reset/07-p3-inventory.md)
 - [P3 reconciliation and work packages](../architecture-hard-reset/08-p3-reconciliation-44f9de4.md)
 
-P3-R1 must mechanically validate the 52-table baseline, optional checkpoint relations, `document_ingest`, `checkpoint_retention_ack`, and the conversation-history index without shipping production SQL. P3-R2 defines trustworthy C8 evidence for removing only Business Workflow compatibility operations from public `/api/skills*`; internal `/skills/validate` and unified invoke retain separate retirement gates. P3-R3/P3-X remain blocked until the reconciled post-P5/C8 sequence passes. Do not create a `/v2` surface, dual write, first-match typed-artifact policy, or partial database/consumer cutover.
+P3-R1 has mechanically validated the 52-table baseline, optional checkpoint relations, `document_ingest`, `checkpoint_retention_ack`, and the conversation-history index without shipping production SQL. P3-R2 now has its repository instrumentation, fixed-schema events, deployment-version wiring, exporter, and unit tests; it is not complete until production instance-complete extraction/retention, a single-version observation window, consumer attestations, rollback proof, and named C8 approval exist. C8 may remove only Business Workflow compatibility operations from public `/api/skills*`; internal `/skills/validate` and unified invoke retain separate retirement gates. P3-R3/P3-X remain blocked until the reconciled post-P5/C8 sequence passes. Do not create a `/v2` surface, dual write, first-match typed-artifact policy, or partial database/consumer cutover.
 
 ### C6 — Wave4-C1/C2: retention restore contract and operational provider
 

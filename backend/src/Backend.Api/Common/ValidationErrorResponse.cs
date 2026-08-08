@@ -6,12 +6,11 @@ namespace Backend.Api.Common;
 /// <summary>
 /// [ApiController] 驗證失敗時的回應工廠:輸出 ApiError(400,"輸入驗證失敗",fieldErrors)。
 /// fieldErrors 的 key 轉 camelCase(並剝掉可能的 "$." 前綴),每個欄位取第一個錯誤訊息。
-/// 與 platform 完全一致。
+/// 與 platform/src/Platform.Web/Errors/ 同名檔刻意保持一致(跨服務各自部署,無法共用 assembly),
+/// 改任一邊須同步另一邊。
 /// </summary>
 public static class ValidationErrorResponse
 {
-    // 契約鏡像:與 platform/src/Platform.Web/Errors/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。
-    // 修改 422/ApiError 格式化邏輯時務必同步另一邊。
     public static IActionResult Create(ActionContext context)
     {
         var fieldErrors = new Dictionary<string, string>();
@@ -45,8 +44,6 @@ public static class ValidationErrorResponse
         };
     }
 
-    // 契約鏡像:與 platform/src/Platform.Web/Errors/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。
-    // 修改 422/ApiError 格式化邏輯時務必同步另一邊。
     private static string ToCamelCaseKey(string key)
     {
         var k = key;

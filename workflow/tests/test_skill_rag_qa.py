@@ -1,6 +1,5 @@
-"""Node-First 遷移（Phase 1）：rag_answer 節點 + 編譯後的 app/skills/rag_qa.yaml。
+"""rag_answer 節點 + 編譯後的 app/skills/rag-qa.yaml。
 
-語意逐字移植自 app/workflows/rag_qa.py（手寫圖已於 Phase 3a 退役刪除）。
 無 pytest-asyncio，async 一律以 asyncio.run 執行（對齊 test_retrieve.py 慣例）。
 """
 

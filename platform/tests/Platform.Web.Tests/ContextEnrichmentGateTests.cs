@@ -30,9 +30,9 @@ public sealed class ContextEnrichmentGateTests
     }
 
     /// <summary>
-    /// 等價類的另一半:兩個旗標全開時 gate 中介軟體根本不註冊,回應不得再帶 gate 自寫的 ApiError。
-    /// Platform 目前確實沒有 Context proxy,所以現況仍是 404 —— 但是路由未命中的空 body 404,
-    /// 而非 gate 的 JSON。日後真的接上 proxy 時本測試應改為斷言被代理的回應。
+    /// 等價類的另一半:兩個旗標全開時 gate 中介軟體根本不註冊。Platform 目前確實沒有
+    /// Context proxy,所以現況仍是一般 unknown-route 404；它與 gate 共用公開 ApiError 契約，
+    /// 不再以空 body 洩漏兩者差異。日後真的接上 proxy 時本測試應改為斷言被代理的回應。
     /// </summary>
     [Fact]
     public async Task ContextRoutes_FlagOn_ProduceNoGateApiError()
@@ -43,6 +43,6 @@ public sealed class ContextEnrichmentGateTests
         var response = await factory.CreateClient().GetAsync("/api/contexts");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
+        (await response.ReadJsonAsync()).AssertApiError(404, "not_found");
     }
 }

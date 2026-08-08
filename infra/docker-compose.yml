@@ -298,6 +298,11 @@ services:
       PROMPT_ARTIFACTS_ENABLED: ${PROMPT_ARTIFACTS_ENABLED:-false}
       PROMPT_ARTIFACTS_SHADOW: ${PROMPT_ARTIFACTS_SHADOW:-false}
       AGENT_WRITE_TOOLS_ENABLED: ${AGENT_WRITE_TOOLS_ENABLED:-false}
+      # D7 的雙白名單硬閘門（tool_boundary.py::effective_tool_names）：只有 workflow 讀這兩把。
+      # 兩者都是逗號分隔且都必須非空，write tool 才會真的進入有效工具集 —— 只開上面的旗標、
+      # 不設這兩把，等於旗標開了但寫入能力仍為零。預設空 = fail-closed。
+      AGENT_WRITE_TOOLS_ALLOWLIST: ${AGENT_WRITE_TOOLS_ALLOWLIST:-}
+      AGENT_WRITE_TOOLS_TENANT_ALLOWLIST: ${AGENT_WRITE_TOOLS_TENANT_ALLOWLIST:-}
       # workflow 的 settings.py 有 context_enrichment_enabled，但刻意沒有 agent_chat_enabled
       # （D6 的公開 canary 決策在 platform/backend，workflow 沒有 chat 派送端點），故此處不補該旗標。
       CONTEXT_ENRICHMENT_ENABLED: ${CONTEXT_ENRICHMENT_ENABLED:-false}

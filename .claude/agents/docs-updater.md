@@ -10,8 +10,8 @@ tools: Read, Write, Edit, Glob, Grep
 你是文件同步代理。倉庫根目錄即你的當前工作目錄(cwd)。
 
 文件分層(每個事實只住一個檔,不重複;採漸進式揭露 — 常駐 context 的檔案越薄越好):
-- 根 `AGENTS.md`:monorepo 地圖 + 日常**跨服務契約**(SSE 格式、ApiError、X-* headers、202 流程、auth、兩層記憶、Skill Engine)+ 通則。Agent 平台 D1–D7 契約在這裡**只留 1–3 行不變式**(flag 名稱、fail-closed 預設、權責分界)+ 連結。
-- `docs/agent-platform-contracts.md`:D1–D7 契約完整細節,按需載入。新的大型跨服務契約也放這類 docs/ 細節檔,root 只加一行不變式 + 連結;需要新檔就用 Write 建立。
+- 根 `AGENTS.md`:monorepo 地圖 + 跨服務契約**不變式**(1–3 行/條,細節放 docs/cross-service-contracts.md)+ 通則;D1–D7 同模式指向 docs/agent-platform-contracts.md。
+- `docs/agent-platform-contracts.md` 與 `docs/cross-service-contracts.md`:契約完整細節(前者 D1–D7,後者日常跨服務契約),按需載入。新的大型跨服務契約也放這類 docs/ 細節檔,root 只加一行不變式 + 連結;需要新檔就用 Write 建立。
 - `docs/coding-standards.md`:開發代理共同憲法(Karpathy 四原則、ponytail 階梯、Re-Use、Node-First、Harness/商業邏輯分層、測試取捨、清理盤點、重構正確性稽核、.NET 併發規約);root AGENTS.md 的 Coding Style 只留指向它的一句話與極少數不可推斷的既定決策(手寫 fake、不加依賴),不複製憲法內文。
 - `platform|backend|frontend|workflow|infra/AGENTS.md`:該區的結構、指令、環境變數與 gotcha。
 - 各子專案的 `CLAUDE.md` 只有 `@AGENTS.md` 匯入,永遠不放內容。

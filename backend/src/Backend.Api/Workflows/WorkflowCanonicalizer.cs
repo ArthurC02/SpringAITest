@@ -7,7 +7,8 @@ namespace Backend.Api.Workflows;
 
 public static class WorkflowCanonicalizer
 {
-    public static string Canonicalize(JsonElement value) => Canonicalize(value.GetRawText());
+    // body 缺欄位(Undefined)/顯式 null 在此收斂成 JSON null 字面值,交給 ValidateEnvelope 回欄位級錯誤。
+    public static string Canonicalize(JsonElement value) => CanonicalJsonTree.NormalizeBody(value);
     public static string Canonicalize(string value) => CanonicalJsonTree.Normalize(JsonNode.Parse(value))!.ToJsonString();
     public static string Hash(string value) => SkillHash.Sha256(value);
 
@@ -25,7 +26,8 @@ public static class WorkflowCanonicalizer
             {
                 if (!graph.RootElement.TryGetProperty("schemaVersion", out var version) || version.ValueKind != JsonValueKind.Number)
                     errors.Add(new("definition.schemaVersion", "schemaVersion is required"));
-                if (!graph.RootElement.TryGetProperty("kind", out var graphKind) || graphKind.GetString() != kind)
+                // ValueKind 先擋:GetString() 對非字串會拋 InvalidOperationException,不在下面的 catch filter 內。
+                if (!graph.RootElement.TryGetProperty("kind", out var graphKind) || graphKind.ValueKind != JsonValueKind.String || graphKind.GetString() != kind)
                     errors.Add(new("definition.kind", "Graph kind must match workflow kind"));
                 if (!graph.RootElement.TryGetProperty("nodes", out var nodes) || nodes.ValueKind != JsonValueKind.Array)
                     errors.Add(new("definition.nodes", "nodes is required"));

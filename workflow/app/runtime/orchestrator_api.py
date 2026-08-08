@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.runtime.orchestrator_supervisor import RootRuntimeSupervisor
-from app.security import require_runtime_context
+from app.security import RequestContext, require_runtime_context
 
 router = APIRouter(prefix="/orchestrator-runs", tags=["root-orchestrator-runtime"])
 
@@ -29,11 +28,13 @@ class RootDispatchAccepted(BaseModel):
     scheduled: bool
 
 
-_context = partial(
-    require_runtime_context,
-    flag_name="multi_agent_dispatch_enabled",
-    message="Root runtime requires tenant, user, and role identity.",
-)
+async def root_runtime_context(request: Request) -> RequestContext:
+    """身分閘門掛成依賴，讓認證先於 pydantic body 驗證（見 runtime/api.py 同名說明）。"""
+    return await require_runtime_context(
+        request,
+        flag_name="multi_agent_dispatch_enabled",
+        message="Root runtime requires tenant, user, and role identity.",
+    )
 
 
 @router.post(
@@ -42,9 +43,11 @@ _context = partial(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def dispatch_root_run(
-    run_id: str, body: RootDispatchRequest, request: Request
+    run_id: str,
+    body: RootDispatchRequest,
+    request: Request,
+    ctx: RequestContext = Depends(root_runtime_context),
 ) -> RootDispatchAccepted:
-    ctx = await _context(request)
     supervisor: RootRuntimeSupervisor | None = getattr(
         request.app.state, "root_runtime_supervisor", None
     )

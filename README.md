@@ -130,9 +130,9 @@ pwsh -File scripts\verify-copilot-shared-core.ps1
 
 release evidence 仍須保留 [plans/copilot-shared-core/04-acceptance-test.md](plans/copilot-shared-core/04-acceptance-test.md) 定義的 C gates：`C-03`/`C-04`/`C-05`/`C-07`/`C-08` 必須由具名 integration tests，加上 `e2e-verifier` 的真服務 trace／必要時手動 browser proxy 檢查完成；routing 驗證必須使用真實模型，不能以 `mock-gpt` 取代。此 smoke script 只能作為它們的補充。
 
-### Copilot Shared Core release evidence（目前 blocked/failed）
+### Copilot Shared Core release evidence（sign-off blocked）
 
-release-evidence harness 已執行，但**尚未達成 release sign-off**。最新 Deterministic lane 的 `E-01`、`E-02`、`E-03`、`E-06` 已全部通過；E-06 以完整 content SSE events（不是 TCP chunks 或其他 AG-UI protocol events）驗證 nginx/Vite 未緩衝。Real-model lane 的 `E-04` 未在時限內由 mem0 取回 authenticated fact；`E-05` 第一輪最終回覆未包含 fixture 數字，且該 failure bundle 尚未保存可稽核的 routing capture。不得以 deterministic PASS 取代這兩個 gate 發布。
+release-evidence harness 已執行，但**尚未達成 release sign-off**。最新 Deterministic lane 的 `E-01`、`E-02`、`E-03`、`E-06` 已全部通過；E-06 以完整 content SSE events（不是 TCP chunks 或其他 AG-UI protocol events）驗證 nginx/Vite 未緩衝。較新的 RealModel bundle `20260725T111722672Z-90c9119f` 記錄 `E-04`、`E-05` PASS；仍須以同一候選版本重新完整執行 E-01..E-06、完成 fresh-image end-to-end 證據與獨立覆核後，才能解除 sign-off 阻擋。
 
 ```powershell
 # 首次或 evidence image / profile 有變更時加 -BuildEvidenceProfile；兩個 lane 都會輸出 bundle。
@@ -199,25 +199,34 @@ Docker daemon 不可用時，收集會以 exit code 3 安全停止，且不會�
 
 ## API
 
+**四個 `/api/chat*` 端點都需要 JWT**（未帶或無效 token 一律 401），先依「[認證流程](#認證流程)」登入取得 token：
+
 ```bash
-# 送出訊息（非串流）。userId / conversationId 皆選填：
-#   userId         → 匿名短期對話的 caller key；已登入時由 JWT 身分覆蓋。
-#   conversationId → 短期記憶分群（哪一「串」對話），省略則退回以 userId 分群。
-curl -X POST http://localhost:8080/api/chat \
+# 登入取得 token（回應：{"token":"eyJhbGc...","username":"user-a",...}）
+curl -X POST http://localhost:8080/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"message": "你好，今天天氣如何？", "userId": "alice", "conversationId": "c-001"}'
+  -d '{"username":"user-a","password":"password123"}'
+
+# 送出訊息（非串流）。body 只有 message 與選填 conversationId：
+#   conversationId → 對話分群（哪一「串」對話）；省略或空白時由平台產生正規 UUID。
+# 加 -i 可看回應 header 的 X-Conversation-Id（兩個 POST 端點都會回傳實際生效的值）。
+curl -i -X POST http://localhost:8080/api/chat \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "你好，今天天氣如何？"}'
 
 # 串流（SSE，逐字回傳）
 curl -N -X POST http://localhost:8080/api/chat/stream \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"message": "你好，今天天氣如何？", "userId": "alice", "conversationId": "c-001"}'
+  -d '{"message": "你好，今天天氣如何？"}'
 
 # 查詢歷史
-curl http://localhost:8080/api/chat/history
+curl -H "Authorization: Bearer <token>" http://localhost:8080/api/chat/history
 ```
 
 > Windows PowerShell 內 JSON 的雙引號需轉義:`-d '{\"message\": \"...\"}'`。
-> 前端登入後，`userId` 不受 request body 信任，長期記憶與持久化均由 JWT `{tenant}:{user}` 歸戶；`conversationId` 存 localStorage 並隨請求帶上。同一登入身分跨對話穩定；按「新建對話」時換新 UUID，讓短期記憶重新開始。匿名 `/api/chat*` 只保留短期對話，不 recall/remember mem0，也不持久化。
+> request body 不再接受 `userId`：身分、mem0 長期記憶與持久化一律由 JWT `{tenant}:{user}` 歸戶。`conversationId` 存 localStorage 並隨請求帶上；同一登入身分跨對話穩定，按「新建對話」時換新 UUID，讓短期記憶重新開始。
 
 ## 後端:兩層服務架構
 
@@ -244,7 +253,7 @@ workflow                                  Skill 引擎層
 | ---- | ----------- | --------------------- | --------------------------------------------------------------------------------------------- |
 | 平台 | Service     | `ChatServiceTests`    | xUnit + 手寫 fake HttpMessageHandler（BackendClient 代理行為）                                |
 | 平台 | Web         | `ChatControllerTests` | xUnit + WebApplicationFactory（整合測試）                                                     |
-| 核心 | Backend.Api | 694 個                | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking、Agent Registry 等單元測試（所有 PostgreSQL 相依測試現在都跑，0 個 skipped） |
+| 核心 | Backend.Api | `Backend.Api.Tests`   | xUnit + 手寫 fake repository、test fixture；內含 Auth、Retrieval、Config、Chunking、Agent Registry 等單元測試（所有 PostgreSQL 相依測試現在都跑，0 個 skipped） |
 
 ## 可觀測性架構（LiteLLM 閘道 + Langfuse）
 
@@ -279,8 +288,8 @@ OpenAI / ...（未來可加 Claude 等）
 mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量存進 postgres/pgvector
 ```
 
-- **接點是共用的 pipeline，不是單一 controller**:`ChatContextProvider`（呼叫 LLM 前 `recall`，記憶注入 Instructions）與 `ChatTurnRecorder`（完整回覆後 `remember`）掛在兩條聊天鏈路共用的 Agent Framework pipeline 上，已登入的 `ChatView`（`/api/chat*`）與 CopilotKit 副駕（`/api/copilot/agui`）都會用到。匿名 `ChatView` 僅保留短期連續性，既不 recall/remember mem0，也不持久化。mem0 的 best-effort 由 pipeline 邊界保證：任何 `IMem0Client` 例外都會記錄並降級為空 recall/no-op remember，**聊天主流程不受影響**。
-- **記憶按 JWT 身分分群**:登入後以 `{tenant}:{user}` 分群，request body 的 `userId` 不能指定或冒用其他人的長期記憶（見 [API](#api)）。
+- **接點是共用的 pipeline，不是單一 controller**:`ChatContextProvider`（呼叫 LLM 前 `recall`，記憶注入 Instructions）與 `ChatTurnRecorder`（完整回覆後 `remember`）掛在兩條聊天鏈路共用的 Agent Framework pipeline 上，`ChatView`（`/api/chat*`）與 CopilotKit 副駕（`/api/copilot/agui`）都會用到；兩條鏈路都要求 JWT，未認證的請求在進入 pipeline 前就被 401 擋下。mem0 的 best-effort 由 pipeline 邊界保證：任何 `IMem0Client` 例外都會記錄並降級為空 recall/no-op remember，**聊天主流程不受影響**。
+- **記憶按 JWT 身分分群**:一律以 JWT 的 `{tenant}:{user}` 分群；wire 上已無 `userId` 欄位，無從指定或冒用他人的長期記憶（見 [API](#api)）。
 - **不另接 OpenAI / 不另加向量庫**:mem0 的 LLM 與 embedder 都指向現有 LiteLLM,向量存進現有 postgres 的 pgvector(故 `postgres` 映像用 `pgvector/pgvector:pg17`)。embedding 模型需在 `litellm-config.yaml` 註冊(`text-embedding-3-small`)。
 
 > **官方映像的兩個坑**(已由 `infra/mem0.Dockerfile` 與 `scripts/ensure-mem0-db.*` 處理,啟動腳本會自動套用):
@@ -292,7 +301,7 @@ mem0 :8000 ──(LLM 抽取 + embedding 都走 LiteLLM :4000)──► 向量�
 同一次對話的近期來回，由 **Microsoft Agent Framework 的 session store**（`InMemoryChatHistoryProvider` + `SlidingWindowCompactionStrategy`）提供，和 mem0 互補:
 
 - **兩種記憶各司其職**:mem0 存「跨 session 的長期事實」(走 system prompt 注入);短期記憶存「這一串對話的近期訊息」(直接把前幾輪對話補回 prompt),讓 LLM 認得「上一句」。
-- **框架實作、兩條聊天鏈路共用**:per-conversation 保留最近 20 則訊息、以「輪」為單位裁切（不會拆散工具呼叫/結果配對）。AG-UI 用 JWT `{tenant}:{user}` strict isolation（任一 claim 缺失即 fail-closed）；ChatView 的登入 session key 已前綴同一身分、匿名則保留自己的短期 conversation key。AG-UI 重送完整 message 陣列時先按 ID 去重，assistant ID 重建時以保守 fingerprint 避免重複歷史。
+- **框架實作、兩條聊天鏈路共用**:per-conversation 保留最近 20 則訊息、以「輪」為單位裁切（不會拆散工具呼叫/結果配對）。AG-UI 用 JWT `{tenant}:{user}` strict isolation（任一 claim 缺失即 fail-closed）；ChatView 的 session key 則以同一身分為前綴，再接該次對話的正規 UUID。AG-UI 重送完整 message 陣列時先按 ID 去重，assistant ID 重建時以保守 fingerprint 避免重複歷史。
 - **記憶體儲存、重啟即清**:短期記憶在應用程序記憶體中，重啟平台閘道後對話脈絡歸零屬預期。若要跨重啟保留完整對話，須改為在資料庫（如 backend appdb）持久化。
 
 ## 認證與多租戶
@@ -453,11 +462,11 @@ curl -X POST http://localhost:8080/api/business-workflows/validate \
 
 ## D6 Agent Chat canary
 
-D6 is delivered behind fail-closed configuration. Set `AGENT_CHAT_ENABLED=true` in Platform, Backend, and Workflow, and set Platform `AGENT_CHAT_TENANT_ALLOWLIST` to the exact tenant codes being migrated. Eligible authenticated users are resolved through the tenant runtime binding; Chat and AG-UI then use the same durable, revision-pinned Root Orchestrator path. Anonymous users, tenants outside the allowlist, and tenants resolved as `legacy` remain on the existing shared-core path. An explicitly requested unavailable Orchestrator fails closed.
+D6 is delivered behind fail-closed configuration. Set `AGENT_CHAT_ENABLED=true` in Platform, Backend, and Workflow, and set Platform `AGENT_CHAT_TENANT_ALLOWLIST` to the exact tenant codes being migrated. Eligible authenticated users are resolved through the tenant runtime binding; Chat and AG-UI then use the same durable, revision-pinned Root Orchestrator path. Tenants outside the allowlist and tenants resolved as `legacy` remain on the existing shared-core path; unauthenticated callers never reach routing at all — `/api/chat*` and AG-UI reject them with 401. An explicitly requested unavailable Orchestrator fails closed.
 
 Before adding a tenant, publish and pin its Root Workflow, Worker Agent, independent read-only Verifier Agent, and tenant runtime binding. Canary one tenant at a time and retain the D6 verifier bundle. To roll back, first disable Platform `AGENT_CHAT_ENABLED` or remove the tenant from the allowlist, then disable the Workflow and Backend flags. Routing changes immediately; durable run and event records remain audit-retained.
 
-Historical deterministic D6 snapshot: Backend 479/479 with PostgreSQL coverage; Platform Service 335/335 and Web 269/269; Workflow 862 passed/2 skipped; Frontend 50/50 plus build/lint; deterministic verifier 13/13 PASS. This does not prove the RealModel E-04/E-05 gates. The referenced RealModel bundle is unavailable in this workspace, so release sign-off remains blocked; the canonical status is maintained in [the release evidence plan](plans/copilot-shared-core/05-release-evidence-plan.md).
+Historical deterministic D6 snapshot: Backend 479/479 with PostgreSQL coverage; Platform Service 335/335 and Web 269/269; Workflow 862 passed/2 skipped; Frontend 50/50 plus build/lint; deterministic verifier 13/13 PASS. A later RealModel bundle (`20260725T111722672Z-90c9119f`) records E-04/E-05 PASS, but release sign-off remains blocked pending a fresh full E-01..E-06 rerun, fresh-image end-to-end proof, and independent review. The canonical status is maintained in [the release evidence plan](plans/copilot-shared-core/05-release-evidence-plan.md).
 
 ## D7 approved write tools and operations
 

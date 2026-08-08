@@ -1,8 +1,10 @@
 using System.Diagnostics.Metrics;
+using System.Net;
 using System.Net.Http.Json;
 using Backend.Api.Common;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -67,6 +69,21 @@ public sealed class ArtifactCompatibilityUsageMetricsTests
         Assert.Equal("error", tags["outcome"]);
     }
 
+    // 觀測絕不能改變 API 回應:錯誤路徑上白名單 fail-fast 會**取代**呼叫端正在往上丟的例外,
+    // 把 409 變成 500。此時只能吞掉證據並記錄,原例外照常傳播(成功路徑仍 fail-fast)。
+    [Fact]
+    public async Task ErrorPath_UnboundedDimension_DoesNotReplaceOriginalApiException()
+    {
+        using var capture = new MetricCapture();
+
+        var error = await Assert.ThrowsAsync<ApiException>(() => capture.Metrics.TrackAsync<object>(
+            new DefaultHttpContext(), "public_business_workflows", "revision_read",
+            _ => throw new ApiException(409, "stale")));
+
+        Assert.Equal(409, error.Status);
+        Assert.Empty(capture.Measurements);
+    }
+
     [Fact]
     public async Task MixedList_RecordsOneBoundedRowPerRepresentedType()
     {
@@ -100,6 +117,7 @@ public sealed class ArtifactCompatibilityUsageMetricsTests
         var context = new DefaultHttpContext();
         context.Request.Path = path;
         context.Request.Method = method;
+        MarkAsMatchedControllerAction(context);
 
         await middleware.InvokeAsync(context, capture.Metrics);
         await context.Response.CompleteAsync();
@@ -118,6 +136,7 @@ public sealed class ArtifactCompatibilityUsageMetricsTests
         var context = new DefaultHttpContext();
         context.Request.Path = "/api/skills/example";
         context.Request.Method = "GET";
+        MarkAsMatchedControllerAction(context);
         async Task Next(HttpContext requestContext)
         {
             requestContext.Response.StatusCode = 404;
@@ -137,6 +156,45 @@ public sealed class ArtifactCompatibilityUsageMetricsTests
         Assert.Equal("business_workflow", tags["resolved_artifact_type"]);
         Assert.Equal("not_found", tags["outcome"]);
     }
+
+    // middleware 刻意註冊在 InternalTokenMiddleware 之前。/api/business-workflows 沒有
+    // revisions 路由；POST 卻會被字串分類成合法的 create。未匹配 controller action 的探測
+    // 不得污染零使用量證據。
+    [Fact]
+    public async Task RequestBoundary_PathOutsideSurfaceAuthority_EmitsNoUsageEvent()
+    {
+        using var capture = new MetricCapture();
+        var middleware = new ArtifactCompatibilityUsageMiddleware(context =>
+        {
+            context.Response.StatusCode = 404;
+            return Task.CompletedTask;
+        });
+        var context = new DefaultHttpContext();
+        context.Request.Path = "/api/business-workflows/example/revisions";
+        context.Request.Method = "POST";
+
+        await middleware.InvokeAsync(context, capture.Metrics);
+        await context.Response.CompleteAsync();
+
+        Assert.Empty(capture.Measurements);
+    }
+
+    [Fact]
+    public async Task RealPipeline_NonexistentPathThatLooksLikeCreate_EmitsNoUsageEvent()
+    {
+        using var factory = new BoundaryFactory();
+        using var response = await factory.CreateClient().PostAsJsonAsync(
+            "/api/business-workflows/example/revisions", new { });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Empty(factory.Capture.Measurements);
+    }
+
+    private static void MarkAsMatchedControllerAction(HttpContext context)
+        => context.SetEndpoint(new Endpoint(
+            _ => Task.CompletedTask,
+            new EndpointMetadataCollection(new ControllerActionDescriptor()),
+            "test controller action"));
 
     [Theory]
     [InlineData("admin", 403)]
@@ -161,6 +219,47 @@ public sealed class ArtifactCompatibilityUsageMetricsTests
         Assert.Equal("create", tags["operation"]);
         Assert.Equal("unknown", tags["resolved_artifact_type"]);
         Assert.Equal("rejected", tags["outcome"]);
+    }
+
+    // 「只用有界維度」是 P3-R2 的硬要求(根 AGENTS.md 不變量),語意鏡像 workflow/app/usage_evidence.py
+    // 的 _ALLOWED fail-fast:未知值寧可炸掉也不能靜默寫出高基數標籤把整份證據作廢。
+    // 合法值的放行側由本檔其餘測試(create/update/list/read/delete × 兩個 surface)覆蓋。
+    [Theory]
+    [InlineData("legacy_skills", "list")]           // surface 不在 AUTHORITY["backend"]
+    [InlineData("public_skills", "validate")]       // validate 是 platform/workflow 的權威,不是 backend 的
+    [InlineData("public_skills", "invoke")]
+    public void UnboundedDimension_FailsFastInsteadOfEmittingHighCardinalityLabel(
+        string surface, string operation)
+    {
+        using var capture = new MetricCapture();
+
+        Assert.Throws<ArgumentException>(
+            () => capture.Metrics.RecordRequestFailure(surface, operation, 400));
+        Assert.Empty(capture.Measurements);
+    }
+
+    // surface×operation 是**配對**白名單,不是兩個獨立集合:匯出器檢查的是
+    // AUTHORITY["backend"][surface] 是否含這個 operation。revision_read 對 public_skills 合法,
+    // 對 public_business_workflows 不合法(該 surface 沒有 revisions 路由)—— 平坦集合會放行後者。
+    [Theory]
+    [InlineData("public_skills", "revision_read", true)]
+    [InlineData("public_business_workflows", "export", true)]
+    [InlineData("public_business_workflows", "revision_read", false)]
+    public void SurfaceOperationPair_MirrorsExportAuthority(string surface, string operation, bool authoritative)
+    {
+        using var capture = new MetricCapture();
+
+        if (authoritative)
+        {
+            capture.Metrics.RecordRequestFailure(surface, operation, 404);
+            Assert.Equal(operation, Assert.Single(capture.Measurements)["operation"]);
+        }
+        else
+        {
+            Assert.Throws<ArgumentException>(
+                () => capture.Metrics.RecordRequestFailure(surface, operation, 404));
+            Assert.Empty(capture.Measurements);
+        }
     }
 
     private sealed class BoundaryFactory : TestWebAppFactory

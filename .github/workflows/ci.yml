@@ -354,7 +354,5 @@ jobs:
         working-directory: infra
         run: docker compose --env-file .env.example --profile full down --remove-orphans
 
-  # TODO(WP1-CI): 契約 snapshot 比對。各服務內以 snapshot test 形式實作
-  # （backend/platform xUnit、workflow pytest），因此會直接落在上面既有的
-  # dotnet test / uv run pytest 步驟裡，不需要獨立 job；若之後改為跨服務比對
-  # 的獨立產物 diff，再在這裡新增一個 job。
+  # P1-CI2 route snapshots run inside the existing backend/platform/workflow test jobs above.
+  # Snapshot updates stay beside their service tests and must be reviewed with the API diff.

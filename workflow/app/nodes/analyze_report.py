@@ -1,5 +1,5 @@
-"""doc_insights / report_synthesize 節點：語意對齊已退役的手寫 analyze_report 工作流
-（Node-First 遷移 Phase 1 移植、Phase 3a 隨 app/workflows/ 一併退役）。
+"""doc_insights / report_synthesize 節點：app/skills/analyze-report.yaml 的兩個步驟
+（該 skill 為 required_role: ADMIN）。
 """
 
 from pydantic import BaseModel
@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from app.engine.node_registry import node
 from app.nodes._llm_input import format_docs_context, structured_field
 
-# 手寫圖 analyze_report.py 的固定文案，逐字保留。
+# 沒有任何文件可分析時的固定文案（不呼叫 LLM）。
 _NO_DATA_INSIGHTS = "（無資料）"
 
 

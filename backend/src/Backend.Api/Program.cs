@@ -235,6 +235,7 @@ if (!app.Environment.IsEnvironment("Testing") && !useInMemoryDb)
 
 // 最前面:上游帶來的 correlation id 必須在任何一種錯誤回應(含 InternalTokenMiddleware 的 401
 // 與各 GateWhenDisabled 的 404)寫出之前就生效,否則那些路徑的 ApiError 仍是本機自產的編號。
+app.UseRouting();
 app.UseMiddleware<CorrelationIdMiddleware>();
 
 app.UseExceptionHandler();
@@ -243,17 +244,34 @@ app.UseExceptionHandler();
 // visible. This must run before the internal-token gate to observe rejected callers.
 app.UseMiddleware<ArtifactCompatibilityUsageMiddleware>();
 
+// D7 gates deliberately run before the internal-token check. Unknown /api paths must do the
+// same, otherwise an unauthenticated probe can distinguish "disabled" (404) from "absent" (401).
+// A method-mismatch endpoint is non-null, so the framework still owns its 405 response.
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api") && context.GetEndpoint() is null)
+    {
+        await ApiErrorWriter.WriteAsync(
+            context.Response, StatusCodes.Status404NotFound, "找不到資源");
+        return;
+    }
+    await next();
+});
+
 // 每個 rollout 旗標的 404 守門都是同一個形狀:旗標關閉時,命中的路徑在管線更深處看見它之前就 404。
 // **註冊順序即語意**:D7 那段刻意排在 InternalTokenMiddleware 之前(關閉的功能連沒有內部憑證的
 // 呼叫者也看不見),其餘六段都在憑證守門之後 —— 調換順序會改變對外可觀察行為。
-void GateWhenDisabled(bool enabled, string message, Func<PathString, bool> matches)
+// **訊息刻意不是參數**:每道 gate 都回與一般「找不到資源」相同的 404 ApiError,讓被 gate 的路由
+// 與根本不存在的路由不可區分。先前 "Feature is unavailable"/"Feature not enabled" 這類字串等於
+// 直說「這裡有個關著的功能」;寫死在這裡是為了不讓它再漂開。
+void GateWhenDisabled(bool enabled, Func<PathString, bool> matches)
 {
     if (enabled) return;
     app.Use(async (context, next) =>
     {
         if (matches(context.Request.Path))
         {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, message);
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "找不到資源");
             return;
         }
         await next();
@@ -263,37 +281,37 @@ void GateWhenDisabled(bool enabled, string message, Func<PathString, bool> match
 static bool Contains(PathString path, string segment)
     => path.Value?.Contains(segment, StringComparison.OrdinalIgnoreCase) == true;
 
-GateWhenDisabled(agentWriteToolsEnabled, "Feature is unavailable", path =>
+GateWhenDisabled(agentWriteToolsEnabled, path =>
     ((path.StartsWithSegments("/api/runs") || path.StartsWithSegments("/api/agent-runs")) && Contains(path, "/approvals"))
     || (path.StartsWithSegments("/api/agent-runs") && Contains(path, "/write-effects"))
     || path.StartsWithSegments("/api/agent-run-approval-executions")
     || path.StartsWithSegments("/api/admin/operations")
     || path.StartsWithSegments("/api/operations/telemetry"));
 
-// 內部憑證守門(只有明確 health 端點免驗);置於例外處理之後、路由之前。
+// 內部憑證守門(只有明確 health 端點免驗);置於例外處理與 unknown-route 守門之後。
 app.UseMiddleware<InternalTokenMiddleware>(internalToken);
 
 // D4 authoring endpoints stay invisible even to a direct internal caller while rollout is off.
-GateWhenDisabled(workflowDesignerEnabled, "Feature not enabled", path =>
+GateWhenDisabled(workflowDesignerEnabled, path =>
     path.StartsWithSegments("/api/admin/workflows")
     || path.StartsWithSegments("/api/admin/orchestrators"));
 
 // D5 is independently undiscoverable until the multi-agent dispatch rollout is explicitly
 // enabled.  This is deliberately before MVC/auth, matching the D3/D4 posture.  The Designer
 // gate above is administration-only and no longer participates (02-spec §8).
-GateWhenDisabled(multiAgentDispatchEnabled, "Feature is unavailable", path =>
+GateWhenDisabled(multiAgentDispatchEnabled, path =>
     path.StartsWithSegments("/api/orchestrator-runs")
     || path.StartsWithSegments("/api/admin/orchestrators") && Contains(path, "/runs"));
 
 // Context APIs are internal implementation details of D5/D6.  The acquire route remains
 // available under D5 so an off flag preserves its established fail-closed not-ready response.
-GateWhenDisabled(contextEnrichmentEnabled, "Feature is unavailable", path =>
+GateWhenDisabled(contextEnrichmentEnabled, path =>
     path.StartsWithSegments("/api/contexts")
     || path.StartsWithSegments("/api/context-views")
     || path.StartsWithSegments("/api/context-policies")
     || path.StartsWithSegments("/api/orchestrator-runs") && Contains(path, "/context-requests"));
 
-GateWhenDisabled(agentChatEnabled, "Feature is unavailable", path =>
+GateWhenDisabled(agentChatEnabled, path =>
     path.StartsWithSegments("/api/runtime-discovery")
     || path.StartsWithSegments("/api/chat-runs")
     || path.StartsWithSegments("/api/admin/runtime-binding"));
@@ -301,15 +319,28 @@ GateWhenDisabled(agentChatEnabled, "Feature is unavailable", path =>
 // E2/E3 eval-suite/eval-run routes stay invisible while off, independently of every other flag
 // (including AGENT_WRITE_TOOLS_ENABLED, which separately gates the whole /api/admin/operations
 // prefix these routes also live under -- both must be on for the routes to be reachable).
-GateWhenDisabled(runEvalEnabled, "Feature is unavailable", path =>
+GateWhenDisabled(runEvalEnabled, path =>
     path.StartsWithSegments("/api/admin/operations/eval-suites")
     || path.StartsWithSegments("/api/admin/operations/eval-runs"));
 
 // P1 prompt artifact routes stay invisible while off, independently of every other flag. Publish
 // pinning is gated separately inside AgentController (the publish route itself never disappears).
-GateWhenDisabled(promptArtifactsEnabled, "Feature is unavailable", path =>
+GateWhenDisabled(promptArtifactsEnabled, path =>
     path.StartsWithSegments("/api/prompt-components")
     || path.StartsWithSegments("/api/prompt-manifests"));
+
+// Fill only an otherwise-empty 404 after routing. Unlike MapFallback, this preserves the
+// framework's 405 response when a path exists but the HTTP method is wrong.
+app.Use(async (context, next) =>
+{
+    await next();
+    if (context.Response.StatusCode == StatusCodes.Status404NotFound
+        && !context.Response.HasStarted)
+    {
+        await ApiErrorWriter.WriteAsync(
+            context.Response, StatusCodes.Status404NotFound, "找不到資源");
+    }
+});
 
 app.MapControllers();
 

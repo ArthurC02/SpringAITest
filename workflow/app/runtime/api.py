@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from functools import partial
-
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.runtime.backend import BackendRunConflict, BackendRunError
 from app.runtime.manager import (
@@ -17,7 +15,7 @@ from app.runtime.models import (
     RuntimeRunResult,
     StartRunRequest,
 )
-from app.security import require_runtime_context
+from app.security import RequestContext, require_runtime_context
 from app.settings import settings
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runtime"])
@@ -36,11 +34,24 @@ def _manager(request: Request) -> RuntimeRunManager:
     return value
 
 
-_context = partial(
-    require_runtime_context,
-    flag_name="agent_test_run_enabled",
-    message="Agent runtime requires tenant, user, and role identity.",
-)
+async def agent_runtime_context(request: Request) -> RequestContext:
+    """身分閘門掛成依賴（不是 handler 內第一行），讓認證先於 pydantic body 驗證。
+
+    寫在 handler body 內時 FastAPI 會先驗 body，未授權的呼叫者能靠畸形 body 換到
+    422 + 欄位細節來反推 schema；依賴形式讓同一批請求收斂成 401。
+    """
+    return await require_runtime_context(
+        request,
+        flag_name="agent_test_run_enabled",
+        message="Agent runtime requires tenant, user, and role identity.",
+    )
+
+
+async def approved_write_context(request: Request) -> RequestContext:
+    """D7 寫入旗標的 404 必須排在身分檢查之前（關閉時能力看起來像沒安裝過）。"""
+    if not settings.agent_write_tools_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    return await agent_runtime_context(request)
 
 
 @router.post(
@@ -49,9 +60,11 @@ _context = partial(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def start_agent_run(
-    run_id: str, body: StartRunRequest, request: Request
+    run_id: str,
+    body: StartRunRequest,
+    request: Request,
+    ctx: RequestContext = Depends(agent_runtime_context),
 ) -> RuntimeRunResult:
-    ctx = await _context(request)
     return await _call(_manager(request).dispatch_command(run_id, body.command_id, ctx))
 
 
@@ -61,9 +74,11 @@ async def start_agent_run(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def resume_agent_run(
-    run_id: str, body: ResumeRunRequest, request: Request
+    run_id: str,
+    body: ResumeRunRequest,
+    request: Request,
+    ctx: RequestContext = Depends(agent_runtime_context),
 ) -> RuntimeRunResult:
-    ctx = await _context(request)
     return await _call(_manager(request).dispatch_command(run_id, body.command_id, ctx))
 
 
@@ -73,9 +88,11 @@ async def resume_agent_run(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def cancel_agent_run(
-    run_id: str, request: Request, body: CancelRunRequest
+    run_id: str,
+    request: Request,
+    body: CancelRunRequest,
+    ctx: RequestContext = Depends(agent_runtime_context),
 ) -> RuntimeRunResult:
-    ctx = await _context(request)
     return await _call(_manager(request).dispatch_command(run_id, body.command_id, ctx))
 
 
@@ -84,10 +101,12 @@ async def cancel_agent_run(
     response_model=RuntimeRunResult,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def execute_approved_write(run_id: str, approval_id: str, request: Request) -> RuntimeRunResult:
-    if not settings.agent_write_tools_enabled:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    ctx = await _context(request)
+async def execute_approved_write(
+    run_id: str,
+    approval_id: str,
+    request: Request,
+    ctx: RequestContext = Depends(approved_write_context),
+) -> RuntimeRunResult:
     return await _call(_manager(request).execute_approved_write(run_id, approval_id, ctx))
 
 

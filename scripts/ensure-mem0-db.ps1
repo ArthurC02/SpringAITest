@@ -5,7 +5,7 @@
 #      進而擋住「從 template1 複製建新庫」。先刷新即可（版本本來就相同時是無動作）。
 # 本腳本可重複執行、無副作用。
 $ErrorActionPreference = 'Stop'
-Set-Location (Join-Path $PSScriptRoot '..' 'infra')
+Set-Location (Join-Path (Join-Path $PSScriptRoot '..') 'infra')   # 巢狀兩參數版：PS 5.1 不支援 3-arg Join-Path
 
 # 等 postgres 就緒（compose healthcheck 即 pg_isready，--wait 原生等它轉 healthy）
 docker compose up -d --wait postgres *> $null

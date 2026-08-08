@@ -1,8 +1,7 @@
-"""summarize_text 節點：逐字移植 app/workflows/summarize.py::summarize()。
+"""summarize_text 節點：把輸入文字濃縮成三句以內的繁體中文摘要。
 
-節點名 summarize_text（而非 summarize）避免與既有 @register("summarize", ...)
-手寫工作流撞名——兩者是不同的登記表（node_registry vs workflows/registry），
-不會真的衝突，但沿用不同名字讓 GET /nodes 與 GET /workflows 的目錄各自清楚。
+app/skills/summarize.yaml 唯一的步驟；節點名刻意與 skill 名（summarize）分開，
+GET /nodes 的節點目錄與 GET /skills 的 skill 目錄因此不會互相混淆。
 """
 
 from pydantic import BaseModel
@@ -27,7 +26,7 @@ class _SummarizeOutput(BaseModel):
     requires_tools=[],
 )
 def make_summarize_text_node(llm):
-    """建立 summarize_text 節點函式（對齊 workflows/summarize.py::summarize 的語意）。"""
+    """建立 summarize_text 節點函式；LLM 由 deps 注入，節點不碰全域 settings。"""
 
     async def summarize_text(state: dict) -> dict:
         summary = await structured_field(

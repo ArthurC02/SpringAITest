@@ -43,8 +43,43 @@ public sealed class D7FeatureGateTests : IClassFixture<D7FeatureGateTests.Disabl
         var response = await _factory.CreateClient().SendAsync(request);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        // 決策表的另一半:404 的 body 也是契約(呼叫端靠固定訊息區分「功能沒開」與「資源不存在」)。
-        Assert.Equal("Feature is unavailable", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+        // 決策表的另一半:404 的 body 也是契約 —— 而契約刻意是「與一般找不到資源**無法區分**」。
+        // 任何專屬於 feature gate 的訊息(舊值 "Feature is unavailable")都等於告訴呼叫端這裡有個關著的功能。
+        Assert.Equal("找不到資源", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task WriteFeatureOff_UsesSameNotFoundContractAsUnknownRoute_ForTrustedCaller()
+    {
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Internal-Token", TestWebAppFactory.InternalToken);
+        using var gated = await client.GetAsync("/api/admin/operations/metrics");
+        using var unknown = await client.GetAsync("/api/not-a-route");
+
+        Assert.Equal(HttpStatusCode.NotFound, gated.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        var gatedBody = await gated.ReadJsonAsync();
+        var unknownBody = await unknown.ReadJsonAsync();
+        gatedBody.AssertApiError(404, "not_found");
+        unknownBody.AssertApiError(404, "not_found");
+        Assert.Equal(gatedBody["message"]!.GetValue<string>(), unknownBody["message"]!.GetValue<string>());
+        Assert.Equal(gated.Content.Headers.ContentType?.MediaType, unknown.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task WriteFeatureOff_UsesSameNotFoundContractAsUnknownRoute_BeforeTokenValidation()
+    {
+        using var client = _factory.CreateClient();
+        using var gated = await client.GetAsync("/api/admin/operations/metrics");
+        using var unknown = await client.GetAsync("/api/not-a-route");
+
+        Assert.Equal(HttpStatusCode.NotFound, gated.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        var gatedBody = await gated.ReadJsonAsync();
+        var unknownBody = await unknown.ReadJsonAsync();
+        gatedBody.AssertApiError(404, "not_found");
+        unknownBody.AssertApiError(404, "not_found");
+        Assert.Equal(gatedBody["message"]!.GetValue<string>(), unknownBody["message"]!.GetValue<string>());
     }
 
     public sealed class DisabledFactory : WebApplicationFactory<Program>

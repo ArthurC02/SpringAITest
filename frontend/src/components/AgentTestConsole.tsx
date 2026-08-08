@@ -55,6 +55,253 @@ function JsonValue({ value }: { value: unknown }) {
   return <pre>{JSON.stringify(sanitizeRunDisplay(value), null, 2)}</pre>
 }
 
+/** 測試訊息輸入 + 動作列。Start 失敗時才出現「以新嘗試重送」(結果未定時仍鎖住)。 */
+function TestRunForm({
+  message,
+  enabled,
+  operation,
+  cancellationPending,
+  hasRun,
+  canCancel,
+  startFailed,
+  startAmbiguous,
+  onMessage,
+  onStart,
+  onRefresh,
+  onCancel,
+}: {
+  message: string
+  enabled: boolean
+  operation: Operation
+  cancellationPending: boolean
+  hasRun: boolean
+  canCancel: boolean
+  startFailed: boolean
+  startAmbiguous: boolean
+  onMessage: (value: string) => void
+  onStart: (forceNewAttempt?: boolean) => void
+  onRefresh: () => void
+  onCancel: () => void
+}) {
+  return (
+    <>
+      <div className="field">
+        <label htmlFor="agent-test-message">測試訊息</label>
+        <textarea
+          id="agent-test-message"
+          className="textarea"
+          value={message}
+          disabled={!enabled || operation !== null || cancellationPending}
+          placeholder="輸入要交給這個已發布 Agent 的真實測試任務"
+          onChange={(event) => onMessage(event.target.value)}
+        />
+      </div>
+      <div className="agent-test-console__actions">
+        <button
+          className="btn btn--info"
+          type="button"
+          disabled={!enabled || operation !== null || cancellationPending || !message.trim()}
+          onClick={() => onStart()}
+        >
+          {operation === 'starting' ? '啟動中…' : '啟動測試 Run'}
+        </button>
+        {startFailed && (
+          <button
+            className="btn"
+            type="button"
+            disabled={
+              !enabled ||
+              operation !== null ||
+              cancellationPending ||
+              !message.trim() ||
+              startAmbiguous
+            }
+            onClick={() => onStart(true)}
+          >
+            以新嘗試重送 Start
+          </button>
+        )}
+        {startFailed && startAmbiguous && (
+          <span className="muted" role="status">
+            結果尚未確定，請先用「啟動測試 Run」以相同 key 重試。
+          </span>
+        )}
+        {hasRun && (
+          <>
+            <button
+              className="btn"
+              type="button"
+              disabled={operation !== null}
+              onClick={onRefresh}
+            >
+              立即重新整理
+            </button>
+            <button
+              className="btn btn--danger"
+              type="button"
+              disabled={!canCancel}
+              onClick={onCancel}
+            >
+              {operation === 'cancelling' ? '取消中…' : '取消 Run'}
+            </button>
+          </>
+        )}
+      </div>
+    </>
+  )
+}
+
+/** Run 身分/pin/版本摘要 + budget(全部經過 sanitizeRunDisplay)。 */
+function RunOverview({ run }: { run: AgentRun }) {
+  return (
+    <>
+      <div className="agent-test-console__status" role="status" aria-live="polite">
+        <span className="badge badge--user">{statusLabel(run.status)}</span>
+        <code>{run.runId}</code>
+      </div>
+
+      <dl className="agent-test-console__summary">
+        <div>
+          <dt>Pinned Agent</dt>
+          <dd>{run.pinnedAgentRevision === null ? '未回傳' : `r${run.pinnedAgentRevision}`}</dd>
+        </div>
+        <div>
+          <dt>Pinned Workflow</dt>
+          <dd>
+            {run.pinnedWorkflowRevision === null ? '未回傳' : `r${run.pinnedWorkflowRevision}`}
+          </dd>
+        </div>
+        <div>
+          <dt>State / checkpoint</dt>
+          <dd>
+            {run.stateVersion ?? '—'} / {run.checkpointVersion ?? '—'}
+          </dd>
+        </div>
+        <div>
+          <dt>更新時間</dt>
+          <dd>{run.updatedAt ? fmtDate(run.updatedAt) : '—'}</dd>
+        </div>
+      </dl>
+
+      {run.pinnedSkills.length > 0 && (
+        <>
+          <h5>Pinned Skills</h5>
+          <ul className="agent-test-console__pins">
+            {run.pinnedSkills.map((skill) => (
+              <li key={`${skill.name}:${skill.revision}`}>
+                {skill.name} · {skill.revision === null ? 'revision 未回傳' : `r${skill.revision}`}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {Object.keys(run.budget).length > 0 && (
+        <details>
+          <summary>Budget 使用量</summary>
+          <JsonValue value={run.budget} />
+        </details>
+      )}
+    </>
+  )
+}
+
+/** waiting_input 補充資訊面板;缺 checkpointVersion 一律鎖住 resume(不從錯誤狀態恢復)。 */
+function RunResumePanel({
+  pendingInputMessage,
+  checkpointVersion,
+  message,
+  operation,
+  failed,
+  ambiguous,
+  onMessage,
+  onResume,
+}: {
+  pendingInputMessage: string | null
+  checkpointVersion: number | null
+  message: string
+  operation: Operation
+  failed: boolean
+  ambiguous: boolean
+  onMessage: (value: string) => void
+  onResume: (forceNewAttempt?: boolean) => void
+}) {
+  return (
+    <div className="agent-test-console__resume">
+      <p role="status">
+        {pendingInputMessage ?? '此 Run 需要使用者補充最小必要資訊後才能繼續。'}
+      </p>
+      {checkpointVersion === null && (
+        <p className="field-error" role="alert">
+          回應缺少 checkpointVersion，為避免從錯誤狀態恢復，resume 已鎖定。
+        </p>
+      )}
+      <label htmlFor="agent-test-resume">補充資訊</label>
+      <textarea
+        id="agent-test-resume"
+        className="textarea"
+        value={message}
+        disabled={operation !== null || checkpointVersion === null}
+        onChange={(event) => onMessage(event.target.value)}
+      />
+      <button
+        className="btn btn--info"
+        type="button"
+        disabled={operation !== null || checkpointVersion === null || !message.trim()}
+        onClick={() => onResume()}
+      >
+        {operation === 'resuming' ? '恢復中…' : '從 checkpoint 恢復'}
+      </button>
+      {failed && (
+        <button
+          className="btn"
+          type="button"
+          disabled={
+            operation !== null ||
+            checkpointVersion === null ||
+            !message.trim() ||
+            ambiguous
+          }
+          onClick={() => onResume(true)}
+        >
+          以新嘗試重送 Resume
+        </button>
+      )}
+      {failed && ambiguous && (
+        <p className="muted" role="status">
+          結果尚未確定，請先以相同 key 重送 Resume。
+        </p>
+      )}
+    </div>
+  )
+}
+
+function RunTraceEvents({ events }: { events: AgentRunEvent[] }) {
+  return (
+    <section aria-labelledby="agent-test-events-title">
+      <h5 id="agent-test-events-title">Sanitized trace events</h5>
+      {events.length === 0 ? (
+        <p className="muted">尚無事件。</p>
+      ) : (
+        <ol className="agent-test-console__events">
+          {events.map((event) => (
+            <li key={event.sequence}>
+              <div className="agent-test-console__event-head">
+                <code>#{event.sequence}</code>
+                <strong>{event.eventType}</strong>
+                <span className="muted">
+                  {event.createdAt ? fmtDate(event.createdAt) : ''}
+                </span>
+              </div>
+              {event.payload !== undefined && <JsonValue value={event.payload} />}
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  )
+}
+
 interface Props {
   agentId: string
   publishedRevision: number
@@ -138,23 +385,13 @@ export default function AgentTestConsole({ agentId, publishedRevision, enabled }
 
     getAgentRun(pendingCancel.runId)
       .then((restoredRun) => {
-        if (
-          cancelled ||
-          generationRef.current !== generation ||
-          currentRunIdRef.current !== pendingCancel.runId
-        ) {
-          return
-        }
+        if (cancelled || !isCurrentRequest(generation, pendingCancel.runId)) return
         const nextRun = withAcceptedCancelStatus(restoredRun, pendingCancel.accepted)
         if (nextRun.status === 'cancelled') settleCancelledRun(nextRun.runId)
         setRun(nextRun)
       })
       .catch((error) => {
-        if (
-          !cancelled &&
-          generationRef.current === generation &&
-          currentRunIdRef.current === pendingCancel.runId
-        ) {
+        if (!cancelled && isCurrentRequest(generation, pendingCancel.runId)) {
           setRequestError(`無法恢復取消中的 Run：${(error as Error).message}`)
         }
       })
@@ -406,169 +643,37 @@ export default function AgentTestConsole({ agentId, publishedRevision, enabled }
         </p>
       )}
 
-      <div className="field">
-        <label htmlFor="agent-test-message">測試訊息</label>
-        <textarea
-          id="agent-test-message"
-          className="textarea"
-          value={message}
-          disabled={!enabled || operation !== null || cancellationPending}
-          placeholder="輸入要交給這個已發布 Agent 的真實測試任務"
-          onChange={(event) => setMessage(event.target.value)}
-        />
-      </div>
-      <div className="agent-test-console__actions">
-        <button
-          className="btn btn--info"
-          type="button"
-          disabled={!enabled || operation !== null || cancellationPending || !message.trim()}
-          onClick={() => void start()}
-        >
-          {operation === 'starting' ? '啟動中…' : '啟動測試 Run'}
-        </button>
-        {startFailed && (
-          <button
-            className="btn"
-            type="button"
-            disabled={
-              !enabled ||
-              operation !== null ||
-              cancellationPending ||
-              !message.trim() ||
-              startAmbiguous
-            }
-            onClick={() => void start(true)}
-          >
-            以新嘗試重送 Start
-          </button>
-        )}
-        {startFailed && startAmbiguous && (
-          <span className="muted" role="status">
-            結果尚未確定，請先用「啟動測試 Run」以相同 key 重試。
-          </span>
-        )}
-        {run && (
-          <>
-            <button
-              className="btn"
-              type="button"
-              disabled={operation !== null}
-              onClick={() => void refresh()}
-            >
-              立即重新整理
-            </button>
-            <button
-              className="btn btn--danger"
-              type="button"
-              disabled={!canCancel}
-              onClick={() => void cancel()}
-            >
-              {operation === 'cancelling' ? '取消中…' : '取消 Run'}
-            </button>
-          </>
-        )}
-      </div>
+      <TestRunForm
+        message={message}
+        enabled={enabled}
+        operation={operation}
+        cancellationPending={cancellationPending}
+        hasRun={!!run}
+        canCancel={canCancel}
+        startFailed={startFailed}
+        startAmbiguous={startAmbiguous}
+        onMessage={setMessage}
+        onStart={(forceNewAttempt) => void start(forceNewAttempt)}
+        onRefresh={() => void refresh()}
+        onCancel={() => void cancel()}
+      />
       <ErrorText msg={requestError} />
 
       {run && (
         <div className="agent-test-console__run">
-          <div className="agent-test-console__status" role="status" aria-live="polite">
-            <span className="badge badge--user">{statusLabel(run.status)}</span>
-            <code>{run.runId}</code>
-          </div>
-
-          <dl className="agent-test-console__summary">
-            <div>
-              <dt>Pinned Agent</dt>
-              <dd>{run.pinnedAgentRevision === null ? '未回傳' : `r${run.pinnedAgentRevision}`}</dd>
-            </div>
-            <div>
-              <dt>Pinned Workflow</dt>
-              <dd>
-                {run.pinnedWorkflowRevision === null ? '未回傳' : `r${run.pinnedWorkflowRevision}`}
-              </dd>
-            </div>
-            <div>
-              <dt>State / checkpoint</dt>
-              <dd>
-                {run.stateVersion ?? '—'} / {run.checkpointVersion ?? '—'}
-              </dd>
-            </div>
-            <div>
-              <dt>更新時間</dt>
-              <dd>{run.updatedAt ? fmtDate(run.updatedAt) : '—'}</dd>
-            </div>
-          </dl>
-
-          {run.pinnedSkills.length > 0 && (
-            <>
-              <h5>Pinned Skills</h5>
-              <ul className="agent-test-console__pins">
-                {run.pinnedSkills.map((skill) => (
-                  <li key={`${skill.name}:${skill.revision}`}>
-                    {skill.name} · {skill.revision === null ? 'revision 未回傳' : `r${skill.revision}`}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-
-          {Object.keys(run.budget).length > 0 && (
-            <details>
-              <summary>Budget 使用量</summary>
-              <JsonValue value={run.budget} />
-            </details>
-          )}
+          <RunOverview run={run} />
 
           {run.status === 'waiting_input' && (
-            <div className="agent-test-console__resume">
-              <p role="status">
-                {run.pendingInputMessage ?? '此 Run 需要使用者補充最小必要資訊後才能繼續。'}
-              </p>
-              {run.checkpointVersion === null && (
-                <p className="field-error" role="alert">
-                  回應缺少 checkpointVersion，為避免從錯誤狀態恢復，resume 已鎖定。
-                </p>
-              )}
-              <label htmlFor="agent-test-resume">補充資訊</label>
-              <textarea
-                id="agent-test-resume"
-                className="textarea"
-                value={resumeMessage}
-                disabled={operation !== null || run.checkpointVersion === null}
-                onChange={(event) => setResumeMessage(event.target.value)}
-              />
-              <button
-                className="btn btn--info"
-                type="button"
-                disabled={
-                  operation !== null || run.checkpointVersion === null || !resumeMessage.trim()
-                }
-                onClick={() => void resume()}
-              >
-                {operation === 'resuming' ? '恢復中…' : '從 checkpoint 恢復'}
-              </button>
-              {resumeFailed && (
-                <button
-                  className="btn"
-                  type="button"
-                  disabled={
-                    operation !== null ||
-                    run.checkpointVersion === null ||
-                    !resumeMessage.trim() ||
-                    resumeAmbiguous
-                  }
-                  onClick={() => void resume(true)}
-                >
-                  以新嘗試重送 Resume
-                </button>
-              )}
-              {resumeFailed && resumeAmbiguous && (
-                <p className="muted" role="status">
-                  結果尚未確定，請先以相同 key 重送 Resume。
-                </p>
-              )}
-            </div>
+            <RunResumePanel
+              pendingInputMessage={run.pendingInputMessage}
+              checkpointVersion={run.checkpointVersion}
+              message={resumeMessage}
+              operation={operation}
+              failed={resumeFailed}
+              ambiguous={resumeAmbiguous}
+              onMessage={setResumeMessage}
+              onResume={(forceNewAttempt) => void resume(forceNewAttempt)}
+            />
           )}
 
           {run.status === 'waiting_approval' && (
@@ -584,27 +689,7 @@ export default function AgentTestConsole({ agentId, publishedRevision, enabled }
             </details>
           )}
 
-          <section aria-labelledby="agent-test-events-title">
-            <h5 id="agent-test-events-title">Sanitized trace events</h5>
-            {events.length === 0 ? (
-              <p className="muted">尚無事件。</p>
-            ) : (
-              <ol className="agent-test-console__events">
-                {events.map((event) => (
-                  <li key={event.sequence}>
-                    <div className="agent-test-console__event-head">
-                      <code>#{event.sequence}</code>
-                      <strong>{event.eventType}</strong>
-                      <span className="muted">
-                        {event.createdAt ? fmtDate(event.createdAt) : ''}
-                      </span>
-                    </div>
-                    {event.payload !== undefined && <JsonValue value={event.payload} />}
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
+          <RunTraceEvents events={events} />
         </div>
       )}
     </section>
