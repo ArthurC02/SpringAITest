@@ -4,3 +4,5 @@
 **/.vs/
 **/.vscode/
 **/*.user
+# Dockerfile 是 COPY . .:測試檔異動不該打掉 runtime image 的 layer cache
+tests/

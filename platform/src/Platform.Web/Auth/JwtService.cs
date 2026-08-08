@@ -1,22 +1,13 @@
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Platform.Web.Auth;
 
-/// <summary>Validates backend-issued ES256 JWTs. Platform intentionally has no issuance API or private key.</summary>
-public sealed class JwtService
+/// <summary>
+/// Validates backend-issued ES256 JWTs. Platform intentionally has no issuance API or private key.
+/// 只有一個成員:生產唯一用法是把這組參數交給 JwtBearer(Program.cs),由框架的 JsonWebTokenHandler 驗章。
+/// </summary>
+public static class JwtService
 {
-    private readonly JwtOptions _options;
-
-    public JwtService(JwtOptions options) => _options = options;
-
-    public ClaimsPrincipal Validate(string token)
-    {
-        var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
-        return handler.ValidateToken(token, BuildValidationParameters(_options), out _);
-    }
-
     public static TokenValidationParameters BuildValidationParameters(JwtOptions options) => new()
     {
         ValidateIssuer = true,

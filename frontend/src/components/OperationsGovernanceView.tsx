@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import {
   applyRollout,
   getLegacyInventory,
@@ -91,137 +91,115 @@ function SummaryCards({ metrics }: { metrics: OperationsMetrics }) {
   )
 }
 
-function AgentTable({ rows }: { rows: OperationsAgentMetric[] }) {
-  if (rows.length === 0) return <p className="muted">No Agent runs recorded yet.</p>
+/** 本檔四張指標表的共用外殼(僅此檔:欄位語彙、空狀態文案都是 Operations 專屬)。 */
+function MetricsTable<T>({
+  rows,
+  empty,
+  rowKey,
+  columns,
+}: {
+  rows: T[]
+  empty: string
+  rowKey: (row: T) => string
+  columns: [string, (row: T) => ReactNode][]
+}) {
+  if (rows.length === 0) return <p className="muted">{empty}</p>
   return (
     <div className="table-wrap">
       <table className="table">
         <thead>
           <tr>
-            <th>Agent</th>
-            <th>Rev</th>
-            <th>Runs</th>
-            <th>Completed</th>
-            <th>Failed</th>
-            <th>Avg latency</th>
-            <th>Reserved budget</th>
-            <th>Observed usage</th>
-            <th>Observed cost</th>
-            <th>Observed latency</th>
+            {columns.map(([label]) => (
+              <th key={label}>{label}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map((a) => (
-            <tr key={`${a.agentId}:${a.revision}`}>
-              <td>{a.agentId}</td>
-              <td>r{a.revision}</td>
-              <td>{a.runs}</td>
-              <td>{a.completed}</td>
-              <td>{a.failed}</td>
-              <td>{a.averageLatencyMs} ms</td>
-              <td>{a.reservedBudgetUnits}</td>
-              <td><Observed value={a.observedUsageUnits} /></td>
-              <td><Observed value={a.observedCostUnits} /></td>
-              <td><Observed value={a.observedLatencyMs} unit=" ms" /></td>
+          {rows.map((row) => (
+            <tr key={rowKey(row)}>
+              {columns.map(([label, render]) => (
+                <td key={label}>{render(row)}</td>
+              ))}
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  )
+}
+
+function AgentTable({ rows }: { rows: OperationsAgentMetric[] }) {
+  return (
+    <MetricsTable
+      rows={rows}
+      empty="No Agent runs recorded yet."
+      rowKey={(a) => `${a.agentId}:${a.revision}`}
+      columns={[
+        ['Agent', (a) => a.agentId],
+        ['Rev', (a) => `r${a.revision}`],
+        ['Runs', (a) => a.runs],
+        ['Completed', (a) => a.completed],
+        ['Failed', (a) => a.failed],
+        ['Avg latency', (a) => `${a.averageLatencyMs} ms`],
+        ['Reserved budget', (a) => a.reservedBudgetUnits],
+        ['Observed usage', (a) => <Observed value={a.observedUsageUnits} />],
+        ['Observed cost', (a) => <Observed value={a.observedCostUnits} />],
+        ['Observed latency', (a) => <Observed value={a.observedLatencyMs} unit=" ms" />],
+      ]}
+    />
   )
 }
 
 function SkillTable({ rows }: { rows: OperationsSkillMetric[] }) {
-  if (rows.length === 0) return <p className="muted">No Skill telemetry recorded yet.</p>
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Skill</th>
-            <th>Rev</th>
-            <th>Runs</th>
-            <th>Observed latency</th>
-            <th>Observed usage</th>
-            <th>Observed cost</th>
-            <th>Reserved budget</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((s) => (
-            <tr key={`${s.name}:${s.revision}`}>
-              <td>{s.name}</td>
-              <td>r{s.revision}</td>
-              <td>{s.runs}</td>
-              <td><Observed value={s.observedLatencyMs} unit=" ms" /></td>
-              <td><Observed value={s.observedUsageUnits} /></td>
-              <td><Observed value={s.observedCostUnits} /></td>
-              <td>{s.reservedBudgetUnits}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <MetricsTable
+      rows={rows}
+      empty="No Skill telemetry recorded yet."
+      rowKey={(s) => `${s.name}:${s.revision}`}
+      columns={[
+        ['Skill', (s) => s.name],
+        ['Rev', (s) => `r${s.revision}`],
+        ['Runs', (s) => s.runs],
+        ['Observed latency', (s) => <Observed value={s.observedLatencyMs} unit=" ms" />],
+        ['Observed usage', (s) => <Observed value={s.observedUsageUnits} />],
+        ['Observed cost', (s) => <Observed value={s.observedCostUnits} />],
+        ['Reserved budget', (s) => s.reservedBudgetUnits],
+      ]}
+    />
   )
 }
 
 function ToolTable({ rows }: { rows: OperationsToolMetric[] }) {
-  if (rows.length === 0) return <p className="muted">No tool telemetry recorded yet.</p>
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Tool</th>
-            <th>Count</th>
-            <th>Observed latency</th>
-            <th>Observed usage</th>
-            <th>Observed cost</th>
-            <th>Reserved budget</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((t) => (
-            <tr key={t.kind}>
-              <td>{t.kind}</td>
-              <td>{t.count}</td>
-              <td><Observed value={t.observedLatencyMs} unit=" ms" /></td>
-              <td><Observed value={t.observedUsageUnits} /></td>
-              <td><Observed value={t.observedCostUnits} /></td>
-              <td>{t.reservedBudgetUnits}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <MetricsTable
+      rows={rows}
+      empty="No tool telemetry recorded yet."
+      rowKey={(t) => t.kind}
+      columns={[
+        ['Tool', (t) => t.kind],
+        ['Count', (t) => t.count],
+        ['Observed latency', (t) => <Observed value={t.observedLatencyMs} unit=" ms" />],
+        ['Observed usage', (t) => <Observed value={t.observedUsageUnits} />],
+        ['Observed cost', (t) => <Observed value={t.observedCostUnits} />],
+        ['Reserved budget', (t) => t.reservedBudgetUnits],
+      ]}
+    />
   )
 }
 
 function NodeTable({ rows }: { rows: OperationsNodeMetric[] }) {
-  if (rows.length === 0) return <p className="muted">No node telemetry recorded yet.</p>
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Node</th>
-            <th>Executions</th>
-            <th>Avg latency</th>
-            <th>Max latency</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((n) => (
-            <tr key={n.nodeId}>
-              <td>{n.nodeId}</td>
-              <td>{n.executions}</td>
-              <td>{n.averageLatencyMs} ms</td>
-              <td>{n.maxLatencyMs} ms</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <MetricsTable
+      rows={rows}
+      empty="No node telemetry recorded yet."
+      rowKey={(n) => n.nodeId}
+      columns={[
+        ['Node', (n) => n.nodeId],
+        ['Executions', (n) => n.executions],
+        ['Avg latency', (n) => `${n.averageLatencyMs} ms`],
+        ['Max latency', (n) => `${n.maxLatencyMs} ms`],
+      ]}
+    />
   )
 }
 
@@ -312,7 +290,13 @@ function RegressionPanel({
   const [evidenceRef, setEvidenceRef] = useState('')
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
-  const attempts = useRef(new LogicalAttemptKey(newIdempotencyKey, getSessionStorage(), OVERRIDE_ATTEMPT_KEY))
+  // 懶初始化:useRef(new X()) 每次 render 都會建構(並讀 sessionStorage),只有第一顆會被留下。
+  const attemptRef = useRef<LogicalAttemptKey | null>(null)
+  const attempts = (attemptRef.current ??= new LogicalAttemptKey(
+    newIdempotencyKey,
+    getSessionStorage(),
+    OVERRIDE_ATTEMPT_KEY,
+  ))
   const trimmedEvalRunId = evalRunId.trim()
   const evalRunIdInvalid = trimmedEvalRunId.length > 0 && !GUID_PATTERN.test(trimmedEvalRunId)
   const evalRunIdTrusted = trimmedEvalRunId.length > 0 && !evalRunIdInvalid
@@ -353,12 +337,12 @@ function RegressionPanel({
     )
       return
     const identity = [trimmed] as const
-    const key = attempts.current.keyFor(identity)
+    const key = attempts.keyFor(identity)
     setBusy(true)
     await runWithToast(toast, () => overrideRegression(trimmed, key), {
       success: 'Override recorded.',
       onSuccess: () => {
-        attempts.current.consume(identity, key)
+        attempts.consume(identity, key)
         setReason('')
         onChanged()
       },

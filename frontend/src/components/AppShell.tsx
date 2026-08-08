@@ -37,6 +37,16 @@ const AGENT_PLATFORM_NAV = { id: 'agentPlatform' as const, icon: '🧑‍💼', 
 const APPROVALS_NAV = { id: 'approvals' as const, icon: '✅', label: 'Approvals' }
 const OPERATIONS_NAV = { id: 'operations' as const, icon: '📈', label: 'Operations' }
 
+/** fail-closed 起始值:也是 GET /api/features 失敗時要回到的狀態。 */
+const FLAGS_OFF = {
+  agentBuilderEnabled: false,
+  agentTestRunEnabled: false,
+  workflowDesignerEnabled: false,
+  multiAgentDispatchEnabled: false,
+  agentChatEnabled: false,
+  agentWriteToolsEnabled: false,
+}
+
 interface Props {
   session: Session
   onLogout: () => void
@@ -52,12 +62,7 @@ export default function AppShell({
   onSelectOrchestrator,
 }: Props) {
   const [view, setView] = useState<View>('chat')
-  const [agentBuilderEnabled, setAgentBuilderEnabled] = useState(false)
-  const [agentTestRunEnabled, setAgentTestRunEnabled] = useState(false)
-  const [workflowDesignerEnabled, setWorkflowDesignerEnabled] = useState(false)
-  const [multiAgentDispatchEnabled, setMultiAgentDispatchEnabled] = useState(false)
-  const [agentChatEnabled, setAgentChatEnabled] = useState(false)
-  const [agentWriteToolsEnabled, setAgentWriteToolsEnabled] = useState(false)
+  const [flags, setFlags] = useState(FLAGS_OFF)
   const [chatOrchestrators, setChatOrchestrators] = useState<ChatOrchestrator[]>([])
   const isAdmin = session.role === 'ADMIN'
   // Capability comparison is exact: `workflow.manage.other` is never sufficient.
@@ -65,12 +70,17 @@ export default function AppShell({
   const items = NAV.filter((n) => !n.adminOnly || isAdmin)
   // 入口與內層分頁共用同一份閘門判斷,避免「側欄有入口、進去卻是空分頁」的漂移。
   const showAgentPlatform =
-    agentPlatformTabs({ isAdmin, agentBuilderEnabled, workflowDesignerEnabled, canManageWorkflow }).length > 0
+    agentPlatformTabs({
+      isAdmin,
+      agentBuilderEnabled: flags.agentBuilderEnabled,
+      workflowDesignerEnabled: flags.workflowDesignerEnabled,
+      canManageWorkflow,
+    }).length > 0
   const navItems = [
     ...items,
     ...(showAgentPlatform ? [AGENT_PLATFORM_NAV] : []),
-    ...(agentWriteToolsEnabled ? [APPROVALS_NAV] : []),
-    ...(agentWriteToolsEnabled && canManageWorkflow ? [OPERATIONS_NAV] : []),
+    ...(flags.agentWriteToolsEnabled ? [APPROVALS_NAV] : []),
+    ...(flags.agentWriteToolsEnabled && canManageWorkflow ? [OPERATIONS_NAV] : []),
   ]
 
   // features flag:失敗或 false 一律 fail-closed(不顯示 Agents 入口)。登入即取一次。
@@ -79,23 +89,19 @@ export default function AppShell({
     getFeatures()
       .then((f) => {
         if (!cancelled) {
-          setAgentBuilderEnabled(!!f.agentBuilderEnabled)
-          setAgentTestRunEnabled(!!f.agentBuilderEnabled && !!f.agentTestRunEnabled)
-          setWorkflowDesignerEnabled(!!f.workflowDesignerEnabled)
-          setMultiAgentDispatchEnabled(!!f.multiAgentDispatchEnabled)
-          setAgentChatEnabled(!!f.agentChatEnabled)
-          setAgentWriteToolsEnabled(!!f.agentWriteToolsEnabled)
+          setFlags({
+            agentBuilderEnabled: !!f.agentBuilderEnabled,
+            // 測試執行從屬於 Agent Builder:Builder 關著就一律不開。
+            agentTestRunEnabled: !!f.agentBuilderEnabled && !!f.agentTestRunEnabled,
+            workflowDesignerEnabled: !!f.workflowDesignerEnabled,
+            multiAgentDispatchEnabled: !!f.multiAgentDispatchEnabled,
+            agentChatEnabled: !!f.agentChatEnabled,
+            agentWriteToolsEnabled: !!f.agentWriteToolsEnabled,
+          })
         }
       })
       .catch(() => {
-        if (!cancelled) {
-          setAgentBuilderEnabled(false)
-          setAgentTestRunEnabled(false)
-          setWorkflowDesignerEnabled(false)
-          setMultiAgentDispatchEnabled(false)
-          setAgentChatEnabled(false)
-          setAgentWriteToolsEnabled(false)
-        }
+        if (!cancelled) setFlags(FLAGS_OFF)
       })
     return () => {
       cancelled = true
@@ -106,7 +112,7 @@ export default function AppShell({
   // authenticated catalog route, which keeps the UI exactly legacy.
   useEffect(() => {
     let cancelled = false
-    if (!agentChatEnabled) {
+    if (!flags.agentChatEnabled) {
       setChatOrchestrators([])
       onSelectOrchestrator(null)
       return
@@ -124,7 +130,7 @@ export default function AppShell({
     return () => {
       cancelled = true
     }
-  }, [agentChatEnabled, onSelectOrchestrator])
+  }, [flags.agentChatEnabled, onSelectOrchestrator])
 
   // useDocuments 提升到此層：AppShell 的 copilot action(建立/刪除)與 DocumentsView 共用
   // 同一份狀態,避免兩處各自實例化造成雙重輪詢(見契約)。DocumentsView 改吃 props。
@@ -310,15 +316,17 @@ export default function AppShell({
               {view === 'agentPlatform' && showAgentPlatform && (
                 <AgentPlatformView
                   isAdmin={isAdmin}
-                  agentBuilderEnabled={agentBuilderEnabled}
-                  agentTestRunEnabled={agentTestRunEnabled}
-                  workflowDesignerEnabled={workflowDesignerEnabled}
+                  agentBuilderEnabled={flags.agentBuilderEnabled}
+                  agentTestRunEnabled={flags.agentTestRunEnabled}
+                  workflowDesignerEnabled={flags.workflowDesignerEnabled}
                   canManageWorkflow={canManageWorkflow}
-                  multiAgentDispatchEnabled={multiAgentDispatchEnabled}
+                  multiAgentDispatchEnabled={flags.multiAgentDispatchEnabled}
                 />
               )}
-              {view === 'approvals' && agentWriteToolsEnabled && <ApprovalInbox />}
-              {view === 'operations' && agentWriteToolsEnabled && canManageWorkflow && <OperationsGovernanceView />}
+              {view === 'approvals' && flags.agentWriteToolsEnabled && <ApprovalInbox />}
+              {view === 'operations' && flags.agentWriteToolsEnabled && canManageWorkflow && (
+                <OperationsGovernanceView />
+              )}
               </Suspense>
             </ErrorBoundary>
           </main>

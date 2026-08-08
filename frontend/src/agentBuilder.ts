@@ -24,7 +24,7 @@ export const AGENT_DEFAULT_RUNTIME_LIMITS: AgentRuntimeLimits = {
 }
 
 /** 新建 Agent 的 audience 起始值:同租戶 USER + ADMIN(不是空集合,避免建完沒人能用)。 */
-export const AGENT_DEFAULT_AUDIENCE: readonly string[] = ['role:USER', 'role:ADMIN']
+const AGENT_DEFAULT_AUDIENCE: readonly string[] = ['role:USER', 'role:ADMIN']
 
 /** 新建 Agent 的 System Prompt 骨架(可由系統設定 `agent.defaults.system_prompt` 覆寫)。 */
 export const AGENT_DEFAULT_SYSTEM_PROMPT = `你是一位協助處理內部業務問題的助理。
@@ -34,7 +34,7 @@ export const AGENT_DEFAULT_SYSTEM_PROMPT = `你是一位協助處理內部業務
 邊界:只回答被授權範圍內的問題;需要外部資料時使用被允許的工具,不要臆測數字。`
 
 /** 系統設定 key 命名:key 本身不帶租戶,租戶隔離由 app_config 的 (tenant_id, key) 主鍵負責。 */
-export function agentDefaultConfigKey(field: string): string {
+function agentDefaultConfigKey(field: string): string {
   return `agent.defaults.${field}`
 }
 

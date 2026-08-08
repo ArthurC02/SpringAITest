@@ -1,6 +1,7 @@
 name: CI
 
-# 五個 job 都只需要讀 repo,不給 GITHUB_TOKEN 任何寫入權
+# 七個 job(backend/platform/workflow/frontend/compose-and-scripts/container-hardening/full-chain-smoke)
+# 都只需要讀 repo,不給 GITHUB_TOKEN 任何寫入權
 permissions:
   contents: read
 
@@ -10,7 +11,11 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # PR 的 head_ref 與 push 的 ref_name 對同一條 feat 分支同名 → 同組互相取消,
+  # 避免 feat 分支開 PR 後 push+pull_request 雙觸發各跑一整套(7 job × 2)。
+  # main 的 push 用 run_id 自成一組:除了本來就不取消,也防 fork PR 的 head_ref
+  # 恰為 "main" 時落進同組、反過來取消 main 的 run。
+  group: ci-${{ github.ref == 'refs/heads/main' && github.run_id || (github.head_ref || github.ref_name) }}
   # main 上不取消（要保留每個 commit 的紀錄），分支/PR 只跑最新一次
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -98,8 +103,13 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      # 純邏輯 Vitest 不需要瀏覽器,先跑,失敗時省下整段 playwright 安裝時間。
       - run: npm run test:unit:logic
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('frontend/package-lock.json') }}
+      - run: npx playwright install --with-deps chromium
       # = npm run test:unit:ui，但 playwright.unit.config.ts 沒有 retries 設定，
       # 而 agentBuilder/agentRuns 有已知的全套並行資源競爭 flake。CI 用 CLI flag 補一次重試，
       # 不動 config 檔（本機仍是零重試，flake 會被看見）。

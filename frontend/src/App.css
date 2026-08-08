@@ -274,6 +274,9 @@
   background: var(--info);
   opacity: 0.9;
 }
+.btn--block {
+  width: 100%;
+}
 
 /* 內容來源切換：兩顆 .btn 併成 segmented control，aria-pressed 即選中態。 */
 .seg {
@@ -360,6 +363,10 @@
 }
 .muted {
   color: var(--text);
+}
+/* JSON/程式碼輸入用的等寬 textarea（SkillRunPanel 的 list/dict 欄位）。 */
+.textarea--mono {
+  font-family: var(--mono);
 }
 
 .badge {
@@ -484,6 +491,13 @@ details > summary {
   margin: 0 0 2px;
   font-size: 22px;
 }
+.auth__subtitle {
+  margin-top: 0;
+}
+.auth__alt {
+  margin-top: 14px;
+  font-size: 13px;
+}
 .auth__switch {
   background: none;
   border: none;
@@ -596,6 +610,10 @@ details > summary {
 .view__title {
   font-size: 20px;
   margin: 0;
+}
+/* 視圖內的區塊小標，與上方內容拉開距離。 */
+.view__subhead {
+  margin-top: 24px;
 }
 .doc-form {
   max-width: 640px;

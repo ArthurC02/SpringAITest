@@ -10,7 +10,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.backend_http import get_client, internal_headers
+from app.backend_http import get_client, internal_headers, internal_token_headers
 from app.runtime.orchestrator import (
     ContextAcquisition,
     RootExecutionSnapshot,
@@ -237,7 +237,7 @@ class OrchestratorBackendClient:
         try:
             response = await get_client().post(
                 "/api/orchestrator-runs/recovery/claim",
-                headers={"X-Internal-Token": settings.internal_api_token},
+                headers=internal_token_headers(),
                 json={
                     "worker_id": self.owner,
                     "limit": limit or settings.runtime_recovery_batch_size,

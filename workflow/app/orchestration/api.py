@@ -11,13 +11,13 @@ from app.orchestration.models import (
     GraphValidationResponse,
 )
 from app.orchestration.simulator import simulated_trace
-from app.orchestration.validator import validate
+from app.orchestration.validator import ValidationResult, validate
 from app.security import RequestContext, get_context
 
 router = APIRouter(prefix="/workflow-designer", tags=["workflow-designer"])
 
 
-def _response(result: object) -> GraphValidationResponse:
+def _response(result: ValidationResult) -> GraphValidationResponse:
     return GraphValidationResponse(
         valid=result.valid,
         canonical_definition=result.canonical_definition,

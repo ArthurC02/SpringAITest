@@ -42,7 +42,7 @@ function splitSkillMd(md: string): { frontmatter: string; body: string } {
 }
 
 /** frontmatter + body → SKILL.md 原文（固定用 LF、標準 --- 圍籬）。 */
-export function assembleSkillMd(frontmatter: string, body: string): string {
+function assembleSkillMd(frontmatter: string, body: string): string {
   return `---\n${frontmatter.replace(/\s+$/, '')}\n---\n\n${body.replace(/^\s+/, '')}`
 }
 

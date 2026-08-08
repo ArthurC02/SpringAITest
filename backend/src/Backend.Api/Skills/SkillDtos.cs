@@ -76,6 +76,38 @@ public sealed record SkillRevisionInfo(
     string? PackageSha256 = null);
 
 /// <summary>
+/// SkillController 與 BusinessWorkflowController 共用的請求/回應轉換(兩者對同一份 skill 物理儲存
+/// 開兩條路由,這些映射逐字相同 — 只有外層的 422 訊息因 artifact 種類而異,留在各自的呼叫點)。
+/// </summary>
+internal static class SkillRequests
+{
+    /// <summary>引擎錯誤清單 → fieldErrors。同一錯誤碼多次(不同行)保留第一筆,行號附在訊息尾。</summary>
+    public static Dictionary<string, string> ToFieldErrors(IReadOnlyList<SkillValidationError> errors)
+    {
+        var fieldErrors = new Dictionary<string, string>();
+        foreach (var error in errors)
+        {
+            var message = error.Message ?? error.Code;
+            if (error.Line is int line)
+            {
+                message += $"（第 {line} 行）";
+            }
+
+            fieldErrors.TryAdd(error.Code, message);
+        }
+
+        return fieldErrors;
+    }
+
+    /// <summary>
+    /// request.SimpleForm(選填)→ 可存的原始 JSON 文字。缺席或顯式 null(含 JSON null 值)→ null,
+    /// 寫入層 COALESCE 保留既有值。backend 不解析/不驗證表單內容,原樣落 jsonb。
+    /// </summary>
+    public static string? SimpleFormText(JsonElement? form)
+        => form is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } e ? e.GetRawText() : null;
+}
+
+/// <summary>
 /// Server-side restore 使用的完整 revision。Package 僅在 backend 內部流動，不會直接序列化。
 /// 舊 agentic revision 在加入 package snapshot 前可能為 null；controller 會回 409，避免錯誤回復。
 /// </summary>

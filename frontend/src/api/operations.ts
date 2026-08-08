@@ -219,7 +219,7 @@ export async function overrideRegression(
   )
 }
 
-export interface RolloutInput {
+interface RolloutInput {
   enabled: boolean
   orchestratorId: string | null
   revision: number | null
@@ -337,7 +337,7 @@ export async function getEvalRun(runId: string): Promise<EvalRun> {
 
 /** POST body 的 candidate 部分;本階段 kind 固定 `"skill"`,ref 依 workflow 慣例是 `{name}`
  * (見 workflow/app/evals/api.py `_resolve_candidate_skill`)。 */
-export interface EvalRunCandidateInput {
+interface EvalRunCandidateInput {
   kind: 'skill'
   ref: { name: string }
 }

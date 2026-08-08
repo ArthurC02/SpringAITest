@@ -7,7 +7,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
-from app.backend_http import get_client, internal_headers
+from app.backend_http import get_client, internal_headers, internal_token_headers
 from app.runtime.events import RuntimeEvent
 from app.runtime.models import (
     DirectAgentExecutionSnapshot,
@@ -191,14 +191,14 @@ class BackendRunClient:
         await self._request_no_content("POST", f"/api/agent-runs/{_guid(run_id)}/write-effects/{_guid(effect_id)}/complete?succeeded={'true' if succeeded else 'false'}", ctx, json={})
 
     async def claim_approval_recovery(self, *, limit: int) -> list[dict[str, Any]]:
-        response = await get_client().post(f"/api/agent-run-approval-executions/recovery/claim?limit={limit}", headers={"X-Internal-Token": settings.internal_api_token}, json={}, timeout=httpx.Timeout(10.0))
+        response = await get_client().post(f"/api/agent-run-approval-executions/recovery/claim?limit={limit}", headers=internal_token_headers(), json={}, timeout=httpx.Timeout(10.0))
         response.raise_for_status(); body=response.json(); return body if isinstance(body,list) else []
 
     async def complete_approval_execution(self, approval_id: str, claim_token: str, *, dead_letter: bool = False) -> None:
         try:
             response = await get_client().post(
                 f"/api/agent-run-approval-executions/{_guid(approval_id)}/complete",
-                headers={"X-Internal-Token": settings.internal_api_token},
+                headers=internal_token_headers(),
                 json={"claim_token": claim_token, "dead_letter": dead_letter},
                 timeout=httpx.Timeout(10.0),
             )
@@ -261,7 +261,7 @@ class BackendRunClient:
         try:
             response = await get_client().post(
                 "/api/agent-runs/recovery/claim",
-                headers={"X-Internal-Token": settings.internal_api_token},
+                headers=internal_token_headers(),
                 json={
                     "worker_id": self.owner,
                     "limit": limit,

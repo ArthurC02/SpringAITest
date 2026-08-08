@@ -2,7 +2,7 @@ import { apiFetch } from './http'
 import type { DocumentInfo } from '../types'
 
 /** POST /api/documents 的 202 回應，只含這三欄。 */
-export interface CreatedDocument {
+interface CreatedDocument {
   id: string
   title: string
   status: DocumentInfo['status']

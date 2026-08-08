@@ -65,7 +65,15 @@ ENGINE_KEYS = frozenset(node_registry.ENGINE_KEYS)
 
 
 def clean_invoke_input(raw: dict[Any, Any]) -> dict[Any, Any]:
-    """Remove caller-controlled keys reserved by the engine and runtime."""
+    """剝除呼叫端不得夾帶的保留鍵、引擎鍵與引擎內部鍵（invoke／eval case 共用同一關）。
+
+    query_id / original_query / query_timestamp 等保留鍵若被呼叫端夾帶，會原封不動
+    流進 audit_trail —— 一般 USER 即可偽造稽核軌跡上的「原始問題」。Harness 的
+    IMMUTABLE_KEYS 只擋節點寫入，擋不住 input，所以這一關必須在進 state 前做。
+    引擎鍵（trace / errors / fatal_error，由 Harness 寫入）同樣不可經 input 夾帶：
+    夾帶 fatal_error 會讓所有節點走 fatal 短路而跳過，夾帶 trace/errors 更會讓 reducer
+    型別不符而 500。引擎內部鍵（__ 前綴）同理一併剝除。
+    """
     return {
         key: value
         for key, value in raw.items()

@@ -33,6 +33,8 @@ pnpm-debug.log*
 .lite/
 # Claude Code subagent 隔離 worktree(巢狀 checkout,絕不入版控)
 .claude/worktrees/
+# Codex CLI 本機狀態,絕不入版控
+.codex/
 
 # Local release evidence may contain request/trace projections; never commit it.
 artifacts/copilot-shared-core/

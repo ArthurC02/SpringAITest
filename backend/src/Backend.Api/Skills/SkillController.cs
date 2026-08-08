@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Backend.Api.AgentRuns;
 using Backend.Api.Common;
 using Microsoft.AspNetCore.Mvc;
@@ -183,7 +182,7 @@ public sealed class SkillController : ControllerBase
             }
 
             var created = await _repo.CreateAsync(
-                tenantId, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+                tenantId, "flow", ToSkill(meta, request.Definition!, SkillRequests.SimpleFormText(request.SimpleForm)),
                 Request.UserIdOrEmpty(), ct);
             if (created is null)
             {
@@ -227,7 +226,7 @@ public sealed class SkillController : ControllerBase
             }
 
             var updated = await _repo.UpdateAsync(
-                tenantId, name, "flow", ToSkill(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+                tenantId, name, "flow", ToSkill(meta, request.Definition!, SkillRequests.SimpleFormText(request.SimpleForm)),
                 Request.UserIdOrEmpty(), ct);
             if (updated is null)
             {
@@ -301,7 +300,7 @@ public sealed class SkillController : ControllerBase
         {
             throw new ApiException(StatusCodes.Status422UnprocessableEntity, "Skill 套件驗證失敗")
             {
-                FieldErrors = ToFieldErrors(result.Errors),
+                FieldErrors = SkillRequests.ToFieldErrors(result.Errors),
             };
         }
 
@@ -386,7 +385,7 @@ public sealed class SkillController : ControllerBase
                 throw new ApiException(
                     StatusCodes.Status422UnprocessableEntity, "Skill revision 套件驗證失敗")
                 {
-                    FieldErrors = ToFieldErrors(result.Errors),
+                    FieldErrors = SkillRequests.ToFieldErrors(result.Errors),
                 };
             }
 
@@ -454,26 +453,8 @@ public sealed class SkillController : ControllerBase
 
         throw new ApiException(StatusCodes.Status422UnprocessableEntity, "Skill 定義驗證失敗")
         {
-            FieldErrors = ToFieldErrors(result.Errors),
+            FieldErrors = SkillRequests.ToFieldErrors(result.Errors),
         };
-    }
-
-    /// <summary>引擎錯誤清單 → fieldErrors。同一錯誤碼多次(不同行)保留第一筆,行號附在訊息尾。</summary>
-    private static Dictionary<string, string> ToFieldErrors(IReadOnlyList<SkillValidationError> errors)
-    {
-        var fieldErrors = new Dictionary<string, string>();
-        foreach (var error in errors)
-        {
-            var message = error.Message ?? error.Code;
-            if (error.Line is int line)
-            {
-                message += $"（第 {line} 行）";
-            }
-
-            fieldErrors.TryAdd(error.Code, message);
-        }
-
-        return fieldErrors;
     }
 
     /// <summary>對既有 agentic skill(已存 package)的 definition-only 更新 → 固定 409(agentic 一律走 import),零副作用。</summary>
@@ -491,13 +472,6 @@ public sealed class SkillController : ControllerBase
 
     private Task<T> Track<T>(string operation, Func<ArtifactUsage, Task<T>> action)
         => ArtifactCompatibilityUsageMetrics.Shared.TrackAsync(HttpContext, Surface, operation, action);
-
-    /// <summary>
-    /// request.SimpleForm(選填)→ 可存的原始 JSON 文字。缺席或顯式 null(含 JSON null 值)→ null,
-    /// 寫入層 COALESCE 保留既有值。backend 不解析/不驗證表單內容,原樣落 jsonb。
-    /// </summary>
-    private static string? SimpleFormText(JsonElement? form)
-        => form is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } e ? e.GetRawText() : null;
 
     /// <summary>DB 列 = 引擎中繼資料 + definition(flow=YAML 原文、agentic=canonical 投影)。enabled/revision/時間戳由 DB 決定。
     /// simpleForm 只在 Create/Update 帶入(Import/Restore 留 null → 寫入層不動該欄)。</summary>

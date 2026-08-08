@@ -15,7 +15,7 @@ import 'katex/dist/katex.min.css'
  * ponytail: 全域替換，假設聊天內容不會在 fenced code block 裡出現字面 \[ / \(
  * — 以此聊天情境可接受;真的踩雷再升級成 fence-aware 版本。
  */
-export function normalizeMath(src: string): string {
+function normalizeMath(src: string): string {
   return src
     .replace(/\\\[([\s\S]+?)\\\]/g, '$$$$$1$$$$')
     .replace(/\\\(([\s\S]+?)\\\)/g, '$$$1$$')

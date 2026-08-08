@@ -34,11 +34,11 @@ public sealed class OrchestratorRepository(NpgsqlDataSource dataSource) : IOrche
     {
         var errors = new List<string>(); using var graph = JsonDocument.Parse(def); var workflow = graph.RootElement.GetProperty("workflow"); var wid = Guid.Parse(workflow.GetProperty("id").GetString()!); var wrev = workflow.GetProperty("revision").GetInt32();
         var lockSql = locks ? " FOR SHARE OF w,r" : "";
-        var workflowRow = await c.QuerySingleOrDefaultAsync<IntegrityRow>(new CommandDefinition("SELECT r.definition_canonical Bytes,r.definition_sha256 Sha,w.kind Kind FROM workflow w JOIN workflow_revision r ON r.workflow_id=w.id AND r.revision=@wrev WHERE w.id=@wid AND w.tenant_id=@tenant AND w.enabled AND w.published_revision=@wrev AND w.kind='orchestrator'" + lockSql, new { wid, wrev, tenant }, tx, cancellationToken: ct));
+        var workflowRow = await c.QuerySingleOrDefaultAsync<IntegrityRow>(new CommandDefinition("SELECT r.definition_canonical Bytes,r.definition_sha256 Sha FROM workflow w JOIN workflow_revision r ON r.workflow_id=w.id AND r.revision=@wrev WHERE w.id=@wid AND w.tenant_id=@tenant AND w.enabled AND w.published_revision=@wrev AND w.kind='orchestrator'" + lockSql, new { wid, wrev, tenant }, tx, cancellationToken: ct));
         if (workflowRow is null) errors.Add("workflow must pin active same-tenant published orchestrator kind"); else if (workflowRow.Bytes is null || !SkillHash.MatchesSha256(workflowRow.Bytes, workflowRow.Sha)) errors.Add("workflow revision canonical integrity check failed");
         foreach (var reference in OrchestratorCanonicalizer.AgentRefs(def))
         {
-            var row = await c.QuerySingleOrDefaultAsync<IntegrityRow>(new CommandDefinition("SELECT r.canonical_definition Bytes,r.definition_sha256 Sha,'' Kind,r.runtime_workflow_id RuntimeWorkflowId,r.runtime_workflow_revision RuntimeWorkflowRevision FROM agent a JOIN agent_revision r ON r.agent_id=a.id AND r.revision=@revision WHERE a.id=@id AND a.tenant_id=@tenant AND a.enabled AND a.published_revision=@revision AND r.status='published'" + (locks ? " FOR SHARE OF a,r" : ""), new { id = reference.AgentId, revision = reference.Revision, tenant }, tx, cancellationToken: ct));
+            var row = await c.QuerySingleOrDefaultAsync<IntegrityRow>(new CommandDefinition("SELECT r.canonical_definition Bytes,r.definition_sha256 Sha,r.runtime_workflow_id RuntimeWorkflowId,r.runtime_workflow_revision RuntimeWorkflowRevision FROM agent a JOIN agent_revision r ON r.agent_id=a.id AND r.revision=@revision WHERE a.id=@id AND a.tenant_id=@tenant AND a.enabled AND a.published_revision=@revision AND r.status='published'" + (locks ? " FOR SHARE OF a,r" : ""), new { id = reference.AgentId, revision = reference.Revision, tenant }, tx, cancellationToken: ct));
             if (row is null) { errors.Add($"agent {reference.AgentId:D} must pin active same-tenant published revision"); continue; }
             if (row.Bytes is null || !SkillHash.MatchesSha256(row.Bytes, row.Sha)) { errors.Add($"agent {reference.AgentId:D} canonical integrity check failed"); continue; }
             try { var canonical = Encoding.UTF8.GetString(row.Bytes); errors.AddRange(OrchestratorReferencePolicy.ValidateAgentDefinition(canonical, reference)); errors.AddRange(OrchestratorReferencePolicy.ValidateRuntimeWorkflowProjection(canonical, row.RuntimeWorkflowId, row.RuntimeWorkflowRevision)); } catch (Exception) { errors.Add($"agent {reference.AgentId:D} canonical definition is corrupt"); }
@@ -49,7 +49,7 @@ public sealed class OrchestratorRepository(NpgsqlDataSource dataSource) : IOrche
     private static async Task<IReadOnlyList<string>> ValidateVerifierWorkflow(NpgsqlConnection c, NpgsqlTransaction? tx, string tenant, IntegrityRow agent, bool locks, CancellationToken ct)
     {
         if (agent.RuntimeWorkflowId is not Guid workflowId || agent.RuntimeWorkflowRevision is not int revision) return ["verifier Agent revision must pin a verifier agent-runtime Workflow revision"];
-        var row = await c.QuerySingleOrDefaultAsync<IntegrityRow>(new CommandDefinition("SELECT r.definition_canonical Bytes,r.definition_sha256 Sha,w.kind Kind,r.compiler_contract_version CompilerContractVersion FROM workflow w JOIN workflow_revision r ON r.workflow_id=w.id AND r.revision=@revision WHERE w.id=@workflowId AND w.tenant_id IN (@tenant,@systemTenant) AND w.enabled AND w.kind='agent-runtime'" + (locks ? " FOR SHARE OF w,r" : ""), new { workflowId, revision, tenant, systemTenant = Backend.Api.Agents.AgentDefaults.SystemTenant }, tx, cancellationToken: ct));
+        var row = await c.QuerySingleOrDefaultAsync<IntegrityRow>(new CommandDefinition("SELECT r.definition_canonical Bytes,r.definition_sha256 Sha,r.compiler_contract_version CompilerContractVersion FROM workflow w JOIN workflow_revision r ON r.workflow_id=w.id AND r.revision=@revision WHERE w.id=@workflowId AND w.tenant_id IN (@tenant,@systemTenant) AND w.enabled AND w.kind='agent-runtime'" + (locks ? " FOR SHARE OF w,r" : ""), new { workflowId, revision, tenant, systemTenant = Backend.Api.Agents.AgentDefaults.SystemTenant }, tx, cancellationToken: ct));
         if (row is null) return ["verifier Agent revision must pin a visible agent-runtime Workflow revision"];
         if (row.Bytes is null || !SkillHash.MatchesSha256(row.Bytes, row.Sha)) return ["verifier Agent runtime Workflow canonical integrity check failed"];
         return OrchestratorReferencePolicy.ValidateVerifierWorkflowDefinition(Encoding.UTF8.GetString(row.Bytes), row.CompilerContractVersion);
@@ -60,7 +60,6 @@ public sealed class OrchestratorRepository(NpgsqlDataSource dataSource) : IOrche
     {
         public byte[]? Bytes { get; init; }
         public string? Sha { get; init; }
-        public string Kind { get; init; } = "";
         public Guid? RuntimeWorkflowId { get; init; }
         public int? RuntimeWorkflowRevision { get; init; }
         public string? CompilerContractVersion { get; init; }

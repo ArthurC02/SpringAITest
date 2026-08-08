@@ -25,13 +25,6 @@ from app.settings import settings
 RUNNER_VERSION = "eval-runner/1"
 
 
-def _clean_case_input(raw: dict[str, Any]) -> dict[str, Any]:
-    """比照 app.main._clean_skill_input：eval case 的 input 同樣是不可信輸入，
-    剝除保留鍵／引擎鍵／__ 前綴，不讓呼叫端經 case.input 夾帶偽造的保留鍵。
-    """
-    return clean_invoke_input(raw)
-
-
 def case_canonical_identity(
     suite_id: str, revision: int, case: EvalCase, candidate_pins: dict[str, Any]
 ) -> str:
@@ -78,7 +71,8 @@ async def _execute_case(
         return round((time.perf_counter() - t0) * 1000)
 
     try:
-        cleaned = _clean_case_input(case.input)
+        # eval case 的 input 同樣是不可信輸入，走 invoke 的同一關。
+        cleaned = clean_invoke_input(case.input)
         input_model = build_input_model(skill)
         if input_model is not None:
             input_model.model_validate(cleaned)

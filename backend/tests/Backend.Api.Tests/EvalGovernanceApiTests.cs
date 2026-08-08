@@ -133,7 +133,9 @@ public sealed class EvalGovernanceApiTests : IClassFixture<TestWebAppFactory>
         var evals = factory.Fake<IEvalRepository>();
         await evals.PublishSuiteRevisionAsync("eval-tenant-a", SuiteId, SuiteContent(requiredCaseIds: "case-a"), "system", default);
         using var ownerAdmin = Client(factory, "eval-tenant-a", "operator", manage: true);
-        Assert.Equal(HttpStatusCode.OK, (await CreateRunAsync(ownerAdmin, SuiteId, 1, "skill", key: "tenant-isolation")).StatusCode);
+        var ownerRun = await CreateRunAsync(ownerAdmin, SuiteId, 1, "skill", key: "tenant-isolation");
+        Assert.Equal(HttpStatusCode.OK, ownerRun.StatusCode);
+        var ownerRunId = (await ownerRun.ReadJsonAsync())["id"]!.GetValue<Guid>();
 
         using var otherAdmin = Client(factory, "eval-tenant-b", "operator-b", manage: true);
         Assert.Equal(HttpStatusCode.NotFound, (await otherAdmin.GetAsync($"/api/admin/operations/eval-suites/{SuiteId}")).StatusCode);
@@ -141,6 +143,14 @@ public sealed class EvalGovernanceApiTests : IClassFixture<TestWebAppFactory>
         Assert.Empty(otherSuites.AsArray());
         var otherRuns = await (await otherAdmin.GetAsync("/api/admin/operations/eval-runs")).ReadJsonAsync();
         Assert.Empty(otherRuns.AsArray());
+        // GET eval-runs/{id} 的 404 是唯一沒被覆蓋過的一條:跨租戶不得洩漏他人 run 的存在,而且
+        // 訊息必須指向 Eval Run —— 這條路由過去誤用了 Eval Suite 的工廠。
+        var crossTenantRun = await otherAdmin.GetAsync($"/api/admin/operations/eval-runs/{ownerRunId:D}");
+        Assert.Equal(HttpStatusCode.NotFound, crossTenantRun.StatusCode);
+        Assert.Equal(
+            $"找不到 Eval Run：{ownerRunId:D}",
+            (await crossTenantRun.ReadJsonAsync())["message"]!.GetValue<string>());
+
         // Cross-tenant candidate resolution must fail closed too: the run cannot even be created,
         // because tenant B never published this suite_id.
         Assert.Equal(HttpStatusCode.NotFound, (await CreateRunAsync(otherAdmin, SuiteId, 1, "skill", key: "tenant-isolation-b")).StatusCode);

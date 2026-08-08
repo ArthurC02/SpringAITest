@@ -1,7 +1,7 @@
 # LiteLLM 閘道設定（Lite 版）。以 litellm-config.yaml 為基礎，
-# 唯一差異：移除 langfuse success/failure callback——lite 模式不起 Langfuse，
-# 保留 callback 會讓每次 LLM 呼叫都對 :3000 連線失敗並噴錯誤日誌（見 04-acceptance-test C-10）。
-# 其餘（mock-gpt 路由、drop_params、master_key）與正式版一致。
+# 差異：移除 langfuse success/failure callback（lite 模式不起 Langfuse；
+# 保留 callback 會讓每次 LLM 呼叫都對 :3000 連線失敗並噴錯誤日誌），
+# 並不含 evidence-gpt-4o-mini-2024-07-18 model（release-evidence 專用）。
 model_list:
   - model_name: gpt-4o-mini            # ← platform 的 CHAT_MODEL env 預設值（docker-compose.yml / AGENTS.md）
     litellm_params:

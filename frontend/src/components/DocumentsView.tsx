@@ -3,6 +3,7 @@ import type { useDocuments } from '../hooks/useDocuments'
 import { isConflict } from '../api/http'
 import { fmtDate } from '../format'
 import ErrorText from './ErrorText'
+import FormField from './FormField'
 import { useConfirm } from './ConfirmDialog'
 import { useToast } from './Toast'
 import Skeleton from './Skeleton'
@@ -119,27 +120,18 @@ export default function DocumentsView({ documents }: Props) {
       </div>
 
       <form className="doc-form" onSubmit={onSubmit}>
-        <div className="field">
-          <label htmlFor="doc-title">標題</label>
-          <input
-            id="doc-title"
-            className="input"
-            value={title}
-            onChange={(e) => {
-              formChanged()
-              setTitle(e.target.value)
-              if (titleErr && e.target.value.trim()) setTitleErr('')
-            }}
-            placeholder="文件標題"
-            aria-invalid={!!titleErr}
-            aria-describedby={titleErr ? 'doc-title-err' : undefined}
-          />
-          {titleErr && (
-            <span className="field-error" id="doc-title-err" role="alert">
-              {titleErr}
-            </span>
-          )}
-        </div>
+        <FormField
+          id="doc-title"
+          label="標題"
+          value={title}
+          onChange={(v) => {
+            formChanged()
+            setTitle(v)
+            if (titleErr && v.trim()) setTitleErr('')
+          }}
+          placeholder="文件標題"
+          error={titleErr}
+        />
         <div className="field">
           <span id="doc-source-label">內容來源</span>
           <div className="seg" role="group" aria-labelledby="doc-source-label">

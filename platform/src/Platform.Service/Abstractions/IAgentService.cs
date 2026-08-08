@@ -15,33 +15,22 @@ namespace Platform.Service.Abstractions;
 /// </summary>
 public interface IAgentService
 {
-    Task<AgentProxyResponse> ListAsync(UserContext ctx, CancellationToken ct = default);
-
-    Task<AgentProxyResponse> CreateAsync(UserContext ctx, JsonElement? body, CancellationToken ct = default);
-
-    Task<AgentProxyResponse> GetAsync(Guid id, UserContext ctx, CancellationToken ct = default);
-
-    /// <summary>更新 draft;帶 If-Match 做樂觀鎖。backend:缺 If-Match → 428、版本過期 → 409(原樣穿透)。</summary>
-    Task<AgentProxyResponse> UpdateDraftAsync(
-        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default);
-
-    /// <summary>軟停用(deactivate)。</summary>
-    Task<AgentProxyResponse> DeactivateAsync(Guid id, UserContext ctx, CancellationToken ct = default);
-
-    /// <summary>重新啟用(enable);ADMIN 由 backend 判。</summary>
-    Task<AgentProxyResponse> EnableAsync(Guid id, UserContext ctx, CancellationToken ct = default);
-
-    Task<AgentProxyResponse> ValidateAsync(
-        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default);
-
-    Task<AgentProxyResponse> PublishAsync(
-        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default);
-
-    Task<AgentProxyResponse> RevisionsAsync(Guid id, UserContext ctx, CancellationToken ct = default);
-
-    /// <summary>把舊 revision 重新發布為一個新 revision(不改寫歷史)。</summary>
-    Task<AgentProxyResponse> RestoreRevisionAsync(
-        Guid id, int revision, UserContext ctx, CancellationToken ct = default);
+    /// <summary>
+    /// 送一次 <c>/api/agents</c> 代理請求(比照 <see cref="IWorkflowAdminService.SendAsync"/>)。
+    /// 哪條路徑、要不要帶 If-Match 都是呼叫端(AgentController)的決策 —— 這一層沒有 per-action 語意,
+    /// 每個 action 曾經各有一個一行委派方法,只是同一顆代理的十份複本。
+    /// </summary>
+    /// <param name="suffix">
+    /// 接在 <c>/api/agents</c> 後面的路徑片段(空字串 = 集合本身)。呼叫端必須只用已解析過的
+    /// route 值組出(Guid 以 <c>D</c> 格式、revision 是 int),不得讓原始 route 文字參與 URI normalization。
+    /// </param>
+    Task<AgentProxyResponse> SendAsync(
+        HttpMethod method,
+        string suffix,
+        UserContext ctx,
+        string? ifMatch = null,
+        JsonElement? body = null,
+        CancellationToken ct = default);
 }
 
 /// <summary>透明代理的一次回應:backend 的狀態碼、原始 JSON body 與 ETag(若有),由 controller 原樣寫回。</summary>

@@ -4,9 +4,9 @@ import type { ConfigKey, ConfigurationValues } from './types'
 
 // ponytail: 白名單硬編對齊 infra/litellm-config.yaml 的 chat 模型（gpt-4o-mini / mock-gpt）;
 //           前端無端點可查已配置模型,改模型時同步這裡。text-embedding 不是 chat 模型故不列。
-export const MODEL_OPTIONS = ['gpt-4o-mini', 'mock-gpt'] as const
+const MODEL_OPTIONS = ['gpt-4o-mini', 'mock-gpt'] as const
 
-export interface ConfigFieldDef {
+interface ConfigFieldDef {
   key: ConfigKey
   label: string
   kind: 'int' | 'float' | 'select'

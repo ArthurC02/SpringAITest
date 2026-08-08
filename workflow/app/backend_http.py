@@ -16,6 +16,7 @@ from typing import Protocol
 
 import httpx
 
+from app import correlation
 from app.settings import settings
 
 _client: httpx.AsyncClient | None = None
@@ -67,10 +68,24 @@ class Identity(Protocol):
     role: str
 
 
+def internal_token_headers() -> dict[str, str]:
+    """所有出站 backend 呼叫的共同基底：內部密鑰 ＋（有的話）本次請求的 correlation ID。
+
+    correlation ID 由 app/correlation.py 的 middleware 從入站請求接手（不合格或缺就生一個），
+    往 backend 轉回去，platform → backend → workflow → backend 的日誌才串得成同一條。
+    背景工作（checkpoint retention、recovery 掃描）不在請求範圍內，current_correlation_id()
+    回空字串 —— 那就不帶這個鍵，不造一個對不到任何請求的假值。
+    """
+    headers = {"X-Internal-Token": settings.internal_api_token}
+    correlation_id = correlation.current_correlation_id()
+    if correlation_id:
+        headers[correlation.HEADER_NAME] = correlation_id
+    return headers
+
+
 def internal_headers(ctx: Identity) -> dict[str, str]:
-    """服務間標頭：內部密鑰 + 身分（租戶邊界由 backend 依 X-Tenant-Id 過濾）。"""
-    return {
-        "X-Internal-Token": settings.internal_api_token,
+    """服務間標頭：共同基底 + 身分（租戶邊界由 backend 依 X-Tenant-Id 過濾）。"""
+    return internal_token_headers() | {
         "X-Tenant-Id": ctx.tenant_id,
         "X-User-Id": ctx.user_id,
         "X-User-Role": ctx.role,
@@ -86,10 +101,8 @@ async def _search_chunks(payload: dict, tenant_id: str) -> list[dict]:
     resp = await get_client().post(
         "/api/retrieval/search",
         json=payload,
-        headers={
-            "X-Internal-Token": settings.internal_api_token,
-            "X-Tenant-Id": tenant_id,
-        },
+        # 這條路徑只有租戶（node/port 拿不到呼叫者 user/role），刻意不帶 X-User-*。
+        headers=internal_token_headers() | {"X-Tenant-Id": tenant_id},
     )
     resp.raise_for_status()
     return resp.json()["chunks"]

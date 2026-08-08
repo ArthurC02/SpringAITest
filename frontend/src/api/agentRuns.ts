@@ -113,7 +113,7 @@ export function normalizeAgentRun(value: unknown): AgentRun {
   }
 }
 
-export function normalizeAgentRunEvent(value: unknown): AgentRunEvent | null {
+function normalizeAgentRunEvent(value: unknown): AgentRunEvent | null {
   const source = object(value)
   const sequence = finiteInteger(pick(source, 'sequence', 'eventSequence', 'event_sequence'))
   if (sequence === null || sequence < 0) return null

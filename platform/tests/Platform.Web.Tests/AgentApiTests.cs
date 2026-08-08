@@ -17,7 +17,7 @@ public sealed class AgentApiTests : IDisposable
     private const string ExistingId = FakeAgentService.ExistingIdText;
     private const string GhostId = FakeAgentService.GhostIdText;
     private const string ExistingPath = "/api/agents/" + ExistingId;
-    private readonly TestWebAppFactory _factory = new(agentBuilderEnabled: true);
+    private readonly TestWebAppFactory _factory = TestWebAppFactory.WithFlags("AGENT_BUILDER_ENABLED");
 
     public void Dispose() => _factory.Dispose();
 
@@ -36,7 +36,7 @@ public sealed class AgentApiTests : IDisposable
     [InlineData("POST", ExistingPath + "/revisions/1/restore")]
     public async Task Endpoints_FlagOff_Return404_AndNeverReachProxy(string method, string path)
     {
-        using var flagOff = new TestWebAppFactory(agentBuilderEnabled: false);
+        using var flagOff = new TestWebAppFactory();
         var before = FakeAgentService.Calls.Count;
         // 帶有效 ADMIN token 仍應 404(flag 關閉在認證之前 fail-closed,不洩漏端點存在)。
         var client = flagOff.CreateClient().WithToken(flagOff.IssueToken("admin-a", "ADMIN", "demo-a"));
@@ -224,6 +224,27 @@ public sealed class AgentApiTests : IDisposable
         Assert.True((await resp.ReadJsonAsync())["enabled"]!.GetValue<bool>());
     }
 
+    // AgentService 收斂成單一 SendAsync 後,「哪個 action 對應 backend 哪條路徑」是本 controller 的決策,
+    // 這裡是它唯一的守門:route 值(Guid/int)必須以固定格式組進已知片段,不得整段 route 文字直送。
+    [Theory]
+    [InlineData("GET", "/api/agents", "GET:")]
+    [InlineData("POST", "/api/agents", "POST:")]
+    [InlineData("GET", ExistingPath, "GET:" + ExistingId)]
+    [InlineData("DELETE", ExistingPath, "DELETE:" + ExistingId)]
+    [InlineData("PUT", ExistingPath + "/draft", "PUT:" + ExistingId + "/draft")]
+    [InlineData("POST", ExistingPath + "/enable", "POST:" + ExistingId + "/enable")]
+    [InlineData("POST", ExistingPath + "/validate", "POST:" + ExistingId + "/validate")]
+    [InlineData("POST", ExistingPath + "/publish", "POST:" + ExistingId + "/publish")]
+    [InlineData("GET", ExistingPath + "/revisions", "GET:" + ExistingId + "/revisions")]
+    [InlineData("POST", ExistingPath + "/revisions/1/restore", "POST:" + ExistingId + "/revisions/1/restore")]
+    public async Task Routes_ForwardExactBackendPathSuffix(string method, string path, string expected)
+    {
+        await _factory.AdminClient().SendAsync(Request(
+            method, path, body: method is "POST" or "PUT" ? new { slug = "x" } : null));
+
+        Assert.Equal(expected, FakeAgentService.Calls[^1]);
+    }
+
     [Fact]
     public async Task InvalidAgentId_DoesNotMatchProxyRoute()
     {
@@ -337,7 +358,7 @@ public sealed class AgentApiTests : IDisposable
     [InlineData("POST", "/api/agents/rules/simulate")]
     public async Task RuleEndpoints_FlagOff_Return404BeforeAuthOrWorkflow(string method, string path)
     {
-        using var flagOff = new TestWebAppFactory(agentBuilderEnabled: false);
+        using var flagOff = new TestWebAppFactory();
         var calls = FakeWorkflowEngineClient.EngineCalls.Count;
 
         var response = await flagOff.CreateClient().SendAsync(Request(

@@ -40,6 +40,22 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
         Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(request)).StatusCode);
     }
 
+    // X-User-Role 是 orchestrator_run.caller_role(NOT NULL)的唯一來源。帶著 workflow.manage 卻沒有
+    // 角色標頭時,必須在 controller 就 400 —— 否則 null 會一路穿到倉儲,對外變成 500。
+    [Fact]
+    public async Task Start_WithoutUserRoleHeader_IsBadRequest()
+    {
+        var client = _factory.CreateInternalClient().WithTenant("d5-api").WithUser("root-operator");
+        client.DefaultRequestHeaders.TryAddWithoutValidation(IdentityHeaders.CapabilitiesHeader, "workflow.manage");
+
+        using var request = StartRequest(new { conversation_id = "c-1", message = "plan" }, "no-role-key");
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<ApiError>();
+        Assert.Equal("X-User-Role is required", error!.Message);
+    }
+
     // Idempotency-Key / conversation_id / message 的長度、空白與控制字元邊界。上限剛好通過(會走到倉儲、
     // 因為 orchestrator 不存在而 404),上限 +1 必須在 controller 就被擋成 400 或 413。
     // message 過長對外是 413(與 AgentRunController.RequireMessage 的行為一致),空/空白仍是 400。
@@ -69,6 +85,22 @@ public sealed class OrchestratorRunApiTests : IClassFixture<OrchestratorRunApiTe
 
         using var request = StartRequest(body, key);
         Assert.Equal(expected, (await client.SendAsync(request)).StatusCode);
+    }
+
+    // 重複的 Idempotency-Key 標頭:舊的 .ToString() 會把多值拼成 "a, b",變成一把從未用過的**新** key
+    // 而順利放行 —— 重試因此被記成新的 root run,冪等去重靜默失效。共用 helper 要求恰好一個標頭。
+    [Fact]
+    public async Task Start_RejectsMultipleIdempotencyKeyHeaders()
+    {
+        var client = Client("workflow.manage");
+
+        using var request = StartRequest(new { conversation_id = "c-1", message = "plan" }, "start-a");
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "start-b");
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<ApiError>();
+        Assert.Equal("Idempotency-Key is required", error!.Message);
     }
 
     // message 過長要單獨鎖住 413 的 ApiError 形狀,不能只驗狀態碼:400/413 對「訊息太長」講出兩種

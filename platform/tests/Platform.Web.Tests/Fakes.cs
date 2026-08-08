@@ -882,10 +882,7 @@ public sealed class FakeAgentService : IAgentService
     public static readonly List<string> Calls = new();
     public static UserContext? LastContext { get; set; }
     public const string ExistingIdText = "11111111-1111-1111-1111-111111111111";
-    public const string CreatedIdText = "33333333-3333-3333-3333-333333333333";
     public const string GhostIdText = "22222222-2222-2222-2222-222222222222";
-    public static readonly Guid ExistingId = Guid.Parse(ExistingIdText);
-    public static readonly Guid GhostId = Guid.Parse(GhostIdText);
 
     public FakeAgentService(FakeCallScope scope) => scope.Own(Calls);
 
@@ -905,173 +902,84 @@ public sealed class FakeAgentService : IAgentService
     private const string AgentJson =
         """{"id":"11111111-1111-1111-1111-111111111111","name":"研究員","slug":"researcher","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null,"draft":{}}""";
 
-    public Task<AgentProxyResponse> ListAsync(UserContext ctx, CancellationToken ct = default)
+    /// <summary>
+    /// Calls 記的是「controller 決定送給 backend 的方法 + 路徑片段」,Web 層才驗得到路徑組法
+    /// (AgentService 收斂成單一 SendAsync 後,路徑決策住在 AgentController)。
+    /// </summary>
+    public Task<AgentProxyResponse> SendAsync(
+        HttpMethod method,
+        string suffix,
+        UserContext ctx,
+        string? ifMatch = null,
+        JsonElement? body = null,
+        CancellationToken ct = default)
     {
-        Calls.Add("list");
+        Calls.Add($"{method.Method}:{suffix}");
         LastContext = ctx;
         if (ctx.Role != "ADMIN")
         {
             return Task.FromResult(Forbidden());
         }
 
-        return Task.FromResult(Ok(
-            """[{"id":"11111111-1111-1111-1111-111111111111","name":"研究員","slug":"researcher","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null}]"""));
+        var segments = suffix.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var id = segments.Length > 0 ? segments[0] : null;
+        var action = string.Join('/', segments.Skip(1));
+        return Task.FromResult((method.Method, action) switch
+        {
+            ("GET", "") when id is null => Ok(
+                """[{"id":"11111111-1111-1111-1111-111111111111","name":"研究員","slug":"researcher","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null}]"""),
+            ("POST", "") when id is null => new AgentProxyResponse(
+                201,
+                """{"id":"33333333-3333-3333-3333-333333333333","name":"新代理","slug":"new-agent","enabled":true,"draft_version":1,"draft_validated_version":null,"published_revision":null,"draft":{}}""",
+                CurrentETag),
+            ("GET", "") => id == GhostIdText
+                ? ApiError(404, "找不到 Agent：" + GhostIdText)
+                : Ok(AgentJson, CurrentETag),
+            ("DELETE", "") => new AgentProxyResponse(204, string.Empty, null),
+            ("PUT", "draft") => Precondition(ifMatch) ?? Ok(
+                $$$"""{"id":"{{{id}}}","name":"研究員","slug":"researcher","enabled":true,"draft_version":2,"draft_validated_version":null,"published_revision":null,"draft":{}}""",
+                "\"2\""),
+            ("POST", "validate") => Precondition(ifMatch)
+                ?? Ok("""{"valid":true,"errors":[]}""", CurrentETag),
+            ("POST", "enable") => Ok(
+                $$$"""{"id":"{{{id}}}","slug":"researcher","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null,"draft":{}}""",
+                CurrentETag),
+            ("POST", "publish") => Publish(id, body),
+            ("GET", "revisions") => Ok(
+                """[{"revision":1,"status":"published","definition_sha256":"abc","runtime_workflow_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","runtime_workflow_revision":1,"skill_bindings":[],"created_by":"admin-a","created_at":"2026-07-24T00:00:00Z"}]"""),
+            ("POST", _) when action.StartsWith("revisions/", StringComparison.Ordinal)
+                && action.EndsWith("/restore", StringComparison.Ordinal) => Ok(
+                $$$"""{"id":"{{{id}}}","slug":"researcher","name":"研究員","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":2,"draft":{}}""",
+                CurrentETag),
+            _ => throw new InvalidOperationException($"未預期的 Agent 代理路徑:{method.Method} {suffix}"),
+        });
     }
 
-    public Task<AgentProxyResponse> CreateAsync(UserContext ctx, JsonElement? body, CancellationToken ct = default)
+    /// <summary>backend 的 draft 樂觀鎖語意:缺 If-Match → 428、版本過期 → 409(透明穿透);相符則回 null 放行。</summary>
+    private static AgentProxyResponse? Precondition(string? ifMatch) => ifMatch switch
     {
-        Calls.Add("create");
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
+        null => ApiError(428, "需要 If-Match 前置條件"),
+        CurrentETag => null,
+        _ => ApiError(409, "草稿版本衝突，請重新載入"),
+    };
 
-        return Task.FromResult(new AgentProxyResponse(
-            201,
-            """{"id":"33333333-3333-3333-3333-333333333333","name":"新代理","slug":"new-agent","enabled":true,"draft_version":1,"draft_validated_version":null,"published_revision":null,"draft":{}}""",
-            CurrentETag));
-    }
-
-    public Task<AgentProxyResponse> GetAsync(Guid id, UserContext ctx, CancellationToken ct = default)
+    // 真 backend publish 契約：body 必帶 expected_draft_version；If-Match 可被透明轉送，
+    // 但不是 publish 的 concurrency authority。
+    private static AgentProxyResponse Publish(string? id, JsonElement? body)
     {
-        Calls.Add("get:" + id.ToString("D"));
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        if (id == GhostId)
-        {
-            return Task.FromResult(ApiError(404, "找不到 Agent：" + GhostIdText));
-        }
-
-        return Task.FromResult(Ok(AgentJson, CurrentETag));
-    }
-
-    public Task<AgentProxyResponse> UpdateDraftAsync(
-        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default)
-    {
-        Calls.Add($"update:{id:D}:{ifMatch}");
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        // backend 樂觀鎖語意:缺 If-Match → 428、版本過期 → 409(透明穿透)。
-        if (ifMatch is null)
-        {
-            return Task.FromResult(ApiError(428, "需要 If-Match 前置條件"));
-        }
-
-        if (ifMatch != CurrentETag)
-        {
-            return Task.FromResult(ApiError(409, "草稿版本衝突，請重新載入"));
-        }
-
-        return Task.FromResult(Ok(
-            $$$"""{"id":"{{{id:D}}}","name":"研究員","slug":"researcher","enabled":true,"draft_version":2,"draft_validated_version":null,"published_revision":null,"draft":{}}""",
-            "\"2\""));
-    }
-
-    public Task<AgentProxyResponse> DeactivateAsync(Guid id, UserContext ctx, CancellationToken ct = default)
-    {
-        Calls.Add("deactivate:" + id.ToString("D"));
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        return Task.FromResult(new AgentProxyResponse(204, string.Empty, null));
-    }
-
-    public Task<AgentProxyResponse> EnableAsync(Guid id, UserContext ctx, CancellationToken ct = default)
-    {
-        Calls.Add("enable:" + id.ToString("D"));
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        return Task.FromResult(Ok(
-            $$$"""{"id":"{{{id:D}}}","slug":"researcher","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":null,"draft":{}}""",
-            CurrentETag));
-    }
-
-    public Task<AgentProxyResponse> ValidateAsync(
-        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default)
-    {
-        Calls.Add($"validate:{id:D}:{ifMatch}");
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        if (ifMatch is null)
-        {
-            return Task.FromResult(ApiError(428, "需要 If-Match 前置條件"));
-        }
-
-        if (ifMatch != CurrentETag)
-        {
-            return Task.FromResult(ApiError(409, "草稿版本衝突，請重新載入"));
-        }
-
-        return Task.FromResult(Ok("""{"valid":true,"errors":[]}""", CurrentETag));
-    }
-
-    public Task<AgentProxyResponse> PublishAsync(
-        Guid id, UserContext ctx, string? ifMatch, JsonElement? body, CancellationToken ct = default)
-    {
-        Calls.Add($"publish:{id:D}:{ifMatch}");
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        // 真 backend publish 契約：body 必帶 expected_draft_version；If-Match 可被透明轉送，
-        // 但不是 publish 的 concurrency authority。
         if (body is not JsonElement payload
             || payload.ValueKind != JsonValueKind.Object
             || !payload.TryGetProperty("expected_draft_version", out var versionElement)
             || !versionElement.TryGetInt64(out var expectedVersion))
         {
-            return Task.FromResult(ApiError(400, "publish 必須帶 expected_draft_version"));
+            return ApiError(400, "publish 必須帶 expected_draft_version");
         }
 
-        if (expectedVersion != 1)
-        {
-            return Task.FromResult(ApiError(409, "草稿版本衝突，請重新載入"));
-        }
-
-        return Task.FromResult(Ok(
-            $$$"""{"id":"{{{id:D}}}","slug":"researcher","name":"研究員","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":1,"draft":{}}""",
-            CurrentETag));
-    }
-
-    public Task<AgentProxyResponse> RevisionsAsync(Guid id, UserContext ctx, CancellationToken ct = default)
-    {
-        Calls.Add("revisions:" + id.ToString("D"));
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        return Task.FromResult(Ok(
-            """[{"revision":1,"status":"published","definition_sha256":"abc","runtime_workflow_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","runtime_workflow_revision":1,"skill_bindings":[],"created_by":"admin-a","created_at":"2026-07-24T00:00:00Z"}]"""));
-    }
-
-    public Task<AgentProxyResponse> RestoreRevisionAsync(
-        Guid id, int revision, UserContext ctx, CancellationToken ct = default)
-    {
-        Calls.Add($"restore:{id:D}:{revision}");
-        if (ctx.Role != "ADMIN")
-        {
-            return Task.FromResult(Forbidden());
-        }
-
-        return Task.FromResult(Ok(
-            $$$"""{"id":"{{{id:D}}}","slug":"researcher","name":"研究員","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":2,"draft":{}}""",
-            CurrentETag));
+        return expectedVersion != 1
+            ? ApiError(409, "草稿版本衝突，請重新載入")
+            : Ok(
+                $$$"""{"id":"{{{id}}}","slug":"researcher","name":"研究員","description":"內部研究","enabled":true,"draft_version":1,"draft_validated_version":1,"published_revision":1,"draft":{}}""",
+                CurrentETag);
     }
 }
 

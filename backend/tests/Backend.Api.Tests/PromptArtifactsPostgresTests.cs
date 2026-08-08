@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 
 namespace Backend.Api.Tests;
 
@@ -97,14 +98,20 @@ public sealed class PromptArtifactsPostgresTests(PostgresFixture fixture) : IAsy
                 new { tenant, content = "TAMPERED-CONTENT" });
         }
 
-        using var factory = new DapperPromptArtifactFactory();
+        using var factory = new DapperPromptArtifactFactory(fixture.DataSource!);
         var client = factory.CreateInternalClient().WithTenant(tenant).WithRole("USER").WithUser("caller");
         var response = await client.GetAsync($"/api/prompt-manifests/{manifest.Revision}/resolved");
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
     }
 
-    /// <summary>同一條防線的 manifest 那一半:manifest_canonical 被竄改(manifest_sha256 不動)同樣 500。</summary>
+    /// <summary>
+    /// 同一條防線的 manifest 那一半:manifest_canonical 被竄改(manifest_sha256 不動)同樣 500。
+    /// 竄改後的 canonical 刻意仍結構合法且指向存在的 guard#1,只有 tool_catalog_hash 不同 ——
+    /// 唯一會觸發 500 的就是 manifest SHA 檢查本身。(指向不存在的 guard#999 會因「元件找不到」
+    /// 也丟 InvalidOperationException,拿掉 SHA 守門照樣 500,測試就成了假綠。)
+    /// 竄改前先打一次同一條路由並斷言 200,把「500 因竄改」與「路由本來就 500」分開。
+    /// </summary>
     [SkippableFact]
     public async Task ResolvedRoute_FailsClosed_WhenStoredManifestCanonicalIsTampered()
     {
@@ -113,24 +120,35 @@ public sealed class PromptArtifactsPostgresTests(PostgresFixture fixture) : IAsy
         await Repo.PublishComponentAsync(tenant, "guard", "GUARD-ORIGINAL", "tester", default);
         var manifest = await Repo.CreateManifestAsync(tenant, Canonical(("guard", 1)), "tester", default);
 
+        using var factory = new DapperPromptArtifactFactory(fixture.DataSource!);
+        var client = factory.CreateInternalClient().WithTenant(tenant).WithRole("USER").WithUser("caller");
+        var url = $"/api/prompt-manifests/{manifest.Revision}/resolved";
+
+        var beforeTamper = await client.GetAsync(url);
+        Assert.Equal(HttpStatusCode.OK, beforeTamper.StatusCode);
+
         await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
         {
             await connection.ExecuteAsync(
                 "UPDATE prompt_manifest_revision SET manifest_canonical=@canonical"
                 + " WHERE tenant_id=@tenant AND revision=@revision",
-                new { tenant, revision = manifest.Revision, canonical = Canonical(("guard", 999)) });
+                new
+                {
+                    tenant,
+                    revision = manifest.Revision,
+                    canonical = Canonical("TAMPERED-TOOL-HASH", ("guard", 1)),
+                });
         }
 
-        using var factory = new DapperPromptArtifactFactory();
-        var client = factory.CreateInternalClient().WithTenant(tenant).WithRole("USER").WithUser("caller");
-        var response = await client.GetAsync($"/api/prompt-manifests/{manifest.Revision}/resolved");
+        var response = await client.GetAsync(url);
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
     }
 
     /// <summary>真 Dapper 版 <see cref="IPromptArtifactRepository"/>(其餘依賴仍走 TestWebAppFactory 的 fake),
     /// 讓竄改測試能連真的 Postgres 直接下 SQL 破壞資料,再打真正的 HTTP 路由驗證 fail-closed。</summary>
-    private sealed class DapperPromptArtifactFactory : TestWebAppFactory
+    private sealed class DapperPromptArtifactFactory(NpgsqlDataSource dataSource)
+        : PostgresTestWebAppFactory(dataSource)
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -239,10 +257,13 @@ public sealed class PromptArtifactsPostgresTests(PostgresFixture fixture) : IAsy
     }
 
     private static string Canonical(params (string Kind, int Revision)[] components)
+        => Canonical("tool-hash", components);
+
+    private static string Canonical(string toolCatalogHash, params (string Kind, int Revision)[] components)
         => PromptManifestCanonicalizer.Canonicalize(
             PromptArtifactContract.SchemaVersion,
             components.ToDictionary(c => c.Kind, c => c.Revision),
-            "tool-hash",
+            toolCatalogHash,
             "skill-hash");
 
     private async Task CleanupAsync()

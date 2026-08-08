@@ -18,55 +18,89 @@ namespace Platform.Web.Tests;
 /// </summary>
 public class TestWebAppFactory : WebApplicationFactory<Program>
 {
-    private readonly bool _enableRateLimiting;
+    /// <summary>
+    /// 每個測試共用的固定設定,加上所有 feature flag 的 fail-closed 預設值;呼叫端的 settings bag 逐鍵覆寫。
+    /// 這裡是「應用程式會讀哪些設定鍵」的唯一清單:新增旗標只在這裡多一行,建構子不再跟著變寬。
+    /// </summary>
+    private static readonly Dictionary<string, string?> DefaultSettings = new(StringComparer.Ordinal)
+    {
+        ["INTERNAL_API_TOKEN"] = "platform-test-internal-token",
+        ["JWT_ISSUER"] = TestTokens.Issuer,
+        ["JWT_AUDIENCE"] = TestTokens.Audience,
+        ["JWT_PUBLIC_KEY_RING_JSON"] = TestTokens.PublicKeyRingJson,
+        ["RABBITMQ_URL"] = "amqp://platform-test-user:platform-test-password@rabbit.test:5672/test",
+        ["TRUSTED_PROXY_CIDR"] = "",
+        // Feature flag(D1 起):預設關閉(fail-closed);需要走該端點家族的測試以 settings bag 開啟。
+        ["AGENT_BUILDER_ENABLED"] = "false",
+        ["AGENT_TEST_RUN_ENABLED"] = "false",
+        ["WORKFLOW_DESIGNER_ENABLED"] = "false",
+        ["MULTI_AGENT_DISPATCH_ENABLED"] = "false",
+        ["CONTEXT_ENRICHMENT_ENABLED"] = "false",
+        ["AGENT_WRITE_TOOLS_ENABLED"] = "false",
+        // D6 chat canary:旗標與逗號分隔的伺服器端租戶白名單是兩個獨立條件(兩者皆通過才進 canary),
+        // 故兩個鍵分開,允許測「已啟用但租戶不在白名單」這一格。
+        ["AGENT_CHAT_ENABLED"] = "false",
+        ["AGENT_CHAT_TENANT_ALLOWLIST"] = "",
+    };
+
+    private readonly Dictionary<string, string?> _settings;
+    private readonly string _environment;
     private readonly bool _removeSessionIsolationProvider;
-    private readonly bool _useDevelopmentEnvironment;
-    private readonly bool _agentBuilderEnabled;
-    private readonly bool _agentTestRunEnabled;
-    private readonly bool _workflowDesignerEnabled;
-    private readonly bool _multiAgentDispatchEnabled;
-    private readonly bool _contextEnrichmentEnabled;
-    private readonly bool _agentWriteToolsEnabled;
-    private readonly bool _agentChatEnabled;
-    private readonly string _agentChatTenantAllowlist = string.Empty;
     private readonly IMem0Client? _mem0Override;
-    private readonly string _trustedProxyCidr = string.Empty;
     private readonly IPAddress? _remoteIpAddress;
     private readonly AuthRateLimiter? _authRateLimiterOverride;
     private readonly IAuthService? _authServiceOverride;
 
     public TestWebAppFactory()
+        : this(settings: null)
     {
     }
 
+    /// <param name="settings">
+    /// 覆寫 <see cref="DefaultSettings"/> 的設定鍵值(旗標、白名單、CIDR…);鍵必須是既有的設定鍵,
+    /// 打錯直接拋例外——否則「旗標沒開卻通過」會變成靜默的假綠燈。
+    /// </param>
     internal TestWebAppFactory(
-        bool enableRateLimiting = false, bool removeSessionIsolationProvider = false,
-        bool useDevelopmentEnvironment = false, bool agentBuilderEnabled = false,
-        bool agentTestRunEnabled = false, bool workflowDesignerEnabled = false,
-        bool multiAgentDispatchEnabled = false, bool contextEnrichmentEnabled = false,
-        bool agentWriteToolsEnabled = false,
-        bool agentChatEnabled = false, string agentChatTenantAllowlist = "",
+        Dictionary<string, string?>? settings = null,
+        string environment = "Testing",
+        bool removeSessionIsolationProvider = false,
         IMem0Client? mem0Override = null,
-        string trustedProxyCidr = "", IPAddress? remoteIpAddress = null,
+        IPAddress? remoteIpAddress = null,
         AuthRateLimiter? authRateLimiterOverride = null,
         IAuthService? authServiceOverride = null)
     {
-        _enableRateLimiting = enableRateLimiting;
+        _settings = new Dictionary<string, string?>(DefaultSettings, StringComparer.Ordinal);
+        if (settings is not null)
+        {
+            foreach (var (key, value) in settings)
+            {
+                if (!_settings.ContainsKey(key))
+                {
+                    throw new ArgumentException($"未知的設定鍵:{key}(請先加進 DefaultSettings)", nameof(settings));
+                }
+
+                _settings[key] = value;
+            }
+        }
+
+        _environment = environment;
         _removeSessionIsolationProvider = removeSessionIsolationProvider;
-        _useDevelopmentEnvironment = useDevelopmentEnvironment;
-        _agentBuilderEnabled = agentBuilderEnabled;
-        _agentTestRunEnabled = agentTestRunEnabled;
-        _workflowDesignerEnabled = workflowDesignerEnabled;
-        _multiAgentDispatchEnabled = multiAgentDispatchEnabled;
-        _contextEnrichmentEnabled = contextEnrichmentEnabled;
-        _agentWriteToolsEnabled = agentWriteToolsEnabled;
-        _agentChatEnabled = agentChatEnabled;
-        _agentChatTenantAllowlist = agentChatTenantAllowlist;
         _mem0Override = mem0Override;
-        _trustedProxyCidr = trustedProxyCidr;
         _remoteIpAddress = remoteIpAddress;
         _authRateLimiterOverride = authRateLimiterOverride;
         _authServiceOverride = authServiceOverride;
+    }
+
+    /// <summary>只需要打開旗標的呼叫端捷徑;旗標名沿用 <see cref="DefaultSettings"/> 的鍵。</summary>
+    internal static TestWebAppFactory WithFlags(params string[] enabledFlags)
+    {
+        var settings = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var flag in enabledFlags)
+        {
+            settings[flag] = "true";
+        }
+
+        return new TestWebAppFactory(settings);
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -74,26 +108,12 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         // P1 審查建議的釘子:AddAIAgent 的 hosted agent 若誤宣告 Scoped,Development 環境的
         // ValidateScopes=true 會在啟動期就炸——用真正的 "Development" 環境跑一次冒煙測試釘住
         // 「這個崩潰不會再發生」(見 DevelopmentEnvironmentSmokeTests)。
-        builder.UseEnvironment(_useDevelopmentEnvironment
-            ? "Development"
-            : _enableRateLimiting ? "RateLimitingTesting" : "Testing");
-        builder.UseSetting("INTERNAL_API_TOKEN", "platform-test-internal-token");
-        builder.UseSetting("JWT_ISSUER", TestTokens.Issuer);
-        builder.UseSetting("JWT_AUDIENCE", TestTokens.Audience);
-        builder.UseSetting("JWT_PUBLIC_KEY_RING_JSON", TestTokens.PublicKeyRingJson);
-        builder.UseSetting("RABBITMQ_URL", "amqp://platform-test-user:platform-test-password@rabbit.test:5672/test");
-        builder.UseSetting("TRUSTED_PROXY_CIDR", _trustedProxyCidr);
-        // Agent Builder feature flag(D1):預設關閉(fail-closed);需要走 /api/agents* 代理的測試以此開啟。
-        builder.UseSetting("AGENT_BUILDER_ENABLED", _agentBuilderEnabled ? "true" : "false");
-        builder.UseSetting("AGENT_TEST_RUN_ENABLED", _agentTestRunEnabled ? "true" : "false");
-        builder.UseSetting("WORKFLOW_DESIGNER_ENABLED", _workflowDesignerEnabled ? "true" : "false");
-        builder.UseSetting("MULTI_AGENT_DISPATCH_ENABLED", _multiAgentDispatchEnabled ? "true" : "false");
-        builder.UseSetting("CONTEXT_ENRICHMENT_ENABLED", _contextEnrichmentEnabled ? "true" : "false");
-        builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", _agentWriteToolsEnabled ? "true" : "false");
-        // D6 chat canary:旗標與逗號分隔的伺服器端租戶白名單是兩個獨立條件(兩者皆通過才進 canary),
-        // 故兩個旋鈕分開,允許測「已啟用但租戶不在白名單」這一格。
-        builder.UseSetting("AGENT_CHAT_ENABLED", _agentChatEnabled ? "true" : "false");
-        builder.UseSetting("AGENT_CHAT_TENANT_ALLOWLIST", _agentChatTenantAllowlist);
+        builder.UseEnvironment(_environment);
+        foreach (var (key, value) in _settings)
+        {
+            builder.UseSetting(key, value);
+        }
+
         builder.ConfigureTestServices(services =>
         {
             if (_remoteIpAddress is not null)

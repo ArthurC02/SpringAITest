@@ -47,7 +47,7 @@ export default function AnalysisView() {
             </div>
           </div>
 
-          <h3 style={{ marginTop: 24 }}>最近文件</h3>
+          <h3 className="view__subhead">最近文件</h3>
           {summary.latest_titles.length === 0 ? (
             <p className="muted">尚無文件。</p>
           ) : (

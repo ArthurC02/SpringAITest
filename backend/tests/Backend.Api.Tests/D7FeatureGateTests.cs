@@ -43,6 +43,8 @@ public sealed class D7FeatureGateTests : IClassFixture<D7FeatureGateTests.Disabl
         var response = await _factory.CreateClient().SendAsync(request);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        // 決策表的另一半:404 的 body 也是契約(呼叫端靠固定訊息區分「功能沒開」與「資源不存在」)。
+        Assert.Equal("Feature is unavailable", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
     }
 
     public sealed class DisabledFactory : WebApplicationFactory<Program>

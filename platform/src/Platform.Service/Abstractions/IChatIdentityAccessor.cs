@@ -11,10 +11,13 @@ namespace Platform.Service.Abstractions;
 /// </summary>
 public interface IChatIdentityAccessor
 {
-    Guid? RequestedOrchestratorId => null;
-    void SetRequestedOrchestratorId(Guid? orchestratorId) { }
-    string? LogicalAttemptId => null;
-    ChatTurnMetadata? TurnMetadata { get => null; set { } }
+    // 這五個成員刻意不給 default interface 實作:全倉只有兩個實作(Web 的 HttpChatIdentityAccessor
+    // 與測試 fake),兩邊都已顯式實作,預設值無人取用;留著只會讓未來第三個實作漏掉其中一個時
+    // (最痛的是 PromptManifestCache —— 靜默失去 P1 的「一輪一次解析」保證)靜默通過編譯。
+    Guid? RequestedOrchestratorId { get; }
+    void SetRequestedOrchestratorId(Guid? orchestratorId);
+    string? LogicalAttemptId { get; }
+    ChatTurnMetadata? TurnMetadata { get; set; }
     UserContext? CurrentUser { get; }
 
     /// <summary>沿用 ChatService.cs 既有的防 IDOR 語意(見 <see cref="ChatMemoryKeyDerivation"/>),不放寬。</summary>
@@ -46,8 +49,7 @@ public interface IChatIdentityAccessor
     /// (護欄/persona/mem0)各自開新 scope 呼叫 <c>ResolveAsync</c>,若各自獨立解析,兩次讀取之間
     /// tenant config 若剛好變動,同一輪就可能一半用 manifest、一半用 constants,或混用不同 revision。
     /// 第一個消費點解析後把結果(含「解析失敗、已改用 constants」這個結果本身)寫回這裡,第二個消費點
-    /// 直接複用,不再重讀 config/backend。null = 本輪尚未解析過;預設無實作(回傳 null 且 set 為 no-op)
-    /// 讓既有測試 fake 不必修改——沒有提供真正儲存的呼叫端等同於「不快取,逐次全新解析」,行為與改動前相同。
+    /// 直接複用,不再重讀 config/backend。null = 本輪尚未解析過(每輪由 SetRequestKeys 重置)。
     /// </summary>
-    Platform.Service.PromptManifestResolutionCache? PromptManifestCache { get => null; set { } }
+    Platform.Service.PromptManifestResolutionCache? PromptManifestCache { get; set; }
 }

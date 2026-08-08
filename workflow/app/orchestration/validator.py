@@ -374,6 +374,75 @@ def _validate_topology(
     _validate_stage_order(kind, by_id, forward, state)
 
 
+def _validate_edges(
+    edges_raw: list[Any],
+    nodes: list[dict[str, Any]],
+    ids: set[str],
+    state: _State,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str], int], dict[str, Any]]:
+    """逐條驗證 edge，回 (typed control edges, 每個 input port 的連線數, node → 型別規格)。
+
+    第一個錯誤即 `continue`：同一條 edge 不重複報錯，錯誤碼與產出順序與展開時相同。
+    """
+    control_edges: list[dict[str, Any]] = []
+    edge_ids: set[str] = set()
+    semantic_edges: set[tuple[str, str, str, str]] = set()
+    input_connections: dict[tuple[str, str], int] = defaultdict(int)
+    node_specs = {node["id"]: get(str(node.get("type")), str(node.get("typeVersion"))) for node in nodes}
+    for index, raw in enumerate(edges_raw):
+        path = f"$.definition.edges[{index}]"
+        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not _ID.fullmatch(raw.get("id", "")):
+            state.error(path, "invalid_edge", "Edge needs a stable id and endpoint objects.")
+            continue
+        for key in raw:
+            if key not in {"id", "source", "target"}:
+                state.error(f"{path}.{key}", "unknown_edge_field", "Field is not part of the versioned edge schema.", edge_id=raw["id"])
+        edge_id = raw["id"]
+        if edge_id in edge_ids:
+            state.error(f"{path}.id", "duplicate_edge_id", "Edge id is duplicated.", edge_id=edge_id)
+            continue
+        edge_ids.add(edge_id)
+        source, target = raw.get("source"), raw.get("target")
+        if not isinstance(source, dict) or not isinstance(target, dict):
+            state.error(path, "invalid_edge_endpoint", "Edge source and target must be objects.", edge_id=edge_id)
+            continue
+        if set(source) != {"nodeId", "port"} or set(target) != {"nodeId", "port"}:
+            state.error(path, "invalid_edge_endpoint", "Edge endpoints must contain only nodeId and port.", edge_id=edge_id)
+            continue
+        source_id, source_port = source.get("nodeId"), source.get("port")
+        target_id, target_port = target.get("nodeId"), target.get("port")
+        if not all(isinstance(value, str) for value in (source_id, source_port, target_id, target_port)):
+            state.error(path, "invalid_edge_endpoint", "Edge nodeId and port values must be strings.", edge_id=edge_id)
+            continue
+        if source_id not in ids or target_id not in ids:
+            state.error(path, "dangling_edge", "Edge references an unknown node.", edge_id=edge_id)
+            continue
+        source_spec, target_spec = node_specs[source_id], node_specs[target_id]
+        output = next((port for port in (source_spec.outputs if source_spec else ()) if port.id == source_port), None)
+        input_port = next((port for port in (target_spec.inputs if target_spec else ()) if port.id == target_port), None)
+        if output is None or input_port is None:
+            state.error(path, "unknown_port", "Edge must connect a declared output port to a declared input port.", edge_id=edge_id)
+            continue
+        if output.data_type != input_port.data_type:
+            state.error(path, "incompatible_port_type", "Source and target port types are incompatible.", edge_id=edge_id)
+            continue
+        semantic = (source_id, source_port, target_id, target_port)
+        if semantic in semantic_edges:
+            state.error(path, "duplicate_semantic_edge", "A semantic edge may appear only once even when edge ids differ.", edge_id=edge_id)
+            continue
+        semantic_edges.add(semantic)
+        # Topology is checked over every typed control edge, including one
+        # that separately violates input cardinality.  This keeps malformed
+        # graphs from hiding a cycle or fan-out behind a second error.
+        if output.data_type == "Control":
+            control_edges.append(raw)
+        input_key = (target_id, target_port)
+        input_connections[input_key] += 1
+        if input_port.max_connections is not None and input_connections[input_key] > input_port.max_connections:
+            state.error(path, "input_port_cardinality_exceeded", f"Input port '{target_port}' accepts at most {input_port.max_connections} connection(s).", edge_id=edge_id)
+    return control_edges, input_connections, node_specs
+
+
 def validate(definition: Any, ui_metadata: Any = None) -> ValidationResult:
     state = _State()
     if not isinstance(definition, dict):
@@ -444,65 +513,9 @@ def validate(definition: Any, ui_metadata: Any = None) -> ValidationResult:
                 ids.add(node_id)
                 nodes.append(node)
 
-    valid_edges: list[dict[str, Any]] = []
-    control_edges: list[dict[str, Any]] = []
-    edge_ids: set[str] = set()
-    semantic_edges: set[tuple[str, str, str, str]] = set()
-    input_connections: dict[tuple[str, str], int] = defaultdict(int)
-    node_specs = {node["id"]: get(str(node.get("type")), str(node.get("typeVersion"))) for node in nodes}
-    for index, raw in enumerate(edges_raw):
-        path = f"$.definition.edges[{index}]"
-        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not _ID.fullmatch(raw.get("id", "")):
-            state.error(path, "invalid_edge", "Edge needs a stable id and endpoint objects.")
-            continue
-        for key in raw:
-            if key not in {"id", "source", "target"}:
-                state.error(f"{path}.{key}", "unknown_edge_field", "Field is not part of the versioned edge schema.", edge_id=raw["id"])
-        edge_id = raw["id"]
-        if edge_id in edge_ids:
-            state.error(f"{path}.id", "duplicate_edge_id", "Edge id is duplicated.", edge_id=edge_id)
-            continue
-        edge_ids.add(edge_id)
-        source, target = raw.get("source"), raw.get("target")
-        if not isinstance(source, dict) or not isinstance(target, dict):
-            state.error(path, "invalid_edge_endpoint", "Edge source and target must be objects.", edge_id=edge_id)
-            continue
-        if set(source) != {"nodeId", "port"} or set(target) != {"nodeId", "port"}:
-            state.error(path, "invalid_edge_endpoint", "Edge endpoints must contain only nodeId and port.", edge_id=edge_id)
-            continue
-        source_id, source_port = source.get("nodeId"), source.get("port")
-        target_id, target_port = target.get("nodeId"), target.get("port")
-        if not all(isinstance(value, str) for value in (source_id, source_port, target_id, target_port)):
-            state.error(path, "invalid_edge_endpoint", "Edge nodeId and port values must be strings.", edge_id=edge_id)
-            continue
-        if source_id not in ids or target_id not in ids:
-            state.error(path, "dangling_edge", "Edge references an unknown node.", edge_id=edge_id)
-            continue
-        source_spec, target_spec = node_specs[source_id], node_specs[target_id]
-        output = next((port for port in (source_spec.outputs if source_spec else ()) if port.id == source_port), None)
-        input_port = next((port for port in (target_spec.inputs if target_spec else ()) if port.id == target_port), None)
-        if output is None or input_port is None:
-            state.error(path, "unknown_port", "Edge must connect a declared output port to a declared input port.", edge_id=edge_id)
-            continue
-        if output.data_type != input_port.data_type:
-            state.error(path, "incompatible_port_type", "Source and target port types are incompatible.", edge_id=edge_id)
-            continue
-        semantic = (source_id, source_port, target_id, target_port)
-        if semantic in semantic_edges:
-            state.error(path, "duplicate_semantic_edge", "A semantic edge may appear only once even when edge ids differ.", edge_id=edge_id)
-            continue
-        semantic_edges.add(semantic)
-        # Topology is checked over every typed control edge, including one
-        # that separately violates input cardinality.  This keeps malformed
-        # graphs from hiding a cycle or fan-out behind a second error.
-        if output.data_type == "Control":
-            control_edges.append(raw)
-        input_key = (target_id, target_port)
-        input_connections[input_key] += 1
-        if input_port.max_connections is not None and input_connections[input_key] > input_port.max_connections:
-            state.error(path, "input_port_cardinality_exceeded", f"Input port '{target_port}' accepts at most {input_port.max_connections} connection(s).", edge_id=edge_id)
-            continue
-        valid_edges.append(raw)
+    control_edges, input_connections, node_specs = _validate_edges(
+        edges_raw, nodes, ids, state
+    )
 
     if nodes:
         _validate_topology(nodes, control_edges, kind, state)

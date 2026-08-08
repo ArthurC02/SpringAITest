@@ -974,8 +974,11 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
     {
         const string answer = "Root Orchestrator 的副駕答案";
         var runtime = new StubAgentChatRuntime { Reply = answer };
-        await using var factory = new TestWebAppFactory(
-            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        await using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_CHAT_ENABLED"] = "true",
+            ["AGENT_CHAT_TENANT_ALLOWLIST"] = "demo-a",
+        });
         var client = factory
             .WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
             {

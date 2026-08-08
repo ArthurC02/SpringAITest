@@ -187,6 +187,8 @@ async def test_load_skill_preserves_golden_wire_for_both_kinds_and_scope_switch(
             content='{"answer":"ok"}',
             tool_calls_bound=2,
             steps_bound=4,
+            steps_consumed=3,
+            tool_rounds_consumed=2,
         )
 
     monkeypatch.setattr(runtime_graph, "invoke_pinned_flow", invoke_flow)

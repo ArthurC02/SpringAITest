@@ -10,7 +10,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_FlagOff_Anonymous_Returns200_FalseBool()
     {
-        using var factory = new TestWebAppFactory(agentBuilderEnabled: false);
+        using var factory = new TestWebAppFactory();
 
         var resp = await factory.CreateClient().GetAsync("/api/features");
 
@@ -29,7 +29,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_FlagOn_Anonymous_Returns200_TrueBool()
     {
-        using var factory = new TestWebAppFactory(agentBuilderEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("AGENT_BUILDER_ENABLED");
 
         var resp = await factory.CreateClient().GetAsync("/api/features");
 
@@ -44,9 +44,8 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_TestRunRequiresBothFlags()
     {
-        using var factory = new TestWebAppFactory(
-            agentBuilderEnabled: true,
-            agentTestRunEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags(
+            "AGENT_BUILDER_ENABLED", "AGENT_TEST_RUN_ENABLED");
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -59,7 +58,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_TestRun_TrueWithoutBuilderEnabled_StaysFalse()
     {
-        using var factory = new TestWebAppFactory(agentTestRunEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("AGENT_TEST_RUN_ENABLED");
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -72,7 +71,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_MultiAgentDispatch_TrueWithoutWorkflowDesigner_StaysTrue()
     {
-        using var factory = new TestWebAppFactory(multiAgentDispatchEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("MULTI_AGENT_DISPATCH_ENABLED");
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -83,7 +82,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_WorkflowDesignerFlagIsIndependent()
     {
-        using var factory = new TestWebAppFactory(workflowDesignerEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("WORKFLOW_DESIGNER_ENABLED");
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -96,7 +95,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_ContextEnrichmentRequiresDispatch()
     {
-        using var factory = new TestWebAppFactory(contextEnrichmentEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("CONTEXT_ENRICHMENT_ENABLED");
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -110,7 +109,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_ContextEnrichment_DispatchOnWithoutOwnFlag_StaysFalse()
     {
-        using var factory = new TestWebAppFactory(multiAgentDispatchEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("MULTI_AGENT_DISPATCH_ENABLED");
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -121,9 +120,8 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_ContextEnrichmentEnabledWithDispatch_IsExposed()
     {
-        using var factory = new TestWebAppFactory(
-            multiAgentDispatchEnabled: true,
-            contextEnrichmentEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags(
+            "MULTI_AGENT_DISPATCH_ENABLED", "CONTEXT_ENRICHMENT_ENABLED");
 
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
 
@@ -134,9 +132,11 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_AgentChatFlagIsIndependent()
     {
-        using var factory = new TestWebAppFactory(
-            agentChatEnabled: true,
-            agentChatTenantAllowlist: "tenant-x");
+        using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_CHAT_ENABLED"] = "true",
+            ["AGENT_CHAT_TENANT_ALLOWLIST"] = "tenant-x",
+        });
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
         Assert.True(body["agentChatEnabled"]!.GetValue<bool>());
         Assert.False(body["workflowDesignerEnabled"]!.GetValue<bool>());
@@ -145,7 +145,7 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_WriteToolsFlagIsIndependent()
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("AGENT_WRITE_TOOLS_ENABLED");
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
         Assert.True(body["agentWriteToolsEnabled"]!.GetValue<bool>());
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
@@ -157,15 +157,17 @@ public sealed class FeaturesApiTests
     [Fact]
     public async Task Features_AllFlagsOn_Anonymous_Returns200_AllTrue()
     {
-        using var factory = new TestWebAppFactory(
-            agentBuilderEnabled: true,
-            agentTestRunEnabled: true,
-            workflowDesignerEnabled: true,
-            multiAgentDispatchEnabled: true,
-            contextEnrichmentEnabled: true,
-            agentWriteToolsEnabled: true,
-            agentChatEnabled: true,
-            agentChatTenantAllowlist: "tenant-x");
+        using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_BUILDER_ENABLED"] = "true",
+            ["AGENT_TEST_RUN_ENABLED"] = "true",
+            ["WORKFLOW_DESIGNER_ENABLED"] = "true",
+            ["MULTI_AGENT_DISPATCH_ENABLED"] = "true",
+            ["CONTEXT_ENRICHMENT_ENABLED"] = "true",
+            ["AGENT_WRITE_TOOLS_ENABLED"] = "true",
+            ["AGENT_CHAT_ENABLED"] = "true",
+            ["AGENT_CHAT_TENANT_ALLOWLIST"] = "tenant-x",
+        });
 
         var resp = await factory.CreateClient().GetAsync("/api/features");
 

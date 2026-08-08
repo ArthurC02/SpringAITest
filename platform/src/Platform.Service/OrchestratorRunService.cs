@@ -88,26 +88,21 @@ public sealed class OrchestratorRunService(
             ? response
             : response with { Body = RunCommandRedaction.StripCommandId(response.Body, FailurePrefix) };
 
-    private async Task<AgentProxyResponse> Send(
+    private Task<AgentProxyResponse> Send(
         HttpMethod method,
         string path,
         UserContext ctx,
         object? body,
         string? key,
         CancellationToken ct)
-    {
-        var request = backend.BuildRequest(method, path, ctx, body);
-        if (!string.IsNullOrWhiteSpace(key))
-        {
-            request.Headers.TryAddWithoutValidation("Idempotency-Key", key);
-        }
-
-        var (status, responseBody, etag) = await backend.SendForProxyAsync(
-            request,
+        => backend.SendForAgentProxyAsync(
+            method,
+            path,
+            ctx,
+            body,
             FailurePrefix + "Backend ",
+            string.IsNullOrWhiteSpace(key) ? null : ("Idempotency-Key", key),
             ct);
-        return new AgentProxyResponse(status, responseBody, etag);
-    }
 
     private static (Guid RunId, Guid CommandId) RequiredDispatchIds(string body)
     {

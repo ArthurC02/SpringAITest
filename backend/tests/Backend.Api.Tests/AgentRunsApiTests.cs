@@ -251,8 +251,8 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
     }
 
-    // Idempotency-Key 是必填(AgentRunController:236-246):完全不送標頭、空值、只有空白同屬
-    // 「沒有冪等鍵」等價類 —— 少了這條,漏送標頭會被誤讀成「每次都是一個新 run」而重複派工。
+    // Idempotency-Key 是必填(共用 IdentityHeaders.RequireIdempotencyKey):完全不送標頭、空值、
+    // 只有空白同屬「沒有冪等鍵」等價類 —— 少了這條,漏送標頭會被誤讀成「每次都是一個新 run」而重複派工。
     [Theory]
     [InlineData(null)]
     [InlineData("")]
@@ -275,7 +275,30 @@ public sealed class AgentRunsApiTests : IClassFixture<TestWebAppFactory>
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal(
-            "Idempotency-Key 必須為 1 到 128 個可見字元",
+            "Idempotency-Key is required",
+            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
+    // 重複的 Idempotency-Key 標頭:舊的 .ToString() 會把多值拼成 "a, b" 當成一把**新** key 放行,
+    // 於是同一次重試被記成新 run,冪等去重靜默失效。共用 helper 要求「恰好一個標頭」,多值一律 400。
+    [Fact]
+    public async Task Start_RejectsMultipleIdempotencyKeyHeaders()
+    {
+        var client = Admin();
+        var agentId = await PublishedAgentAsync(client, "idem-multi");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/agents/{agentId}/runs")
+        {
+            Content = JsonContent.Create(new { message = "請整理重點" }),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "start-a");
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "start-b");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "Idempotency-Key is required",
             (await response.ReadJsonAsync())["message"]!.GetValue<string>());
     }
 

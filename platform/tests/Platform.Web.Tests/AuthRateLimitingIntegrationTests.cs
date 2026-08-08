@@ -26,7 +26,7 @@ public sealed class AuthRateLimitingIntegrationTests
     [Fact]
     public async Task Login_NormalizesAccount_AndReturnsStandard429ApiErrorAtBoundary()
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         using var client = factory.CreateClient();
         var spellings = new[] { "RateUser", " rateuser", "RATEUSER ", "RateUser", " rateUSER " };
 
@@ -47,7 +47,7 @@ public sealed class AuthRateLimitingIntegrationTests
     [Fact]
     public async Task Login_InvalidModelStillConsumesRateLimitBeforeValidationShortCircuit()
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         using var client = factory.CreateClient();
 
         for (var i = 0; i < AuthRateLimiter.LoginAccountPermitLimit; i++)
@@ -63,7 +63,7 @@ public sealed class AuthRateLimitingIntegrationTests
     [Fact]
     public async Task Register_PartitionsByNormalizedTenantAndUsername()
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         using var client = factory.CreateClient();
 
         for (var i = 0; i < AuthRateLimiter.RegisterAccountPermitLimit; i++)
@@ -83,8 +83,8 @@ public sealed class AuthRateLimitingIntegrationTests
     public async Task TrustedProxy_UsesForwardedClientIpAsPartition()
     {
         await using var factory = new TestWebAppFactory(
-            enableRateLimiting: true,
-            trustedProxyCidr: "10.253.254.0/28",
+            new() { ["TRUSTED_PROXY_CIDR"] = "10.253.254.0/28" },
+            environment: "RateLimitingTesting",
             remoteIpAddress: IPAddress.Parse("10.253.254.2"));
         using var client = factory.CreateClient();
 
@@ -105,8 +105,8 @@ public sealed class AuthRateLimitingIntegrationTests
     public async Task UntrustedPeer_CannotSplitBudgetWithSpoofedForwardedIps()
     {
         await using var factory = new TestWebAppFactory(
-            enableRateLimiting: true,
-            trustedProxyCidr: "10.253.254.0/28",
+            new() { ["TRUSTED_PROXY_CIDR"] = "10.253.254.0/28" },
+            environment: "RateLimitingTesting",
             remoteIpAddress: IPAddress.Parse("203.0.113.20"));
         using var client = factory.CreateClient();
 
@@ -125,7 +125,7 @@ public sealed class AuthRateLimitingIntegrationTests
     [InlineData("/api/auth/register/")]
     public async Task TrailingSlashAlias_UsesSameIpBudgetAndRejectsNPlusOne(string aliasPath)
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         using var client = factory.CreateClient();
 
         for (var i = 0; i < AuthRateLimiter.ClientIpPermitLimit; i++)
@@ -147,7 +147,7 @@ public sealed class AuthRateLimitingIntegrationTests
     {
         var auth = new RecordingAuthService();
         await using var factory = new TestWebAppFactory(
-            enableRateLimiting: true,
+            environment: "RateLimitingTesting",
             authServiceOverride: auth);
         using var client = factory.CreateClient();
         var oversizedJson = "{\"username\":\"" + new string('u', AuthRequestBodyLimitMiddleware.MaximumBodyBytes)
@@ -217,7 +217,7 @@ public sealed class AuthRateLimitingIntegrationTests
         var hasher = new RecordingHasher();
         var limiter = new AuthRateLimiter(enabled: true, hasher: hasher);
         await using var factory = new TestWebAppFactory(
-            enableRateLimiting: true,
+            environment: "RateLimitingTesting",
             authRateLimiterOverride: limiter);
         using var client = factory.CreateClient();
 

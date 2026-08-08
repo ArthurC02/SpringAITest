@@ -38,7 +38,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       proxy: {
-        // 開發時把 /api 轉發到 Spring 後端（platform/，預設 :8080）。
+        // 開發時把 /api 轉發到 ASP.NET Core platform（platform/，預設 :8080）。
         // Evidence may safely override this to its loopback-only isolated platform.
         // 副駕的 AG-UI(/api/copilot/agui,SSE)同樣走這條。
         // 瀏覽器只跟 Vite 同源溝通，因此完全不需要在後端開 CORS。

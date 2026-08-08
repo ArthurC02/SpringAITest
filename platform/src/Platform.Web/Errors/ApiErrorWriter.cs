@@ -21,11 +21,15 @@ public static class ApiErrorWriter
         IReadOnlyDictionary<string, string>? fieldErrors = null)
     {
         // 契約鏡像:與 backend/src/Backend.Api/Common/ 同名檔為刻意重複(跨服務各自部署,無法共用 assembly)。修改 422/ApiError 格式化邏輯時務必同步另一邊。
+        var correlationId = response.HttpContext.TraceIdentifier;
         var error = new ApiError(
             DateTime.UtcNow, status, ApiErrorCodes.ForStatus(status), message,
-            response.HttpContext.TraceIdentifier,
+            correlationId,
             fieldErrors is null ? new Dictionary<string, string>() : new Dictionary<string, string>(fieldErrors));
         response.StatusCode = status;
+        // 錯誤回應同時把 correlationId 放進 header:curl 使用者不解析 body 也拿得到追蹤編號
+        // (同一串會出現在 backend/workflow 的日誌裡)。成功回應刻意不加(最小變更)。
+        response.Headers[Infrastructure.CorrelationIdHeader.Name] = correlationId;
         // 401/403 等錯誤明確標記 charset=utf-8,確保中文訊息被正確解讀。
         await response.WriteAsJsonAsync(error, InternalRequest.Web, contentType: "application/json; charset=utf-8", ct);
     }

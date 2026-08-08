@@ -183,7 +183,7 @@ export function newLeaf(
       operator?.value_type && !['none', 'same'].includes(operator.value_type)
         ? operator.value_type
         : (fact?.type ?? 'string'),
-      fact?.enumValues ?? fact?.enum_values ?? fact?.values,
+      metadataValues(fact ?? {}),
     )
   }
   return leaf
@@ -222,10 +222,7 @@ export function createRuleAction(catalog: RuleActionCatalogEntry): RuleAction {
   const result: RuleAction = { action: catalog.name }
   for (const parameter of actionParameters(catalog)) {
     if (!parameter.required) continue
-    result[parameter.name] = defaultTypedValue(
-      parameter.type,
-      parameter.enumValues ?? parameter.enum_values ?? parameter.values,
-    )
+    result[parameter.name] = defaultTypedValue(parameter.type, metadataValues(parameter))
   }
   return result
 }

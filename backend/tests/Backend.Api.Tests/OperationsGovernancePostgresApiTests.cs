@@ -41,7 +41,7 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
         var otherTenant = tenant + "-other";
         var run = await CreateRunAsync(tenant);
         var roots = await SeedRootMetricsAsync(tenant, run.Run!.Id);
-        using var factory = new DapperOperationsFactory();
+        using var factory = new DapperOperationsFactory(fixture.DataSource!);
         using var admin = Client(factory, tenant, "operator", manage: true);
 
         var failed = await admin.PostAsJsonAsync(
@@ -220,7 +220,7 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
             Assert.Equal(PostgresErrorCodes.NotNullViolation, violation.SqlState);
         }
 
-        using var factory = new DapperOperationsFactory();
+        using var factory = new DapperOperationsFactory(fixture.DataSource!);
         using var admin = Client(factory, tenant, "operator", manage: true);
         var comparison = await (await admin.GetAsync(
             "/api/admin/operations/version-comparison")).ReadJsonAsync();
@@ -247,7 +247,7 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
                 new { id = run.Run!.Id }));
         }
 
-        using var factory = new DapperOperationsFactory();
+        using var factory = new DapperOperationsFactory(fixture.DataSource!);
         using var admin = Client(factory, tenant, "operator", manage: true);
         var metrics = await (await admin.GetAsync("/api/admin/operations/metrics")).ReadJsonAsync();
 
@@ -268,7 +268,7 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
         fixture.SkipIfUnavailable();
 
         var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
-        using var factory = new DapperOperationsFactory();
+        using var factory = new DapperOperationsFactory(fixture.DataSource!);
         using var denied = Client(factory, tenant, "ordinary", manage: false);
 
         var read = await denied.GetAsync("/api/admin/operations/metrics");
@@ -428,7 +428,8 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
         return client;
     }
 
-    private sealed class DapperOperationsFactory : TestWebAppFactory
+    private sealed class DapperOperationsFactory(NpgsqlDataSource dataSource)
+        : PostgresTestWebAppFactory(dataSource)
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

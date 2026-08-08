@@ -198,8 +198,7 @@ export default function SkillRunPanel({ name, inputSchema }: Props) {
                 ) : kind === 'list' || kind === 'dict' ? (
                   <textarea
                     id={`run-${key}`}
-                    className="textarea"
-                    style={{ fontFamily: 'var(--mono)' }}
+                    className="textarea textarea--mono"
                     value={typeof values[key] === 'string' ? (values[key] as string) : ''}
                     placeholder={kind === 'list' ? '[]' : '{ }'}
                     onChange={(e) => setField(key, e.target.value)}

@@ -11,7 +11,7 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
     public async Task<IActionResult> Start(Guid orchestratorId, OrchestratorRunStartRequest request, CancellationToken ct)
     {
         Request.RequireCapability("workflow.manage");
-        var result = await runs.CreateAsync(Request.RequireTenant(), Request.RequireUserId(), Request.UserRole()!, Request.UserGroups(), Request.UserCapabilities(), orchestratorId, Conversation(request.ConversationId), Message(request.Message), Key(), ct);
+        var result = await runs.CreateAsync(Request.RequireTenant(), Request.RequireUserId(), Request.RequireUserRole(), Request.UserGroups(), Request.UserCapabilities(), orchestratorId, Conversation(request.ConversationId), Message(request.Message), Key(), ct);
         return Accepted(result);
     }
     [HttpGet("orchestrator-runs/{runId:guid}")]
@@ -95,7 +95,7 @@ public sealed class OrchestratorRunController(IOrchestratorRunRepository runs) :
     // while a 409 would be retried forever. Surface the same fixed messages as a permanent 400.
     private static void Child(OrchestratorChildCreateRequest request)
     { try { OrchestratorTaskEnvelope.ValidateChild(request); } catch (ArgumentException e) { throw new ApiException(400, e.Message); } }
-    private string Key() { var x = Request.Headers["Idempotency-Key"].ToString().Trim(); if (x.Length is < 1 or > 128 || x.Any(char.IsControl)) throw new ApiException(400, "Idempotency-Key is required"); return x; }
+    private string Key() => Request.RequireIdempotencyKey();
     private static string Message(string? x) { x = x?.Trim(); if (string.IsNullOrEmpty(x)) throw new ApiException(400, "message is required"); if (x.Length > 16384) throw new ApiException(413, "message is too large"); return x; }
     private static string Conversation(string? x) { x = x?.Trim(); if (string.IsNullOrEmpty(x) || x.Length > 128 || x.Any(char.IsControl)) throw new ApiException(400, "conversation_id is required"); return x; }
     private static ApiException Missing() => new(404, "Orchestrator run not found");

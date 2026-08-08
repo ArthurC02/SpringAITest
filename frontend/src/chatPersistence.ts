@@ -2,10 +2,10 @@ import { CHAT_MESSAGES_KEY } from './storageKeys'
 import type { Message } from './types'
 
 let activeGeneration = 0
-export const MAX_PERSISTED_CHAT_MESSAGES = 100
+const MAX_PERSISTED_CHAT_MESSAGES = 100
 export const MAX_PERSISTED_CHAT_BYTES = 1024 * 1024
 
-export type ChatPersistenceResult = 'written' | 'stale' | 'quota_failed'
+type ChatPersistenceResult = 'written' | 'stale' | 'quota_failed'
 
 function jsonBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength

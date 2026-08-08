@@ -96,19 +96,38 @@ public static class IdentityHeaders
         Value(request, UserHeader) ?? throw new ApiException(StatusCodes.Status400BadRequest, "X-User-Id is required");
 
     /// <summary>
+    /// 把角色當持久化欄位寫入的端點(D5 <c>caller_role</c> 是 NOT NULL):缺 X-User-Role 直接 400。
+    /// 角色「選填、缺則空字串」的既有端點仍用 <see cref="UserRole"/>,語意不同不要混用。
+    /// </summary>
+    public static string RequireUserRole(this HttpRequest request) =>
+        Value(request, RoleHeader) ?? throw new ApiException(StatusCodes.Status400BadRequest, "X-User-Role is required");
+
+    /// <summary>
+    /// 不透明內部 header 的共用邊界檢查:恰一個值、trim 後 1..128 字元、無控制字元;不符一律 null。
+    /// 「不符時要做什麼」由呼叫端決定(Idempotency-Key → 400;X-Correlation-Id → 當作沒帶)。
+    /// 128 是這類內部 token header 的共用上限,不是各自獨立的數字。
+    ///
+    /// correlation 用途下,這裡只是鏈路上較寬的一段:最終字元集由 workflow 的
+    /// <c>_SAFE_ID = [A-Za-z0-9._:-]{1,128}</c> 白名單決定,通過本檢查但含其他字元的值到 workflow
+    /// 會被丟棄並改生 uuid(追蹤編號因此在該段斷開,不是錯誤)。不在此收緊:本方法同時是
+    /// <see cref="RequireIdempotencyKey"/> 的驗證器,縮字元集會連動改變冪等鍵語意。
+    /// </summary>
+    public static string? SingleBoundedValue(this HttpRequest request, string name)
+    {
+        var values = request.Headers[name];
+        var value = values.Count == 1 ? values[0]?.Trim() : null;
+        return string.IsNullOrWhiteSpace(value) || value.Length > 128 || value.Any(char.IsControl)
+            ? null
+            : value;
+    }
+
+    /// <summary>
     /// Shared idempotent-write header contract (regression-overrides, eval-runs): exactly one
     /// non-blank, control-char-free `Idempotency-Key` header up to 128 chars, or 400.
     /// </summary>
     public static string RequireIdempotencyKey(this HttpRequest request)
-    {
-        var values = request.Headers["Idempotency-Key"];
-        var key = values.Count == 1 ? values[0]?.Trim() : null;
-        if (string.IsNullOrWhiteSpace(key) || key.Length > 128 || key.Any(char.IsControl))
-        {
-            throw new ApiException(StatusCodes.Status400BadRequest, "Idempotency-Key is required");
-        }
-        return key;
-    }
+        => request.SingleBoundedValue("Idempotency-Key")
+           ?? throw new ApiException(StatusCodes.Status400BadRequest, "Idempotency-Key is required");
 
     private static string? Value(HttpRequest request, string name)
     {

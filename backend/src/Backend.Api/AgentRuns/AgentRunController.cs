@@ -13,7 +13,6 @@ namespace Backend.Api.AgentRuns;
 public sealed class AgentRunController : ControllerBase
 {
     private const int MaxMessageLength = 16_384;
-    private const int MaxIdempotencyKeyLength = 128;
     private readonly IAgentRunRepository _runs;
 
     public AgentRunController(IAgentRunRepository runs) => _runs = runs;
@@ -30,7 +29,7 @@ public sealed class AgentRunController : ControllerBase
             Request.UserCapabilities(),
             agentId,
             RequireMessage(request.Message),
-            RequireIdempotencyKey(),
+            Request.RequireIdempotencyKey(),
             ct);
         return AcceptedResult(result);
     }
@@ -76,7 +75,7 @@ public sealed class AgentRunController : ControllerBase
             runId,
             RequireMessage(request.Message),
             checkpointVersion,
-            RequireIdempotencyKey(),
+            Request.RequireIdempotencyKey(),
             ct);
         return AcceptedResult(result);
     }
@@ -96,7 +95,7 @@ public sealed class AgentRunController : ControllerBase
             Request.RequireUserId(),
             runId,
             reason,
-            RequireIdempotencyKey(),
+            Request.RequireIdempotencyKey(),
             ct);
         return AcceptedResult(result);
     }
@@ -232,18 +231,6 @@ public sealed class AgentRunController : ControllerBase
             AgentRunWriteStatus.InvalidState => throw Conflict(result.Message),
             _ => result.Run!,
         };
-
-    private string RequireIdempotencyKey()
-    {
-        var key = Request.Headers["Idempotency-Key"].ToString().Trim();
-        if (key.Length is < 1 or > MaxIdempotencyKeyLength || key.Any(char.IsControl))
-        {
-            throw new ApiException(
-                StatusCodes.Status400BadRequest,
-                $"Idempotency-Key 必須為 1 到 {MaxIdempotencyKeyLength} 個可見字元");
-        }
-        return key;
-    }
 
     private static string RequireMessage(string? message)
     {

@@ -59,7 +59,7 @@ public sealed class OrchestratorRunApiTests
     [InlineData("POST", "/api/admin/orchestrators/" + OrchestratorId + "/runs/")]
     public async Task DispatchFlagOff_HidesOrchestratorRunRoutesBeforeAuthentication(string method,string path)
     {
-        using var factory=new TestWebAppFactory(multiAgentDispatchEnabled:false);
+        using var factory=new TestWebAppFactory();
         var before=FakeOrchestratorRunService.Calls.Count;
 
         var response=await factory.CreateClient().SendAsync(Request(method,path));
@@ -75,7 +75,11 @@ public sealed class OrchestratorRunApiTests
     [Fact]
     public async Task DispatchIsIndependentOfWorkflowDesigner_ButAdminSurfaceStaysGated()
     {
-        using var factory=new TestWebAppFactory(workflowDesignerEnabled:false,multiAgentDispatchEnabled:true);
+        using var factory=new TestWebAppFactory(new()
+        {
+            ["WORKFLOW_DESIGNER_ENABLED"]="false",
+            ["MULTI_AGENT_DISPATCH_ENABLED"]="true",
+        });
         var admin=factory.CreateClient().WithToken(
             factory.IssueToken("owner","ADMIN","tenant-x",new[]{"workflow.manage"}));
 
@@ -138,7 +142,8 @@ public sealed class OrchestratorRunApiTests
 
     // start 路由住在 /api/admin/orchestrators 之下,仍受 designer 這個管理 gate 保護,
     // 所以完整流程的 fixture 兩個旗標都要開(runtime 路由本身已不需要 designer)。
-    private static TestWebAppFactory EnabledFactory()=>new(workflowDesignerEnabled:true,multiAgentDispatchEnabled:true);
+    private static TestWebAppFactory EnabledFactory()
+        =>TestWebAppFactory.WithFlags("WORKFLOW_DESIGNER_ENABLED","MULTI_AGENT_DISPATCH_ENABLED");
     private static HttpRequestMessage Request(string method,string path)=>new(new HttpMethod(method),path)
     { Content=method=="POST"?JsonContent.Create(new { reason="stop" }):null };
 
@@ -149,7 +154,11 @@ public sealed class OrchestratorRunApiTests
         public CapturingBackendHandler Workflow { get; }=new();
 
         public RealServiceFactory()
-            : base(workflowDesignerEnabled:true,multiAgentDispatchEnabled:true)
+            : base(new()
+            {
+                ["WORKFLOW_DESIGNER_ENABLED"]="true",
+                ["MULTI_AGENT_DISPATCH_ENABLED"]="true",
+            })
         {
         }
 

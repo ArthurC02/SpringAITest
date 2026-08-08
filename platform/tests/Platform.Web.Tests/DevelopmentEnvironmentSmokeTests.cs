@@ -14,7 +14,7 @@ public sealed class DevelopmentEnvironmentSmokeTests
     [Fact]
     public async Task DevelopmentEnvironment_StartsUp_AndServesHealthCheck_WithoutValidateScopesCrash()
     {
-        await using var factory = new TestWebAppFactory(useDevelopmentEnvironment: true);
+        await using var factory = new TestWebAppFactory(environment: "Development");
         var client = factory.CreateClient();
 
         var resp = await client.GetAsync("/actuator/health");
@@ -27,7 +27,7 @@ public sealed class DevelopmentEnvironmentSmokeTests
     [Fact]
     public async Task DevelopmentEnvironment_AguiEndpoint_ResolvesHostedAgent_WithoutValidateScopesCrash()
     {
-        await using var factory = new TestWebAppFactory(useDevelopmentEnvironment: true);
+        await using var factory = new TestWebAppFactory(environment: "Development");
         var client = factory.CreateClient().WithToken(factory.IssueToken());
 
         using var req = new HttpRequestMessage(HttpMethod.Post, "/api/copilot/agui")
@@ -59,7 +59,7 @@ public sealed class DevelopmentEnvironmentSmokeTests
     [Fact]
     public async Task DevelopmentEnvironment_ChatEndpoint_ResolvesChatAssistantHostAgent_WithoutValidateScopesCrash()
     {
-        await using var factory = new TestWebAppFactory(useDevelopmentEnvironment: true);
+        await using var factory = new TestWebAppFactory(environment: "Development");
         var client = factory.CreateClient().WithToken(factory.IssueToken());
 
         using var req = new HttpRequestMessage(HttpMethod.Post, "/api/chat")

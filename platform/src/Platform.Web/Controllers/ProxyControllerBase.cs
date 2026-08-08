@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Platform.Service.Abstractions;
+using Platform.Web.Infrastructure;
 
 namespace Platform.Web.Controllers;
 
@@ -10,9 +11,14 @@ namespace Platform.Web.Controllers;
 /// </summary>
 public abstract class ProxyControllerBase : ControllerBase
 {
-    /// <summary>本次請求的 Idempotency-Key(缺則 null);哪些命令要往下轉發由各端點決定。</summary>
+    /// <summary>
+    /// 本次請求的 Idempotency-Key(缺則 null);哪些命令要往下轉發由各端點決定。
+    /// 多值 → 400(<see cref="IdempotencyKeyHeader.SingleValueOrNull"/> 拋 <c>WorkflowBadInputException</c>),
+    /// 與 Document/Chat 兩條路徑一致:先前是 <c>StringValues.ToString()</c> 把多值逗號拼接後往下轉,
+    /// 悄悄繞過 backend 的「恰一個值」檢查,讓兩個不同的邏輯嘗試合成一把沒人發過的 key。
+    /// </summary>
     protected string? IdempotencyKey =>
-        Request.Headers.TryGetValue("Idempotency-Key", out var value) ? value.ToString() : null;
+        IdempotencyKeyHeader.SingleValueOrNull(Request.Headers[IdempotencyKeyHeader.Name]);
 
     /// <summary>本次請求的 If-Match(樂觀鎖前置條件);缺則 null。原樣轉發給 backend。</summary>
     protected string? IfMatch =>

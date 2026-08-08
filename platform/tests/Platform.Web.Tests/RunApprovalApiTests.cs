@@ -27,10 +27,13 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
     [InlineData(true)]
     public async Task FeatureOff_HidesApprovalRoutesBeforeAuthentication(bool agentTestRunEnabled)
     {
-        using var factory = new TestWebAppFactory(
-            agentBuilderEnabled: agentTestRunEnabled,
-            agentTestRunEnabled: agentTestRunEnabled,
-            agentWriteToolsEnabled: false);
+        var testRun = agentTestRunEnabled ? "true" : "false";
+        using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_BUILDER_ENABLED"] = testRun,
+            ["AGENT_TEST_RUN_ENABLED"] = testRun,
+            ["AGENT_WRITE_TOOLS_ENABLED"] = "false",
+        });
         var before = FakeAgentRunService.Calls.Count;
 
         var response = await factory.CreateClient().GetAsync($"/api/runs/{RunId}/approvals");
@@ -212,7 +215,7 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
     }
 
     private sealed class RejectingFactory(int status)
-        : TestWebAppFactory(agentWriteToolsEnabled: true)
+        : TestWebAppFactory(new() { ["AGENT_WRITE_TOOLS_ENABLED"] = "true" })
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -229,12 +232,17 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
     /// G4:List/decide 各案共用同一份 host。刻意只打開 agentWriteToolsEnabled,agentTestRunEnabled
     /// 維持關閉——這同時證明了 D3 gate(Program.cs 的 <c>!agentTestRunEnabled</c> 中介軟體)對 approval 路徑的
     /// <c>isApprovalRoute</c> 例外真的生效:商務審批者不會因為 ADMIN 專用的 D3 測試台被關掉而看不到待審項目。
-    /// 若有人「簡化」這裡的建構參數(例如順手把 agentTestRunEnabled 也打開,或省略這個本來就是預設值的顯式參數),
-    /// 這個覆蓋語意會靜默消失,故 agentTestRunEnabled: false 即使等於建構子預設值也保留顯式寫法。
+    /// 若有人「簡化」這裡的設定(例如順手把 AGENT_TEST_RUN_ENABLED 也打開,或省略這個本來就是預設值的顯式鍵),
+    /// 這個覆蓋語意會靜默消失,故 AGENT_TEST_RUN_ENABLED = "false" 即使等於預設值也保留顯式寫法。
     /// </summary>
     public sealed class EnabledApprovalFixture : TestWebAppFactory
     {
-        public EnabledApprovalFixture() : base(agentWriteToolsEnabled: true, agentTestRunEnabled: false)
+        public EnabledApprovalFixture()
+            : base(new()
+            {
+                ["AGENT_WRITE_TOOLS_ENABLED"] = "true",
+                ["AGENT_TEST_RUN_ENABLED"] = "false",
+            })
         {
         }
     }

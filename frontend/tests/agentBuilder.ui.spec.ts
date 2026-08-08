@@ -288,6 +288,9 @@ test('validation errors inside the collapsed advanced group force it open', asyn
   await page.getByRole('button', { name: '驗證', exact: true }).click()
   await expect(slug).toBeVisible()
   await expect(page.getByText('slug 已被其他 Agent 使用。')).toBeVisible()
+  // The message is only reachable by a screen reader if the input points at it.
+  await expect(slug).toHaveAttribute('aria-describedby', 'agent-slug-error')
+  await expect(page.locator('#agent-slug-error')).toHaveText('slug 已被其他 Agent 使用。')
 
   // Collapsing again is allowed; the effect only re-fires when a new error appears.
   await advancedSummary(page).click()

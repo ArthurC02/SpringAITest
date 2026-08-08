@@ -512,8 +512,11 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     {
         const string answer = "Root Orchestrator 的阻塞答案";
         var runtime = new StubAgentChatRuntime { Reply = answer };
-        await using var factory = new TestWebAppFactory(
-            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        await using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_CHAT_ENABLED"] = "true",
+            ["AGENT_CHAT_TENANT_ALLOWLIST"] = "demo-a",
+        });
         var client = AgentChatClient(factory, runtime);
 
         var resp = await client.PostAsJsonAsync("/api/chat", new { message = "這季毛利率多少?" });
@@ -540,8 +543,11 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     {
         const string answer = "Root Orchestrator 的串流答案";
         var runtime = new StubAgentChatRuntime { Reply = answer };
-        await using var factory = new TestWebAppFactory(
-            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        await using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_CHAT_ENABLED"] = "true",
+            ["AGENT_CHAT_TENANT_ALLOWLIST"] = "demo-a",
+        });
         var client = AgentChatClient(factory, runtime);
 
         var resp = await client.PostAsJsonAsync("/api/chat/stream", new { message = "這季毛利率多少?" });
@@ -563,8 +569,11 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     {
         var bodyId = Guid.NewGuid();
         var runtime = new StubAgentChatRuntime { Reply = "指定 Orchestrator 的答案" };
-        await using var factory = new TestWebAppFactory(
-            agentChatEnabled: true, agentChatTenantAllowlist: "demo-a");
+        await using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_CHAT_ENABLED"] = "true",
+            ["AGENT_CHAT_TENANT_ALLOWLIST"] = "demo-a",
+        });
         var client = AgentChatClient(factory, runtime);
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
         {
@@ -586,9 +595,11 @@ public sealed class ChatApiTests : IClassFixture<TestWebAppFactory>
     {
         var onPoint = new string('t', 128);
         var offPoint = new string('t', 129);
-        await using var factory = new TestWebAppFactory(
-            agentChatEnabled: true,
-            agentChatTenantAllowlist: $" demo-a , ,demo-b ,{onPoint},{offPoint},badctrl");
+        await using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_CHAT_ENABLED"] = "true",
+            ["AGENT_CHAT_TENANT_ALLOWLIST"] = $" demo-a , ,demo-b ,{onPoint},{offPoint},badctrl",
+        });
 
         var options = factory.Services.GetRequiredService<Platform.Service.Options.AgentChatOptions>();
 

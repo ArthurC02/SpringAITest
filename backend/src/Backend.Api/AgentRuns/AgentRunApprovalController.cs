@@ -5,7 +5,7 @@ namespace Backend.Api.AgentRuns;
 
 [ApiController]
 [Route("api/runs/{runId:guid}/approvals")]
-public sealed class AgentRunApprovalController(IAgentRunApprovalRepository approvals, IConfiguration configuration) : ControllerBase
+public sealed class AgentRunApprovalController(IAgentRunApprovalRepository approvals, AgentWriteToolsState writeTools) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<AgentRunApprovalPublicResponse>>> List(Guid runId, CancellationToken ct)
@@ -80,11 +80,13 @@ public sealed class AgentRunApprovalController(IAgentRunApprovalRepository appro
 
     private async Task<ActionResult<AgentRunApprovalResponse>> Decide(Guid runId, Guid approvalId, bool approve, AgentRunApprovalDecisionRequest? request, CancellationToken ct)
     {
-        RequireEnabled(); var key = Request.Headers["Idempotency-Key"].FirstOrDefault()?.Trim(); if (string.IsNullOrWhiteSpace(key) || key.Length > 128) throw new ApiException(400, "Idempotency-Key is required");
+        RequireEnabled(); var key = Request.RequireIdempotencyKey();
         return Write(await approvals.DecideAsync(Request.RequireTenant(), Request.RequireUserId(), Request.UserRole() ?? "", runId, approvalId, approve, key, request?.Reason?.Trim(), ct), false);
     }
     private static ActionResult<AgentRunApprovalResponse> Write(AgentRunApprovalWriteResult result, bool created) => result.Status switch
     { AgentRunApprovalWriteStatus.Success when result.Approval is not null => created ? new ObjectResult(Public(result.Approval)) { StatusCode = StatusCodes.Status202Accepted } : new OkObjectResult(Public(result.Approval)), AgentRunApprovalWriteStatus.NotFound => throw new ApiException(404, "approval not found"), AgentRunApprovalWriteStatus.Forbidden => throw new ApiException(403, "approval decision is not authorized"), AgentRunApprovalWriteStatus.Expired => throw new ApiException(409, "approval expired"), AgentRunApprovalWriteStatus.Replay => throw new ApiException(409, "approval was already decided"), _ => throw new ApiException(409, result.Message ?? "approval state changed") };
     private static AgentRunApprovalPublicResponse Public(AgentRunApprovalResponse value) => new(value.Id, value.RunId, value.Status, value.RequiredRole, value.ExpiresAt, value.SelfApprovalForbidden, value.Decision, value.DecidedAt);
-    private void RequireEnabled() { if (!string.Equals(configuration["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase)) throw new ApiException(404, "Feature is unavailable"); }
+    // Defense in depth: unreachable while the Program.cs D7 middleware stands in front of every
+    // one of these routes, and deliberately kept so a future routing change cannot expose them.
+    private void RequireEnabled() { if (!writeTools.Enabled) throw new ApiException(404, "Feature is unavailable"); }
 }

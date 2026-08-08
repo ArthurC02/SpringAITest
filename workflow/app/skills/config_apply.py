@@ -135,6 +135,6 @@ async def resolve(ctx: RequestContext) -> tuple[KbQueryDeps | None, int, int | N
     retrieval_seed = int(raw_top_k) if raw_top_k is not None else None
 
     per_config = get_config_deps(
-        ctx.tenant_id, config_version(active), custom.deps(), effective
+        ctx.tenant_id, config_version(active), custom.singleton_deps(), effective
     )
     return per_config, timeout, retrieval_seed

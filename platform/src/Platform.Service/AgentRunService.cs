@@ -17,6 +17,7 @@ public sealed class AgentRunService : IAgentRunService
 {
     private const string FailurePrefix = "Agent 執行服務失敗：";
     private const string BackendFailurePrefix = FailurePrefix + "Backend ";
+    private const string IdempotencyKeyHeader = "Idempotency-Key";
 
     private readonly BackendClient _backend;
     private readonly HttpClient _workflow;
@@ -176,18 +177,21 @@ public sealed class AgentRunService : IAgentRunService
         return response;
     }
 
-    private async Task<AgentProxyResponse> BackendAsync(
+    private Task<AgentProxyResponse> BackendAsync(
         HttpMethod method,
         string path,
         UserContext ctx,
         object? body,
         string? idempotencyKey,
         CancellationToken ct)
-    {
-        var (status, responseBody, etag) = await _backend.SendForProxyAsync(
-            BuildRequest(method, path, ctx, body, idempotencyKey), BackendFailurePrefix, ct);
-        return new AgentProxyResponse(status, responseBody, etag);
-    }
+        => _backend.SendForAgentProxyAsync(
+            method,
+            path,
+            ctx,
+            body,
+            BackendFailurePrefix,
+            string.IsNullOrWhiteSpace(idempotencyKey) ? null : (IdempotencyKeyHeader, idempotencyKey),
+            ct);
 
     private async Task<BackendCommandResult> BackendCommandAsync(
         HttpMethod method,
@@ -234,13 +238,18 @@ public sealed class AgentRunService : IAgentRunService
         return new BackendCommandResult(proxy, true, commandId);
     }
 
+    /// <summary>
+    /// 只服務 <see cref="BackendCommandAsync"/>:它要在 response 釋放前取下 dispatch metadata header,
+    /// 需要 <see cref="BackendClient.SendForProxyAsync"/> 的 inspectResponse,不能走
+    /// <see cref="BackendClient.SendForAgentProxyAsync"/> 這條收斂路徑。
+    /// </summary>
     private HttpRequestMessage BuildRequest(
         HttpMethod method, string path, UserContext ctx, object? body, string? idempotencyKey)
     {
         var request = _backend.BuildRequest(method, path, ctx, body);
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
-            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+            request.Headers.TryAddWithoutValidation(IdempotencyKeyHeader, idempotencyKey);
         }
 
         return request;

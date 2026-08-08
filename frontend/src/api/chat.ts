@@ -1,4 +1,4 @@
-// 與 Spring 後端 /api/chat/stream 對接的薄封裝（含 SSE 解析）。
+// 與 ASP.NET Core platform /api/chat/stream 對接的薄封裝（含 SSE 解析）。
 // 開發時經由 Vite proxy 轉發到 http://localhost:8080（見 vite.config.ts），
 // 因此這裡一律用相對路徑 /api，免處理 CORS。
 import { getSession } from './auth'

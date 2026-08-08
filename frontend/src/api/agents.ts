@@ -16,7 +16,7 @@ import type {
 } from '../types'
 
 /** GET /api/features（camelCase）。false 或請求失敗 → 呼叫端 fail-closed 隱藏 Agents 入口。 */
-export interface FeatureFlags {
+interface FeatureFlags {
   agentBuilderEnabled: boolean
   agentTestRunEnabled?: boolean
   workflowDesignerEnabled?: boolean

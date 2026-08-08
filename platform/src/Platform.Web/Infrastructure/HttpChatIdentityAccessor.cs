@@ -80,16 +80,15 @@ public sealed class HttpChatIdentityAccessor : IChatIdentityAccessor
     {
         get
         {
-            var values = _httpContextAccessor.HttpContext?.Request.Headers["Idempotency-Key"];
-            if (values is null || values.Value.Count == 0)
+            var values = _httpContextAccessor.HttpContext?.Request.Headers[IdempotencyKeyHeader.Name];
+            if (values is not { } header)
                 return null;
-            if (values.Value.Count != 1)
-                throw new Platform.Service.Exceptions.WorkflowBadInputException(
-                    "Idempotency-Key must contain exactly one value");
-            var value = values.Value[0]?.Trim();
+            if (IdempotencyKeyHeader.SingleValueOrNull(header) is not { } single)
+                return null;
+            var value = single.Trim();
             if (string.IsNullOrEmpty(value) || value.Length > MaxLogicalAttemptIdLength)
                 throw new Platform.Service.Exceptions.WorkflowBadInputException(
-                    "Idempotency-Key is invalid");
+                    IdempotencyKeyHeader.InvalidMessage);
             return value;
         }
     }

@@ -15,7 +15,7 @@ export function getSession(): Session | null {
   }
 }
 
-export function saveSession(s: Session): void {
+function saveSession(s: Session): void {
   localStorage.setItem(SESSION_KEY, JSON.stringify(normalizeSession(s)))
 }
 

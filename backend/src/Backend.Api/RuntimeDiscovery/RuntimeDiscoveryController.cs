@@ -9,11 +9,11 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
 {
     [HttpGet("runtime-discovery/orchestrators")]
     public async Task<IActionResult> List(CancellationToken ct) => Ok(new RuntimeOrchestratorListResponse(
-        await service.ListAsync(Request.RequireTenant(), Role(), Request.UserGroups(), ct)));
+        await service.ListAsync(Request.RequireTenant(), Request.RequireUserRole(), Request.UserGroups(), ct)));
 
     [HttpPost("runtime-discovery/resolve")]
     public async Task<IActionResult> Resolve(RuntimeResolveRequest request, CancellationToken ct) => Ok(
-        await service.ResolveAsync(Request.RequireTenant(), Request.RequireUserId(), Role(), Request.UserGroups(), request.OrchestratorId, ct));
+        await service.ResolveAsync(Request.RequireTenant(), Request.RequireUserId(), Request.RequireUserRole(), Request.UserGroups(), request.OrchestratorId, ct));
 
     [HttpPut("admin/runtime-binding")]
     public async Task<IActionResult> PutBinding(TenantRuntimeBindingUpsert request, CancellationToken ct)
@@ -32,7 +32,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     [HttpPost("chat-runs")]
     public async Task<IActionResult> Start(ChatRunStartRequest request, CancellationToken ct)
     {
-        var value = await service.StartAsync(Request.RequireTenant(), Request.RequireUserId(), Role(), Request.UserGroups(), Request.UserCapabilities(), request, Key(), ct);
+        var value = await service.StartAsync(Request.RequireTenant(), Request.RequireUserId(), Request.RequireUserRole(), Request.UserGroups(), Request.UserCapabilities(), request, Request.RequireIdempotencyKey(), ct);
         Response.Headers["X-Chat-Run-Replayed"] = value.Replayed ? "true" : "false";
         return StatusCode(202, value);
     }
@@ -61,7 +61,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
         request = CanonicalizeReplay(request);
         ValidateReplay(request);
         var prior = await runs.FindByIdempotencyKeyAsync(
-            Request.RequireTenant(), Request.RequireUserId(), Key(), request, ct);
+            Request.RequireTenant(), Request.RequireUserId(), Request.RequireIdempotencyKey(), request, ct);
         if (prior.IsAmbiguous)
             throw new ApiException(409, "Multiple chat root runs share this logical attempt");
         if (prior.IsMismatch)
@@ -75,7 +75,7 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     {
         var input = request.Input?.Trim();
         if (string.IsNullOrEmpty(input) || input.Length > 16_384 || input.Any(char.IsControl)) throw new ApiException(400, "input is required");
-        var result = await runs.ResumeAsync(Request.RequireTenant(), Request.RequireUserId(), runId, input, Key(), ct);
+        var result = await runs.ResumeAsync(Request.RequireTenant(), Request.RequireUserId(), runId, input, Request.RequireIdempotencyKey(), ct);
         if (result.Status == OrchestratorRunWriteStatus.NotFound) throw new ApiException(404, "Chat root run not found");
         if (result.Status is OrchestratorRunWriteStatus.InvalidState or OrchestratorRunWriteStatus.Conflict) throw new ApiException(409, result.Message ?? "Chat root run state conflict");
         var run = result.Run ?? throw new InvalidOperationException("Resume returned no run");
@@ -84,15 +84,6 @@ public sealed class RuntimeDiscoveryController(RuntimeDiscoveryService service, 
     }
 
     private void RequireManage() => Request.RequireCapability("workflow.manage");
-    private string Role() => Request.UserRole() ?? throw new ApiException(400, "X-User-Role is required");
-    private string Key()
-    {
-        var values = Request.Headers["Idempotency-Key"];
-        if (values.Count != 1) throw new ApiException(400, "Idempotency-Key is required");
-        var key = values[0]?.Trim() ?? "";
-        if (key.Length is < 1 or > 128 || key.Any(char.IsControl)) throw new ApiException(400, "Idempotency-Key is required");
-        return key;
-    }
     private static void ValidateReplay(OrchestratorRunReplayRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.ConversationId) || request.ConversationId.Length > 128 || request.ConversationId.Any(char.IsControl)

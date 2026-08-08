@@ -1,22 +1,21 @@
 import { apiFetch, apiFetchWithEtag } from './http'
+import { object, type JsonObject } from '../wire'
 import type { Orchestrator, OrchestratorDraft, OrchestratorRevision, OrchestratorSummary } from '../types'
 
 const base = '/api/admin/orchestrators'
 const idPath = (id: string) => `${base}/${encodeURIComponent(id)}`
-type RawObject = Record<string, unknown>
-type WireOrchestrator = RawObject & { id: string; name: string; description: string; enabled: boolean; draft_version: number; published_revision: number | null; definition: RawObject }
+type WireOrchestrator = JsonObject & { id: string; name: string; description: string; enabled: boolean; draft_version: number; published_revision: number | null; definition: JsonObject }
 
-function asObject(value: unknown): RawObject { return value && typeof value === 'object' ? value as RawObject : {} }
-function ref(value: unknown): OrchestratorDraft['workflow'] { const item = asObject(value); return { id: typeof item.id === 'string' ? item.id : '', revision: typeof item.revision === 'number' ? item.revision : 0 } }
-function agentRef(value: unknown): { agentId: string; revision: number } { const item = asObject(value); return { agentId: typeof item.agentId === 'string' ? item.agentId : '', revision: typeof item.revision === 'number' ? item.revision : 0 } }
+function ref(value: unknown): OrchestratorDraft['workflow'] { const item = object(value); return { id: typeof item.id === 'string' ? item.id : '', revision: typeof item.revision === 'number' ? item.revision : 0 } }
+function agentRef(value: unknown): { agentId: string; revision: number } { const item = object(value); return { agentId: typeof item.agentId === 'string' ? item.agentId : '', revision: typeof item.revision === 'number' ? item.revision : 0 } }
 
 /** The backend persists one typed definition object; the UI gets a convenient explicit draft view. */
 export function decodeOrchestrator(value: WireOrchestrator): Orchestrator {
-  const definition = asObject(value.definition)
-  const context = asObject(definition.context)
-  const budgets = asObject(definition.budgets)
-  const policy = asObject(definition.policy)
-  const workerPolicy = asObject(definition.workerPolicy)
+  const definition = object(value.definition)
+  const context = object(definition.context)
+  const budgets = object(definition.budgets)
+  const policy = object(definition.policy)
+  const workerPolicy = object(definition.workerPolicy)
   return {
     id: value.id, name: value.name, description: value.description, enabled: value.enabled,
     draft_version: value.draft_version, published_revision: value.published_revision, updated_at: String(value.updated_at ?? ''),
@@ -58,7 +57,7 @@ export function decodeOrchestrator(value: WireOrchestrator): Orchestrator {
 }
 
 /** Keep the four Backend-required fields explicit and use verifier.agentId (never ambiguous `id`). */
-export function encodeOrchestratorUpsert(draft: OrchestratorDraft): RawObject {
+export function encodeOrchestratorUpsert(draft: OrchestratorDraft): JsonObject {
   return { name: draft.name, description: draft.description, definition: {
     instructions: draft.instructions, policy: draft.policy, workflow: draft.workflow,
     workerPool: draft.workerPool, workerPolicy: draft.workerPolicy,

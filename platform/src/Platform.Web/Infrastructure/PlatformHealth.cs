@@ -89,6 +89,11 @@ internal sealed class PlatformReadinessProbe
                 .ToDictionary();
             var ready = _checks.Select((check, index) => results[index] || !check.Required).All(x => x);
             var degraded = results.Any(result => !result);
+
+            // A non-cooperative check can return after the caller has cancelled. The caller's
+            // cancellation still wins over a fresh result: do not publish or cache it.
+            ct.ThrowIfCancellationRequested();
+
             _cached = new HealthReport(
                 !ready ? "DOWN" : degraded ? "DEGRADED" : "UP",
                 ready,

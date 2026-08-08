@@ -18,9 +18,11 @@ public sealed class AgentRunApiTests
     [InlineData("POST", "/api/runs/" + RunId + "/cancel")]
     public async Task TestFlagOff_FailsClosedBeforeAuthentication(string method, string path)
     {
-        using var factory = new TestWebAppFactory(
-            agentBuilderEnabled: true,
-            agentTestRunEnabled: false);
+        using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_BUILDER_ENABLED"] = "true",
+            ["AGENT_TEST_RUN_ENABLED"] = "false",
+        });
         var before = FakeAgentRunService.Calls.Count;
 
         var response = await factory.CreateClient().SendAsync(Request(method, path));
@@ -32,9 +34,11 @@ public sealed class AgentRunApiTests
     [Fact]
     public async Task TestFlagCannotEnableWhenBuilderIsOff()
     {
-        using var factory = new TestWebAppFactory(
-            agentBuilderEnabled: false,
-            agentTestRunEnabled: true);
+        using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_BUILDER_ENABLED"] = "false",
+            ["AGENT_TEST_RUN_ENABLED"] = "true",
+        });
 
         var response = await factory.CreateClient().GetAsync("/api/runs/" + RunId);
 
@@ -208,7 +212,7 @@ public sealed class AgentRunApiTests
     }
 
     private static TestWebAppFactory EnabledFactory()
-        => new(agentBuilderEnabled: true, agentTestRunEnabled: true);
+        => TestWebAppFactory.WithFlags("AGENT_BUILDER_ENABLED", "AGENT_TEST_RUN_ENABLED");
 
     private static HttpRequestMessage Request(string method, string path)
     {

@@ -48,10 +48,6 @@ def singleton_deps() -> Any:
     return _deps
 
 
-# 保留既有 custom.deps() 呼叫面。
-deps = singleton_deps
-
-
 async def _fetch(path: str, ctx: RequestContext) -> Any | None:
     """GET backend；404 回 None，其餘傳輸失敗轉為受控例外。"""
     try:

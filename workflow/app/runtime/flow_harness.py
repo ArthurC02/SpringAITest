@@ -32,7 +32,7 @@ from app.engine.skill import (
     parse_step,
     resolve_node,
 )
-from app import correlation
+from app import correlation, tracing
 from app.runtime.artifacts import LoadedSkillArtifact
 from app.runtime.bounded_json import bounded_canonical_json
 from app.runtime.models import DirectAgentExecutionSnapshot
@@ -45,16 +45,14 @@ logger = logging.getLogger(__name__)
 
 MAX_FLOW_RESULT_CHARS = 16_384
 
+# 稽核輸出鍵直接取自 audit_feedback 的 writes 契約：節點加一個輸出鍵，遮蔽自動跟上，
+# 不會留下一份會靜默過期的手抄清單。上面的 import 已保證該節點完成註冊，
+# resolve_node 為 None 就是註冊壞了 —— 讓它在載入期直接炸，而不是靜默少擋一組鍵。
 PUBLIC_DENY_KEYS = frozenset(
     RESERVED_KEYS
     | ENGINE_KEYS
     | RUNTIME_AUTHORITY_KEYS
-    | {
-        "audit_trail",
-        "issue_label",
-        "regression_test_item",
-        "improvement_backlog",
-    }
+    | set(resolve_node("audit_feedback").writes)
 )
 
 class FlowDenied(RuntimeError):
@@ -88,8 +86,8 @@ class FlowResult:
     content: str
     tool_calls_bound: int
     steps_bound: int
-    steps_consumed: int | None = None
-    tool_rounds_consumed: int | None = None
+    steps_consumed: int
+    tool_rounds_consumed: int
 
 
 @dataclass(frozen=True)
@@ -97,6 +95,17 @@ class FlowGovernanceResult:
     status: str
     output: dict
     governance: dict
+
+
+def _status_from_output(output: dict[str, Any]) -> str:
+    """圖跑完後的 fatal_error → 對外 status（兩條 flow 路徑共用同一份映射）。
+
+    budget_exhausted 是列舉出來的治理結果、其餘 fatal 才是 error；沒有 fatal 就是 completed。
+    """
+    fatal = str(output.get("fatal_error") or "")
+    if not fatal:
+        return "completed"
+    return "budget_exhausted" if fatal.startswith("budget_exhausted:") else "error"
 
 
 def _public_flow_output(state: dict[str, Any]) -> dict[str, Any]:
@@ -108,14 +117,24 @@ def _public_flow_output(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prepare_flow_state(
-    skill: Skill, raw_input: dict[str, Any], *, recursion_cap: int | None = None
+    skill: Skill,
+    raw_input: dict[str, Any],
+    *,
+    recursion_cap: int | None = None,
+    config_extra: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """組出 flow 的初始 state 與 runnable config。
+
+    config_extra 是呼叫端要一併帶進 LangGraph 的設定（目前只有 tracing callbacks）：
+    先展開再蓋上 recursion_limit，確保治理上界永遠由這裡算出，不會被呼叫端覆蓋。
+    """
     recursion_limit = compiler.step_analysis(skill).recursion_limit
     return dict(raw_input), {
+        **(config_extra or {}),
         "recursion_limit": min(
             recursion_limit,
             recursion_cap or recursion_limit,
-        )
+        ),
     }
 
 
@@ -145,6 +164,7 @@ async def invoke_flow_with_governance(
     tool_round_budget: int,
     graph: CompiledStateGraph | None = None,
     recursion_limit: int | None = None,
+    config_extra: dict[str, Any] | None = None,
     definition: str = "",
     definition_sha256: str | None = None,
 ) -> FlowGovernanceResult:
@@ -168,19 +188,17 @@ async def invoke_flow_with_governance(
         if execution_steps > step_budget or analysis.tool_call_bound > tool_round_budget:
             status = "budget_exhausted"
         else:
-            state, config = _prepare_flow_state(skill, raw_input, recursion_cap=recursion_limit)
+            state, config = _prepare_flow_state(
+                skill, raw_input, recursion_cap=recursion_limit, config_extra=config_extra
+            )
             compiled = graph or compiler.compile(skill, deps)
             preflight_complete = True
             output = await _execute_compiled_flow(
                 compiled, state, config,
                 reserve_step, charge_tool_call, timeout_seconds
             )
+            status = _status_from_output(output)
             if output.get("fatal_error"):
-                status = (
-                    "budget_exhausted"
-                    if str(output["fatal_error"]).startswith("budget_exhausted:")
-                    else "error"
-                )
                 governance["error"] = str(output["fatal_error"])
     except TimeoutError:
         status = "timeout"
@@ -210,6 +228,9 @@ async def invoke_flow_with_governance(
             "tool_rounds_consumed": get_tool_rounds(),
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
         }
+        # HTTP 回應不帶 governance，所以 finalize 只在這裡有機會被人看到。欄位全是治理
+        # 中繼資料（skill 名、狀態、計數、耗時），不含使用者輸入或例外文字。
+        logger.info("workflow_completed %s", governance["finalize"])
     return FlowGovernanceResult(status, _public_flow_output(output), governance)
 
 
@@ -306,8 +327,14 @@ async def invoke_pinned_flow(
 
     try:
         graph = compiler.compile(artifact.skill, runtime_deps)
+        # D3 Harness 沒有上游 runnable config 可繼承（manager 只帶 checkpoint config），
+        # 所以和 standalone invoke 一樣直接取 tracing 這個唯一來源；recursion_limit 仍由
+        # _prepare_flow_state 最後覆蓋，治理上界不會被 config_extra 蓋掉。
         state, config = _prepare_flow_state(
-            artifact.skill, state, recursion_cap=max(2, recursion_cap)
+            artifact.skill,
+            state,
+            recursion_cap=max(2, recursion_cap),
+            config_extra=tracing.runnable_config(),
         )
         output = await _execute_compiled_flow(
             graph, state, config, _reserve_step, _on_tool, timeout_seconds
@@ -334,13 +361,9 @@ async def invoke_pinned_flow(
             steps_consumed=get_steps(),
             tool_rounds_consumed=get_tool_rounds(),
         )
-    if str(output.get("fatal_error") or "").startswith("budget_exhausted:"):
-        status = "budget_exhausted"
-    else:
-        status = "error" if output.get("fatal_error") else "completed"
     public = _public_flow_output(output)
     return FlowResult(
-        status=status,
+        status=_status_from_output(output),
         content=_bounded_json(public),
         tool_calls_bound=tool_calls_bound,
         steps_bound=steps_bound,

@@ -1,9 +1,9 @@
 import { useMemo, useRef, useState } from 'react'
 import {
-  listRuleActions,
-  listRuleFacts,
   simulateBusinessRules,
   validateBusinessRules,
+  type RuleActionCatalogResponse,
+  type RuleFactCatalogResponse,
 } from '../api/agents'
 import {
   actionCatalogItems,
@@ -38,7 +38,6 @@ import type {
   RuleSimulationResult,
   RuleValidationResult,
 } from '../types'
-import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { useConfirm } from './ConfirmDialog'
@@ -47,6 +46,9 @@ interface Props {
   value: AgentBusinessRules
   disabled: boolean
   onChange: (value: AgentBusinessRules) => void
+  /** 規則目錄由 AgentEditor 取一次後分給本元件與 AgentBuilderCopilot(避免同一畫面重複 GET)。 */
+  factResource: { data: RuleFactCatalogResponse | null; error: string | null }
+  actionResource: { data: RuleActionCatalogResponse | null; error: string | null }
 }
 
 function groupCondition(kind: 'all' | 'any', children: RuleCondition[]): RuleCondition {
@@ -280,7 +282,7 @@ function ConditionEditor({
   depth: number
   path: string
   facts: RuleFactCatalogEntry[]
-  factCatalog: Awaited<ReturnType<typeof listRuleFacts>> | null
+  factCatalog: RuleFactCatalogResponse | null
   disabled: boolean
   removable: boolean
   onChange: (condition: RuleCondition) => void
@@ -561,7 +563,7 @@ function ActionEditor({
 
 function templateRule(
   facts: RuleFactCatalogEntry[],
-  factCatalog: Awaited<ReturnType<typeof listRuleFacts>> | null,
+  factCatalog: RuleFactCatalogResponse | null,
   actions: RuleActionCatalogEntry[],
   factName: string,
   operatorName: string,
@@ -583,10 +585,14 @@ function templateRule(
   }
 }
 
-export default function BusinessRuleEditor({ value, disabled, onChange }: Props) {
+export default function BusinessRuleEditor({
+  value,
+  disabled,
+  onChange,
+  factResource,
+  actionResource,
+}: Props) {
   const confirm = useConfirm()
-  const factResource = useResource(listRuleFacts)
-  const actionResource = useResource(listRuleActions)
   const facts = useMemo(() => factCatalogItems(factResource.data), [factResource.data])
   const actions = useMemo(() => actionCatalogItems(actionResource.data), [actionResource.data])
   const gate: RuleGate = DEFAULT_RULE_GATE

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
@@ -28,49 +29,67 @@ public sealed class AgentController : ProxyControllerBase
 
     public AgentController(IAgentService agents) => _agents = agents;
 
+    /// <summary>
+    /// Agent id 已由 <c>{id:guid}</c>、revision 已由 <c>{revision:int}</c> 在路由層解析成型別值,
+    /// 這裡只以固定格式(Guid 的 <c>D</c>、invariant 的整數)放進已知路徑片段 ——
+    /// caller-controlled route 文字永遠不參與 URI normalization。
+    /// </summary>
+    private static string Suffix(Guid id, string? action = null)
+        => action is null ? id.ToString("D") : $"{id:D}/{action}";
+
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)
-        => Write(await _agents.ListAsync(User.ToUserContext(), ct));
+        => Write(await _agents.SendAsync(HttpMethod.Get, string.Empty, User.ToUserContext(), ct: ct));
 
     [HttpPost]
     public async Task<IActionResult> Create(
         [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body, CancellationToken ct)
-        => Write(await _agents.CreateAsync(User.ToUserContext(), body, ct));
+        => Write(await _agents.SendAsync(
+            HttpMethod.Post, string.Empty, User.ToUserContext(), body: body, ct: ct));
 
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken ct)
-        => Write(await _agents.GetAsync(id, User.ToUserContext(), ct));
+        => Write(await _agents.SendAsync(HttpMethod.Get, Suffix(id), User.ToUserContext(), ct: ct));
 
     [HttpPut("{id:guid}/draft")]
     public async Task<IActionResult> UpdateDraft(
         Guid id, [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body, CancellationToken ct)
-        => Write(await _agents.UpdateDraftAsync(id, User.ToUserContext(), IfMatch, body, ct));
+        => Write(await _agents.SendAsync(
+            HttpMethod.Put, Suffix(id, "draft"), User.ToUserContext(), IfMatch, body, ct));
 
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Deactivate(Guid id, CancellationToken ct)
-        => Write(await _agents.DeactivateAsync(id, User.ToUserContext(), ct));
+        => Write(await _agents.SendAsync(HttpMethod.Delete, Suffix(id), User.ToUserContext(), ct: ct));
 
     [HttpPost("{id:guid}/enable")]
     public async Task<IActionResult> Enable(Guid id, CancellationToken ct)
-        => Write(await _agents.EnableAsync(id, User.ToUserContext(), ct));
+        => Write(await _agents.SendAsync(
+            HttpMethod.Post, Suffix(id, "enable"), User.ToUserContext(), ct: ct));
 
     [HttpPost("{id:guid}/validate")]
     public async Task<IActionResult> Validate(
         Guid id, [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body, CancellationToken ct)
-        => Write(await _agents.ValidateAsync(id, User.ToUserContext(), IfMatch, body, ct));
+        => Write(await _agents.SendAsync(
+            HttpMethod.Post, Suffix(id, "validate"), User.ToUserContext(), IfMatch, body, ct));
 
     [HttpPost("{id:guid}/publish")]
     public async Task<IActionResult> Publish(
         Guid id, [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] JsonElement? body, CancellationToken ct)
-        => Write(await _agents.PublishAsync(id, User.ToUserContext(), IfMatch, body, ct));
+        => Write(await _agents.SendAsync(
+            HttpMethod.Post, Suffix(id, "publish"), User.ToUserContext(), IfMatch, body, ct));
 
     [HttpGet("{id:guid}/revisions")]
     public async Task<IActionResult> Revisions(Guid id, CancellationToken ct)
-        => Write(await _agents.RevisionsAsync(id, User.ToUserContext(), ct));
+        => Write(await _agents.SendAsync(
+            HttpMethod.Get, Suffix(id, "revisions"), User.ToUserContext(), ct: ct));
 
     [HttpPost("{id:guid}/revisions/{revision:int}/restore")]
     public async Task<IActionResult> RestoreRevision(Guid id, int revision, CancellationToken ct)
-        => Write(await _agents.RestoreRevisionAsync(id, revision, User.ToUserContext(), ct));
+        => Write(await _agents.SendAsync(
+            HttpMethod.Post,
+            Suffix(id, $"revisions/{revision.ToString(CultureInfo.InvariantCulture)}/restore"),
+            User.ToUserContext(),
+            ct: ct));
 
     [HttpGet("catalog/rule-facts")]
     public async Task<ActionResult<JsonElement>> RuleFacts(

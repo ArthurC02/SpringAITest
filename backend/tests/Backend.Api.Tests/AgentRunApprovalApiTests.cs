@@ -120,25 +120,6 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
     }
 
     /// <summary>
-    /// fail-closed 等價類:AGENT_WRITE_TOOLS_ENABLED 非 "true" 時,公開的決定路由必須在
-    /// 內部憑證、身分與 body 解析之前就 404。D7FeatureGateTests 蓋了其餘 D7 路由,
-    /// 唯獨 approve/reject 這兩條(唯一給人按的)不在它的清單裡。
-    /// </summary>
-    [Fact]
-    public async Task Decide_WhenWriteToolsDisabled_Is404BeforeAnyIdentityCheck()
-    {
-        using var disabled = new WriteToolsDisabledFactory();
-        using var request = new HttpRequestMessage(
-            HttpMethod.Post, $"/api/runs/{Guid.NewGuid():D}/approvals/{Guid.NewGuid():D}/approve");
-        request.Headers.TryAddWithoutValidation("Idempotency-Key", "disabled");
-
-        var response = await disabled.CreateClient().SendAsync(request);
-
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        Assert.Equal("Feature is unavailable", (await response.ReadJsonAsync())["message"]!.GetValue<string>());
-    }
-
-    /// <summary>
     /// 決定信封的兩個規格數字:Idempotency-Key 上限 128(缺席/空白也不行),reason 上限 500。
     /// 兩個上限分屬不同守門人 —— key 由 controller 擋(400),reason 由儲存庫擋(InvalidState → 409),
     /// 所以 on-point 那一列必須同時帶 128 + 500 才能證明兩道門都在正確的一側。
@@ -147,6 +128,7 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
     {
         { null, 0, HttpStatusCode.BadRequest, "Idempotency-Key is required" },              // header 缺席
         { new string('k', 129), 0, HttpStatusCode.BadRequest, "Idempotency-Key is required" }, // 128 + 1
+        { "k\u0001", 0, HttpStatusCode.BadRequest, "Idempotency-Key is required" },            // 控制字元
         { new string('k', 128), 501, HttpStatusCode.Conflict, "invalid decision request" },    // reason 500 + 1
         { new string('k', 128), 500, HttpStatusCode.OK, null },                                // 兩個 on-point
     };
@@ -172,6 +154,37 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
         else Assert.Equal(expectedMessage, body["message"]!.GetValue<string>());
     }
 
+    /// <summary>
+    /// 重複的 Idempotency-Key 標頭:舊的 .FirstOrDefault() 只看第一個值就放行,兩把不同的鍵會被
+    /// 當成同一次決定;共用 helper 要求恰好一個標頭,多值一律 400 —— approve/reject 是有副作用的
+    /// 一次性寫入,不能讓「送了哪一把鍵」取決於標頭順序。
+    /// </summary>
+    [Fact]
+    public async Task Decide_RejectsMultipleIdempotencyKeyHeaders()
+    {
+        using var admin = Client("demo-a", "admin-a", "ADMIN");
+        var agent = await PublishedUserAgentAsync(admin);
+        using var owner = Client("demo-a", "admin-a", "ADMIN");
+        var running = await StartRunningAsync(owner, agent);
+        var runId = running.Run["id"]!.GetValue<string>();
+        var approvalId = (await CreateApprovalAsync(owner, running, new string('c', 64), "USER"))["id"]!.GetValue<string>();
+
+        using var approver = Client("demo-a", "user-b", "USER");
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post, $"/api/runs/{runId}/approvals/{approvalId}/approve")
+        {
+            Content = JsonContent.Create(new { reason = "D7 test" }),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "decide-a");
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", "decide-b");
+        var response = await approver.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "Idempotency-Key is required",
+            (await response.ReadJsonAsync())["message"]!.GetValue<string>());
+    }
+
     private HttpClient Client(string tenant, string user, string role)
         => _factory.CreateInternalClient().WithTenant(tenant).WithUser(user).WithRole(role);
 
@@ -183,17 +196,6 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
         };
         if (key is not null) request.Headers.TryAddWithoutValidation("Idempotency-Key", key);
         return await client.SendAsync(request);
-    }
-
-    /// <summary>D7 旗標關閉的最小宿主:路由在觸及任何倉儲之前就被擋下,不需要換 fake。</summary>
-    private sealed class WriteToolsDisabledFactory : WebApplicationFactory<Program>
-    {
-        protected override void ConfigureWebHost(IWebHostBuilder builder)
-        {
-            builder.UseEnvironment("Testing");
-            TestWebAppFactory.ConfigureCredentials(builder);
-            builder.UseSetting("AGENT_WRITE_TOOLS_ENABLED", "false");
-        }
     }
 
     private async Task<JsonNode> PublishedUserAgentAsync(HttpClient admin)

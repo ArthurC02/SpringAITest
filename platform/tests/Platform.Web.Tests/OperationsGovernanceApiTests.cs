@@ -29,14 +29,14 @@ public sealed class OperationsGovernanceApiTests
     [Fact]
     public async Task FeatureOff_HidesOperationsBeforeAuthentication()
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: false);
+        using var factory = new TestWebAppFactory();
         Assert.Equal(HttpStatusCode.NotFound, (await factory.CreateClient().GetAsync("/api/admin/operations/metrics")).StatusCode);
     }
 
     [Fact]
     public async Task FlagOn_AnonymousReturns401()
     {
-        using var factory = new TestWebAppFactory(agentWriteToolsEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags("AGENT_WRITE_TOOLS_ENABLED");
         Assert.Equal(
             HttpStatusCode.Unauthorized,
             (await factory.CreateClient().GetAsync("/api/admin/operations/metrics")).StatusCode);
@@ -166,11 +166,36 @@ public sealed class OperationsGovernanceApiTests
         Assert.Equal("key-forward-check", _proxy.Handler.Header("Idempotency-Key"));
     }
 
+    // 決策表的另一半:單一 key 原樣轉發(上一條)vs. 重複 header → 400,一個位元組都不往下送。
+    // 先前 ProxyControllerBase 用 StringValues.ToString() 把多值逗號拼接後轉發,合成出一把
+    // 兩個邏輯嘗試都沒發過的 key,悄悄繞過 backend 的「恰一個值」檢查(Document/Chat 兩條路徑
+    // 早就是 400,只有代理層漏掉)。
+    [Fact]
+    public async Task KeyRoutes_DuplicateIdempotencyKeyHeader_Returns400_AndForwardsNothing()
+    {
+        using var client = _proxy.CreateClient().WithToken(
+            _proxy.IssueToken(capabilities: ["workflow.manage"]));
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post, "/api/admin/operations/regression-overrides")
+        {
+            Content = new StringContent("{\"reason\":\"break glass\"}", Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("Idempotency-Key", new[] { "attempt-1", "attempt-2" });
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        body.AssertApiError(400, "validation_failed");
+        Assert.Equal(
+            "Idempotency-Key must contain exactly one value", body["message"]!.GetValue<string>());
+    }
+
     /// <summary>保留真 BackendClient,只把最下游換成可斷言的攔截 handler(預設固定回應 200/"{}")。</summary>
     public class ProxyFixture : TestWebAppFactory
     {
         public CapturingBackendHandler Handler { get; } = new();
-        public ProxyFixture() : base(agentWriteToolsEnabled: true) { }
+        public ProxyFixture() : base(new() { ["AGENT_WRITE_TOOLS_ENABLED"] = "true" }) { }
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             base.ConfigureWebHost(builder);

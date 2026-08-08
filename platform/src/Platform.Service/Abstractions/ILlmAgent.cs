@@ -2,7 +2,8 @@ namespace Platform.Service.Abstractions;
 
 /// <summary>
 /// LLM 代理的薄介面。實作在 Web 層以 Microsoft Agent Framework 的 AIAgent 提供;
-/// ChatService 只相依此介面,單元測試可自行 fake。
+/// 唯一消費者是 <see cref="Platform.Service.SkillRoutingAgent"/>(路由決策與命中後的摘要,
+/// 刻意走這條「裸」LLM 而不經 ChatClientAgent),單元測試可自行 fake。
 /// </summary>
 public interface ILlmAgent
 {

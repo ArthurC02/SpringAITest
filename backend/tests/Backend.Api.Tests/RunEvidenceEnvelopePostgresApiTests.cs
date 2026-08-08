@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 
 namespace Backend.Api.Tests;
 
@@ -36,7 +37,7 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
         var otherTenant = tenant + "-other";
         var runId = await CreateRunAsync(tenant);
 
-        using var factory = new DapperEvidenceFactory();
+        using var factory = new DapperEvidenceFactory(fixture.DataSource!);
         using var sameTenantClient = factory.CreateInternalClient().WithTenant(tenant).WithUser("workflow").WithRole("SYSTEM");
         using var crossTenantClient = factory.CreateInternalClient().WithTenant(otherTenant).WithUser("workflow").WithRole("SYSTEM");
 
@@ -95,7 +96,7 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
             "SELECT snapshot_sha256 FROM agent_run WHERE id=@runId", new { runId });
         Assert.NotNull(pinnedSha); // otherwise the caller assertion below would be the IS NULL branch
 
-        using var factory = new DapperEvidenceFactory();
+        using var factory = new DapperEvidenceFactory(fixture.DataSource!);
         using var client = factory.CreateInternalClient().WithTenant(tenant).WithUser("workflow").WithRole("SYSTEM");
         var eventId = Guid.NewGuid();
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
@@ -155,7 +156,7 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
                 hash = new string('a', 64),
             });
 
-        using var factory = new DapperEvidenceFactory();
+        using var factory = new DapperEvidenceFactory(fixture.DataSource!);
         using var client = factory.CreateInternalClient().WithTenant(tenant).WithUser("workflow").WithRole("SYSTEM");
         var eventId = Guid.NewGuid();
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
@@ -180,7 +181,7 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
 
         var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
         var runId = await CreateRunAsync(tenant);
-        using var factory = new DapperEvidenceFactory();
+        using var factory = new DapperEvidenceFactory(fixture.DataSource!);
         using var client = factory.CreateInternalClient().WithTenant(tenant).WithUser("workflow").WithRole("SYSTEM");
 
         var eventId = Guid.NewGuid();
@@ -242,7 +243,7 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
                 new { sha = authoritativeSha, runId });
         }
 
-        using var factory = new DapperEvidenceFactory();
+        using var factory = new DapperEvidenceFactory(fixture.DataSource!);
         using var client = factory.CreateInternalClient().WithTenant(tenant).WithUser("workflow").WithRole("SYSTEM");
         var eventId = Guid.NewGuid();
         var response = await client.PostAsJsonAsync("/api/operations/telemetry", new
@@ -323,7 +324,8 @@ public sealed class RunEvidenceEnvelopePostgresApiTests(PostgresFixture fixture)
         return created.Run!.Id;
     }
 
-    private sealed class DapperEvidenceFactory : TestWebAppFactory
+    private sealed class DapperEvidenceFactory(NpgsqlDataSource dataSource)
+        : PostgresTestWebAppFactory(dataSource)
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

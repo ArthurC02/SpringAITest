@@ -21,6 +21,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 
 namespace Backend.Api.Tests;
 
@@ -135,6 +136,30 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         var processor = scope.ServiceProvider.GetRequiredService<DocumentProcessor>();
         await processor.ProcessAsync(new DocumentMessage(id, tenantId, "seed-user", title, text), retryCount: 0, CancellationToken.None);
         return id;
+    }
+}
+
+/// <summary>
+/// 給「真 Dapper + 真 appdb」整合測試的基底:把被測 app 的 <see cref="NpgsqlDataSource"/> 換成
+/// <c>PostgresFixture</c> 那一份真連線。基底 <see cref="TestWebAppFactory"/> 刻意把
+/// DB_CONNECTION_STRING 設成無法解析的 <c>Host=db.test</c>(讓 fake 儲存庫的測試絕不誤連真 DB),
+/// 子類換回 Dapper 儲存庫時若不一併換掉 data source,每一條查詢都會是 SocketException → 500。
+///
+/// 改註冊物件而不是改連線字串,是因為:(1) 測試的直接 SQL 斷言與被測 app 共用同一份「哪個 DB」事實;
+/// (2) 本機與 CI 的 appdb 都是 postgres/postgres 開發憑證,而測試以 Testing 環境啟動,
+/// 覆寫連線字串會撞上 <c>StartupCredentialValidator</c>(不該為了測試鬆動生產啟動守門)。
+/// 以實例註冊的服務不會被 DI 容器 dispose,DataSource 擁有權仍在 fixture。
+/// </summary>
+public class PostgresTestWebAppFactory(NpgsqlDataSource dataSource) : TestWebAppFactory
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+        builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<NpgsqlDataSource>();
+            services.AddSingleton(dataSource);
+        });
     }
 }
 

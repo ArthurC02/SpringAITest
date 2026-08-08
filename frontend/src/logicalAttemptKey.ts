@@ -10,6 +10,8 @@ interface StoredAttempt {
 export const AGENT_RUN_ATTEMPT_STORAGE_PREFIX = 'springai-agent-runs:idempotency'
 /** Operations governance(O1)寫入動作(override 等)的 idempotency key 前綴,同樣要在登出時清除。 */
 export const OPERATIONS_ATTEMPT_STORAGE_PREFIX = 'springai-operations:'
+/** D7 approval 決策(ApprovalInbox)的 idempotency key 前綴,同樣要在登出時清除。 */
+export const RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX = 'springai-run-approvals:'
 
 export interface PendingCancelRun {
   runId: string
@@ -43,9 +45,10 @@ export function getSessionStorage(): Storage | undefined {
 export function clearLogicalAttemptStorage(storage = getSessionStorage()): void {
   clearByPrefix(storage, `${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:`)
   clearByPrefix(storage, OPERATIONS_ATTEMPT_STORAGE_PREFIX)
+  clearByPrefix(storage, RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX)
 }
 
-export function pendingCancelStorageKey(agentId: string): string {
+function pendingCancelStorageKey(agentId: string): string {
   return `${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:pending-cancel:${encodeURIComponent(agentId)}`
 }
 

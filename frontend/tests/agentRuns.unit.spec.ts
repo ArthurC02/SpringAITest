@@ -19,6 +19,7 @@ import {
   clearLogicalAttemptStorage,
   LogicalAttemptKey,
   OPERATIONS_ATTEMPT_STORAGE_PREFIX,
+  RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX,
 } from '../src/logicalAttemptKey'
 
 class MemoryStorage implements Storage {
@@ -115,11 +116,13 @@ test.describe('D3 Agent run public contracts', () => {
     }
   })
 
-  test('cleans Agent run and Operations attempt records at logout, nothing else', () => {
+  test('cleans Agent run, Operations and approval attempt records at logout, nothing else', () => {
     const storage = new MemoryStorage()
     storage.setItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:start:agent-1`, '{}')
     storage.setItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:cancel:run-1`, '{}')
     storage.setItem(`${OPERATIONS_ATTEMPT_STORAGE_PREFIX}override-idempotency`, '{}')
+    // 同分頁換人登入時,前一位使用者的 approval idempotency key 不得被沿用。
+    storage.setItem(`${RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX}idempotency`, '{}')
     storage.setItem('unrelated', 'keep')
 
     clearLogicalAttemptStorage(storage)
@@ -127,6 +130,7 @@ test.describe('D3 Agent run public contracts', () => {
     expect(storage.getItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:start:agent-1`)).toBeNull()
     expect(storage.getItem(`${AGENT_RUN_ATTEMPT_STORAGE_PREFIX}:cancel:run-1`)).toBeNull()
     expect(storage.getItem(`${OPERATIONS_ATTEMPT_STORAGE_PREFIX}override-idempotency`)).toBeNull()
+    expect(storage.getItem(`${RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX}idempotency`)).toBeNull()
     expect(storage.getItem('unrelated')).toBe('keep')
   })
 

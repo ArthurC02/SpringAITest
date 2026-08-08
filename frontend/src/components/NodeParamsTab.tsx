@@ -153,6 +153,8 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
                 id={`cs-${f.key}`}
                 className="input"
                 value={editing.draft[f.key] ?? ''}
+                aria-invalid={!!fieldErrors[f.key]}
+                aria-describedby={fieldErrors[f.key] ? `cs-${f.key}-error` : undefined}
                 onChange={(ev) => setDraftField(f.key, ev.target.value)}
               >
                 <option value="">預設（{f.default}）</option>
@@ -172,11 +174,13 @@ export default function NodeParamsTab({ isAdmin }: { isAdmin: boolean }) {
                 step={f.step ?? (f.kind === 'int' ? 1 : 'any')}
                 value={editing.draft[f.key] ?? ''}
                 placeholder={`預設 ${f.default}${rangeHint(f.min, f.max)}`}
+                aria-invalid={!!fieldErrors[f.key]}
+                aria-describedby={fieldErrors[f.key] ? `cs-${f.key}-error` : undefined}
                 onChange={(ev) => setDraftField(f.key, ev.target.value)}
               />
             )}
             {fieldErrors[f.key] && (
-              <p className="field-error" role="alert">
+              <p id={`cs-${f.key}-error`} className="field-error" role="alert">
                 {fieldErrors[f.key]}
               </p>
             )}

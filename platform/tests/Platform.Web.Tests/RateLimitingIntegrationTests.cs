@@ -8,7 +8,7 @@ public sealed class RateLimitingIntegrationTests
     [Fact]
     public async Task Chat_ThirtyFirstRequest_Returns429_ApiError()
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         var client = factory.CreateClient().WithToken(factory.IssueToken());
 
         // 空白訊息讓前 30 次停在模型驗證，不呼叫 LLM；第 31 次應由 limiter 先攔截。
@@ -35,7 +35,7 @@ public sealed class RateLimitingIntegrationTests
     [Fact]
     public async Task Chat_And_Stream_ShareOneBudget_PerClientIp()
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         var client = factory.CreateClient().WithToken(factory.IssueToken());
 
         // 兩條路徑各 15 次(空白訊息停在模型驗證,不呼叫 LLM),合計剛好用滿 30。
@@ -61,7 +61,7 @@ public sealed class RateLimitingIntegrationTests
     [Fact]
     public async Task Chat_And_Agui_ShareOneBudget_PerClientIp()
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         var client = factory.CreateClient().WithToken(factory.IssueToken());
         var anonymousClient = factory.CreateClient();
 
@@ -85,7 +85,7 @@ public sealed class RateLimitingIntegrationTests
     [Fact]
     public async Task UnlistedPath_AfterChatBudgetExhausted_StillReturns200()
     {
-        await using var factory = new TestWebAppFactory(enableRateLimiting: true);
+        await using var factory = new TestWebAppFactory(environment: "RateLimitingTesting");
         var client = factory.CreateClient().WithToken(factory.IssueToken());
 
         for (var i = 0; i < 30; i++)

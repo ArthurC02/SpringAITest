@@ -5,8 +5,15 @@
 500」對回「伺服器上那筆 traceback」的線 —— correlation ID 就是這條線,而且只有這條:
 回應 body(snake_case `correlation_id`)與回應標頭各回一份,完整例外只留在日誌。
 
-呼叫端可帶 `X-Correlation-Id` 讓同一個 ID 貫穿跨服務鏈路;帶進來的值會被原樣回寫進回應
-標頭,所以它是信任邊界輸入 —— 走白名單、預設拒絕(不合格即改用新生成的 uuid4)。
+呼叫端可帶 `X-Correlation-Id`;帶進來的值會被原樣回寫進回應標頭,所以它是信任邊界輸入
+—— 走白名單、預設拒絕(不合格即改用新生成的 uuid4)。鏈路已貫穿三個服務:platform 以自己的
+`HttpContext.TraceIdentifier` 為權威來源(不採信瀏覽器帶進來的值)並往 backend/workflow 轉發,
+backend 收下後取代自己的 TraceIdentifier 再轉發給這裡,所以同一次請求在三個服務的日誌是同一串。
+本模組的白名單仍是最後一道:上游若送來不符 `_SAFE_ID` 的值,這裡照樣換成新的 uuid4。
+
+出站方向也接上了:`backend_http.internal_token_headers()` 會把 `current_correlation_id()`
+附到每一次打回 backend 的呼叫上(D3/D5 的 retrieval、run transition、evidence 寫入、prompt
+manifest resolve),所以鏈路是往返閉合的,不是只到 workflow 為止。
 """
 
 import json

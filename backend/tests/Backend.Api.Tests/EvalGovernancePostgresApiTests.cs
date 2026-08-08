@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 
 namespace Backend.Api.Tests;
 
@@ -95,7 +96,7 @@ public sealed class EvalGovernancePostgresApiTests(PostgresFixture fixture) : IA
         const string content = "{\"policy\":{\"required_case_ids\":[\"a\"],\"freshness_seconds\":86400},\"cases\":[{\"case_id\":\"a\",\"mode\":\"deterministic\",\"input\":{},\"expected\":{}}]}";
         await repo.PublishSuiteRevisionAsync(tenant, suiteId, content, "tester", default);
 
-        using var factory = new DapperEvalFactory();
+        using var factory = new DapperEvalFactory(fixture.DataSource!);
         using var admin = factory.CreateInternalClient().WithTenant(tenant).WithUser("operator").WithRole("SYSTEM_ADMIN");
         admin.DefaultRequestHeaders.Add("X-User-Capabilities", "workflow.manage");
 
@@ -136,7 +137,7 @@ public sealed class EvalGovernancePostgresApiTests(PostgresFixture fixture) : IA
         const string content = "{\"policy\":{\"required_case_ids\":[\"a\"],\"freshness_seconds\":86400},\"cases\":[{\"case_id\":\"a\",\"mode\":\"deterministic\",\"input\":{},\"expected\":{}}]}";
         await repo.PublishSuiteRevisionAsync(tenant, suiteId, content, "tester", default);
 
-        using var factory = new DapperEvalFactory();
+        using var factory = new DapperEvalFactory(fixture.DataSource!);
         using var admin = factory.CreateInternalClient().WithTenant(tenant).WithUser("operator").WithRole("SYSTEM_ADMIN");
         admin.DefaultRequestHeaders.Add("X-User-Capabilities", "workflow.manage");
         var fakeRunner = (FakeEvalRunner)factory.Fake<IEvalRunner>();
@@ -167,7 +168,7 @@ public sealed class EvalGovernancePostgresApiTests(PostgresFixture fixture) : IA
         const string content = "{\"policy\":{\"required_case_ids\":[\"a\"],\"freshness_seconds\":86400},\"cases\":[{\"case_id\":\"a\",\"mode\":\"deterministic\",\"input\":{},\"expected\":{}}]}";
         await repo.PublishSuiteRevisionAsync(tenant, suiteId, content, "tester", default);
 
-        using var factory = new DapperEvalFactory();
+        using var factory = new DapperEvalFactory(fixture.DataSource!);
         using var admin = factory.CreateInternalClient().WithTenant(tenant).WithUser("operator").WithRole("SYSTEM_ADMIN");
         admin.DefaultRequestHeaders.Add("X-User-Capabilities", "workflow.manage");
         // FakeEvalRunner's default (no .Setup) script returns every case PASS with "now" timestamps.
@@ -218,7 +219,8 @@ public sealed class EvalGovernancePostgresApiTests(PostgresFixture fixture) : IA
             new { prefix = TenantPrefix + "%" });
     }
 
-    private sealed class DapperEvalFactory : TestWebAppFactory
+    private sealed class DapperEvalFactory(NpgsqlDataSource dataSource)
+        : PostgresTestWebAppFactory(dataSource)
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

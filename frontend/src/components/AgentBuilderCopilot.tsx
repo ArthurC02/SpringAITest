@@ -1,11 +1,6 @@
 import { useMemo } from 'react'
 import { useCopilotAction, useCopilotReadable } from '@copilotkit/react-core'
-import {
-  listRuleActions,
-  listRuleFacts,
-  type RuleActionCatalogResponse,
-  type RuleFactCatalogResponse,
-} from '../api/agents'
+import type { RuleActionCatalogResponse, RuleFactCatalogResponse } from '../api/agents'
 import { businessRuleCount } from '../agentBuilder'
 import {
   actionCatalogItems,
@@ -29,7 +24,6 @@ import type {
   RuleOperatorCatalogEntry,
   SkillCatalogEntry,
 } from '../types'
-import { useResource } from '../hooks/useResource'
 
 interface Props {
   form: AgentDraft
@@ -39,6 +33,9 @@ interface Props {
   /** 已過濾成「可綁定」的 Skill(副駕只能從這裡挑)。 */
   skills: SkillCatalogEntry[]
   tools: AgentToolCatalogEntry[]
+  /** 規則目錄由 AgentEditor 取一次後分給本元件與 BusinessRuleEditor(避免同一畫面重複 GET)。 */
+  factCatalog: RuleFactCatalogResponse | null
+  actionCatalog: RuleActionCatalogResponse | null
   onPatch: (patch: Partial<AgentDraft>) => void
   onRevealAdvanced: () => void
 }
@@ -328,12 +325,11 @@ export default function AgentBuilderCopilot({
   locked,
   skills,
   tools,
+  factCatalog,
+  actionCatalog,
   onPatch,
   onRevealAdvanced,
 }: Props) {
-  // ponytail: 規則目錄與 BusinessRuleEditor 各取一次(兩個小 GET);要省再把 catalog 提到 AgentEditor 共用。
-  const factRes = useResource(listRuleFacts)
-  const actionRes = useResource(listRuleActions)
   const skillNames = useMemo(() => skills.map((skill) => skill.name), [skills])
   const toolNames = useMemo(() => tools.map((tool) => tool.name), [tools])
 
@@ -382,22 +378,22 @@ export default function AgentBuilderCopilot({
       description:
         `Business Rule 目錄(gate=${DEFAULT_RULE_GATE}):可用的 fact、其允許的運算子與值,以及可用的動作。addAgentBusinessRule 的參數只能取自這裡。`,
       value: {
-        facts: factsForGate(factCatalogItems(factRes.data), DEFAULT_RULE_GATE).map((fact) => ({
+        facts: factsForGate(factCatalogItems(factCatalog), DEFAULT_RULE_GATE).map((fact) => ({
           name: fact.name,
           label: fact.label,
           type: fact.type,
           description: fact.description,
-          operators: operatorEntries(fact, factRes.data).map((operator) => operator.name),
+          operators: operatorEntries(fact, factCatalog).map((operator) => operator.name),
           allowed_values: metadataValues(fact).map(String),
         })),
-        actions: actionCatalogItems(actionRes.data).map((action) => ({
+        actions: actionCatalogItems(actionCatalog).map((action) => ({
           name: action.name,
           label: action.label,
           description: action.description,
         })),
       },
     },
-    [factRes.data, actionRes.data],
+    [factCatalog, actionCatalog],
   )
 
   useCopilotReadable({
@@ -487,7 +483,7 @@ export default function AgentBuilderCopilot({
         { name: 'name', type: 'string', description: '規則名稱(給人看的)', required: false },
       ],
       handler: async ({ fact, operator, action, value, name }) => {
-        if (!locked && (!factRes.data || !actionRes.data)) {
+        if (!locked && (!factCatalog || !actionCatalog)) {
           return '規則目錄尚未載入完成(或載入失敗),草稿未變更,請稍後再試。'
         }
         const plan = planAgentBusinessRule(
@@ -495,8 +491,8 @@ export default function AgentBuilderCopilot({
           {
             current: form.business_rules,
             locked,
-            facts: factRes.data,
-            actions: actionRes.data,
+            facts: factCatalog,
+            actions: actionCatalog,
           },
         )
         if (!plan.rules) return plan.message
@@ -505,7 +501,7 @@ export default function AgentBuilderCopilot({
         return plan.message
       },
     },
-    [form.business_rules, locked, factRes.data, actionRes.data, onPatch, onRevealAdvanced],
+    [form.business_rules, locked, factCatalog, actionCatalog, onPatch, onRevealAdvanced],
   )
 
   return null

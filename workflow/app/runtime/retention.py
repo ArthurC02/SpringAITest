@@ -151,7 +151,7 @@ class CheckpointRetentionService:
             response = await backend_http.get_client().get(
                 "/api/internal/checkpoint-retention/candidates",
                 params=page_params,
-                headers={"X-Internal-Token": settings.internal_api_token},
+                headers=backend_http.internal_token_headers(),
             )
             response.raise_for_status()
             try:
@@ -237,7 +237,7 @@ class CheckpointRetentionService:
                 "deleted_root_contexts": deleted_root_contexts,
                 "evidence_ref": evidence_ref,
             },
-            headers={"X-Internal-Token": settings.internal_api_token},
+            headers=backend_http.internal_token_headers(),
         )
         response.raise_for_status()
 

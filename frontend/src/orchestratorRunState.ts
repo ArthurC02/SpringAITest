@@ -15,7 +15,7 @@ export interface StoredOrchestratorRun {
   cancelAccepted: boolean
 }
 
-export const ORCHESTRATOR_RUN_STORAGE_PREFIX = 'springai-orchestrator-runs:active'
+const ORCHESTRATOR_RUN_STORAGE_PREFIX = 'springai-orchestrator-runs:active'
 
 export function orchestratorRunStorageKey(scope: string, orchestratorId: string): string {
   return `${ORCHESTRATOR_RUN_STORAGE_PREFIX}:${encodeURIComponent(scope)}:${encodeURIComponent(orchestratorId)}`

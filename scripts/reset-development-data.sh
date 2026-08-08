@@ -56,6 +56,7 @@ fi
 
 # .lite 必須解析在 repo 目錄內才准遞迴刪除。字串比對擋不住 symlink,
 # 所以真的存在時用 `cd` + `pwd -P` 取實體路徑再比對(指到 repo 外的連結一律拒絕,不跟著刪)。
+# 確認畫面與實際刪除都用同一個解析後路徑,與 ps1 版語意一致。
 RESOLVED_LITE="$LITE_DIR"
 if [ -e "$LITE_DIR" ]; then
   RESOLVED_LITE="$(cd "$LITE_DIR" 2>/dev/null && pwd -P || true)"
@@ -71,7 +72,7 @@ echo "  1. appdb 資料庫        $APPDB_DATABASE"
 echo "  2. checkpoint 資料庫   ${CHECKPOINT_DATABASE:-(CHECKPOINT_DATABASE_URL 未設定,略過)}"
 echo "  3. mem0 關聯狀態庫     $MEM0_DATABASE"
 echo "  4. RabbitMQ 佇列       $RABBIT_QUEUES"
-echo "  5. Lite 本機狀態       $LITE_DIR"
+echo "  5. Lite 本機狀態       $RESOLVED_LITE"
 echo "不會被碰到:Langfuse 追蹤、上述儲存體以外的上傳原始檔、其他 volume。"
 
 printf '輸入確認詞以繼續(%s):' "$CONFIRM_TOKEN"
@@ -118,11 +119,11 @@ for queue in $RABBIT_QUEUES; do
   fi
 done
 
-if [ -d "$LITE_DIR" ]; then
-  rm -rf "$LITE_DIR"
-  echo "  ✓ 已刪除 $LITE_DIR"
+if [ -d "$RESOLVED_LITE" ]; then
+  rm -rf "$RESOLVED_LITE"
+  echo "  ✓ 已刪除 $RESOLVED_LITE"
 else
-  echo "  – $LITE_DIR 不存在,略過"
+  echo "  – $RESOLVED_LITE 不存在,略過"
 fi
 
 echo "完成。接著可執行 ./scripts/start-infra.sh 或 ./scripts/start-lite.sh 重新啟動,再跑開發 seed。"

@@ -17,9 +17,11 @@ public sealed class ContextEnrichmentGateTests
     [InlineData("/api/contexts/abc-123")]
     public async Task ContextRoutes_FlagOff_AreHiddenBeforeAuthentication(string path)
     {
-        using var factory = new TestWebAppFactory(
-            multiAgentDispatchEnabled: true,
-            contextEnrichmentEnabled: false);
+        using var factory = new TestWebAppFactory(new()
+        {
+            ["MULTI_AGENT_DISPATCH_ENABLED"] = "true",
+            ["CONTEXT_ENRICHMENT_ENABLED"] = "false",
+        });
 
         var response = await factory.CreateClient().GetAsync(path);
 
@@ -35,9 +37,8 @@ public sealed class ContextEnrichmentGateTests
     [Fact]
     public async Task ContextRoutes_FlagOn_ProduceNoGateApiError()
     {
-        using var factory = new TestWebAppFactory(
-            multiAgentDispatchEnabled: true,
-            contextEnrichmentEnabled: true);
+        using var factory = TestWebAppFactory.WithFlags(
+            "MULTI_AGENT_DISPATCH_ENABLED", "CONTEXT_ENRICHMENT_ENABLED");
 
         var response = await factory.CreateClient().GetAsync("/api/contexts");
 

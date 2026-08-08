@@ -13,11 +13,15 @@ public static class ApiErrorWriter
         HttpResponse response, int status, string message, CancellationToken ct = default,
         IReadOnlyDictionary<string, string>? fieldErrors = null)
     {
+        var correlationId = response.HttpContext.TraceIdentifier;
         var error = new ApiError(
             DateTime.UtcNow, status, ApiErrorCodes.ForStatus(status), message,
-            response.HttpContext.TraceIdentifier,
+            correlationId,
             fieldErrors is null ? new Dictionary<string, string>() : new Dictionary<string, string>(fieldErrors));
         response.StatusCode = status;
+        // 錯誤回應同時把 correlationId 放進 header:curl 使用者不解析 body 也拿得到追蹤編號。
+        // 成功回應刻意不加(最小變更)。UseExceptionHandler 的 ClearCacheHeaders 只清 cache/ETag,不影響這個。
+        response.Headers[CorrelationIdMiddleware.HeaderName] = correlationId;
         // 明確標記 charset=utf-8,確保中文訊息被正確解讀。
         await response.WriteAsJsonAsync(error, JsonOpts, contentType: "application/json; charset=utf-8", ct);
     }

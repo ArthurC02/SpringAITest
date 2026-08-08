@@ -1,12 +1,16 @@
 import { useRef, useState } from 'react'
 import { decideRunApproval, listRunApprovals } from '../api/runApprovals'
 import { newIdempotencyKey } from '../api/agentRuns'
-import { getSessionStorage, LogicalAttemptKey } from '../logicalAttemptKey'
+import {
+  getSessionStorage,
+  LogicalAttemptKey,
+  RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX,
+} from '../logicalAttemptKey'
 import type { RunApproval } from '../types'
 import { fmtDate } from '../format'
-import { useToast } from './Toast'
+import { runWithToast, useToast } from './Toast'
 
-const ATTEMPT_KEY = 'springai-run-approvals:idempotency'
+const ATTEMPT_KEY = `${RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX}idempotency`
 
 /** A USER-safe approval surface. Backend is the authorization and redaction authority. */
 export default function ApprovalInbox() {
@@ -15,26 +19,31 @@ export default function ApprovalInbox() {
   const [approvals, setApprovals] = useState<RunApproval[]>([])
   const [reason, setReason] = useState('')
   const [loading, setLoading] = useState(false)
-  const attempts = useRef(new LogicalAttemptKey(newIdempotencyKey, getSessionStorage(), ATTEMPT_KEY))
+  // 懶初始化:useRef(new X()) 每次 render 都會建構(並讀 sessionStorage),只有第一顆會被留下。
+  const attemptRef = useRef<LogicalAttemptKey | null>(null)
+  const attempts = (attemptRef.current ??= new LogicalAttemptKey(
+    newIdempotencyKey,
+    getSessionStorage(),
+    ATTEMPT_KEY,
+  ))
 
   async function load() {
     const target = runId.trim()
     if (!target || loading) return
     setLoading(true)
-    try { setApprovals(await listRunApprovals(target)) }
-    catch (error) { toast((error as Error).message, 'error') }
-    finally { setLoading(false) }
+    await runWithToast(toast, () => listRunApprovals(target), { onSuccess: setApprovals })
+    setLoading(false)
   }
 
   async function decide(approval: RunApproval, decision: 'approve' | 'reject') {
     const target = runId.trim()
     if (!target || loading || approval.status !== 'pending') return
     const identity = [target, approval.id, decision, reason.trim()] as const
-    const key = attempts.current.keyFor(identity)
+    const key = attempts.keyFor(identity)
     setLoading(true)
     try {
       await decideRunApproval(target, approval.id, decision, reason, key)
-      attempts.current.consume(identity, key)
+      attempts.consume(identity, key)
       setApprovals(await listRunApprovals(target))
       toast(decision === 'approve' ? 'Approval recorded.' : 'Rejection recorded.', 'success')
     } catch (error) {

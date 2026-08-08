@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { ApiError, consumeSessionExpired } from '../api/http'
 import type { Session } from '../types'
 import ErrorText from './ErrorText'
+import FormField from './FormField'
 
 interface Props {
   login: (username: string, password: string) => Promise<Session>
@@ -11,58 +12,6 @@ interface Props {
     tenantCode: string,
     inviteCode: string,
   ) => Promise<unknown>
-}
-
-interface FormFieldProps {
-  id: string
-  testId: string
-  label: string
-  value: string
-  onChange: (val: string) => void
-  onBlur: (val: string) => void
-  error?: string
-  type?: string
-  autoComplete?: string
-  minLength?: number
-}
-
-/** 登入/註冊表單共用的單一欄位（label + input + field-error），四欄各自差異走 props。 */
-function FormField({
-  id,
-  testId,
-  label,
-  value,
-  onChange,
-  onBlur,
-  error,
-  type = 'text',
-  autoComplete,
-  minLength,
-}: FormFieldProps) {
-  return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
-      <input
-        id={id}
-        type={type}
-        data-testid={testId}
-        className="input"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onBlur={(e) => onBlur(e.target.value)}
-        autoComplete={autoComplete}
-        required
-        minLength={minLength}
-        aria-invalid={!!error}
-        aria-describedby={error ? `${id}-err` : undefined}
-      />
-      {error && (
-        <span className="field-error" id={`${id}-err`} role="alert">
-          {error}
-        </span>
-      )}
-    </div>
-  )
 }
 
 /** 未登入入口：登入 / 註冊切換。成功登入後 App 因 session 改變自動切到 AppShell。 */
@@ -175,7 +124,7 @@ export default function AuthPage({ login, register }: Props) {
     <div className="auth" data-testid="auth-page">
       <form className="auth__card" onSubmit={onSubmit} noValidate>
         <h1 className="auth__title">{isRegister ? '註冊' : '登入'}</h1>
-        <p className="muted" style={{ marginTop: 0 }}>資料分析平台</p>
+        <p className="muted auth__subtitle">資料分析平台</p>
 
         <FormField
           id="username"
@@ -185,6 +134,7 @@ export default function AuthPage({ login, register }: Props) {
           onChange={(v) => onChange('username', v, setUsername)}
           onBlur={(v) => onBlur('username', v)}
           autoComplete="username"
+          required
           error={usernameErr}
         />
 
@@ -198,6 +148,7 @@ export default function AuthPage({ login, register }: Props) {
           onBlur={(v) => onBlur('password', v)}
           autoComplete={isRegister ? 'new-password' : 'current-password'}
           minLength={isRegister ? 8 : undefined}
+          required
           error={passwordErr}
         />
 
@@ -210,6 +161,7 @@ export default function AuthPage({ login, register }: Props) {
               value={tenantCode}
               onChange={(v) => onChange('tenantCode', v, setTenantCode)}
               onBlur={(v) => onBlur('tenantCode', v)}
+              required
               error={tenantErr}
             />
             <FormField
@@ -219,6 +171,7 @@ export default function AuthPage({ login, register }: Props) {
               value={inviteCode}
               onChange={(v) => onChange('inviteCode', v, setInviteCode)}
               onBlur={(v) => onBlur('inviteCode', v)}
+              required
               error={inviteErr}
             />
           </>
@@ -232,16 +185,15 @@ export default function AuthPage({ login, register }: Props) {
         )}
 
         <button
-          className="btn btn--primary"
+          className="btn btn--primary btn--block"
           data-testid="auth-submit"
           type="submit"
           disabled={busy}
-          style={{ width: '100%' }}
         >
           {busy ? '請稍候…' : isRegister ? '註冊' : '登入'}
         </button>
 
-        <p className="muted" style={{ marginTop: 14, fontSize: 13 }}>
+        <p className="muted auth__alt">
           {isRegister ? '已經有帳號?' : '還沒有帳號?'}{' '}
           <button
             type="button"

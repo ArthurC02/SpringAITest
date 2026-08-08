@@ -119,12 +119,15 @@ builder.Services.AddSingleton(sp => new PlatformReadinessProbe(
     testing: builder.Environment.IsEnvironment("Testing")
         || builder.Environment.IsEnvironment("RateLimitingTesting")));
 
+// 五顆內部下游 client 共用的 correlation 轉發(見 Infrastructure/CorrelationIdHeader.cs)。
+builder.Services.AddTransient<CorrelationIdForwardingHandler>();
+
 // ---------------------------------------------------------------------------
 // backend client:核心商業邏輯已抽到 backend(:8002)。連線逾時 5s;讀取逾時 90s
 // (容納文件嵌入這類較慢的呼叫);強制 HTTP/1.1 在 BackendClient 內設定。
 // ---------------------------------------------------------------------------
 builder.Services.AddHttpClient<BackendClient>(c => c.Timeout = TimeSpan.FromSeconds(90))
-    .WithFastConnectTimeout();
+    .WithInternalDownstreamDefaults();
 
 // ---------------------------------------------------------------------------
 // Services(認證/聊天歷史/文件/分析/組態 皆代理 backend;工作流仍打 Python :8001)
@@ -144,13 +147,13 @@ builder.Services.AddScoped<IAgentService, AgentService>();
 builder.Services.AddScoped<IWorkflowAdminService, WorkflowAdminService>();
 builder.Services.AddHttpClient<IAgentRunService, AgentRunService>(
         c => c.Timeout = TimeSpan.FromSeconds(150))
-    .WithFastConnectTimeout();
+    .WithInternalDownstreamDefaults();
 builder.Services.AddHttpClient<IOrchestratorRunService, OrchestratorRunService>(
         c => c.Timeout = TimeSpan.FromSeconds(90))
-    .WithFastConnectTimeout();
+    .WithInternalDownstreamDefaults();
 builder.Services.AddHttpClient<IAgentChatRuntime, AgentChatRuntime>(
         c => c.Timeout = TimeSpan.FromSeconds(90))
-    .WithFastConnectTimeout();
+    .WithInternalDownstreamDefaults();
 
 // P1 prompt manifest 解析器:只在旗標開啟時註冊(Singleton —— (tenant, revision) 的 resolved manifest
 // 快取要跨請求存活)。關閉時兩條鏈路的 GetService 取到 null 直接用 constants,連 backend 都不打。
@@ -166,8 +169,9 @@ if (promptArtifactsEnabled)
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<IChatIdentityAccessor, HttpChatIdentityAccessor>();
 
-// LLM 代理:Agent Framework 實作,無狀態、單例即可。
-builder.Services.AddSingleton<ILlmAgent>(_ => new AgentFrameworkLlmAgent(llmOptions));
+// LLM 代理:Agent Framework 實作,無狀態、單例即可(底層共用下面註冊的那顆 IChatClient 單例)。
+builder.Services.AddSingleton<ILlmAgent>(sp =>
+    new AgentFrameworkLlmAgent(sp.GetRequiredService<IChatClient>(), llmOptions));
 
 // ---------------------------------------------------------------------------
 // AG-UI(CopilotKit 操作助理):同一套 LiteLLM 佈線。IChatClient 註冊為單例,
@@ -322,7 +326,7 @@ else
 
 // 下游工作流 client:連線逾時 5s;讀取逾時 150s(強制 HTTP/1.1 在 service 內設定)。
 builder.Services.AddHttpClient<IWorkflowEngineClient, WorkflowEngineClient>(c => c.Timeout = TimeSpan.FromSeconds(150))
-    .WithFastConnectTimeout();
+    .WithInternalDownstreamDefaults();
 builder.Services.AddScoped<IBusinessWorkflowService, BusinessWorkflowService>();
 
 // ---------------------------------------------------------------------------
@@ -626,13 +630,17 @@ app.Run();
 public partial class Program;
 
 /// <summary>
-/// G3:5 顆下游 HttpClient(BackendClient、AgentRunService、OrchestratorRunService、AgentChatRuntime、
-/// WorkflowEngineClient)的 primary handler 逐字相同(僅連線逾時 5s),外層 c.Timeout 依端點各異。
+/// G3:5 顆內部下游 HttpClient(BackendClient、AgentRunService、OrchestratorRunService、AgentChatRuntime、
+/// WorkflowEngineClient)共用的兩件事 —— primary handler 逐字相同(僅連線逾時 5s),以及把本請求的
+/// correlation id 轉發給 backend/workflow。外層 c.Timeout 依端點各異,留在各自的註冊上。
+/// mem0 與 health 探針**不**掛這條:前者不是內部信任邊界內的下游,後者沒有請求範圍的 correlation id。
 /// file-scoped:只有本檔的 AddHttpClient 註冊用得到。
 /// </summary>
 file static class HttpClientBuilderExtensions
 {
-    internal static IHttpClientBuilder WithFastConnectTimeout(this IHttpClientBuilder builder)
-        => builder.ConfigurePrimaryHttpMessageHandler(
-            () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) });
+    internal static IHttpClientBuilder WithInternalDownstreamDefaults(this IHttpClientBuilder builder)
+        => builder
+            .ConfigurePrimaryHttpMessageHandler(
+                () => new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) })
+            .AddHttpMessageHandler<CorrelationIdForwardingHandler>();
 }

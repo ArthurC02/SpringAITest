@@ -292,7 +292,13 @@ function EvalTriggerForm({
   const [candidateName, setCandidateName] = useState('')
   const [budgetMs, setBudgetMs] = useState('')
   const [busy, setBusy] = useState(false)
-  const attempts = useRef(new LogicalAttemptKey(newIdempotencyKey, getSessionStorage(), EVAL_RUN_ATTEMPT_KEY))
+  // 懶初始化:useRef(new X()) 每次 render 都會建構(並讀 sessionStorage),只有第一顆會被留下。
+  const attemptRef = useRef<LogicalAttemptKey | null>(null)
+  const attempts = (attemptRef.current ??= new LogicalAttemptKey(
+    newIdempotencyKey,
+    getSessionStorage(),
+    EVAL_RUN_ATTEMPT_KEY,
+  ))
   const selectedSuite = suites.find((s) => s.suiteId === suiteId) ?? null
   const trimmedBudget = budgetMs.trim()
   const parsedBudget = trimmedBudget ? Number(trimmedBudget) : undefined
@@ -313,7 +319,7 @@ function EvalTriggerForm({
     )
       return
     const identity = [suiteId, revision, name, parsedBudget ?? null] as const
-    const key = attempts.current.keyFor(identity)
+    const key = attempts.keyFor(identity)
     setBusy(true)
     await runWithToast(
       toast,
@@ -321,7 +327,7 @@ function EvalTriggerForm({
       {
         success: 'Eval run completed.',
         onSuccess: () => {
-          attempts.current.consume(identity, key)
+          attempts.consume(identity, key)
           setCandidateName('')
           setBudgetMs('')
           onCreated()

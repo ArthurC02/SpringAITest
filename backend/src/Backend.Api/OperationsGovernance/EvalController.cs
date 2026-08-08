@@ -176,7 +176,7 @@ public sealed class EvalController(IEvalRepository evals, IEvalRunner runner) : 
     public async Task<IActionResult> GetRun(Guid runId, CancellationToken ct)
     {
         RequireManage();
-        var run = await evals.GetRunAsync(Request.RequireTenant(), runId, ct) ?? throw NotFound(runId.ToString("D"));
+        var run = await evals.GetRunAsync(Request.RequireTenant(), runId, ct) ?? throw NotFoundRun(runId.ToString("D"));
         return Ok(PublicDetail(run));
     }
 
@@ -185,6 +185,8 @@ public sealed class EvalController(IEvalRepository evals, IEvalRunner runner) : 
     private static int JsonBytes(JsonElement value) => System.Text.Encoding.UTF8.GetByteCount(value.GetRawText());
 
     private static ApiException NotFound(string id) => ApiErrors.NotFound(" Eval Suite", id);
+
+    private static ApiException NotFoundRun(string id) => ApiErrors.NotFound(" Eval Run", id);
 
     private static object PublicSuite(EvalSuiteSummary s) => new
     {

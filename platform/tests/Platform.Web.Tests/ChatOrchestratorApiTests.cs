@@ -117,7 +117,11 @@ public sealed class ChatOrchestratorApiTests
         public CapturingBackendHandler Backend { get; } = new();
 
         public Factory(string allowlist, bool enabled = true, bool backendUnreachable = false)
-            : base(agentChatEnabled: enabled, agentChatTenantAllowlist: allowlist)
+            : base(new()
+            {
+                ["AGENT_CHAT_ENABLED"] = enabled ? "true" : "false",
+                ["AGENT_CHAT_TENANT_ALLOWLIST"] = allowlist,
+            })
         {
             _handler = backendUnreachable ? new UnreachableBackendHandler() : (HttpMessageHandler)Backend;
         }

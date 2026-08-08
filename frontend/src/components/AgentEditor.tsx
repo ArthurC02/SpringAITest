@@ -5,6 +5,8 @@ import {
   getAgent,
   listAgentToolCatalog,
   listAgentRevisions,
+  listRuleActions,
+  listRuleFacts,
   publishAgent,
   putAgentDraft,
   restoreAgentRevision,
@@ -340,6 +342,9 @@ export default function AgentEditor({
   ]
   const toolCatalogRes = useResource(listAgentToolCatalog)
   const toolCatalog: AgentToolCatalogEntry[] = toolCatalogRes.data ?? []
+  // 規則目錄取一次,分給 BusinessRuleEditor 與副駕(兩者同時掛載,各自取會變成重複 GET)。
+  const ruleFactsRes = useResource(listRuleFacts)
+  const ruleActionsRes = useResource(listRuleActions)
 
   // 建立模式才讀系統設定;失敗靜默(輔助資料,不是主功能)→ 沿用程式內建 fallback。
   const fetchDefaults = useCallback(
@@ -756,6 +761,8 @@ export default function AgentEditor({
             locked={locked}
             skills={bindableSkills}
             tools={toolCatalog}
+            factCatalog={ruleFactsRes.data}
+            actionCatalog={ruleActionsRes.data}
             onPatch={patch}
             onRevealAdvanced={() => setAdvancedOpen(true)}
           />
@@ -771,11 +778,12 @@ export default function AgentEditor({
                 value={form.name}
                 disabled={locked}
                 aria-invalid={!!fieldError('name')}
+                aria-describedby={fieldError('name') ? 'agent-name-error' : undefined}
                 placeholder="租戶內顯示名稱"
                 onChange={(e) => patch({ name: e.target.value })}
               />
               {fieldError('name') && (
-                <span className="field-error" role="alert">
+                <span id="agent-name-error" className="field-error" role="alert">
                   {fieldError('name')}
                 </span>
               )}
@@ -788,11 +796,12 @@ export default function AgentEditor({
                 value={form.description}
                 disabled={locked}
                 aria-invalid={!!fieldError('description')}
+                aria-describedby={fieldError('description') ? 'agent-desc-error' : undefined}
                 placeholder="用途與適用情境"
                 onChange={(e) => patch({ description: e.target.value })}
               />
               {fieldError('description') && (
-                <span className="field-error" role="alert">
+                <span id="agent-desc-error" className="field-error" role="alert">
                   {fieldError('description')}
                 </span>
               )}
@@ -810,11 +819,12 @@ export default function AgentEditor({
                 value={form.system_prompt}
                 disabled={locked}
                 aria-invalid={!!fieldError('system_prompt')}
+                aria-describedby={fieldError('system_prompt') ? 'agent-system-prompt-error' : undefined}
                 placeholder="角色、目標、語氣、一般行為指引"
                 onChange={(e) => patch({ system_prompt: e.target.value })}
               />
               {fieldError('system_prompt') && (
-                <span className="field-error" role="alert">
+                <span id="agent-system-prompt-error" className="field-error" role="alert">
                   {fieldError('system_prompt')}
                 </span>
               )}
@@ -944,12 +954,13 @@ export default function AgentEditor({
                   value={form.slug}
                   disabled={locked || !creating}
                   aria-invalid={!!fieldError('slug')}
+                  aria-describedby={fieldError('slug') ? 'agent-slug-error' : undefined}
                   placeholder="租戶內唯一、穩定的 API 識別字"
                   onChange={(e) => patch({ slug: e.target.value })}
                 />
                 {!creating && <p className="muted">slug 是穩定識別字,建立後不可變更。</p>}
                 {fieldError('slug') && (
-                  <span className="field-error" role="alert">
+                  <span id="agent-slug-error" className="field-error" role="alert">
                     {fieldError('slug')}
                   </span>
                 )}
@@ -1065,6 +1076,8 @@ export default function AgentEditor({
               value={form.business_rules}
               disabled={locked}
               onChange={(business_rules) => patch({ business_rules })}
+              factResource={ruleFactsRes}
+              actionResource={ruleActionsRes}
             />
 
             {/* ── Runtime limits / Harness pin ── */}

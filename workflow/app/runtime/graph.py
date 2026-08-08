@@ -226,17 +226,7 @@ async def _model_step(
             **_failure(state, context, "model_step", budget_error),
             "pending_command": None,
         }
-    artifact = await _active_artifact(state, context)
-    scope = state.get("active_skill_scope") or {}
-    rule_tools = (
-        frozenset(scope.get("effective_tools") or []) if artifact is not None else None
-    )
-    specs = effective_specs(
-        context.snapshot,
-        artifact=artifact,
-        rule_tools=rule_tools,
-        deps=context.deps,
-    )
+    artifact, specs = await _active_artifact_and_specs(state, context)
     started = time.perf_counter()
     try:
         turn = await context.model.next_command(
@@ -316,22 +306,8 @@ async def _policy_gate(
         command.kind == "request_input"
         and int(state.get("context_acquisition_attempts") or 0) < 1
     ):
-        artifact = await _active_artifact(state, context)
-        scope = state.get("active_skill_scope") or {}
-        rule_tools = (
-            frozenset(scope.get("effective_tools") or [])
-            if artifact is not None
-            else None
-        )
-        available = {
-            spec.name
-            for spec in effective_specs(
-                context.snapshot,
-                artifact=artifact,
-                rule_tools=rule_tools,
-                deps=context.deps,
-            )
-        }
+        _artifact, specs = await _active_artifact_and_specs(state, context)
+        available = {spec.name for spec in specs}
         latest_user = next(
             (
                 str(item.get("content") or "")
@@ -643,10 +619,9 @@ async def _invoke_business_workflow(
         failure = _failure(state, context, "load_skill", error_code)
         return {
             **failure,
-            "step_count": int(state.get("step_count") or 0)
-            + int(result.steps_consumed or 0),
+            "step_count": int(state.get("step_count") or 0) + result.steps_consumed,
             "tool_rounds": int(state.get("tool_rounds") or 0)
-            + int(result.tool_rounds_consumed or 0),
+            + result.tool_rounds_consumed,
             "events": _event_list(
                 {**state, "events": failure.get("events", state.get("events") or [])},
                 context,
@@ -665,18 +640,8 @@ async def _invoke_business_workflow(
     return {
         "pending_command": None,
         "rule_allowed_tools": None,
-        "step_count": int(state.get("step_count") or 0)
-        + (
-            result.steps_consumed
-            if result.steps_consumed is not None
-            else max(result.steps_bound - 1, 0)
-        ),
-        "tool_rounds": int(state.get("tool_rounds") or 0)
-        + (
-            result.tool_rounds_consumed
-            if result.tool_rounds_consumed is not None
-            else result.tool_calls_bound
-        ),
+        "step_count": int(state.get("step_count") or 0) + result.steps_consumed,
+        "tool_rounds": int(state.get("tool_rounds") or 0) + result.tool_rounds_consumed,
         "messages": [
             *(state.get("messages") or []),
             {
@@ -1168,6 +1133,27 @@ async def _active_artifact(
     ):
         raise ArtifactError("active Skill scope does not match its checkpoint pin")
     return artifact
+
+
+async def _active_artifact_and_specs(
+    state: RuntimeState, context: RuntimeGraphContext
+) -> tuple[LoadedSkillArtifact | None, list[tool_registry.ToolSpec]]:
+    """目前 Skill scope 的 artifact + 該 scope 下的有效工具規格。
+
+    scope 內的 `effective_tools` 是 Business Rules 當下算出的授權集合，與
+    `_rule_tools(state)` 讀的 `rule_allowed_tools` 是兩個不同來源，不可互換。
+    """
+    artifact = await _active_artifact(state, context)
+    scope = state.get("active_skill_scope") or {}
+    rule_tools = (
+        frozenset(scope.get("effective_tools") or []) if artifact is not None else None
+    )
+    return artifact, effective_specs(
+        context.snapshot,
+        artifact=artifact,
+        rule_tools=rule_tools,
+        deps=context.deps,
+    )
 
 
 def _proposed_action(

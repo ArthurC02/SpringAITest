@@ -161,14 +161,14 @@ public sealed class WorkflowAdminApiTests
 
     public sealed class DisabledFixture : TestWebAppFactory
     {
-        public DisabledFixture() : base(workflowDesignerEnabled: false)
+        public DisabledFixture() : base(new() { ["WORKFLOW_DESIGNER_ENABLED"] = "false" })
         {
         }
     }
 
     public sealed class EnabledFixture : TestWebAppFactory
     {
-        public EnabledFixture() : base(workflowDesignerEnabled: true)
+        public EnabledFixture() : base(new() { ["WORKFLOW_DESIGNER_ENABLED"] = "true" })
         {
         }
     }

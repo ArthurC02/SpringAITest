@@ -7,15 +7,16 @@ using Platform.Service.Exceptions;
 namespace Platform.Service.Tests;
 
 /// <summary>
-/// AgentService(透明代理 backend /api/agents,D1)。這一層驗:
-/// (a) 每個請求都帶 X-Internal-Token + 三個身分 header(取自已驗證 JWT),capabilities 有才帶 X-User-Capabilities;
-/// (b) PUT draft / publish / validate 的 If-Match 原樣往下轉發;
-/// (c) backend 的狀態碼(含 412)、body 與 ETag 原樣穿透;5xx 與傳輸失敗才收斂成對外 502。
+/// AgentService(透明代理 backend /api/agents,D1)。收斂成單一 <c>SendAsync</c> 後,「哪個 action 走哪條路徑」
+/// 是 AgentController 的決策,由 <c>AgentApiTests.Routes_ForwardExactBackendPathSuffix</c> 在 Web 層釘住;
+/// 這一層只剩這顆代理自己的契約:
+/// (a) 每個請求都帶 X-Internal-Token + 三個身分 header(取自已驗證 JWT),capabilities/groups 有才帶;
+/// (b) suffix 接在 /api/agents 之後(空字串 = 集合本身),If-Match 有值才轉發;
+/// (c) backend 的狀態碼、body 與 ETag 原樣穿透;5xx 與傳輸失敗才收斂成對外 502。
 /// </summary>
 public sealed class AgentServiceTests
 {
     private const string AgentIdText = "11111111-1111-1111-1111-111111111111";
-    private static readonly Guid AgentId = Guid.Parse(AgentIdText);
     private static readonly UserContext AdminCtx = new("admin-a", "demo-a", "ADMIN");
 
     private static readonly UserContext CapCtx =
@@ -52,8 +53,9 @@ public sealed class AgentServiceTests
             HttpStatusCode.OK,
             """[{"id":"11111111-1111-1111-1111-111111111111","slug":"researcher"}]"""));
 
-        var result = await Build(stub).ListAsync(AdminCtx);
+        var result = await Build(stub).SendAsync(HttpMethod.Get, string.Empty, AdminCtx);
 
+        // 空 suffix = 集合本身,不多掛一條斜線。
         Assert.Equal("http://backend/api/agents", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Get, stub.LastRequest!.Method);
         Assert.Equal("tok", stub.Header("X-Internal-Token"));
@@ -73,7 +75,7 @@ public sealed class AgentServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, "[]"));
 
-        await Build(stub).ListAsync(CapCtx);
+        await Build(stub).SendAsync(HttpMethod.Get, string.Empty, CapCtx);
 
         Assert.Equal("workflow.manage agent.author", stub.Header("X-User-Capabilities"));
     }
@@ -83,7 +85,7 @@ public sealed class AgentServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, "[]"));
 
-        await Build(stub).ListAsync(GroupCtx);
+        await Build(stub).SendAsync(HttpMethod.Get, string.Empty, GroupCtx);
 
         Assert.Equal("operations reviewers", stub.Header("X-User-Groups"));
     }
@@ -99,40 +101,8 @@ public sealed class AgentServiceTests
         };
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => Build(stub).ListAsync(context));
+            () => Build(stub).SendAsync(HttpMethod.Get, string.Empty, context));
         Assert.Null(stub.LastRequest);
-    }
-
-    // ---- 路徑/方法/body 正確性 ----
-
-    [Fact]
-    public async Task Create_PostsBodyToCollection()
-    {
-        var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.Created, """{"id":"a2"}"""));
-
-        var result = await Build(stub).CreateAsync(AdminCtx, Json("""{"slug":"new-agent","name":"新代理"}"""));
-
-        Assert.Equal("http://backend/api/agents", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
-        Assert.Equal(201, result.Status);
-        using var sent = JsonDocument.Parse(stub.LastBody!);
-        Assert.Equal("new-agent", sent.RootElement.GetProperty("slug").GetString());
-    }
-
-    [Fact]
-    public async Task Get_ForwardsIdInPath_ReturnsEtagFromResponse()
-    {
-        var stub = new StubHttpMessageHandler(_ => Resp(
-            HttpStatusCode.OK,
-            """{"id":"11111111-1111-1111-1111-111111111111","draft_version":3}""",
-            "\"3\""));
-
-        var result = await Build(stub).GetAsync(AgentId, AdminCtx);
-
-        Assert.Equal($"http://backend/api/agents/{AgentIdText}", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal(200, result.Status);
-        Assert.Equal("\"3\"", result.ETag);
-        Assert.Equal(3, Json(result.Body).GetProperty("draft_version").GetInt32());
     }
 
     private static string[] GroupSet(bool exceedByOneByte)
@@ -147,64 +117,48 @@ public sealed class AgentServiceTests
             })
             .ToArray();
 
-    [Fact]
-    public async Task Deactivate_SendsDeleteToItemPath()
-    {
-        var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
-
-        var result = await Build(stub).DeactivateAsync(AgentId, AdminCtx);
-
-        Assert.Equal($"http://backend/api/agents/{AgentIdText}", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal(HttpMethod.Delete, stub.LastRequest!.Method);
-        Assert.Equal(204, result.Status);
-    }
+    // ---- suffix / body / ETag ----
 
     [Fact]
-    public async Task Revisions_SendsGetToRevisionsPath()
+    public async Task Create_PostsBodyToCollection()
     {
-        var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, """[{"revision":1}]"""));
+        var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.Created, """{"id":"a2"}"""));
 
-        await Build(stub).RevisionsAsync(AgentId, AdminCtx);
+        var result = await Build(stub).SendAsync(
+            HttpMethod.Post, string.Empty, AdminCtx, body: Json("""{"slug":"new-agent","name":"新代理"}"""));
 
-        Assert.Equal($"http://backend/api/agents/{AgentIdText}/revisions", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal(HttpMethod.Get, stub.LastRequest!.Method);
-    }
-
-    [Fact]
-    public async Task RestoreRevision_SendsPostToRestorePath()
-    {
-        var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, """{"revision":2}"""));
-
-        await Build(stub).RestoreRevisionAsync(AgentId, 1, AdminCtx);
-
-        Assert.Equal(
-            $"http://backend/api/agents/{AgentIdText}/revisions/1/restore",
-            stub.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("http://backend/api/agents", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
+        Assert.Equal(201, result.Status);
+        using var sent = JsonDocument.Parse(stub.LastBody!);
+        Assert.Equal("new-agent", sent.RootElement.GetProperty("slug").GetString());
     }
 
     [Fact]
-    public async Task Enable_SendsPostToEnablePath()
+    public async Task NonEmptySuffix_IsAppendedToCollectionPath_AndEtagIsReturned()
     {
         var stub = new StubHttpMessageHandler(_ => Resp(
             HttpStatusCode.OK,
-            """{"id":"11111111-1111-1111-1111-111111111111","enabled":true}"""));
+            """{"id":"11111111-1111-1111-1111-111111111111","draft_version":3}""",
+            "\"3\""));
 
-        var result = await Build(stub).EnableAsync(AgentId, AdminCtx);
+        var result = await Build(stub).SendAsync(HttpMethod.Get, AgentIdText, AdminCtx);
 
-        Assert.Equal($"http://backend/api/agents/{AgentIdText}/enable", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal(HttpMethod.Post, stub.LastRequest!.Method);
+        Assert.Equal($"http://backend/api/agents/{AgentIdText}", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(200, result.Status);
+        Assert.Equal("\"3\"", result.ETag);
+        Assert.Equal(3, Json(result.Body).GetProperty("draft_version").GetInt32());
     }
 
     // ---- If-Match 轉發(樂觀鎖)----
 
     [Fact]
-    public async Task UpdateDraft_ForwardsIfMatchAndBody_ToPut()
+    public async Task IfMatch_AndBody_AreForwardedVerbatim()
     {
         var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, """{"draft_version":2}""", "\"2\""));
 
-        await Build(stub).UpdateDraftAsync(AgentId, AdminCtx, "\"1\"", Json("""{"name":"改名"}"""));
+        await Build(stub).SendAsync(
+            HttpMethod.Put, $"{AgentIdText}/draft", AdminCtx, "\"1\"", Json("""{"name":"改名"}"""));
 
         Assert.Equal($"http://backend/api/agents/{AgentIdText}/draft", stub.LastRequest!.RequestUri!.ToString());
         Assert.Equal(HttpMethod.Put, stub.LastRequest!.Method);
@@ -214,33 +168,11 @@ public sealed class AgentServiceTests
     }
 
     [Fact]
-    public async Task Publish_ForwardsIfMatch()
-    {
-        var stub = new StubHttpMessageHandler(_ => Resp(
-            HttpStatusCode.OK,
-            """{"published_revision":1}"""));
-
-        await Build(stub).PublishAsync(
-            AgentId,
-            AdminCtx,
-            "\"1\"",
-            Json("""{"expected_draft_version":1}"""));
-
-        Assert.Equal($"http://backend/api/agents/{AgentIdText}/publish", stub.LastRequest!.RequestUri!.ToString());
-        Assert.Equal("\"1\"", stub.LastRequest!.Headers.IfMatch.Single().ToString());
-        using var sent = JsonDocument.Parse(stub.LastBody!);
-        Assert.Equal(1, sent.RootElement.GetProperty("expected_draft_version").GetInt64());
-    }
-
-    // UpdateDraft/Publish/Validate 三個方法都只是把 ifMatch 參數丟進同一顆 ProxyAsync;
-    // 有 body 的兩條(語意最重)已覆蓋該分支,validate 的路徑正確性由 Web 層釘住。
-
-    [Fact]
-    public async Task UpdateDraft_WithoutIfMatch_DoesNotSendHeader()
+    public async Task WithoutIfMatch_DoesNotSendHeader()
     {
         var stub = new StubHttpMessageHandler(_ => Resp(HttpStatusCode.OK, "{}"));
 
-        await Build(stub).UpdateDraftAsync(AgentId, AdminCtx, null, null);
+        await Build(stub).SendAsync(HttpMethod.Put, $"{AgentIdText}/draft", AdminCtx);
 
         Assert.Empty(stub.LastRequest!.Headers.IfMatch);
     }
@@ -249,14 +181,15 @@ public sealed class AgentServiceTests
 
     // 409(版本過期):backend 對 draft 樂觀鎖用 409(不是 412)—— 透明代理原樣帶回狀態碼、ApiError body 與目前版本的 ETag。
     [Fact]
-    public async Task UpdateDraft_Backend409Stale_PassesThroughStatusBodyAndEtag()
+    public async Task Backend409Stale_PassesThroughStatusBodyAndEtag()
     {
         var stub = new StubHttpMessageHandler(_ => Resp(
             (HttpStatusCode)409,
             """{"timestamp":"2026-07-24T00:00:00Z","status":409,"code":"version_conflict","message":"草稿版本衝突","correlationId":"backend-trace-1","fieldErrors":{}}""",
             "\"5\""));
 
-        var result = await Build(stub).UpdateDraftAsync(AgentId, AdminCtx, "\"1\"", Json("{}"));
+        var result = await Build(stub).SendAsync(
+            HttpMethod.Put, $"{AgentIdText}/draft", AdminCtx, "\"1\"", Json("{}"));
 
         Assert.Equal(409, result.Status);
         Assert.Equal("\"5\"", result.ETag);
@@ -276,7 +209,7 @@ public sealed class AgentServiceTests
         var body = $"{{\"timestamp\":\"2026-07-24T00:00:00Z\",\"status\":{status},\"code\":\"backend_code\",\"message\":\"下游訊息\",\"correlationId\":\"backend-trace-1\",\"fieldErrors\":{{\"slug\":\"重複\"}}}}";
         var stub = new StubHttpMessageHandler(_ => Resp((HttpStatusCode)status, body));
 
-        var result = await Build(stub).CreateAsync(AdminCtx, Json("{}"));
+        var result = await Build(stub).SendAsync(HttpMethod.Post, string.Empty, AdminCtx, body: Json("{}"));
 
         Assert.Equal(status, result.Status);
         var parsed = Json(result.Body);
@@ -294,7 +227,8 @@ public sealed class AgentServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
 
-        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(() => Build(stub).ListAsync(AdminCtx));
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(stub).SendAsync(HttpMethod.Get, string.Empty, AdminCtx));
         Assert.Contains("500", ex.Message);
     }
 
@@ -304,7 +238,8 @@ public sealed class AgentServiceTests
     {
         var stub = new StubHttpMessageHandler(_ => throw new HttpRequestException("連線被拒"));
 
-        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(() => Build(stub).ListAsync(AdminCtx));
+        var ex = await Assert.ThrowsAsync<WorkflowInvocationException>(
+            () => Build(stub).SendAsync(HttpMethod.Get, string.Empty, AdminCtx));
         Assert.Contains("Agent 服務呼叫失敗", ex.Message);
     }
 }

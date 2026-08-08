@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Backend.Api.Common;
 using Backend.Api.Skills;
 using Microsoft.AspNetCore.Mvc;
@@ -71,7 +70,7 @@ public sealed class BusinessWorkflowController : ControllerBase
             }
 
             var created = await _repo.CreateAsync(
-                tenantId, "flow", ToWorkflow(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+                tenantId, "flow", ToWorkflow(meta, request.Definition!, SkillRequests.SimpleFormText(request.SimpleForm)),
                 Request.UserIdOrEmpty(), ct);
             if (created is null)
             {
@@ -107,7 +106,7 @@ public sealed class BusinessWorkflowController : ControllerBase
             }
 
             var updated = await _repo.UpdateAsync(
-                tenantId, name, "flow", ToWorkflow(meta, request.Definition!, SimpleFormText(request.SimpleForm)),
+                tenantId, name, "flow", ToWorkflow(meta, request.Definition!, SkillRequests.SimpleFormText(request.SimpleForm)),
                 Request.UserIdOrEmpty(), ct);
             return Ok(updated ?? throw NotFound(name));
         });
@@ -140,27 +139,11 @@ public sealed class BusinessWorkflowController : ControllerBase
             return result.Skill!;
         }
 
-        var fieldErrors = new Dictionary<string, string>();
-        foreach (var error in result.Errors)
-        {
-            var message = error.Message ?? error.Code;
-            if (error.Line is int line)
-            {
-                message += $"（第 {line} 行）";
-            }
-            fieldErrors.TryAdd(error.Code, message);
-        }
-
         throw new ApiException(StatusCodes.Status422UnprocessableEntity, "Business Workflow 定義驗證失敗")
         {
-            FieldErrors = fieldErrors,
+            FieldErrors = SkillRequests.ToFieldErrors(result.Errors),
         };
     }
-
-    private static string? SimpleFormText(JsonElement? form)
-        => form is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } value
-            ? value.GetRawText()
-            : null;
 
     private static Skill ToWorkflow(SkillMetadata meta, string definition, string? simpleForm) => new(
         meta.Name,

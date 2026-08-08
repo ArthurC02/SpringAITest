@@ -9,6 +9,20 @@ namespace Platform.Web.Tests;
 
 public sealed class JwtTests
 {
+    /// <summary>
+    /// 測試專用的 token 驗證器:直接對 <see cref="JwtService.BuildValidationParameters"/> 產出的參數
+    /// 驗一個 token,不必起 <c>WebApplicationFactory</c> 打 HTTP。
+    /// ⚠️ 此 <see cref="JwtSecurityTokenHandler"/> **僅供測試** —— 生產路徑上沒有任何地方 new 它:
+    /// Program.cs 只把同一組 <see cref="TokenValidationParameters"/> 交給 JwtBearer,實際驗章的是
+    /// 框架內部的 <c>JsonWebTokenHandler</c>。兩者共用的是「驗證參數」這個唯一真理來源,不是 handler。
+    /// </summary>
+    private sealed class TestTokenValidator(JwtOptions options)
+    {
+        public ClaimsPrincipal Validate(string token)
+            => new JwtSecurityTokenHandler { MapInboundClaims = false }
+                .ValidateToken(token, JwtService.BuildValidationParameters(options), out _);
+    }
+
     private static JwtOptions Options(params (string Kid, TestJwtKeyPair Key)[] keys)
     {
         var ring = keys.Length == 0
@@ -20,7 +34,7 @@ public sealed class JwtTests
     [Fact]
     public void Validate_AcceptsBackendFormatToken_AndReadsClaims()
     {
-        var principal = new JwtService(Options()).Validate(TestTokens.Mint("alice", "ADMIN", "demo-a"));
+        var principal = new TestTokenValidator(Options()).Validate(TestTokens.Mint("alice", "ADMIN", "demo-a"));
 
         Assert.Equal("alice", principal.FindFirst("sub")!.Value);
         Assert.Equal("ADMIN", principal.FindFirst("role")!.Value);
@@ -32,7 +46,7 @@ public sealed class JwtTests
     {
         var oldKey = TestJwtKeyPair.Create();
         var newKey = TestJwtKeyPair.Create();
-        var service = new JwtService(Options(("old", oldKey), ("new", newKey)));
+        var service = new TestTokenValidator(Options(("old", oldKey), ("new", newKey)));
 
         Assert.Equal("alice", service.Validate(TestTokens.Mint(
             "alice", keyPair: oldKey, kid: "old")).FindFirst("sub")!.Value);
@@ -51,7 +65,7 @@ public sealed class JwtTests
             audience: mismatch == "audience" ? "wrong-audience" : null,
             kid: mismatch == "kid" ? "unknown" : null);
 
-        Assert.ThrowsAny<SecurityTokenException>(() => new JwtService(Options()).Validate(token));
+        Assert.ThrowsAny<SecurityTokenException>(() => new TestTokenValidator(Options()).Validate(token));
     }
 
     [Fact]
@@ -70,7 +84,7 @@ public sealed class JwtTests
         token.Header.Remove(JwtHeaderParameterNames.Kid);
         var encoded = new JwtSecurityTokenHandler().WriteToken(token);
 
-        Assert.ThrowsAny<SecurityTokenException>(() => new JwtService(Options()).Validate(encoded));
+        Assert.ThrowsAny<SecurityTokenException>(() => new TestTokenValidator(Options()).Validate(encoded));
     }
 
     [Fact]
@@ -88,13 +102,13 @@ public sealed class JwtTests
             signingCredentials: new SigningCredentials(symmetric, SecurityAlgorithms.HmacSha256));
         var encoded = new JwtSecurityTokenHandler().WriteToken(token);
 
-        Assert.ThrowsAny<SecurityTokenException>(() => new JwtService(Options()).Validate(encoded));
+        Assert.ThrowsAny<SecurityTokenException>(() => new TestTokenValidator(Options()).Validate(encoded));
     }
 
     [Fact]
     public void Validate_RejectsExpiredAndNotYetValidTokens_WithZeroClockSkew()
     {
-        var service = new JwtService(Options());
+        var service = new TestTokenValidator(Options());
         Assert.Throws<SecurityTokenExpiredException>(() => service.Validate(TestTokens.Mint(
             notBefore: DateTime.UtcNow.AddHours(-2),
             expires: DateTime.UtcNow.AddHours(-1))));

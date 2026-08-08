@@ -43,7 +43,6 @@ class NodeType:
     required_for: frozenset[str] = frozenset()
     runtime_variants: frozenset[str] = frozenset()
     bounded: bool = False
-    join: bool = False
 
     def wire(self) -> dict[str, Any]:
         wire = {
@@ -69,7 +68,6 @@ class NodeType:
 
 IN = (Port("in"),)
 OUT = (Port("out", required=False, max_connections=None),)
-IN_OUT = IN + OUT
 
 # A loop cannot be inferred from an arbitrary back edge.  These ports make the
 # body, return, and escape edge independently checkable by the compiler.
@@ -87,7 +85,6 @@ def _node(
     kinds: tuple[str, ...],
     required_for: tuple[str, ...] = (),
     bounded: bool = False,
-    join: bool = False,
     inputs: tuple[Port, ...] = IN,
     outputs: tuple[Port, ...] = OUT,
     runtime_policy: str = "run.control",
@@ -119,7 +116,6 @@ def _node(
         required_for=frozenset(required_for),
         runtime_variants=frozenset(runtime_variants),
         bounded=bounded,
-        join=join,
         runtime_policy=runtime_policy,
     )
 
@@ -166,7 +162,7 @@ _ALL: tuple[NodeType, ...] = (
         inputs=(Port("in", max_connections=None), Port("results", "WorkerResult[]")),
         outputs=OUT + (Port("acceptedResults", "WorkerResult[]", required=False),),
         config_schema={"type": "object", "additionalProperties": False},
-        required_for=frozenset({"orchestrator"}), join=True,
+        required_for=frozenset({"orchestrator"}),
     ),
     _node("invoke_verifier", kinds=("orchestrator",), required_for=("orchestrator",), runtime_policy="verification.execute"),
     _node(

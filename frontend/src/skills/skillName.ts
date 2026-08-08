@@ -3,7 +3,7 @@
 // 前端在存檔前先擋掉不合規輸入(例如中文),讓非技術使用者不會看到被誤標成 flow 的 server 錯誤;
 // server 仍是真正的關卡,這裡只是 UX。
 
-export const NAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/
+const NAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/
 
 export const NAME_RULE_MESSAGE =
   '名稱只能用小寫英文、數字、連字號（-），不可首尾或連續連字號（1–64 字）；中文請放在說明'

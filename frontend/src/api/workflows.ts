@@ -1,5 +1,5 @@
 import { apiFetch, apiFetchWithEtag } from './http'
-import { object } from '../wire'
+import { object, type JsonObject } from '../wire'
 import type {
   Workflow, WorkflowDefinition, WorkflowDraft, WorkflowKind, WorkflowNodeType,
   WorkflowRevision, WorkflowSimulation, WorkflowSummary, WorkflowUiMetadata, WorkflowValidation,
@@ -8,8 +8,7 @@ import type {
 const base = '/api/admin/workflows'
 const idPath = (id: string) => `${base}/${encodeURIComponent(id)}`
 
-type RawObject = Record<string, unknown>
-type WireWorkflow = RawObject & { id: string; name: string; kind: WorkflowKind; enabled: boolean; draft_version: number; published_revision: number | null; definition: WorkflowDefinition; ui_metadata: WorkflowUiMetadata }
+type WireWorkflow = JsonObject & { id: string; name: string; kind: WorkflowKind; enabled: boolean; draft_version: number; published_revision: number | null; definition: WorkflowDefinition; ui_metadata: WorkflowUiMetadata }
 type WireValidation = { valid: boolean; definition?: WorkflowDefinition; ui_metadata?: WorkflowUiMetadata; errors?: Array<{ field?: string; message: string; node_id?: string; edge_id?: string }> }
 type WireCatalog = { nodes?: WorkflowNodeType[] }
 
@@ -38,7 +37,7 @@ export function decodeWorkflow(value: WireWorkflow): Workflow {
   }
 }
 
-export function encodeWorkflowUpsert(input: { name: string; kind: WorkflowKind; draft: WorkflowDraft }): RawObject {
+export function encodeWorkflowUpsert(input: { name: string; kind: WorkflowKind; draft: WorkflowDraft }): JsonObject {
   return { name: input.name, kind: input.kind, definition: graph(input.draft.definition, input.kind), ui_metadata: input.draft.ui_metadata }
 }
 

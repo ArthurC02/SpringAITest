@@ -62,6 +62,7 @@ var multiAgentDispatchEnabled = string.Equals(cfg["MULTI_AGENT_DISPATCH_ENABLED"
 var agentChatEnabled = multiAgentDispatchEnabled
     && string.Equals(cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentWriteToolsEnabled = string.Equals(cfg["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+builder.Services.AddSingleton(new AgentWriteToolsState(agentWriteToolsEnabled));
 var contextEnrichmentEnabled = multiAgentDispatchEnabled
     && string.Equals(cfg["CONTEXT_ENRICHMENT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 builder.Services.AddSingleton(new ContextEnrichmentState(contextEnrichmentEnabled));
@@ -141,31 +142,39 @@ builder.Services.AddSingleton(new JwtService(jwtSigning, TimeSpan.FromHours(24))
 
 // Skill 定義的靜態驗證:唯一事實來源是 workflow 引擎(:8001)。backend → workflow 的反向依賴為
 // 設計上的取捨(03-design §4.1):validate 無副作用、失敗即快速回 502/422,不把驗證規則複製到 backend。
-builder.Services.AddHttpClient("skill-validator", c => c.Timeout = TimeSpan.FromSeconds(15));
+// 五顆 workflow client 共用:把本請求的 correlation id 轉發給引擎(見 Common/CorrelationId.cs)。
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddTransient<CorrelationIdForwardingHandler>();
+
+builder.Services.AddHttpClient("skill-validator", c => c.Timeout = TimeSpan.FromSeconds(15))
+    .AddHttpMessageHandler<CorrelationIdForwardingHandler>();
 builder.Services.AddScoped<ISkillValidator>(sp => new WorkflowSkillValidator(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("skill-validator"), workflowBaseUrl, internalToken));
 
 // Agent Business Rule AST 的語意/型別/安全限制同樣只由 Workflow 擁有。Agent validate 與 publish
 // 都經這個 request-time dependency；引擎不可達一律 502 且不得發布。
-builder.Services.AddHttpClient("business-rule-validator", c => c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddHttpClient("business-rule-validator", c => c.Timeout = TimeSpan.FromSeconds(15))
+    .AddHttpMessageHandler<CorrelationIdForwardingHandler>();
 builder.Services.AddScoped<IBusinessRuleValidator>(sp => new WorkflowBusinessRuleValidator(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("business-rule-validator"),
     workflowBaseUrl,
     internalToken));
 builder.Services.AddScoped<RuntimeDiscoveryService>();
-builder.Services.AddHttpClient("workflow-designer", c => c.Timeout = TimeSpan.FromSeconds(30));
-builder.Services.AddHttpContextAccessor();
+builder.Services.AddHttpClient("workflow-designer", c => c.Timeout = TimeSpan.FromSeconds(30))
+    .AddHttpMessageHandler<CorrelationIdForwardingHandler>();
 builder.Services.AddScoped<IWorkflowCompiler>(sp => new WorkflowDesignerCompiler(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("workflow-designer"), workflowBaseUrl, internalToken, sp.GetRequiredService<IHttpContextAccessor>()));
 
 // Agent Skill package 驗證(P0):multipart 轉送 zip 給引擎 POST /skills/validate-package(唯一結構/語意權威)。
-builder.Services.AddHttpClient("skill-package-validator", c => c.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHttpClient("skill-package-validator", c => c.Timeout = TimeSpan.FromSeconds(30))
+    .AddHttpMessageHandler<CorrelationIdForwardingHandler>();
 builder.Services.AddScoped<ISkillPackageValidator>(sp => new WorkflowSkillPackageValidator(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("skill-package-validator"), workflowBaseUrl, internalToken));
 
 // E2 eval runner:呼叫引擎(:8001)的 POST /evals/run(workflow-internal、無 /api prefix)。
 // 引擎 flag 關閉或不可達皆為 502(比照 skill validate 的 request-time dependency 慣例)。
-builder.Services.AddHttpClient("eval-runner", c => c.Timeout = TimeSpan.FromMinutes(5));
+builder.Services.AddHttpClient("eval-runner", c => c.Timeout = TimeSpan.FromMinutes(5))
+    .AddHttpMessageHandler<CorrelationIdForwardingHandler>();
 builder.Services.AddScoped<IEvalRunner>(sp => new WorkflowEvalRunner(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient("eval-runner"), workflowBaseUrl, internalToken));
 
@@ -224,131 +233,83 @@ if (!app.Environment.IsEnvironment("Testing") && !useInMemoryDb)
     await DbBootstrap.RunAsync(dataSource, logger);
 }
 
+// 最前面:上游帶來的 correlation id 必須在任何一種錯誤回應(含 InternalTokenMiddleware 的 401
+// 與各 GateWhenDisabled 的 404)寫出之前就生效,否則那些路徑的 ApiError 仍是本機自產的編號。
+app.UseMiddleware<CorrelationIdMiddleware>();
+
 app.UseExceptionHandler();
 
 // Complete outside MVC action instrumentation so middleware/filter/model-binding failures are
 // visible. This must run before the internal-token gate to observe rejected callers.
 app.UseMiddleware<ArtifactCompatibilityUsageMiddleware>();
 
-// 內部憑證守門(只有明確 health 端點免驗);置於例外處理之後、路由之前。
-if (!agentWriteToolsEnabled)
+// 每個 rollout 旗標的 404 守門都是同一個形狀:旗標關閉時,命中的路徑在管線更深處看見它之前就 404。
+// **註冊順序即語意**:D7 那段刻意排在 InternalTokenMiddleware 之前(關閉的功能連沒有內部憑證的
+// 呼叫者也看不見),其餘六段都在憑證守門之後 —— 調換順序會改變對外可觀察行為。
+void GateWhenDisabled(bool enabled, string message, Func<PathString, bool> matches)
 {
+    if (enabled) return;
     app.Use(async (context, next) =>
     {
-        var d7RunPath = context.Request.Path.StartsWithSegments("/api/agent-runs")
-            && (context.Request.Path.Value?.Contains("/approvals", StringComparison.OrdinalIgnoreCase) == true
-                || context.Request.Path.Value?.Contains("/write-effects", StringComparison.OrdinalIgnoreCase) == true);
-        if (((context.Request.Path.StartsWithSegments("/api/runs") || context.Request.Path.StartsWithSegments("/api/agent-runs")) && context.Request.Path.Value?.Contains("/approvals", StringComparison.OrdinalIgnoreCase) == true)
-            || d7RunPath
-            || context.Request.Path.StartsWithSegments("/api/agent-run-approval-executions")
-            || context.Request.Path.StartsWithSegments("/api/admin/operations")
-            || context.Request.Path.StartsWithSegments("/api/operations/telemetry"))
-        { await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable"); return; }
-        await next();
-    });
-}
-
-app.UseMiddleware<InternalTokenMiddleware>(internalToken);
-
-// D4 authoring endpoints stay invisible even to a direct internal caller while rollout is off.
-if (!workflowDesignerEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/admin/workflows")
-            || context.Request.Path.StartsWithSegments("/api/admin/orchestrators"))
+        if (matches(context.Request.Path))
         {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature not enabled");
+            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, message);
             return;
         }
         await next();
     });
 }
+
+static bool Contains(PathString path, string segment)
+    => path.Value?.Contains(segment, StringComparison.OrdinalIgnoreCase) == true;
+
+GateWhenDisabled(agentWriteToolsEnabled, "Feature is unavailable", path =>
+    ((path.StartsWithSegments("/api/runs") || path.StartsWithSegments("/api/agent-runs")) && Contains(path, "/approvals"))
+    || (path.StartsWithSegments("/api/agent-runs") && Contains(path, "/write-effects"))
+    || path.StartsWithSegments("/api/agent-run-approval-executions")
+    || path.StartsWithSegments("/api/admin/operations")
+    || path.StartsWithSegments("/api/operations/telemetry"));
+
+// 內部憑證守門(只有明確 health 端點免驗);置於例外處理之後、路由之前。
+app.UseMiddleware<InternalTokenMiddleware>(internalToken);
+
+// D4 authoring endpoints stay invisible even to a direct internal caller while rollout is off.
+GateWhenDisabled(workflowDesignerEnabled, "Feature not enabled", path =>
+    path.StartsWithSegments("/api/admin/workflows")
+    || path.StartsWithSegments("/api/admin/orchestrators"));
 
 // D5 is independently undiscoverable until the multi-agent dispatch rollout is explicitly
 // enabled.  This is deliberately before MVC/auth, matching the D3/D4 posture.  The Designer
 // gate above is administration-only and no longer participates (02-spec §8).
-if (!multiAgentDispatchEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
-            || context.Request.Path.StartsWithSegments("/api/admin/orchestrators")
-               && context.Request.Path.Value?.Contains("/runs", StringComparison.OrdinalIgnoreCase) == true)
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
-            return;
-        }
-        await next();
-    });
-}
+GateWhenDisabled(multiAgentDispatchEnabled, "Feature is unavailable", path =>
+    path.StartsWithSegments("/api/orchestrator-runs")
+    || path.StartsWithSegments("/api/admin/orchestrators") && Contains(path, "/runs"));
 
 // Context APIs are internal implementation details of D5/D6.  The acquire route remains
 // available under D5 so an off flag preserves its established fail-closed not-ready response.
-if (!contextEnrichmentEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/contexts")
-            || context.Request.Path.StartsWithSegments("/api/context-views")
-            || context.Request.Path.StartsWithSegments("/api/context-policies")
-            || context.Request.Path.StartsWithSegments("/api/orchestrator-runs")
-               && context.Request.Path.Value?.Contains("/context-requests", StringComparison.OrdinalIgnoreCase) == true)
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
-            return;
-        }
-        await next();
-    });
-}
+GateWhenDisabled(contextEnrichmentEnabled, "Feature is unavailable", path =>
+    path.StartsWithSegments("/api/contexts")
+    || path.StartsWithSegments("/api/context-views")
+    || path.StartsWithSegments("/api/context-policies")
+    || path.StartsWithSegments("/api/orchestrator-runs") && Contains(path, "/context-requests"));
 
-if (!agentChatEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/runtime-discovery")
-            || context.Request.Path.StartsWithSegments("/api/chat-runs")
-            || context.Request.Path.StartsWithSegments("/api/admin/runtime-binding"))
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
-            return;
-        }
-        await next();
-    });
-}
+GateWhenDisabled(agentChatEnabled, "Feature is unavailable", path =>
+    path.StartsWithSegments("/api/runtime-discovery")
+    || path.StartsWithSegments("/api/chat-runs")
+    || path.StartsWithSegments("/api/admin/runtime-binding"));
 
 // E2/E3 eval-suite/eval-run routes stay invisible while off, independently of every other flag
 // (including AGENT_WRITE_TOOLS_ENABLED, which separately gates the whole /api/admin/operations
 // prefix these routes also live under -- both must be on for the routes to be reachable).
-if (!runEvalEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/admin/operations/eval-suites")
-            || context.Request.Path.StartsWithSegments("/api/admin/operations/eval-runs"))
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
-            return;
-        }
-        await next();
-    });
-}
+GateWhenDisabled(runEvalEnabled, "Feature is unavailable", path =>
+    path.StartsWithSegments("/api/admin/operations/eval-suites")
+    || path.StartsWithSegments("/api/admin/operations/eval-runs"));
 
 // P1 prompt artifact routes stay invisible while off, independently of every other flag. Publish
 // pinning is gated separately inside AgentController (the publish route itself never disappears).
-if (!promptArtifactsEnabled)
-{
-    app.Use(async (context, next) =>
-    {
-        if (context.Request.Path.StartsWithSegments("/api/prompt-components")
-            || context.Request.Path.StartsWithSegments("/api/prompt-manifests"))
-        {
-            await ApiErrorWriter.WriteAsync(context.Response, StatusCodes.Status404NotFound, "Feature is unavailable");
-            return;
-        }
-        await next();
-    });
-}
+GateWhenDisabled(promptArtifactsEnabled, "Feature is unavailable", path =>
+    path.StartsWithSegments("/api/prompt-components")
+    || path.StartsWithSegments("/api/prompt-manifests"));
 
 app.MapControllers();
 

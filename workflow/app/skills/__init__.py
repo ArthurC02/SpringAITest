@@ -71,14 +71,17 @@ _NODE_FIRST_MIGRATION_NAMES = ("rag-qa", "summarize", "triage", "analyze-report"
 # 前置 404，這裡同步從 catalog 隱藏——否則任何登入者仍讀得到完整 YAML 定義。
 _INTERNAL_SKILL_NAMES = frozenset({"context-enrichment", "context-task-local"})
 
-# skill 名 → 依賴組裝函式。沒有對應項目的 skill 以 None 建圖（節點若需要依賴會在編譯期炸）。
-_DEPS_BUILDERS = {
-    "kb-query": _kb_query_deps,
-    "context-enrichment": _kb_query_deps,
-    "context-task-local": _kb_query_deps,
-    **{name: _kb_query_deps for name in _TEMPLATE_NAMES},
-    **{name: _kb_query_deps for name in _NODE_FIRST_MIGRATION_NAMES},
-}
+# 需要正式依賴（KbQueryDeps）的內建 skill；不在此清單者以 deps=None 建圖
+# （節點若需要依賴會在編譯期炸）。
+_DEPS_SKILL_NAMES = frozenset(
+    {
+        "kb-query",
+        "context-enrichment",
+        "context-task-local",
+        *_TEMPLATE_NAMES,
+        *_NODE_FIRST_MIGRATION_NAMES,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -101,11 +104,13 @@ _SKILLS: dict[str, LoadedSkill] = {}
 
 
 def _load_builtin() -> None:
+    # 一份 KbQueryDeps 給全部內建 skill 共用：adapter 皆無狀態、LLM 走 lru_cache，
+    # 而 compiler 的快取鍵含 id(deps) —— 每支各建一份只會讓 32 格 FIFO 白白少 11 格。
+    shared_deps = _kb_query_deps()
     for path in sorted(_SKILL_DIR.glob("*.yaml")):
         raw = path.read_text(encoding="utf-8")
         skill = skill_mod.parse_source(raw)
-        deps_builder = _DEPS_BUILDERS.get(skill.name)
-        deps = deps_builder() if deps_builder else None
+        deps = shared_deps if skill.name in _DEPS_SKILL_NAMES else None
         _SKILLS[skill.name] = LoadedSkill(
             skill=skill,
             graph=compiler.compile(skill, deps),

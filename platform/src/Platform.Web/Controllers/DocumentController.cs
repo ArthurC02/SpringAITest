@@ -2,6 +2,7 @@ using System.Text.Json;
 using Platform.Service.Abstractions;
 using Platform.Service.Dtos;
 using Platform.Web.Auth;
+using Platform.Web.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Platform.Service.Exceptions;
@@ -35,8 +36,8 @@ public sealed class DocumentController : ControllerBase
 
     private string ResolveIdempotencyKey()
     {
-        var values = Request.Headers["Idempotency-Key"];
-        if (values.Count == 0)
+        // 刻意不 Trim(與 chat 那側不同):前後空白在下面的可列印 ASCII 檢查就是無效字元。
+        if (IdempotencyKeyHeader.SingleValueOrNull(Request.Headers[IdempotencyKeyHeader.Name]) is not { } value)
         {
             // Compatibility inventory: remove this fallback only after this counter remains zero
             // through the agreed client rollout/rollback window. Missing-key requests are not
@@ -45,17 +46,11 @@ public sealed class DocumentController : ControllerBase
             return Guid.NewGuid().ToString("N");
         }
 
-        if (values.Count != 1)
-        {
-            throw new WorkflowBadInputException("Idempotency-Key must contain exactly one value");
-        }
-
-        var value = values[0];
         if (string.IsNullOrEmpty(value)
             || value.Length > MaxIdempotencyKeyLength
             || value.Any(character => character is < '!' or > '~'))
         {
-            throw new WorkflowBadInputException("Idempotency-Key is invalid");
+            throw new WorkflowBadInputException(IdempotencyKeyHeader.InvalidMessage);
         }
 
         return value;

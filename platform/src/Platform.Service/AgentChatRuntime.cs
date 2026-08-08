@@ -14,7 +14,13 @@ namespace Platform.Service;
 /// <summary>
 /// D6 transport-neutral adapter. Backend remains the selection, authorization and durable-run
 /// authority; Platform only resolves, allocates, best-effort kicks Workflow, then reads the
-/// caller-safe terminal result. Polling is bounded by the request cancellation/deadline.
+/// caller-safe terminal result.
+///
+/// Polling has no local cap on this side: <see cref="PollAsync"/> loops until the run reaches
+/// waiting_input or a terminal status, or until the caller's <c>CancellationToken</c> fires
+/// (client disconnect detaches from polling and deliberately does not cancel the durable run).
+/// Termination of an otherwise stuck run therefore depends on Backend's deadline being turned
+/// into a terminal status by Workflow's recovery sweep — not on any timeout kept here.
 /// </summary>
 public sealed class AgentChatRuntime(
     BackendClient backend,

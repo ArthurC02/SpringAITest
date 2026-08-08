@@ -49,7 +49,7 @@ services:
   # backend, workflow, and document traffic can never reach disposable state.
   rabbitmq-evidence:
     profiles: ["evidence-real"]
-    image: rabbitmq:4-management@sha256:c86dd1d32c1cbf3ff6547db9e359d7551b5973fe6e158e0edc64a3ed6ac69981
+    image: rabbitmq:4.1-management@sha256:d66919f2b72a3579bb0a6974e488d53238cf4e9e07142942a83cfb05cff3e7ba
     environment:
       RABBITMQ_DEFAULT_USER: app
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-app-dev-password}
@@ -90,6 +90,12 @@ services:
       WORKFLOW_DESIGNER_ENABLED: "true"
       MULTI_AGENT_DISPATCH_ENABLED: "true"
       AGENT_CHAT_ENABLED: "true"
+      # 其餘 feature gate 比照 base compose 的 backend 宣告,fail-closed 預設。
+      CONTEXT_ENRICHMENT_ENABLED: ${CONTEXT_ENRICHMENT_ENABLED:-false}
+      AGENT_WRITE_TOOLS_ENABLED: ${AGENT_WRITE_TOOLS_ENABLED:-false}
+      PROMPT_ARTIFACTS_ENABLED: ${PROMPT_ARTIFACTS_ENABLED:-false}
+      RUN_EVIDENCE_ENABLED: ${RUN_EVIDENCE_ENABLED:-false}
+      RUN_EVAL_ENABLED: ${RUN_EVAL_ENABLED:-false}
     user: app
     networks:
       - default
@@ -120,8 +126,15 @@ services:
       BACKEND_BASE_URL: http://backend-evidence:8080
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
       AGENT_TEST_RUN_ENABLED: "true"
-      WORKFLOW_DESIGNER_ENABLED: "true"
+      # workflow 不讀 WORKFLOW_DESIGNER_ENABLED(settings.py 無此欄位,designer gate 在 platform/backend),刻意不宣告
       MULTI_AGENT_DISPATCH_ENABLED: "true"
+      # 其餘 feature gate 比照 base compose 的 workflow 宣告,fail-closed 預設。
+      CONTEXT_ENRICHMENT_ENABLED: ${CONTEXT_ENRICHMENT_ENABLED:-false}
+      AGENT_WRITE_TOOLS_ENABLED: ${AGENT_WRITE_TOOLS_ENABLED:-false}
+      PROMPT_ARTIFACTS_ENABLED: ${PROMPT_ARTIFACTS_ENABLED:-false}
+      PROMPT_ARTIFACTS_SHADOW: ${PROMPT_ARTIFACTS_SHADOW:-false}
+      RUN_EVAL_ENABLED: ${RUN_EVAL_ENABLED:-false}
+      ISOLATED_SKILL_SCRIPTS_ENABLED: ${ISOLATED_SKILL_SCRIPTS_ENABLED:-false}
       CHECKPOINT_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@appdb:5432/${EVIDENCE_DB_NAME:?set a generated evidence database}
       CHECKPOINT_HMAC_KEY: ${EVIDENCE_CHECKPOINT_HMAC_KEY:?set a per-run checkpoint HMAC key}
     user: appuser
@@ -221,6 +234,11 @@ services:
       MULTI_AGENT_DISPATCH_ENABLED: ${EVIDENCE_MULTI_AGENT_DISPATCH_ENABLED:-${MULTI_AGENT_DISPATCH_ENABLED:-false}}
       AGENT_CHAT_ENABLED: ${EVIDENCE_AGENT_CHAT_ENABLED:-${AGENT_CHAT_ENABLED:-false}}
       AGENT_CHAT_TENANT_ALLOWLIST: ${EVIDENCE_AGENT_CHAT_TENANT_ALLOWLIST:-${AGENT_CHAT_TENANT_ALLOWLIST:-}}
+      # 其餘 feature gate 比照 base compose 的 platform 宣告,fail-closed 預設。
+      CONTEXT_ENRICHMENT_ENABLED: ${CONTEXT_ENRICHMENT_ENABLED:-false}
+      AGENT_WRITE_TOOLS_ENABLED: ${AGENT_WRITE_TOOLS_ENABLED:-false}
+      PROMPT_ARTIFACTS_ENABLED: ${PROMPT_ARTIFACTS_ENABLED:-false}
+      PROMPT_ARTIFACTS_SHADOW: ${PROMPT_ARTIFACTS_SHADOW:-false}
       TRUSTED_PROXY_CIDR: ${TRUSTED_PROXY_CIDR:-10.253.254.0/28}
     user: app
 
