@@ -2,7 +2,7 @@
 
 > **Historical delivery record (2026-08-02):** P1–P4 已落地；本系列不再是待執行計畫。未來 artifact/API/chat/schema 收斂由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 負責，不得依本文件重建已刪除的 legacy 模組。
 
-> 狀態：Planning（2026-07-30）
+> 狀態：已交付（原 Planning 起案於 2026-07-30；2026-08-02 全部 Phase 完成，轉為上方 Historical delivery record）。程式碼現況核實：`workflow/app/runtime/legacy_flow.py` 已不存在，`flow_harness.py` 是 Harness 內與 standalone invoke 共用的唯一執行層，兩者皆發 `workflow_completed`（見 [workflow/AGENTS.md](../../workflow/AGENTS.md)）。下文各 Phase「完成定義」核取方塊維持原始規劃格式、未逐項回填勾選，不代表未完成；現況以本狀態列、附錄 C（P1-T01～P4-T07 驗收已通過）與 `workflow/tests/` 為準。
 
 ## 1. 現狀分析
 
@@ -371,3 +371,26 @@ compiler cache（`compiler.py:522-551`）以 `(name, revision, sha256, id(deps))
 | `workflow/app/skills/custom.py` | 租戶自訂 artifact 載入 |
 | `workflow/app/main.py:invoke_skill` | `/skills/{name}/invoke` endpoint |
 | `workflow/app/workflow_contracts.py` | Harness stage 契約版本 |
+
+---
+
+## 附錄 A：事件命名沿革補充（併自 02-spec.md，2026-08-09 整併）
+
+事實已完整記載於 §5 風險表「Phase 4 事件重命名 `legacy_flow_completed` → `workflow_completed` 需 Backend 同步」列；此處僅補充規格原始出處為 02-spec.md。
+
+## 附錄 B：模組職責劃分（併自 03-design.md，2026-08-09 整併）
+
+Harness 內 flow（路徑 B'）與 standalone flow invoke（路徑 C'）共用同一組模組，各自職責邊界如下：
+
+| 模組 | 管什麼 | 不管什麼 |
+|------|--------|---------|
+| **graph.py**（Harness） | 14 節點的固定骨架、agent loop、policy gate、全局 budget gate、preflight/finalize | flow 內部節點的執行（委託 flow\_harness） |
+| **flow_harness.py** | flow 執行的治理包覆（preflight、budget callback 注入、finalize）、state 組裝、timeout、validation | 節點級治理（委託 Node Shell）、flow 編譯（委託 compiler） |
+| **compiler.py** | YAML → LangGraph 圖的編譯、cache、step 結構分析、audit 終端節點注入 | 執行期行為（不知道 budget、policy、任何 runtime state） |
+| **node_shell.py** | 節點級治理殼：fatal 短路、trace、writes/reads 契約、immutable keys、authority keys、budget callback dispatch | 決定 budget 是否耗盡（由 callback 決定）、policy 裁定 |
+
+`flow_harness.py` 是 Phase 3 新增的模組，Phase 4 併吞 `legacy_flow.py` 的剩餘邏輯後成為 Harness 內 flow 與 standalone flow invoke 的唯一共用執行層；`compiler.py` 與 `node_shell.py` 全程不知道呼叫端是路徑 B' 還是路徑 C'。
+
+## 附錄 C：驗收測試現況（併自 04-acceptance-tests.md，2026-08-09 整併）
+
+P1-T01～P4-T07 驗收已通過，現由 `workflow/tests/`（`test_engine_node_shell.py`、`test_flow_harness.py` 等）覆蓋。

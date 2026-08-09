@@ -24,7 +24,7 @@
 | A-CTX-13 | Envelope 超過大小上限 | 建立 gap 並降級投影，**不得靜默截斷**——Workflow `build_views` 以 64 KB 傳輸上限降級（超限 evidence 不進 view、記 `evidence-oversized-degraded` gap 含 `content_ref`，完整 evidence 仍進 store）；Backend 硬上限 400 為後擋 |
 | A-CTX-14 | Worker child 取得的 payload | 只含自己的 view；斷言 envelope 全量欄位不出現在 child snapshot |
 | A-CTX-15 | Deadline 逼近 | 停止 optional retrieval，保留 mandatory flow；既有 timeout 仍生效 |
-| A-CTX-18 | lite 模式（`DB_PROVIDER=inmemory`） | 一個吃 `IContextRepository` 的參數化 Theory 同時跑 Dapper 與 in-memory（C19），斷言 revision 不可變、tenant 隔離、唯一 active policy。存在理由是 `plans/test-audit/ledger.md` 已記錄過同型分歧，不是為了覆蓋率 |
+| A-CTX-18 | lite 模式（`DB_PROVIDER=inmemory`） | 一個吃 `IContextRepository` 的參數化 Theory 同時跑 Dapper 與 in-memory（C19），斷言 revision 不可變、tenant 隔離、唯一 active policy。存在理由是 2026-07-26 test-audit 快照（15 條全數結案，紀錄已於 2026-08-09 退役）已記錄過同型分歧，不是為了覆蓋率 |
 | A-CTX-19 | Enrichment 產出的內容 | 不寫入 mem0；mem0 recall 內容不被當成 evidence |
 | A-CTX-21 | 同一 chunk 由兩次檢索取得 | 以 `document_id + chunk_id + content_hash` 為 canonical key 合併為一筆 evidence（依賴 `RetrievedChunk` 新增 chunk 識別欄位） |
 | **A-CTX-22** | **I2 守門測試**：同一組 evidence 與量測值，只改 `context_policy` 的門檻，重跑一次 | status 必須跟著改變。這是四條不變量裡最容易被侵蝕的一條——只要有人在 Workflow 補一個「暫時的」門檻常數，這個測試就會失敗。它同時證明判定確實來自 Backend |

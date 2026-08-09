@@ -1,7 +1,14 @@
 # 計畫書 — 系統設定重構 × Skill 編輯器 × 節點參數設定
 
-> **狀態: 已交付主要體驗；以下保留決策與驗收記錄。**
-> 已實作: 三分頁設定頁、簡易與進階 Skill 編輯、範本組合、試跑、版本檢視，以及 Configuration Set 的執行期套用基礎。後續工作必須由可重現的行為或測試缺口提出。
+> **稽核追加(已推翻 / 已不存在的具體技術判斷,彙整自 01–04 全系列文件,2026-08-09 整併;不逐行改寫下文步驟記錄,以此區塊為唯一權威更正):**
+> - ConfigView 現況為**四分頁**(`businessWorkflows`/`agentSkills`/`nodeParams`/`general`,`frontend/src/components/ConfigView.tsx:15-22,174-177`),非下文描述的三分頁。
+> - Skill 概念已依 skill-concept-realignment 拆分為「業務流程」(本計畫的範本/簡易-進階雙門編輯落地於此)與「Agent Skills」(package 概念,不使用本計畫的範本/`nl_logic` 機制)。
+> - compare/stats 的 Python `script` 槽與 O5 CodeMirror 6 **未交付**;五支範本商業邏輯槽已統一為 `nl_logic`(`frontend/src/skills/templates.ts` 型別已無 `slotKind` 欄;`workflow/app/skills/template-compare.yaml:12` 註解「舊 script 槽已廢」;`frontend/package.json` 無 codemirror 依賴,無 `PythonEditor.tsx`)。影響 §4.4 範本表(下文步驟記錄,不改寫)、§7 O2b/O5、附錄 §C。
+> - O6「`app_config` 維持全域」的決策**已被推翻**:現為 tenant-scoped + ADMIN-only(`(tenant_id, key)` 複合主鍵,GET/PUT 都經 `RequireTenant()`,見根 AGENTS.md Backend 信任邊界節)。此變更非本計畫落地,但決策記錄已過期。影響 §7 O6。
+> - `SkillsTab.tsx` **已不存在**,進階編輯器現為獨立 `AdvancedSkillEditor.tsx`(被 `BusinessWorkflowHome.tsx` 使用);`WorkflowsView.tsx` **未刪除**,已被 agent-platform-redesign D4 的 Workflow Designer 重新利用,與本文描述的用途無關;`SkillHome.tsx` 已變成無 kind 決策的共享 presentation 元件,由 `AgentSkillHome.tsx`/`BusinessWorkflowHome.tsx` 各自帶 `kind` props 組裝,非單一頂層 tab 元件;簡單/進階編輯實際呼叫 `frontend/src/api/businessWorkflows.ts`,非 `api/skills.ts`。
+
+> **狀態: 已交付主要體驗;以下保留決策與驗收記錄。**
+> 已實作: 三分頁設定頁、簡易與進階 Skill 編輯、範本組合、試跑、版本檢視,以及 Configuration Set 的執行期套用基礎。後續工作必須由可重現的行為或測試缺口提出。
 > 程式碼與測試入口見 [plans README](../README.md)。
 >
 > **前置脈絡:**
@@ -15,11 +22,6 @@
 >
 > **併入的計畫:**
 > 原 skill-authoring 計畫的內容已分解至本計畫 P1–P4 並統籌於此;該計畫已封存並刪除。
->
-> **稽核追加(已推翻的具體技術判斷,不逐行改寫下文步驟記錄):**
-> - ConfigView 現況為**四分頁**(`businessWorkflows`/`agentSkills`/`nodeParams`/`general`,`frontend/src/components/ConfigView.tsx:15-22,174-177`),非本文描述的三分頁。Skill 概念已依 skill-concept-realignment 拆分為「業務流程」(本計畫的範本/簡易-進階雙門編輯落地於此)與「Agent Skills」(package 概念,不使用本計畫的範本/nl_logic 機制)。
-> - compare/stats 的 Python `script` 槽與 O5 CodeMirror 6 **未交付**;五支範本商業邏輯槽已統一為 `nl_logic`(`frontend/src/skills/templates.ts` 型別已無 `slotKind` 欄;`workflow/app/skills/template-compare.yaml:12` 註解「舊 script 槽已廢」;`frontend/package.json` 無 codemirror 依賴,無 `PythonEditor.tsx`)。
-> - O6「`app_config` 維持全域」的決策**已被推翻**:現為 tenant-scoped + ADMIN-only(`(tenant_id, key)` 複合主鍵,GET/PUT 都經 `RequireTenant()`,見根 AGENTS.md Backend 信任邊界節)。此變更非本計畫落地,但決策記錄已過期。
 
 ## 1. 使用者需求(逐條)
 
@@ -30,7 +32,7 @@
 5. 「系統設定」的**兩大核心** = Skill + **部分工作流節點的參數調整設定**。
 
 ### 已拍板決策
-- **D1**(可編輯範圍):系統設定列出所有非 `template_*` 的內建 Skill 與自訂 Skill；內建 Skill 唯讀，自訂 Skill 可編輯。純 code 工作流不進此清單。
+- **D1**(可編輯範圍):系統設定列出所有非 `template_*` 的內建 Skill 與自訂 Skill；內建 Skill 唯讀,自訂 Skill 可編輯。純 code 工作流不進此清單。
 - **D2**(NL 商業邏輯語意):自然語言商業邏輯**接一個新的 LLM 節點在執行時解讀執行**(功能完整,需擴充引擎)。
 - **D3**(節點參數推進方式):由本規劃**先讀節點契約、提可調參數清單**(見第 6 節)供選定。
 - **D4**(架構取捨):4 分頁只是**撰寫外殼**,存檔時組合成現有 node-first YAML `definition`;引擎資料模型不動。
@@ -163,16 +165,16 @@ flow:
 **範本對齊使用者在聊天中真正會問的五類問題原型**(複雜度遞增;見專案記憶 non-technical-users-chat-first):
 
 | 範本     | 使用者問句樣態                           | 管線(隱藏)                                  | 開放給使用者填                                                 | 對應形狀                                    |
-| -------- | ---------------------------------------- | ------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------- |
+| -------- | ----------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------- |
 | **檢索** | 「X 出現在哪份文件 / 查一下 X」          | 檢索 + 證據驗證 + 附出處回答(kb_query 形狀) | 名稱 / 說明 / (選)我的規則 / (選)檢索筆數                      | 檢索管線 + 選用邏輯 slot(`nl_logic`)        |
 | **比對** | 「比較/排序 A、B、C(YoY、績效排名)」     | 檢索多筆 + 比較/排序(具名項的相對次序)      | 名稱 / 說明 / **比較規則** / (選)排序依據                      | 檢索 + `script`(比較排序需精確,預設 Python) |
 | **統計** | 「全年總額 / 平均 / 某指標的計數・分佈」 | 檢索(較高 top_k,拉全集)+ script 聚合        | 名稱 / 說明 / **統計規則(聚合)** / (選)統計指標 / (選)統計期間 | 檢索 + `script`(聚合算術需精確,預設 Python) |
-| **推論** | 「假設 X,後續會怎樣」                    | 檢索 + LLM 推理                             | 名稱 / 說明 / **推論規則**                                     | 檢索 + `nl_logic`(推理)                     |
-| **啟發** | 「這個場景,給我 insight」                | 檢索 + LLM 綜合                             | 名稱 / 說明 / **啟發角度**                                     | 檢索 + `nl_logic`(綜合)                     |
+| **推論** | 「假設 X,後續會怎樣」                    | 檢索 + LLM 推理                              | 名稱 / 說明 / **推論規則**                                     | 檢索 + `nl_logic`(推理)                     |
+| **啟發** | 「這個場景,給我 insight」                | 檢索 + LLM 綜合                              | 名稱 / 說明 / **啟發角度**                                     | 檢索 + `nl_logic`(綜合)                     |
 
 - **比對 vs 統計是兩件事**:比對 = 具名項之間的相對次序/排名(YoY、績效排名),輸出是「排序」;統計 = 對整個集合/期間做聚合(總額/平均/計數/分佈),輸出是「聚合數字」,通常不指名項目相互比較。
 - 檢索最接近純管線(自訂邏輯選用);推論/啟發本質是 LLM 推理,重度依賴 `nl_logic`(印證 D2)。**比對與統計因輸出是精確數字,預設走 Python(`script`)** —— LLM 對多列資料做排序/算術不可靠;兩者共用同一條「精確→Python」機理,統計只是第二支 `script`-leaning 範本。
-- 五個原型是作者體驗的範本分類；聊天路由不依固定分類，而是根據非範本 Skill 的名稱與描述選擇候選項目。
+- 五個原型是作者體驗的範本分類;聊天路由不依固定分類,而是根據非範本 Skill 的名稱與描述選擇候選項目。
 
 範本規格 = **兩個天然歸屬**(骨架 = 引擎契約,metadata = 授權期呈現):
 - **骨架**(flow + input_schema + 一顆明確的「規則注入 slot」;`nl_logic` slot 或 `compare`/`stats` 的 `script` slot)= 節點名/版本就是 `@node` 契約 → **放 workflow**:`workflow/app/skills/template_*.yaml` 五支 curate 過的內建 skill(比照 `skills/kb_query.yaml`,與節點契約同源同 deploy、pytest 就地驗)。
@@ -203,7 +205,7 @@ flow:
 
 **已是 env/settings 可調(開放成本低)**
 | 參數                  | settings 欄位                               | 預設        | 影響                             |
-| --------------------- | ------------------------------------------- | ----------- | -------------------------------- |
+| --------------------- | -------------------------------------------- | ----------- | -------------------------------- |
 | 共用檢索取回數        | `retrieval_top_k` (`RETRIEVAL_TOP_K`, 1–50) | 4           | `retrieve` 節點未指定 top_k 時   |
 | kb_query 檢索基準數   | `kb_query_top_k` (`KB_QUERY_TOP_K`)         | 8           | retrieval_planner 基準           |
 | kb_query 最大檢索次數 | `kb_query_max_retrieval_attempts`           | 2           | RETRY 迴圈收斂點(input 亦可覆寫) |
@@ -212,7 +214,7 @@ flow:
 
 **高價值但寫死在節點(開放成本中,需改碼 + 加 settings + 經 `KbQueryDeps` 注入)**
 | 參數                                       | 位置                           | 現值           |
-| ------------------------------------------ | ------------------------------ | -------------- |
+| ------------------------------------------- | -------------------------------- | -------------- |
 | 意圖分類 LLM 採用信心門檻                  | intent_classification.py:91    | 0.6            |
 | LLM 溫度                                   | llm.py:19(單例寫死,全節點共用) | 0.7            |
 | query_rewrite 變體數上限                   | query_rewrite.py:74            | 5              |
@@ -230,23 +232,8 @@ flow:
 
 ### 6.3 Configuration Set — tenant-scoped 具名參數組(D6/O4,本功能最大工程成本)
 
-節點參數不是全域 key/value,而是**具名的 Configuration Set**:每個組織(租戶)有自己的一或多組參數設定,擇一啟用。命名空間化 `app_config`(全域、無租戶)**承載不了**這個需求,需專屬 schema。
+節點參數不是全域 key/value,而是**具名的 Configuration Set**:每個組織(租戶)有自己的一或多組參數設定,擇一啟用。命名空間化 `app_config`(全域、無租戶)**承載不了**這個需求,需專屬 schema。資料模型 DDL 與值集合定義,見附錄 §A。
 
-**資料模型(新增,appdb / backend 持有,與 skill 同源同路)**
-```sql
-CREATE TABLE configuration_set (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   text NOT NULL,              -- 對齊 skill.tenant_id 的 text（租戶 code）
-    name        text NOT NULL,              -- 組織內具名，如 "預設" / "高召回"
-    is_active   boolean NOT NULL DEFAULT false,  -- 該租戶啟用中的組（至多一組 active）
-    values      jsonb NOT NULL DEFAULT '{}',     -- { "kb_query.top_k": 8, "llm.temperature": 0.7, ... }
-    created_by  text NOT NULL,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT uq_confset_tenant_name UNIQUE (tenant_id, name)
-);
-CREATE UNIQUE INDEX uq_confset_active ON configuration_set(tenant_id) WHERE is_active;
-```
 - 只存**覆寫值**;未覆寫的鍵回落**全域預設**(= 節點內建 / settings 預設)。分層對齊 D8:全域預設(未來系統 Admin 管)← 租戶 Configuration Set(組織 Admin 管)。
 - `values` 的鍵集合 = §6.2 選定開放的參數;每個鍵有型別/範圍(存前於 backend 驗證,比照現有 DataAnnotations)。
 
@@ -266,13 +253,13 @@ CREATE UNIQUE INDEX uq_confset_active ON configuration_set(tenant_id) WHERE is_a
 O1(D5)、O4(D6)前已定案。本輪一次定調其餘全部:
 
 | #       | 決策                                   | **定調**                                                                           | 備註 / 代價                                                             |
-| ------- | -------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| ------- | -------------------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
 | **O2**  | 簡單模式「我的規則」預設格式           | **自然語言(→ `nl_logic`)為預設;Python 為進階選項**                                 | 直觀優先。代價:每次執行多一次 LLM 呼叫、行為不完全確定;非技術情境划算   |
-| **O2b** | v1 範本清單                            | **對齊五類問題原型:檢索 / 比對 / 統計 / 推論 / 啟發**(§4.4)                        | 與聊天路由共用同一套意圖分類;比對與統計預設走 `script`;組織自訂範本延後 |
+| **O2b** | v1 範本清單                            | **對齊五類問題原型:檢索 / 比對 / 統計 / 推論 / 啟發**(§4.4)                        | 與聊天路由共用同一套意圖分類;比對與統計預設走 `script`(**已失效**,見檔頭稽核追加:五支範本商業邏輯槽已統一為 `nl_logic`);組織自訂範本延後 |
 | **O3**  | 節點參數 v1 範圍                       | **5 個既有 settings + 促升 2 個寫死值(意圖信心門檻 0.6、LLM 溫度 0.7)為 settings** | 立即有感、成本可控;其餘寫死值 v2 再議,規則資料類不做                    |
 | **O4b** | Configuration Set 執行取值路徑         | **(i) workflow 於 invoke 向 backend 取 + 依租戶/版本快取**                         | 與「skill 定義也向 backend 取」一致,事實來源集中                        |
-| **O5**  | 線上 Python 編輯器                     | **CodeMirror 6(視為已授權)**                                                       | 使用者已明示要線上寫 Python;新增依賴,僅用於進階/Python 規則             |
-| **O6**  | 「一般設定」`app_config` per-tenant 化 | **本計畫不動(維持全域)**                                                           | 若日後組織級一般設定需隔離,另立小計畫加 tenant 欄                       |
+| **O5**  | 線上 Python 編輯器                     | **CodeMirror 6(視為已授權)**                                                       | 使用者已明示要線上寫 Python;新增依賴,僅用於進階/Python 規則(**未交付**,見檔頭稽核追加)             |
+| **O6**  | 「一般設定」`app_config` per-tenant 化 | **本計畫不動(維持全域)**                                                           | 若日後組織級一般設定需隔離,另立小計畫加 tenant 欄(**決策已被推翻**,見檔頭稽核追加:現為 tenant-scoped + ADMIN-only)                       |
 | **O7**  | Configuration Set 每租戶組數           | **多組 + 一 active**(schema 已按此設計)                                            | 支援「高召回/保守」等多套切換;租戶內 name 唯一、至多一 active           |
 
 > 定調後無阻塞項;下一步可將 P1–P4 各自展開為實作 spec(仍待「開始實作」指令)。
@@ -280,7 +267,7 @@ O1(D5)、O4(D6)前已定案。本輪一次定調其餘全部:
 ## 8. 交付分階(規劃,待核准後才動工)
 
 | 階段                     | 內容                                                                                                                                                                                                                                      | 服務                               | 風險                                          |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------- |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------- |
 | **P1 前端 IA**           | 移除 workflows 選單;Skill 功能樹搬進系統設定;系統設定改三分頁;試跑(TraceView)+版本控管(revisions)接為子功能                                                                                                                               | frontend                           | 低                                            |
 | **P2a 範本**             | workflow:curate 5 支 `template_*` 內建骨架(骨架 flow + input_schema + 注入槽;三支 `nl_logic` slot、比對/統計為 `script` slot)、catalog 內建項帶 definition;frontend:薄 UI metadata(basedOn/開放欄位/標籤/元件)+ compose(patch 骨架)(§4.4) | workflow + frontend                | 低—中                                         |
 | **P2b 簡單模式**         | 範本挑選 + 名稱/說明/我的規則(NL 預設、Python 進階 CodeMirror)+ 內建試跑 + 組譯 YAML + validate 翻人話                                                                                                                                    | frontend                           | 中                                            |
@@ -298,3 +285,66 @@ O1(D5)、O4(D6)前已定案。本輪一次定調其餘全部:
 - 簡單模式不讓非技術使用者碰流程/節點/YAML(範本代勞);組織自訂範本亦延後。
 - 不 UI 化詞彙/口徑/意圖對照/公式等規則資料(§6.1 末,另立計畫)。
 - 不改公開聊天 API / SSE / AG-UI 契約。
+
+---
+
+## 附錄
+
+### §A. Configuration Set 資料表與值集合(併自 02-spec.md、03-design.md,2026-08-09 整併)
+
+資料表 DDL(取 03-design §7.1 版本,`DbBootstrap.cs` 的 `Ddl` 尾端追加,冪等建表;02-spec §2.2 的較舊版本已捨棄):
+
+```sql
+CREATE TABLE IF NOT EXISTS configuration_set (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id   text NOT NULL,                 -- 對齊 skill.tenant_id(租戶 code,text)
+  name        text NOT NULL,
+  is_active   boolean NOT NULL DEFAULT false,
+  values      jsonb NOT NULL DEFAULT '{}',
+  created_by  text NOT NULL DEFAULT '',
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_confset_tenant_name UNIQUE (tenant_id, name));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_confset_active ON configuration_set(tenant_id) WHERE is_active;
+```
+
+`uq_confset_active` 部分唯一索引 = 「一租戶至多一組 active」的 DB 級護欄(不靠應用碼把關,對齊 backend「DB constraint over app code」慣例)。
+
+Configuration Set 值集合(v1 開放鍵,O3:5 個既有 settings + 促升 2 個寫死值,取自 02-spec §4.1):
+
+| `values` 鍵                         | 全域預設(來源)                      | 型別/範圍                        | 執行套用點                              |
+| ------------------------------------ | ------------------------------------ | --------------------------------- | ---------------------------------------- |
+| `retrieval.top_k`                   | 4(`settings.retrieval_top_k`)       | int 1–50                         | 範本顯式帶進 retrieve params(P2a 骨架縫) |
+| `kb_query.top_k`                    | 8(`settings.kb_query_top_k`)        | int ≥1                            | `KbQueryDeps.default_top_k`             |
+| `kb_query.max_retrieval_attempts`   | 2                                    | int ≥1                            | `KbQueryDeps.max_retrieval_attempts`    |
+| `workflow.timeout_seconds`          | 120                                   | int ≥1                            | `main.py:188` timeout(改讀有效設定)     |
+| `llm.model`                         | `gpt-4o-mini`(`settings.llm_model`) | str(白名單 = LiteLLM 已配置模型) | per-config 建 LLM                       |
+| `intent.confidence_threshold`(促升) | 0.6(`intent_classification.py:91`)  | float 0–1                         | `KbQueryDeps` 新欄位 → factory           |
+| `llm.temperature`(促升)             | 0.7(`llm.py:19`)                    | float 0–2                         | per-config 建 LLM                       |
+
+- **只存覆寫值**;未覆寫鍵回落全域預設。
+- **明確不做(v2 / 另立計畫)**:rerank 加權、變體數上限、容差、locator 權重;詞彙/口徑/意圖對照/公式等「規則資料」的 UI 化。
+
+### §B. 實作前必讀的落地縫(併自 03-design.md,2026-08-09 整併)
+
+以下七縫為 03-design 讀碼後發現、02-spec 未點名的落地風險。**部分解法可能已隨後續重構(如 skill-concept-realignment 拆分業務流程/Agent Skills)失效,本節存查用,不保證仍對應現行程式碼**。
+
+| #   | 縫                                                                  | 影響                                                                                 | 對策                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ①   | **前端無 YAML 庫**(package.json 僅 highlight.js)                    | compose 不能 parse/emit YAML                                                          | block-scalar + 尾註 sentinel 純字串 patch;不加依賴                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ②   | **`LoadedSkill` 不保留骨架原文**(`__init__.py:52` parse 後丟原文)   | catalog 無 `definition` 可暴露,compose 取不到骨架                                     | `LoadedSkill.definition=raw` + `SkillInfo.definition`。**不做會使前端始終取不到骨架原文,compose 全面失效**。                                                                                                                                                                                                                                                                                                                                                                                          |
+| ③   | **`_DEPS_BUILDERS` 只認 kb_query**(`__init__.py:32`)                | 五支 template 啟動 glob 載入時 deps=None → nl_logic/kb 族編譯期崩,**整服務起不來**   | 五名映射 `_kb_query_deps`,與 yaml 同次提交。**不做會啟動崩潰**。                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ④   | **template_* 會混進 `GET /skills` 目錄**                            | 骨架出現在使用者可執行/可編輯清單                                                     | 前端濾 `template_` 前綴;可選加進 ReservedNames                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ⑤   | **builtin 圖啟動即預編(全域 deps)**(`__init__.py:57`)               | P4 per-config 覆寫對 builtin 無效(用的是啟動圖)                                       | 有覆寫時 builtin 改走 `compile(skill, per_config)`,靠 `id(deps)` 快取。**不做會讓 Configuration Set 覆寫對內建 skill 悄悄不生效**(無錯誤訊號,只是設定被忽略)。                                                                                                                                                                                                                                                                                                                                     |
+| ⑥   | **`nl_logic` 走 `app.nodes` 非 kb_query 族**                        | `skills/__init__.py` 的 import 觸發不到它的 `@node`                                   | `main.py` 加 `from app.nodes import nl_logic`                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ⑦   | **`retrieve.py` 的 top_k 取值**                                     | `retrieval.top_k` 覆寫要能對已存(不重 compose)的通用 retrieve skill 執行期生效        | retrieve 執行期讀 per-config state seed:精度 per-config state(`retrieval_top_k` seed)＞ compose 期 SLOT(build 參數)＞ 模組全域。`retrieval_top_k` 列為 `harness.CONFIG_SEED_KEYS` → 進 `skill.RESERVED_KEYS`(是 state 頻道、資料流視為可用、呼叫端不得夾帶、只讀不可寫);`config_apply.resolve` 於 invoke 期抽出租戶覆寫值,`main.py` seed 進初始 state;未覆寫則不 seed,retrieve 回落 SLOT/全域,零行為變更。**不做會讓 Configuration Set 的 `retrieval.top_k` 覆寫悄悄不生效**(已存 skill 永遠只讀舊值)。 |
+
+### §C. 已不適用驗收案例(併自 04-acceptance-test.md,2026-08-09 整併)
+
+以下 04-acceptance-test.md 中的驗收案例,依檔頭「稽核追加」所述現況已不適用,不再視為有效驗收依據:
+
+- **`SSR-P2A-003`**:斷言「retrieval/infer/inspire 位於 `nl_logic` block scalar,compare/stats 位於 `script` block scalar」—— 現況五支範本商業邏輯槽已統一為 `nl_logic`,無 `script` 分支。
+- **`SSR-P2A-004`**:斷言「三支 NL 產生 `business_result`,兩支 Python 執行精確排序/聚合」—— 同上,compare/stats 的 Python 分支未交付。
+- **`SSR-P2B-006`**:斷言「compare/stats 預設 Python;stats 顯示 metric/period/topK,compare 顯示 sortBy」—— 現況 `compare` 的 `openFields` 只有 `name`/`description`/`rule`(無 `sortBy`),`stats` 只有 `name`/`description`/`rule`/`topK`(無 `metric`/`period`),且商業邏輯槽已統一為 `nl_logic`,無 Python 預設分支。
+- **`SSR-P2C-001`**:驗「CodeMirror/Python language package 不在首屏 chunk,切換 Python 後才載入」—— O5 CodeMirror 6 未交付,`frontend/package.json` 無 codemirror 依賴,無 `PythonEditor.tsx`,此案例無對應實作可測。
+- **`SSR-P2C-002`**:驗「Python editor 已載入」後的編輯/儲存行為 —— 同上,前提元件不存在。

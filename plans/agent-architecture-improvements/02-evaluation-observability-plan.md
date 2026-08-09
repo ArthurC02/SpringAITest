@@ -1,12 +1,12 @@
 # Evaluation 與 Observability 閉環計畫
 
 > 優先級：P0。  
-> 交付狀態：Phase E1/E2/E3 已實作（2026-07-30）；Phase E0 僅 item 4（document consumer DLQ）完成，items 1–3 仍未完成，見 §3 與 [../copilot-shared-core/05-release-evidence-plan.md](../copilot-shared-core/05-release-evidence-plan.md)；Phase E4 部分交付（eval suites/runs UI；operations productization 其餘項目未實作）。  
+> 交付狀態：Phase E1/E2/E3 已實作（2026-07-30）；Phase E0 items 1–2 已於 2026-08-09 完成（E-01–E-06 六關同輪全 PASS + 具名核准，權威紀錄見 [../copilot-shared-core/05-release-evidence-plan.md](../copilot-shared-core/05-release-evidence-plan.md)），item 4（document consumer DLQ）已完成，item 3（真 PostgreSQL checkpoint/HMAC/reopen tests 納入明確 release profile）仍未完成，見 §3；Phase E4 部分交付（eval suites/runs UI；operations productization 其餘項目未實作）。  
 > 目標：重用既有 events、OTel/Langfuse、operations metrics、`CSR-EVAL-001` 與 regression gate，建立可執行且可稽核的 improvement loop。
 
 ## 1. 問題
 
-目前可以看見 aggregate usage/cost/latency，也可以人工記錄 regression PASS/FAIL，但 release gate 無法證明結果是由哪個 dataset、candidate、model/config、runner 與 case results 算出。Shared-core E-04/E-05 仍失敗；PostgreSQL production checks 也不是預設 release lane。
+目前可以看見 aggregate usage/cost/latency，也可以人工記錄 regression PASS/FAIL，但 release gate 無法證明結果是由哪個 dataset、candidate、model/config、runner 與 case results 算出。Shared-core E-04/E-05 撰文當時失敗（已於 2026-08-09 隨 E0 items 1–2 解決）；PostgreSQL production checks 也不是預設 release lane（item 3，仍未完成）。
 
 最小正確改動不是新增 dashboard-only score，而是讓每個 run 與 eval 都有 stable evidence identity，並讓既有 gate 驗證該 identity。
 
@@ -33,8 +33,8 @@ flowchart LR
 
 ## 3. Phase E0：先消除現有矛盾
 
-1. Reconcile shared-core evidence：D6 delivery row 記載較新的 E-04/E-05 PASS，但 canonical evidence record 仍是 FAIL，且目前 workspace 找不到該 PASS bundle。以 runner manifest、artifact identity、case results 與 secret scan 判定，不能只改文字。
-2. 若 PASS bundle 無法驗證，修復 E-04 mem0 recall 與 E-05 routing/answer fidelity，再重跑同一組最新 E-01–E-06 bundle；不得拼接不同時間的局部 PASS。
+1. **（已完成 2026-08-09）** Reconcile shared-core evidence：D6 delivery row 記載較新的 E-04/E-05 PASS，但 canonical evidence record 仍是 FAIL，且目前 workspace 找不到該 PASS bundle。以 runner manifest、artifact identity、case results 與 secret scan 判定，不能只改文字。→ canonical record 已收錄 2026-08-09 同輪全 PASS bundle 與具名核准。
+2. **（已完成 2026-08-09）** 若 PASS bundle 無法驗證，修復 E-04 mem0 recall 與 E-05 routing/answer fidelity，再重跑同一組最新 E-01–E-06 bundle；不得拼接不同時間的局部 PASS。→ 六關於同一輪重跑全 PASS，未拼接。
 3. 把真 PostgreSQL checkpoint/HMAC/reopen tests 納入明確 release command/evidence profile。
 4. 修正 document consumer unexpected failure：transient bounded requeue，terminal poison durable failed + DLQ；不得無條件 ACK 遺失。
 

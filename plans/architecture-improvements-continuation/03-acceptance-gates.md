@@ -86,7 +86,7 @@ Mandatory execution properties:
 
 Stop immediately on unknown database classification, checksum drift, lock ambiguity, partial consumer cutover, schema fingerprint mismatch, tenant-isolation regression, or any requirement to restart an old binary after reset.
 
-P3 deliberately has no compatibility canary or rollback window. Its recovery and rollout rules are those already defined by Architecture Hard Reset; do not revive the superseded dual-track retirement policy.
+**Superseded (2026-08-06 P3-R0 reconciliation; corrected 2026-08-09):** this file originally claimed P3 has no compatibility canary or rollback window. Per the current P3 authority [../architecture-hard-reset/08-p3-reconciliation-44f9de4.md](../architecture-hard-reset/08-p3-reconciliation-44f9de4.md) §1, compatibility routes deliberately coexist during P2–P5, C8 retirement requires usage `= 0`, consumer cutover, a completed rollback window, and human approval, and the destructive physical split is blocked until post-P5/C8 P3-R3. P3 recovery and rollout rules are those defined by Architecture Hard Reset.
 
 ## 5. Final release gate
 

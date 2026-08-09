@@ -2,7 +2,7 @@
 
 > **Superseded P5 policy (2026-08-02):** P5 的雙軌、410 與 C8 gate 已由 [Architecture Hard Reset](../architecture-hard-reset/01-plan.md) 的直接 schema/API cutover 取代；P0–P4 與本文件的歷史理由保留。現行程式仍是 P0–P4 狀態，直到 hard-reset P3 實作並通過 gate。
 
-> 狀態：執行中（2026-07-30）。P0 正名已落地；P1–P4 依各自驗收 gate 推進。P5 **未完成**，且不得在 cleanup C8 的流量、usage、rollback 與簽核證據齊備前宣告完成。本計畫是概念/命名/API 邊界的重整，不是新功能；現況以程式碼為準。
+> 狀態：P0–P4 已交付（2026-08-09 confirmed；程式碼佐證：`backend/src/Backend.Api/BusinessWorkflows/BusinessWorkflowController.cs`、`workflow/app/engine/agent_skill_graph.py`、`frontend/src/components/AgentSkillHome.tsx`）。P5 **未完成**，且不得在 cleanup C8 的流量、usage、rollback 與簽核證據齊備前宣告完成，見 [06-cleanup-and-consolidation.md](../agent-architecture-improvements/06-cleanup-and-consolidation.md) 的 C8 gate。本計畫是概念/命名/API 邊界的重整，不是新功能；現況以程式碼為準。
 
 ## 1. 動機：Re-Architecture 後的概念漂移
 
@@ -81,3 +81,50 @@ P0/P1 可並行；P2 依賴 P1；P3 與 P2 可並行（不同服務）；P4 依�
 - `chat-skill-routing`：路由不分 kind、以 catalog 名稱為鍵、統一走 invoke——**前提在三分法下仍成立，不需改行為**；僅在文件補一句避免誤讀。
 - `agent-platform-redesign` R6：legacy flow 退場門檻不變、owner 不變；本計畫修訂 05 文件第 193 行的分類錯誤與第 197-198 行的表述。
 - `agent-architecture-improvements/06-cleanup-and-consolidation.md`：新增 C8（本計畫的收斂與死碼刪除）。
+
+> 死碼/重複碼/孤兒測試完整帳本與誤判澄清區交叉參照：[05-dead-code-and-test-ledger.md § 5 誤判澄清區](05-dead-code-and-test-ledger.md#5-誤判澄清區看似死碼但不是嚴禁誤刪)。
+
+## 附錄
+
+### §A 02-spec 核心決策併入（併自 02-spec.md，2026-08-09 整併）
+
+> Superseded 註記：02-spec 舊 §3.1「revisions/restore 一律留在 Skill 面、Business Workflow 面不提供 revisions 路由」的歸屬決策已由 [Architecture Hard Reset §02-spec](../architecture-hard-reset/02-spec.md) 取代 —— hard-reset 為 Business Workflow 建立獨立 revision 表與 `/api/business-workflows*` revisions 路由，以 hard-reset 為準。（此為 `architecture-hard-reset/07-p3-inventory.md:42` 的 2026-08-05 預決,原擬加在 02-spec 上,現落於此。）
+
+以下為 02-spec 的核心決策，原文逐字保留（僅編號沿用來源檔）：
+
+#### D-2 邏輯拆分、物理保留：不拆 `skill`/`skill_revision` 表
+
+**決策：`skill` 表保留為兩種 artifact 的共同儲存，`kind` 欄位是 discriminator；拆分發生在 API/domain/UI 層，不在儲存層。**
+
+理由（依平台不變式）：
+- `agent_revision_skill`（`DbBootstrap.cs:227-234`）以 FK 指向 `skill(id)`（無 revision FK，`skill_revision` 是純整數欄）；`agent_run_skill`（`:686-698`）以複合 FK 指向 `skill_revision(skill_id, revision)`。兩者分別鎖住待拆的兩張表；已發布的 Agent revision 與已執行的 run 快照是**不可變 audit 記錄**（06-cleanup 規則 4：immutable revisions/snapshots 永不因程式路徑 cleanup 刪除）。物理拆表必須改寫或雙寫這些 FK 與快照 pin，等於重寫不可變歷史。
+- D3 runtime 的 execution-artifact 端點（`SkillController.cs:124-156`）與快照 pin 驗證（`workflow/app/runtime/artifacts.py:80-191`）依賴單一 revision 座標系；拆表會分裂座標系。
+- 邏輯拆分已足以消除概念漂移：漂移全部發生在 API 命名、model 分派、UI 分流，沒有一項是儲存布局造成的。
+
+代價（接受）：`skill` 表名對 DBA 而言涵蓋兩種內容；以表註解與文件說明。
+
+#### D-3 Runtime wire 契約凍結（紅線）
+
+以下形狀在本計畫內**一位元都不改**：
+- `RuntimeCommand.kind` 詞彙（`workflow/app/runtime/models.py:413-426`）：`load_skill`/`exit_skill`/`tool_call`/`read_resource`/`request_input`/`final`。
+- `ActiveSkillScope`（`models.py:429-437`）、`PinnedSkillSummary`（`models.py:149-171`）、`AgentRunSnapshotBuilder` 的 skill pin 形狀（`AgentRunSnapshotBuilder.cs:184-199`）。
+- checkpoint state shape 與 thread id 規則、`agent_run_skill` 列形狀。
+- **run event 的 `event_type` 字串與 payload 鍵集合**：`_load_skill`/`_invoke_business_workflow` 產生的 event_type 為 **`workflow_completed`**（非 `legacy_flow_completed`——該字串已於 `02dde09` 統一治理時淘汰，並立回歸測試 `AgentRunEventContractTests.cs` 禁止復現）/`skill_scope_entered`/`skill_scope_exited`（`graph.py:638-651,674-702`），backend `AgentRunRepository.cs:16-37` 有硬編 event-type 白名單且違反時整筆 transition 被拒（`:1015-1023`）——此三字串為凍結範圍，不含已淘汰的 `legacy_flow_completed`。
+
+理由：in-flight run 的 checkpoint resume、不可變快照 hash、audit replay 都以這些形狀為準。`_load_skill` 的內部重構（03-design §3.3）必須是行為保持的純程式碼整理。
+
+**執行記錄（P0，審查認可，非改名產物）**：`node_shell.py`（原 `harness.py`，D-7 改名）本輪新增剝除 `RUNTIME_AUTHORITY_KEYS`（`run_id`/`agent_id`/`agent_revision`/`knowledge_sources`/`enforce_data_scope`，`node_shell.py:49-55`）的邏輯——這些鍵正是本節 `AgentRunSnapshotBuilder` skill pin 形狀經 legacy-flow adapter 注入 state 的同一批鍵；舊 `harness.py` 只剝 `IMMUTABLE_KEYS`，從未真正落實其「must never be overwritten」的既有承諾（見 `node_shell.py:45-48` 註解）。此修補堵住「未宣告 writes 契約的 node/匿名節點可偽造 D3 授權鍵」的殘餘路徑（tool 的 `save_as` 在 compile 期已擋、script 在 `script_runner` 的 `FORBIDDEN_WRITE_KEYS` 已擋，此為第三處、也是最後一處缺口），三支測試覆蓋：`test_engine_node_shell.py::test_node_and_tool_shell_outputs_cannot_replace_runtime_authority`、`test_engine_script_steps.py::test_script_cannot_replace_runtime_authority_seen_by_downstream_node`、`test_engine_tool_registry.py::test_tool_step_cannot_save_into_runtime_authority_channel`。這是 P0 執行過程中順手修補的既有安全缺口，屬**計畫外但經審查認可**的行為變更：本節凍結的是「形狀」（鍵存在與意義不變），這裡新增的是「防寫執行」，兩者不衝突。
+
+#### D-6 `kind` 成為一級可信契約欄位（現況說明）
+
+現況修正（審查後）：backend `SkillInfo`/`Skill` DTO **已帶** `kind`（`SkillDtos.cs:19,39`，SELECT 已取回），platform 原樣穿透 JSON——backend/platform 側是零工作，只補迴歸測試。真正殘留的嗅探在兩處：
+- 引擎 `custom.py:111-120` 的 `_entry()`：明明拿到 backend list 已含 `kind` 的 `info`，卻逐筆再 GET detail 並以 `_is_agentic(definition)` 重解 YAML 決定 kind（引擎 catalog 的 kind 就是這樣產生的）。改為直接取 `info['kind']`（`input_schema` 仍需 detail，該次 GET 保留，但 kind 判定不再嗅探）。
+- 前端 `SkillHome.tsx:84-85` 的 `kindOf()` 以引擎 catalog（= 上述嗅探結果）優先、backend `s.kind` 只是 fallback；`:235` 的 `openCustomEdit` 還帶 `|| isAgenticDefinition(s.definition)`。改為 API `kind` 欄位為唯一來源，刪 `isAgenticDefinition`（`agenticPackage.ts:152`，唯一呼叫端即此處）。
+
+### §B 03-design 依賴方向規則摘要（併自 03-design.md，2026-08-09 整併）
+
+拆分後的引擎內部依賴界線：`agent_skill_graph` 是 Agent Skill bridge graph factory，可 import node_shell/tool_registry/node_registry，但**不得 import Business Workflow 的 schema/compiler internals**，也不得讓 Agent Skill 被描述成 Business Workflow（`app/engine/compiler.py` 的宣告式 YAML schema/建圖職責只服務 Business Workflow，只在顯式 kind 分派點呼叫 `agent_skill_graph.build(...)`）。
+
+### §C 04-acceptance-tests 防呆規則併入（併自 04-acceptance-tests.md，2026-08-09 整併）
+
+workflow-internal `/skills/validate` alias（與 `/business-workflows/validate` 同 handler）**不得被 P5/C8 自動刪除**；其退場必須另立 consumer inventory、usage-zero 與 rollback gate 的獨立驗收，不得借既有收斂批次順手移除。

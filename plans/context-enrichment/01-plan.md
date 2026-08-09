@@ -174,7 +174,7 @@ I2 是四條裡影響最大的。它把設計稿 §16「Context Quality Gate」�
 | **C17** | **Revision publish 交易：複製樣板，不抽跨 aggregate 框架**。複製「FOR UPDATE 鎖 → 驗版本 → reference lock（FOR SHARE）→ supersede → insert revision → 更新指標欄」六步驟；若 Context 也有 Publish/Restore 共同邏輯，比照 `OrchestratorRepository.WriteRevision` 在**同一檔案內**抽私有方法 | 三個既有 revision 表的欄位差異很大（skill binding / ui_metadata / verifier 參照），鎖定順序本身也是各自的業務規則。抽共用等於要把 INSERT 欄位清單參數化成 mini-ORM，成本遠大於維持三份百行內的原生 SQL |
 | **C18** | **Readiness 政策的存放：仿 `configuration_set` 形狀新建一張 `context_policy` 表，不塞進既有表**。`app_config` 無 tenant 概念（`DbBootstrap.cs:74-76`）不適合；`configuration_set` 的形狀（tenant 隔離 + jsonb + 逐鍵白名單驗證，`Configuration/ConfigurationValues.cs:20-70`）正合用，但 key 白名單、業務語意、生命週期都不同，**共用同一張表會讓兩套白名單互相污染** | I3：複用「形狀」而非複用「表」 |
 | C18a | **E1 的 `context_policy` 是種子資料，沒有編輯 API、沒有 revision 表**。要能編輯政策時（E4）才加 draft+revision 雙表 | 現有兩張組態表都沒有變更歷史。業務政策長期需要稽核軌跡，但 E1 沒有人能改它——先不蓋。這是刻意的延後，不是遺漏 |
-| C19 | **in-memory 雙路徑：實作複製既有樣板（`Data/InMemory/InMemoryConfigurationSetRepository.cs`，127 行、`lock (_store)` 手動重建 UNIQUE 與唯一 active）；但測試寫成一個吃 `IContextRepository` 的參數化 xUnit Theory，同時跑兩份實作**（Dapper 半邊沿用 `PostgresFixture` + `SkippableFact`，DB 不可達即 skip）。**範圍僅限 Context 這一組 repository，不做全 repo 的契約測試框架** | 初稿寫「複製樣板、各測各的」，被證據推翻：`plans/test-audit/ledger.md` 記錄了 `InMemoryAgentRunApprovalRepository.CompleteExecuteAsync(deadLetter:true)` 與 Dapper 版行為分歧（run 卡在 `queued` 而非 `failed`），**是人工稽核抓到的，沒有任何測試擋下**。這個 bug class 是真的。但修法不是發明全 repo 框架（那比新增整個 Context repository 還大，I3 禁止），而是一個測試類別吃兩個實例——這不是框架，成本近乎零，且正好符合 I4「這段邏輯壞掉時會失敗」 |
+| C19 | **in-memory 雙路徑：實作複製既有樣板（`Data/InMemory/InMemoryConfigurationSetRepository.cs`，127 行、`lock (_store)` 手動重建 UNIQUE 與唯一 active）；但測試寫成一個吃 `IContextRepository` 的參數化 xUnit Theory，同時跑兩份實作**（Dapper 半邊沿用 `PostgresFixture` + `SkippableFact`，DB 不可達即 skip）。**範圍僅限 Context 這一組 repository，不做全 repo 的契約測試框架** | 初稿寫「複製樣板、各測各的」，被證據推翻：2026-07-26 test-audit 快照（15 條全數結案，紀錄已於 2026-08-09 退役）記錄了 `InMemoryAgentRunApprovalRepository.CompleteExecuteAsync(deadLetter:true)` 與 Dapper 版行為分歧（run 卡在 `queued` 而非 `failed`），**是人工稽核抓到的，沒有任何測試擋下**。這個 bug class 是真的。但修法不是發明全 repo 框架（那比新增整個 Context repository 還大，I3 禁止），而是一個測試類別吃兩個實例——這不是框架，成本近乎零，且正好符合 I4「這段邏輯壞掉時會失敗」 |
 
 ---
 
@@ -344,7 +344,7 @@ E1 驗收全表（A-CTX-01..22）移至 [04-acceptance-tests.md](04-acceptance-t
 | Envelope 體積 vs 既有上限 | 大型分析爆量 | 既有硬上限：`MAX_TASK_CONTEXT_BYTES` 65 536、`MAX_ROOT_RESULT_BYTES` 983 040（`workflow/app/runtime/orchestrator.py:22-26`），以及 Backend `context`/`task_envelope` 各 65 536。Envelope 另設 256 KB 上限，超過即建 gap（A-CTX-13）；view 另有 `max_input_tokens`。**不得為了塞下而放寬既有常數** |
 | ~~Enrichment skill 被當成一般 skill 直接 invoke~~ | — | **已查證不成立**：三道既有防線都已生效（C1a）。此風險撤除 |
 | 旗標文件與程式碼落差（C6） | 以為有三層 fail-closed，實際只有兩層 | 實作 E1 時一併核實並修正 `workflow/AGENTS.md:80` 與根 AGENTS.md 的 D6 敘述 |
-| in-memory 雙路徑成本 | 每條業務規則都要手動同步兩份實作。全 repo 目前只靠人工紀律，且**已經真的漏過一次**（`plans/test-audit/ledger.md` 的 `CompleteExecuteAsync(deadLetter:true)` 分歧） | C19：Context 這一組用參數化 Theory 同時跑兩份實作，把這個 bug class 擋在門外；但不擴張成全 repo 框架 |
+| in-memory 雙路徑成本 | 每條業務規則都要手動同步兩份實作。全 repo 目前只靠人工紀律，且**已經真的漏過一次**（2026-07-26 test-audit 快照（15 條全數結案，紀錄已於 2026-08-09 退役）的 `CompleteExecuteAsync(deadLetter:true)` 分歧） | C19：Context 這一組用參數化 Theory 同時跑兩份實作，把這個 bug class 擋在門外；但不擴張成全 repo 框架 |
 | Enrichment 失敗使 Root 完全不可用 | 可用性倒退 | 旗標關閉即完整回退到既有 not-ready 行為（A-CTX-01）；Enrichment 不是 root 啟動的前置依賴 |
 | PostgreSQL checkpointer 測試預設 skip | 新圖的 checkpoint 缺乏自動覆蓋 | 沿用 workflow/AGENTS.md 已記載的手動指令，並把 enrichment 的 checkpoint 測試放進同一組 |
 

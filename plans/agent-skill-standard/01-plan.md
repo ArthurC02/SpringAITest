@@ -134,10 +134,9 @@ compiler 仍在終點加上 `audit_feedback`。`agent_skill_runner` 以 `harness
 
 這是「允許外部 package 的 scripts 在 production 執行」之前的硬前置，獨立於格式、runner 與 UI 上線。
 
-- 先寫出 script execution protocol：輸入/輸出 serialisation、唯讀資源掛載、CPU/記憶體/時間限制、取消、審計與錯誤分類。
-- 沿用 `ScriptRunnerPort` 注入點，但將隔離 runner 實作與其 Linux deployment requirement 一起交付；gVisor 是候選實作，不是尚未驗證前的既定事實。
-- sandbox 環境不得取得 `INTERNAL_API_TOKEN` 或其他 service secret，預設不得出網；合法服務呼叫必須走 host 的 tool registry proxy。
-- 在 Linux production runner 有隔離與拒絕出網的整合測試前，拒絕執行 bundle scripts；Windows/dev 保持現有 AST runner 的既有 flow 行為。
+- 沿用 `ScriptRunnerPort` 注入點；完整必要條件與 protocol 明細見附錄 §A（R8 需求）與 §B（D1–D8 設計決策 + protocol）；驗收見附錄 §C。
+- script isolation 的 host/sandbox 邊界（S1–S3）另見 [../agent-architecture-improvements/05-extension-security-plan.md](../agent-architecture-improvements/05-extension-security-plan.md)，此處不重述其內容。
+- 現行 frontmatter 契約與 R2 命名對照以 [05-standard-conformance.md](05-standard-conformance.md) 為獨立事實來源。
 
 ## 不變契約與驗證
 
@@ -152,3 +151,57 @@ compiler 仍在終點加上 `audit_feedback`。`agent_skill_runner` 以 `harness
 - 修正 `workflow/app/security.py` 已過期的 `/workflows*`、`/documents*` 描述。
 - 對齊 Platform 與 Frontend 的 answer-key 順序與成員，讓 agentic runner 的固定 output key 不漂移。
 - 功能完成後再更新 root 與各 area `AGENTS.md` 的端點、儲存、執行限制與測試數；不要在實作前把推測寫成現況。
+
+## 附錄
+
+### §A 需求 R8 — scripts 的分期安全界線
+
+(併自 02-spec.md，2026-08-09 整併)
+
+P0/P1/P2 可接受並保存通過 AST scan 的 `scripts/*.py`，但不得執行它們。任何外部 package script 的 production execution 都必須等 P3 isolation 完成後才開放；完成前，執行 bundle script 必須受控拒絕。
+
+P3 必要條件的完整 protocol 明細見 §B。
+
+### §B 設計決策（D1–D8）與 P3 script isolation protocol
+
+(併自 03-design.md，2026-08-09 整併)
+
+#### 設計決策
+
+| ID  | 決策                                                                                                      | 理由                                                                                         |
+| --- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| D1  | package validation 採 multipart，Backend 將 upload stream 轉送至 Workflow 的 internal validation endpoint | zip 是二進位資料；避免 JSON base64 膨脹與兩種 transport 並存                                 |
+| D2  | Workflow 解析 `SKILL.md` 並回傳 canonical definition                                                      | 保持 Workflow 為 schema 唯一語意權威，Backend 不複製 parser                                  |
+| D3  | Workflow invoke 經 tenant-scoped internal endpoint 按需取得 package                                       | 現行 custom loader 僅取得 `definition`；package 不進公開 JSON，也不做有風險的跨 tenant cache |
+| D4  | agentic 在 compiler 內降為單一 `agent_skill_runner` node                                                  | 保留 compiler、Harness、audit 與 cache，不新建 orchestration runtime                         |
+| D5  | LangChain tool adapter 只是一層轉接，所有 dispatch 回到 `tool_registry.invoke`                            | allowlist 與 trace 的既有 enforcement 不被繞過                                               |
+| D6  | 現有 chat router 不拓寬 input 規則                                                                        | 避免 agentic feature 意外改變既有 deterministic routing 行為                                 |
+| D7  | P1 runner 不執行 bundle scripts                                                                           | 外部 zip 的 script 不可在現有 in-process runner 上取得 production execution 能力             |
+| D8  | P3 isolation runner 與 script protocol 獨立交付；gVisor 是候選而非先決實作                                | 先把安全結果與測試門檻定義清楚，再決定可部署的 Linux runtime                                 |
+
+#### P3 script isolation protocol
+
+P3 前，agentic `scripts/` 是 stored-but-disabled resource。要啟用時，先定義 `ScriptRunnerPort` 實作的明確 protocol：
+
+- host 傳入 JSON-compatible input、唯讀 package resources 與 limits；sandbox 回傳受 schema 限制的 output 與分類後的錯誤（error classification）。
+- sandbox process/container 不接收 `INTERNAL_API_TOKEN`、JWT、database credentials 或 host environment secrets。
+- network 預設拒絕；需要外部能力時必須改用 host tool adapter，不能給 script direct egress。
+- CPU、memory、wall-clock、output size 與 cancellation 均由 host 可觀察並可終止。
+- Linux deployment 提供隔離/拒絕出網 integration evidence；Windows/dev 不可假稱有同等隔離。
+
+### §C 驗收標準 — P3 production script isolation
+
+(併自 04-acceptance-test.md，2026-08-09 整併)
+
+P0/P1/P2 逐案驗收內容已隨程式碼落地，現況以現行 xUnit（backend/platform）與 pytest（workflow）測試套件為準，不在此重複列案。
+
+| ID           | Given                                                    | When                       | Then                                                             | 層級 / 建議位置       |
+| ------------ | -------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------- | --------------------- |
+| `AST-P3-001` | Linux isolation runner 與 script 要求讀環境變數          | 執行 bundle script         | 取不到 internal token、JWT、DB password 與 host secrets          | Linux integration     |
+| `AST-P3-002` | script 嘗試 DNS/HTTP socket                              | 執行                       | 預設拒絕出網；合法資料需求必須改走受 allowlist 約束的 host tool  | Linux integration     |
+| `AST-P3-003` | CPU loop、記憶體配置、超大 stdout、wall timeout fixtures | 執行                       | 各自被限制、可取消、host 保持可服務且留下受控 audit error        | Linux integration     |
+| `AST-P3-004` | script 嘗試讀 package 外路徑或寫入資源                   | 執行                       | 只見唯讀允許資源；host filesystem 未被讀寫                       | Linux integration     |
+| `AST-P3-005` | tenant-a/b script packages 同名                          | 交錯執行                   | input/resources/output/audit 不跨 tenant 混用                    | Linux integration     |
+| `AST-P3-006` | Windows/dev 環境                                         | 嘗試啟用外部 bundle script | 明確拒絕或維持 disabled；不得宣稱提供 Linux production isolation | Environment gate test |
+
+**P3 exit：** `AST-P3-001`～`006` 在 Linux integration 綠後，才可允許 production bundle script execution。

@@ -1,6 +1,6 @@
 # 驗收測試 — 聊天 → Skill 路由（Chat-to-Skill Routing）
 
-> 狀態：**已交付功能的驗收基準。** 承接 [01-plan.md](01-plan.md)、[02-spec.md](02-spec.md)、[03-design.md](03-design.md)；實際測試入口見 [plans README](../README.md)。
+> 狀態：**已交付功能的驗收基準。** 承接 [01-plan.md](01-plan.md);02-spec/03-design 內容已併入 [01-plan.md](01-plan.md) 附錄;實際測試入口見 [plans README](../README.md)。
 > 範圍：驗證動態 Skill 目錄與手動 LLM 名稱選擇路由，且不破壞聊天、權限、記憶及 SSE 契約；P2–P4 僅記錄未來門檻，不視為 P1 失敗。
 
 ## 1. 驗收原則與層級

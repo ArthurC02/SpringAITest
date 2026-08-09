@@ -229,4 +229,133 @@ get_recent_traces(filter?: string, limit?: int) → List<{timestamp, name, durat
 
 ---
 
-下一步: [02-spec.md](02-spec.md)(可交付規格) → 實作 → [e2e-verifier](../../.claude/agents/e2e-verifier.md) 驗證
+詳見下方附錄:疑難排解指南、邊界案例與風險、未來升級路徑、最小驗證集合、非驗收範圍。e2e 驗證見 [e2e-verifier](../../.claude/agents/e2e-verifier.md)。
+
+---
+
+## 附錄 A — 疑難排解指南(併自 02-spec.md,2026-08-09 整併)
+
+### 腳本啟動坑
+
+1. **`dotnet run` 綁定錯誤埠 (e.g. :5008 instead of :8080)**
+   - 原因: launchSettings.json 的 profile 優先於環境變數 `ASPNETCORE_URLS`
+   - 解決: 在啟動腳本中加 `--no-launch-profile` 旗標，or 臨時改 launchSettings.json
+
+2. **Windows 上 npm 子行程孤兒(佔住 :5173)**
+   - 原因: `npm run dev` 生衍的 node 子行程收不到信號
+   - 解決: 用 `taskkill /T /F /PID <pid>` 殺掉進程樹 (stop-lite.ps1 已實裝)
+
+3. **Linux/macOS 上終端背景工作未正確等待**
+   - 原因: `nohup ... &` 後迴圈檢查埠連線失敗
+   - 解決: 加重試邏輯與延遲，或用 `pgrep -P` 建立進程樹追蹤 (start-lite.sh 已實裝)
+
+### LiteLLM 工具鏈限制
+
+4. **`uvx --from "litellm[proxy]"` 安裝失敗 (missing Rust/MSVC)**
+   - 原因: litellm 最新版本含 Rust 依賴，無預建 wheel 時會觸發 `pip install` 編譯
+   - 症狀: Windows 上缺 Visual Studio Build Tools 時，`error: Microsoft Visual C++ 14.0 or greater is required`
+   - 解決 (a): 裝 Visual Studio Build Tools (C++ workload)
+   - 解決 (b): 在 start-lite 腳本中改用舊版 litellm(有預建 wheel),如 `uvx --from "litellm[proxy]==1.x.y" litellm ...`
+   - **注意**: 此為環境依賴問題,非腳本 bug;本機開發環境應備足工具
+
+---
+
+## 附錄 B — 邊界案例與風險(併自 03-design.md,2026-08-09 整併)
+
+### B.1 重啟即失憶
+
+**現象:** Lite 進程重啟後,所有 in-memory 記憶(mem0、對話、文檔)清空
+
+**是否可接受:** ✅ **是**,符合演示定位
+
+**緩解:**
+- 文檔明示「Lite 不保存跨重啟狀態」
+- 若需持久化,改用 `start-full`(容器模式)
+- 開發迭代時重啟無損
+
+### B.2 記憶體上限
+
+**現象:** InMemory repos 無限增長 → OOM
+
+**估計:**
+- 每個使用者最多 100 對記憶(~10KB/對) = 1MB/user
+- 對話無上限(可達千萬筆)
+- 文檔無上限(嵌入向量 1536 float ≈ 6KB/chunk)
+
+**是否可接受:** ⚠️ **部分**,開發場景下對話可能無限增長
+
+**緩解:**
+- 長期:對話加時間戳 TTL(e.g. 24h)自動清理
+- 短期:文檔上傳回 502(階段一無 async processing)
+- 開發:手動 `stop-lite` 重啟
+
+### B.3 多進程不共享
+
+**現象:** 若誤啟兩份 platform 實例,各自獨立記憶
+
+**是否可接受:** ✅ **是**,Lite 預期單一進程組(scripts/start-lite 一次啟動即可)
+
+**防守:** 預設埠衝突(8080/8001 已占)會自動拒絕第二份
+
+### B.4 種子帳號 hash 漂移
+
+**風險:** InMemoryAuthRepository 與 DbBootstrap 的 BCrypt hash 不一致 → 登入失敗
+
+**防守:**
+- 兩者都用 `BCrypt.Net.BCrypt.HashPassword("password123")` 相同邏輯
+- 或抽出共用常數 → 兩處都引用
+- 測試驗證登入 `admin-a/password123` 兩模式一致
+
+### B.5 Isolation key 取不到(AG-UI)
+
+**現象:** 未登入或 JWT 缺 tenant/user claim → `IsolationKeyScopedAgentSessionStore(Strict=true)` 拋例外
+
+**是否可接受:** ✅ **是**,AG-UI 本來就應要求認證(`RequireAuthorization()`)
+
+**防守:** `JwtTenantIsolationKeyProvider` 回 null 時 fail-closed,不創建共享 key
+
+### B.6 RingBuffer 容量不足
+
+**現象:** Agent 想查最近 100 spans 但只保留 200 total → 快速聊天時 span 出隊太快
+
+**估計:** 每輪聊天 ~3-5 spans → 200 spans ≈ 40-65 輪對話,開發足用
+
+**是否可接受:** ✅ **是**,不是正式演示環境
+
+**升級:** 若需更多歷史,改 `MaxCapacity` 常數(可改為環變)
+
+---
+
+## 附錄 C — 未來升級路徑(併自 03-design.md,2026-08-09 整併)
+
+- **RingBuffer 租戶隔離:** 若 Lite 用於多租戶演示,改 per-tenant 環形緩衝
+- **對話 TTL:** InMemoryConversationRepository 加 24h 自動清理
+- **Skill 版本化:** InMemorySkillRepository 升格為無限版本歷史(目前省略)
+- **文件 async:** 階段二 backend Channel<DocumentMessage> + platform HTTP IDocumentQueue
+
+---
+
+## 附錄 D — 最小驗證集合(併自 04-acceptance-test.md,2026-08-09 整併)
+
+只能跑一組時,跑這 6 條:
+
+| # | 案例 | 單獨守住什麼 |
+| --- | --- | --- |
+| 1 | `A-01` + `A-02` | 預設模式零污染(既有 .NET 測試就是行為快照):三個環變皆未設,`platform/` 與 `backend/` 下 `dotnet test` 全綠、案數不減,且 backend 側 Fakes 搬遷後未改任何斷言 |
+| 2 | `A-06` | 開關只認暗語,亂設不會半開:環變設為其他值(`MEM0_MODE=banana`、`DB_PROVIDER=postgres`、`OTEL_MODE=otlp`)時行為與未設完全相同(現行路徑) |
+| 3 | `B-D-01` | singleton —— 錯成 scoped 時 lite「能啟動但什麼都存不住」,最隱蔽的失敗型態:`DB_PROVIDER=inmemory` 下解析六個 repository 介面兩次,須為同一 singleton 實例 |
+| 4 | `B-D-03` | 種子帳號 + BCrypt Verify,lite 的第一個使用者動作(登入)成敗在此:`FindUserByUsernameAsync("admin-a"/"user-a"/"user-b")` 角色與租戶齊全,且 `BCrypt.Verify("password123", hash)` 為 true(不比對 hash 字面值) |
+| 5 | `B-T-02` | get_recent_traces 絕不進生產:`OTEL_MODE` 未設時,ChatClientAgent 的 `ChatOptions.Tools` 不含 `get_recent_traces` |
+| 6 | `C-01` + `C-10` | 腳本真的起得來、收得掉,整個計畫的對外承諾:乾淨 shell 執行 `start-lite.ps1`/`.sh`,前置檢查通過,五個進程全起,三個健康檢查在逾時內綠,產生 `start-lite.pids`,全程未觸碰 Docker;`stop-lite.ps1` 收攤後所有 PID 終止、port 釋放、pids 檔刪除,重複執行不報錯 |
+
+---
+
+## 附錄 E — 非驗收範圍(YAGNI)(併自 04-acceptance-test.md,2026-08-09 整併)
+
+- RabbitMQ in-memory 替代(階段二;文件上傳只驗 502 契約不變)。
+- backend/workflow 的 OTel(階段二;lite 只有 platform 有遙測)。
+- mem0 recall 品質(關鍵字比對是刻意的低配,不驗語意相關性)。
+- ring buffer 的租戶隔離(進程級共用是明文設計)。
+- 效能/壓力(lite 是開發機模式)。
+- 20/21 滑動窗口邊界 —— 屬 copilot-shared-core 的既有驗收案例,不重複。
+- 真模型下的工具呼叫體驗(mock-gpt 不會主動呼叫工具;要真模型驗收需改 `CHAT_MODEL` + 金鑰,屬手動加測)。

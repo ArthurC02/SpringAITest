@@ -1,6 +1,6 @@
 # 契約強制化 × 作者/執行 UX — Node-first 第二階段
 
-> 狀態: **已實作(2026-07-24)。** Track A(A1/A2)與 Track B(B1/B2/B3)七批全部落地並通過 code-reviewer 全差異審查(七檢點全過,判定可收);gate:workflow 655 / backend 266 / platform 437 / frontend lint+build 綠。遺留:`@codemirror/lang-python` 孤兒依賴待授權移除。 相關文件: [計劃書](01-plan.md)、[規格書](02-spec.md)、[設計文稿](03-design.md)、[驗收案例](04-acceptance-tests.md)。
+> 狀態: **已實作(2026-07-24)。** Track A(A1/A2)與 Track B(B1/B2/B3)七批全部落地並通過 code-reviewer 全差異審查(七檢點全過,判定可收);gate:workflow 655 / backend 266 / platform 437 / frontend lint+build 綠。遺留:`@codemirror/lang-python` 孤兒依賴待授權移除。 相關文件: [計劃書](01-plan.md)、[規格書](01-plan.md)、[設計文稿](01-plan.md)、[驗收案例](01-plan.md)。
 > 本文是 01–04(已交付記錄)之後的下一階段:把 Node-First 尚未兌現的「reads 契約強制化」補完,並修正非技術使用者在 Skill 建立/執行/編輯三個畫面的實際斷點。
 > 所有事實基礎均經逐檔查證(含一次「改了實測再還原」的爆炸半徑量測與一輪對抗性評估);證據以 file:line 註記。
 
