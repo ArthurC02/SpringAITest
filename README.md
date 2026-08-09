@@ -35,6 +35,8 @@ ASP.NET Core 10 + Python LangGraph + React 19 **monorepo**：平台層（.NET �
 
 Windows 用 `.ps1`（需 PowerShell 7+），Linux/macOS 用同名 `.sh`（首次需 `chmod +x scripts/*.sh`）。
 
+模式 A 預設不重建容器 image（多數人只在主機上改 platform/frontend）；backend/ 或 workflow/ 原始碼有異動時，加 `-Build`（`./scripts/start-infra.ps1 -Build`）或 `--build`（`./scripts/start-infra.sh --build`）才會重建。
+
 **停止：** 模式 A/B → `cd infra && docker compose --profile full down` | 模式 C → `./scripts/stop-lite.ps1`
 
 ## 設定金鑰

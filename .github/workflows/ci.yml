@@ -73,10 +73,28 @@ jobs:
         working-directory: platform
 
   # workflow/AGENTS.md：uv + `uv run pytest`（從 workflow/），pyproject requires-python >= 3.12。
-  # 註：CHECKPOINT_DATABASE_URL 未設，真 PostgreSQL checkpointer 測試仍會 skip
-  # （見 workflow/AGENTS.md「The default skips hide the only production checkpointer」）。
+  # CHECKPOINT_DATABASE_URL 現在指向本 job 的 appdb service container，
+  # 所以 D3/D5 唯一的正式環境 checkpointer（PostgreSQL）測試會真的跑，不再靜默 skip
+  # （tests/conftest.py 強制 APP_ENVIRONMENT=development，production 憑證檢查不會擋這裡）。
+  # 刻意不設 CHECKPOINT_HMAC_KEY：測試自簽自驗、development 預設 key 即可，且
+  # settings.py 無 env_prefix，注入會滲進 test_settings_credentials 的零組態預設值斷言。
   workflow:
     runs-on: ubuntu-latest
+    services:
+      appdb:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: springaitest
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CHECKPOINT_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/springaitest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -84,8 +102,23 @@ jobs:
           python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: workflow/uv.lock
+      # 防呆:CHECKPOINT_DATABASE_URL 指向的 DB 不可達時,checkpointer 測試會誠實 skip(綠但沒跑)。
+      # 這一步讓容器壞掉/憑證漂移直接紅,而不是靜默退回 skip。
+      - name: appdb must be reachable
+        run: psql "postgresql://postgres:postgres@localhost:5433/springaitest" -c 'select 1'
       - run: uv run pytest -q
         working-directory: workflow
+      # 再次斷言:未來若有人動掉 CHECKPOINT_DATABASE_URL 的名稱或注入方式,
+      # 唯一的正式環境 checkpointer 測試會靜默退回 skip 而非變紅——這一步把「被 skip」本身變成紅燈。
+      - name: PostgreSQL checkpointer tests must not be skipped
+        working-directory: workflow
+        run: |
+          output=$(uv run pytest tests/test_agent_runtime_postgres.py "tests/test_root_orchestrator_supervisor.py::test_root_checkpoint_round_trips_through_real_postgres_when_configured" -v 2>&1)
+          echo "$output"
+          if echo "$output" | grep -qi 'SKIPPED'; then
+            echo "PostgreSQL checkpointer tests were skipped — CHECKPOINT_DATABASE_URL wiring is broken." >&2
+            exit 1
+          fi
 
   # frontend/AGENTS.md：npm ci / lint / build / test:unit（package.json 無 engines，用 Node 22 LTS）。
   frontend:
