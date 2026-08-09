@@ -33,6 +33,8 @@ ASP.NET Core 10 + Python LangGraph + React 19 **monorepo**：平台層（.NET �
 | **B 全容器** | `./scripts/start-full.ps1` | 容器 | 容器 | 容器 | 容器 nginx |
 | **C 無容器** | `./scripts/start-lite.ps1` | 本機 | 本機 | 主機 `dotnet run` | 主機 `npm run dev` |
 
+Windows 用 `.ps1`（需 PowerShell 7+），Linux/macOS 用同名 `.sh`（首次需 `chmod +x scripts/*.sh`）。
+
 **停止：** 模式 A/B → `cd infra && docker compose --profile full down` | 模式 C → `./scripts/stop-lite.ps1`
 
 ## 設定金鑰
