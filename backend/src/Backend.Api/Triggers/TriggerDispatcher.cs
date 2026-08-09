@@ -27,15 +27,20 @@ public sealed class TriggerDispatcher(
 
     private static readonly string WorkerId = "trigger-dispatcher-" + Guid.NewGuid().ToString("N");
 
-    /// <summary>Claims and resolves every occurrence due at <paramref name="now"/>; returns how many were claimed.</summary>
-    public async Task<int> RunOnceAsync(DateTime now, CancellationToken ct)
+    /// <summary>
+    /// Claims and resolves every occurrence the store considers due; returns how many were claimed.
+    /// "Now" is never supplied by this process — the repository returns the authoritative instant it
+    /// cut the leases from, and every decision below is made against that instant.
+    /// </summary>
+    public async Task<int> RunOnceAsync(CancellationToken ct)
     {
-        var claims = await triggers.ClaimDueAsync(WorkerId, now, LeaseSeconds, BatchLimit, ct);
+        var batch = await triggers.ClaimDueAsync(WorkerId, LeaseSeconds, BatchLimit, ct);
+        var claims = batch.Claims;
         foreach (var claim in claims)
         {
             try
             {
-                var (status, rootRunId) = await ResolveAsync(claim, now, ct);
+                var (status, rootRunId) = await ResolveAsync(claim, batch.Now, ct);
                 await triggers.CompleteOccurrenceAsync(
                     claim.Occurrence.Id, claim.ClaimToken, status, rootRunId, ct);
             }
@@ -142,7 +147,7 @@ public sealed class TriggerDispatchService(
             {
                 await using var scope = scopes.CreateAsyncScope();
                 await scope.ServiceProvider.GetRequiredService<TriggerDispatcher>()
-                    .RunOnceAsync(DateTime.UtcNow, stoppingToken);
+                    .RunOnceAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

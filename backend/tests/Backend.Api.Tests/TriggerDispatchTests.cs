@@ -22,15 +22,28 @@ public sealed class TriggerDispatchTests
     private static readonly DateTime Due = new(2030, 5, 1, 12, 0, 0, DateTimeKind.Utc);
     private static readonly Guid Target = Guid.Parse("b0000000-0000-4000-8000-000000000001");
 
+    /// <summary>
+    /// The store's clock. Every case below sets it far from the host wall clock, which is exactly
+    /// what proves the dispatcher no longer consults <c>DateTime.UtcNow</c>: nothing would be due at
+    /// 2030 under the real clock, and nothing would misfire at a 2030 boundary either.
+    /// </summary>
+    private sealed class TestClock(DateTime start)
+    {
+        public DateTime Now { get; set; } = start;
+
+        public InMemoryTriggerRepository Repository() => new() { Clock = () => Now };
+    }
+
     [Fact]
     public async Task RunOnce_FiresThroughTheExistingD5RootCommand_UsingTheImmutableGrantSnapshot()
     {
-        var triggers = new InMemoryTriggerRepository();
+        var clock = new TestClock(Due);
+        var triggers = clock.Repository();
         var trigger = await ScheduleAsync(triggers);
         var runs = new RecordingRuns();
         var dispatcher = Dispatcher(triggers, runs);
 
-        Assert.Equal(1, await dispatcher.RunOnceAsync(Due, default));
+        Assert.Equal(1, await dispatcher.RunOnceAsync(default));
 
         var call = Assert.Single(runs.Calls);
         Assert.Equal("t", call.Tenant);
@@ -55,26 +68,27 @@ public sealed class TriggerDispatchTests
     [Fact]
     public async Task RunOnce_BeforeDue_ClaimsNothing()
     {
-        var triggers = new InMemoryTriggerRepository();
+        var triggers = new TestClock(Due.AddSeconds(-1)).Repository();
         await ScheduleAsync(triggers);
         var runs = new RecordingRuns();
 
-        Assert.Equal(0, await Dispatcher(triggers, runs).RunOnceAsync(Due.AddSeconds(-1), default));
+        Assert.Equal(0, await Dispatcher(triggers, runs).RunOnceAsync(default));
         Assert.Empty(runs.Calls);
     }
 
     // On-point/off-point for the documented window: resolved exactly at the boundary still fires,
-    // one second later is a misfire that is never backfilled.
+    // one second later is a misfire that is never backfilled. The verdict follows the injected store
+    // clock alone -- the host wall clock is years away from both of these instants.
     [Theory]
     [InlineData(20, TriggerOccurrenceStatuses.Fired, TriggerStatuses.Fired)]
     [InlineData(21, TriggerOccurrenceStatuses.SkippedMisfired, TriggerStatuses.Misfired)]
     public async Task RunOnce_MisfireWindowBoundary(int lateSeconds, string occurrenceStatus, string triggerStatus)
     {
-        var triggers = new InMemoryTriggerRepository();
+        var triggers = new TestClock(Due.AddSeconds(lateSeconds)).Repository();
         var trigger = await ScheduleAsync(triggers, window: 20);
         var runs = new RecordingRuns();
 
-        await Dispatcher(triggers, runs).RunOnceAsync(Due.AddSeconds(lateSeconds), default);
+        await Dispatcher(triggers, runs).RunOnceAsync(default);
 
         Assert.Equal(occurrenceStatus, (await OccurrenceAsync(triggers, trigger)).Status);
         Assert.Equal(triggerStatus, (await triggers.GetAsync("t", trigger.Id, default))!.Status);
@@ -84,14 +98,14 @@ public sealed class TriggerDispatchTests
     [Fact]
     public async Task Cancel_StopsFutureClaims_AndCreatesNoRun()
     {
-        var triggers = new InMemoryTriggerRepository();
+        var triggers = new TestClock(Due).Repository();
         var trigger = await ScheduleAsync(triggers);
         Assert.Equal(
             TriggerWriteStatus.Success,
             (await triggers.CancelAsync("t", trigger.Id, trigger.Version, default)).Status);
         var runs = new RecordingRuns();
 
-        Assert.Equal(0, await Dispatcher(triggers, runs).RunOnceAsync(Due, default));
+        Assert.Equal(0, await Dispatcher(triggers, runs).RunOnceAsync(default));
 
         Assert.Empty(runs.Calls);
         Assert.Equal(TriggerOccurrenceStatuses.SkippedCancelled, (await OccurrenceAsync(triggers, trigger)).Status);
@@ -116,7 +130,7 @@ public sealed class TriggerDispatchTests
     [MemberData(nameof(FailClosedCases))]
     public async Task RunOnce_FailsClosed_WithBoundedReasonCode(string scenario, string expected)
     {
-        var triggers = new InMemoryTriggerRepository();
+        var triggers = new TestClock(Due).Repository();
         var trigger = await ScheduleAsync(triggers);
         var runs = new RecordingRuns
         {
@@ -147,7 +161,7 @@ public sealed class TriggerDispatchTests
 
         await new TriggerDispatcher(
                 triggers, orchestrators, runs, users, state, NullLogger<TriggerDispatcher>.Instance)
-            .RunOnceAsync(Due, default);
+            .RunOnceAsync(default);
 
         var occurrence = await OccurrenceAsync(triggers, trigger);
         Assert.Equal(expected, occurrence.Status);
@@ -159,14 +173,14 @@ public sealed class TriggerDispatchTests
     [Fact]
     public async Task ConcurrentDueClaims_ProduceExactlyOneRootRun()
     {
-        var triggers = new InMemoryTriggerRepository();
+        var triggers = new TestClock(Due).Repository();
         var trigger = await ScheduleAsync(triggers);
         var runs = new RecordingRuns();
 
         var claimed = await Task.WhenAll(
-            Dispatcher(triggers, runs).RunOnceAsync(Due, default),
-            Dispatcher(triggers, runs).RunOnceAsync(Due, default),
-            Dispatcher(triggers, runs).RunOnceAsync(Due, default));
+            Dispatcher(triggers, runs).RunOnceAsync(default),
+            Dispatcher(triggers, runs).RunOnceAsync(default),
+            Dispatcher(triggers, runs).RunOnceAsync(default));
 
         Assert.Equal(1, claimed.Sum());
         Assert.Single(runs.Created);
@@ -176,13 +190,15 @@ public sealed class TriggerDispatchTests
     [Fact]
     public async Task RepeatedPasses_NeverRefireACompletedOccurrence()
     {
-        var triggers = new InMemoryTriggerRepository();
+        var clock = new TestClock(Due);
+        var triggers = clock.Repository();
         var trigger = await ScheduleAsync(triggers);
         var runs = new RecordingRuns();
         var dispatcher = Dispatcher(triggers, runs);
 
-        Assert.Equal(1, await dispatcher.RunOnceAsync(Due, default));
-        Assert.Equal(0, await dispatcher.RunOnceAsync(Due.AddDays(1), default));
+        Assert.Equal(1, await dispatcher.RunOnceAsync(default));
+        clock.Now = Due.AddDays(1);
+        Assert.Equal(0, await dispatcher.RunOnceAsync(default));
 
         var rootRunId = Assert.Single(runs.Created);
         Assert.Equal(rootRunId, (await OccurrenceAsync(triggers, trigger)).RootRunId);
@@ -194,19 +210,20 @@ public sealed class TriggerDispatchTests
     [Fact]
     public async Task ExpiredLeaseAfterCrash_ReplaysTheSameRootRun()
     {
-        var inner = new InMemoryTriggerRepository();
+        var clock = new TestClock(Due);
+        var inner = clock.Repository();
         var triggers = new FailingCompleteTriggers(inner, failures: 1);
         var trigger = await ScheduleAsync(inner);
         var runs = new RecordingRuns();
         var dispatcher = Dispatcher(triggers, runs);
 
-        Assert.Equal(1, await dispatcher.RunOnceAsync(Due, default));
+        Assert.Equal(1, await dispatcher.RunOnceAsync(default));
         var midFlight = await OccurrenceAsync(inner, trigger);
         Assert.Equal(TriggerOccurrenceStatuses.Claimed, midFlight.Status);
         Assert.Null(midFlight.RootRunId);
 
-        Assert.Equal(1, await dispatcher.RunOnceAsync(
-            Due.AddSeconds(TriggerDispatcher.LeaseSeconds + 1), default));
+        clock.Now = Due.AddSeconds(TriggerDispatcher.LeaseSeconds + 1);
+        Assert.Equal(1, await dispatcher.RunOnceAsync(default));
 
         Assert.Equal(2, runs.Calls.Count);
         var rootRunId = Assert.Single(runs.Created);
@@ -221,7 +238,8 @@ public sealed class TriggerDispatchTests
     [Fact]
     public async Task DownstreamTransportFailure_LeavesOccurrenceRetryable_AndDoesNotAbortTheBatch()
     {
-        var triggers = new InMemoryTriggerRepository();
+        var clock = new TestClock(Due);
+        var triggers = clock.Repository();
         var failing = await ScheduleAsync(triggers, name: "failing");
         var healthy = await ScheduleAsync(triggers, name: "healthy");
         // The throwing branch is selected by conversation id, which is occurrence-derived.
@@ -231,7 +249,7 @@ public sealed class TriggerDispatchTests
                 TriggerOccurrenceId.For(failing.Id, failing.FireAt)),
         };
 
-        Assert.Equal(2, await Dispatcher(triggers, runs).RunOnceAsync(Due, default));
+        Assert.Equal(2, await Dispatcher(triggers, runs).RunOnceAsync(default));
 
         Assert.Equal(TriggerOccurrenceStatuses.Claimed, (await OccurrenceAsync(triggers, failing)).Status);
         Assert.Null((await OccurrenceAsync(triggers, failing)).RootRunId);
@@ -239,7 +257,8 @@ public sealed class TriggerDispatchTests
 
         // Retryable, not burned: once the downstream recovers, the expired lease fires normally.
         runs.ThrowForConversation = null;
-        await Dispatcher(triggers, runs).RunOnceAsync(Due.AddSeconds(TriggerDispatcher.LeaseSeconds + 1), default);
+        clock.Now = Due.AddSeconds(TriggerDispatcher.LeaseSeconds + 1);
+        await Dispatcher(triggers, runs).RunOnceAsync(default);
         Assert.Equal(TriggerOccurrenceStatuses.Fired, (await OccurrenceAsync(triggers, failing)).Status);
     }
 
@@ -272,13 +291,13 @@ public sealed class TriggerDispatchTests
         var orchestrators = new StubOrchestrators(Target, RootDefinition(root.Workflow.Id, workerId, verifierId));
         var d5 = new InMemoryOrchestratorRunRepository(
             orchestrators, workflows, new StubAgents(workerId, verifierId, workerWorkflow, verifierWorkflow));
-        var triggers = new InMemoryTriggerRepository();
+        var triggers = new TestClock(Due).Repository();
         var trigger = await ScheduleAsync(triggers);
 
         var fired = await new TriggerDispatcher(
                 triggers, orchestrators, d5, new FakeUsers(), new AgentTriggersState(true, true),
                 NullLogger<TriggerDispatcher>.Instance)
-            .RunOnceAsync(Due, default);
+            .RunOnceAsync(default);
 
         Assert.Equal(1, fired);
         var occurrence = await OccurrenceAsync(triggers, trigger);
@@ -498,6 +517,6 @@ public sealed class TriggerDispatchTests
         public Task<Trigger?> GetAsync(string a, Guid b, CancellationToken c) => inner.GetAsync(a, b, c);
         public Task<TriggerWriteResult> CancelAsync(string a, Guid b, long c, CancellationToken d) => inner.CancelAsync(a, b, c, d);
         public Task<IReadOnlyList<TriggerOccurrence>?> OccurrencesAsync(string a, Guid b, TriggerOccurrencePosition? c, int d, CancellationToken e) => inner.OccurrencesAsync(a, b, c, d, e);
-        public Task<IReadOnlyList<TriggerClaim>> ClaimDueAsync(string a, DateTime b, int c, int d, CancellationToken e) => inner.ClaimDueAsync(a, b, c, d, e);
+        public Task<TriggerClaimBatch> ClaimDueAsync(string a, int b, int c, CancellationToken d) => inner.ClaimDueAsync(a, b, c, d);
     }
 }

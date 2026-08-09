@@ -57,8 +57,9 @@ public sealed class TriggerRepositoryPostgresTests
             await DbBootstrap.RunAsync(dataSource, NullLogger.Instance);
             var repository = new TriggerRepository(dataSource);
 
-            await CreateAndCancel(repository);
+            await CreateAndCancel(repository, dataSource);
             await ClaimAndComplete(repository, dataSource);
+            await DatabaseClockDecidesDue(repository, dataSource);
             await KeysetAndTenantScope(repository, dataSource);
         }
         finally
@@ -67,7 +68,7 @@ public sealed class TriggerRepositoryPostgresTests
         }
     }
 
-    private static async Task CreateAndCancel(TriggerRepository repository)
+    private static async Task CreateAndCancel(TriggerRepository repository, NpgsqlDataSource dataSource)
     {
         var created = await repository.CreateAsync("t", Principal, Input("cancel-me"), default);
         Assert.Equal(TriggerWriteStatus.Success, created.Status);
@@ -109,9 +110,11 @@ public sealed class TriggerRepositoryPostgresTests
         Assert.Equal(
             TriggerOccurrenceStatuses.SkippedCancelled,
             Assert.Single((await repository.OccurrencesAsync("t", trigger.Id, null, 10, default))!).Status);
-        // Cancel stops future claims: nothing due remains for this trigger.
+        // Cancel stops future claims: even with the occurrence made due from the database's own point
+        // of view, the cancelled state keeps it out of the claim set.
+        await MakeDueAsync(dataSource, trigger.Id);
         Assert.DoesNotContain(
-            await repository.ClaimDueAsync("w", Due, 60, 10, default),
+            (await repository.ClaimDueAsync("w", 60, 10, default)).Claims,
             claim => claim.Trigger.Id == trigger.Id);
 
         Assert.Equal(
@@ -129,12 +132,13 @@ public sealed class TriggerRepositoryPostgresTests
     private static async Task ClaimAndComplete(TriggerRepository repository, NpgsqlDataSource dataSource)
     {
         var trigger = (await repository.CreateAsync("claim", Principal, Input("fire-me"), default)).Trigger!;
+        await MakeDueAsync(dataSource, trigger.Id);
 
         // Concurrent pollers: at most one may ever lease the same occurrence.
         var claims = await Task.WhenAll(
-            repository.ClaimDueAsync("worker-a", Due, 60, 10, default),
-            repository.ClaimDueAsync("worker-b", Due, 60, 10, default));
-        var leased = claims.SelectMany(x => x).Where(x => x.Trigger.Id == trigger.Id).ToArray();
+            repository.ClaimDueAsync("worker-a", 60, 10, default),
+            repository.ClaimDueAsync("worker-b", 60, 10, default));
+        var leased = claims.SelectMany(x => x.Claims).Where(x => x.Trigger.Id == trigger.Id).ToArray();
         var claim = Assert.Single(leased);
         Assert.Equal(TriggerOccurrenceStatuses.Claimed, claim.Occurrence.Status);
         AssertPrincipal(claim.Trigger.Principal);
@@ -153,7 +157,7 @@ public sealed class TriggerRepositoryPostgresTests
 
         // A completed occurrence is never re-leased, and the stale token cannot resurrect it.
         Assert.DoesNotContain(
-            await repository.ClaimDueAsync("worker-a", Due.AddDays(1), 60, 10, default),
+            (await repository.ClaimDueAsync("worker-a", 60, 10, default)).Claims,
             x => x.Trigger.Id == trigger.Id);
         Assert.False(await repository.CompleteOccurrenceAsync(
             claim.Occurrence.Id, claim.ClaimToken, TriggerOccurrenceStatuses.SkippedMisfired, null, default));
@@ -164,22 +168,79 @@ public sealed class TriggerRepositoryPostgresTests
             "SELECT count(*) FROM agent_trigger_occurrence WHERE id=@id AND (claim_token_sha256 IS NOT NULL OR claim_owner IS NOT NULL)",
             new { id = claim.Occurrence.Id }));
 
-        // An expired lease is reclaimable without operator action.
+        // An expired lease is reclaimable without operator action. Expiry is aged out through the
+        // database clock (the lease column itself), never by handing the repository a later "now".
         var expiring = (await repository.CreateAsync("claim", Principal, Input("expire-me"), default)).Trigger!;
+        await MakeDueAsync(dataSource, expiring.Id);
         var first = Assert.Single(
-            await repository.ClaimDueAsync("worker-a", Due, 1, 10, default),
+            (await repository.ClaimDueAsync("worker-a", 60, 10, default)).Claims,
             x => x.Trigger.Id == expiring.Id);
         Assert.DoesNotContain(
-            await repository.ClaimDueAsync("worker-b", Due, 60, 10, default),
+            (await repository.ClaimDueAsync("worker-b", 60, 10, default)).Claims,
             x => x.Trigger.Id == expiring.Id);
+        await using (var aging = await dataSource.OpenConnectionAsync())
+        {
+            await aging.ExecuteAsync(
+                "UPDATE agent_trigger_occurrence SET claim_expires_at=now() - interval '1 second' WHERE id=@id",
+                new { id = first.Occurrence.Id });
+        }
+
         var reclaimed = Assert.Single(
-            await repository.ClaimDueAsync("worker-b", Due.AddSeconds(2), 60, 10, default),
+            (await repository.ClaimDueAsync("worker-b", 60, 10, default)).Claims,
             x => x.Trigger.Id == expiring.Id);
         Assert.Equal(first.Occurrence.Id, reclaimed.Occurrence.Id);
         Assert.NotEqual(first.ClaimToken, reclaimed.ClaimToken);
         // The superseded token can no longer complete it -- that is the fence.
         Assert.False(await repository.CompleteOccurrenceAsync(
             first.Occurrence.Id, first.ClaimToken, TriggerOccurrenceStatuses.Fired, Guid.NewGuid(), default));
+    }
+
+    /// <summary>
+    /// The store owns "now": nothing is handed in, so due-ness, the lease expiry and the returned
+    /// instant can only come from the database clock. Both occurrences below are seeded with SQL
+    /// relative to <c>now()</c>, and every app-side timestamp in this file is year 2030 — so an
+    /// implementation that leaked the host wall clock back in would either claim both rows or stamp
+    /// a lease five years out, and each assertion here would fail.
+    /// </summary>
+    private static async Task DatabaseClockDecidesDue(TriggerRepository repository, NpgsqlDataSource dataSource)
+    {
+        var past = (await repository.CreateAsync("clock", Principal, Input("already-due"), default)).Trigger!;
+        var future = (await repository.CreateAsync("clock", Principal, Input("not-yet-due"), default)).Trigger!;
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await connection.ExecuteAsync(
+            "UPDATE agent_trigger_occurrence SET scheduled_for=now() - interval '1 second' WHERE trigger_id=@id",
+            new { id = past.Id });
+        await connection.ExecuteAsync(
+            "UPDATE agent_trigger_occurrence SET scheduled_for=now() + interval '1 hour' WHERE trigger_id=@id",
+            new { id = future.Id });
+
+        var batch = await repository.ClaimDueAsync("clock-worker", 60, 10, default);
+        var claim = Assert.Single(batch.Claims, x => x.Trigger.Id == past.Id);
+        Assert.DoesNotContain(batch.Claims, x => x.Trigger.Id == future.Id);
+
+        // The returned instant is the database's, not this process's: it is the same statement-stable
+        // now() the row was stamped with, so it must equal updated_at exactly.
+        Assert.Equal(claim.Occurrence.UpdatedAt, batch.Now);
+        Assert.Equal(
+            1,
+            await connection.ExecuteScalarAsync<int>(
+                """
+                SELECT count(*) FROM agent_trigger_occurrence
+                WHERE id=@id AND claim_expires_at > now() AND claim_expires_at <= now() + interval '60 seconds'
+                """,
+                new { id = claim.Occurrence.Id }));
+    }
+
+    /// <summary>
+    /// Makes an occurrence due from the database's point of view. Tests can no longer say "pretend it
+    /// is 2030" — the only clock the claim reads is the server's.
+    /// </summary>
+    private static async Task MakeDueAsync(NpgsqlDataSource dataSource, Guid triggerId)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await connection.ExecuteAsync(
+            "UPDATE agent_trigger_occurrence SET scheduled_for=now() - interval '1 minute' WHERE trigger_id=@triggerId",
+            new { triggerId });
     }
 
     private static async Task KeysetAndTenantScope(TriggerRepository repository, NpgsqlDataSource dataSource)

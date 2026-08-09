@@ -1,3 +1,4 @@
+using Backend.Api.Files;
 using Npgsql;
 
 namespace Backend.Api.Common;
@@ -16,6 +17,7 @@ internal sealed class BackendReadinessProbe
     private readonly Func<CancellationToken, Task<bool>> _check;
     private readonly bool _databaseRequired;
     private readonly BackendHealthMetrics _metrics;
+    private readonly DocumentConsumerState? _documentConsumer;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private HealthReport? _cached;
     private DateTime _cachedAt;
@@ -23,10 +25,12 @@ internal sealed class BackendReadinessProbe
     public BackendReadinessProbe(
         bool databaseRequired,
         NpgsqlDataSource? dataSource,
-        BackendHealthMetrics? metrics = null)
+        BackendHealthMetrics? metrics = null,
+        DocumentConsumerState? documentConsumer = null)
     {
         _databaseRequired = databaseRequired;
         _metrics = metrics ?? BackendHealthMetrics.Shared;
+        _documentConsumer = documentConsumer;
         _check = !databaseRequired
             ? _ => Task.FromResult(true)
             : async ct =>
@@ -47,11 +51,13 @@ internal sealed class BackendReadinessProbe
 
     internal BackendReadinessProbe(
         Func<CancellationToken, Task<bool>> check,
-        BackendHealthMetrics? metrics = null)
+        BackendHealthMetrics? metrics = null,
+        DocumentConsumerState? documentConsumer = null)
     {
         _check = check;
         _databaseRequired = true;
         _metrics = metrics ?? BackendHealthMetrics.Shared;
+        _documentConsumer = documentConsumer;
     }
 
     public async Task<HealthReport> CheckAsync(CancellationToken ct)
@@ -98,13 +104,24 @@ internal sealed class BackendReadinessProbe
                 _metrics.RecordReadinessCheck(healthy);
             }
 
+            var components = new Dictionary<string, HealthComponent>
+            {
+                ["database_migrations"] = new(healthy ? "UP" : "DOWN", Required: true),
+            };
+
+            // 只有真的跑著 consumer 的進程才呈報這個元件 —— 「沒有 consumer」不能看起來像
+            // 「consumer 壞了」。Required:false 是刻意的:它不參與 Ready 判定,broker 抖動不得把
+            // backend 判成 not ready(重啟 backend 對停滯中的文件處理沒有幫助,只多一次不穩定)。
+            // 要升級成 gating 就是把下面那個 false 改成 true,是獨立的維運決策。
+            if (_documentConsumer is { Active: true } consumer)
+            {
+                components["document_consumer"] = new(consumer.Connected ? "UP" : "DOWN", Required: false);
+            }
+
             _cached = new HealthReport(
                 healthy ? "UP" : "DOWN",
                 healthy,
-                new Dictionary<string, HealthComponent>
-                {
-                    ["database_migrations"] = new(healthy ? "UP" : "DOWN", Required: true),
-                });
+                components);
             _cachedAt = DateTime.UtcNow;
             return _cached;
         }

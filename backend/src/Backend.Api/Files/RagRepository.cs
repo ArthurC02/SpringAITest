@@ -151,30 +151,32 @@ public sealed class RagRepository : IRagRepository
             await conn.ExecuteAsync(new CommandDefinition(sql.ToString(), p, tx, cancellationToken: ct));
         }
 
+        // 重跑成功後不得殘留上一輪的失敗原因。
         await conn.ExecuteAsync(new CommandDefinition(
-            "UPDATE rag_documents SET chunk_count = @chunkCount, status = 'ready'"
+            "UPDATE rag_documents SET chunk_count = @chunkCount, status = 'ready', failure_reason = NULL"
             + " WHERE id = @docId AND tenant_id = @tenantId",
             new { chunkCount = chunks.Count, docId, tenantId }, tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
     }
 
-    public async Task MarkFailedAsync(string documentId, string tenantId, CancellationToken ct)
+    public async Task MarkFailedAsync(string documentId, string tenantId, string? failureReason, CancellationToken ct)
     {
         var docId = Guid.Parse(documentId);
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
-            "UPDATE rag_documents SET status = 'failed'"
+            "UPDATE rag_documents SET status = 'failed', failure_reason = @failureReason"
             + " WHERE id = @docId AND tenant_id = @tenantId"
             + " AND status IN ('pending_publish', 'processing', 'failed')",
-            new { docId, tenantId }, cancellationToken: ct));
+            new { docId, tenantId, failureReason }, cancellationToken: ct));
     }
 
     public async Task<IReadOnlyList<DocumentInfo>> ListDocumentsAsync(string tenantId, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<DocumentInfo>(new CommandDefinition(
-            "SELECT id::text AS Id, title AS Title, chunk_count AS ChunkCount, created_at AS CreatedAt, status AS Status"
+            "SELECT id::text AS Id, title AS Title, chunk_count AS ChunkCount, created_at AS CreatedAt,"
+            + " status AS Status, failure_reason AS FailureReason"
             + " FROM rag_documents WHERE tenant_id = @tenantId"
             + " AND status NOT IN ('pending_publish', 'deleted') ORDER BY created_at",
             new { tenantId }, cancellationToken: ct));

@@ -174,6 +174,14 @@ public sealed record TriggerOccurrencePosition(DateTime ScheduledFor, Guid Id);
 /// <summary>A leased occurrence plus the trigger revision it must fire under. Internal only.</summary>
 public sealed record TriggerClaim(TriggerOccurrence Occurrence, Trigger Trigger, string ClaimToken);
 
+/// <summary>
+/// A claim pass plus the <b>authoritative</b> instant it was taken at. The store owns "now" — the
+/// Dapper side reads the database clock (the same one <c>updated_at=now()</c> already writes), so
+/// the due predicate, the lease expiry and every downstream comparison (misfire) all sit on one
+/// clock instead of mixing a .NET host wall clock into rows stamped by PostgreSQL.
+/// </summary>
+public sealed record TriggerClaimBatch(DateTime Now, IReadOnlyList<TriggerClaim> Claims);
+
 public enum TriggerWriteStatus { Success, NotFound, VersionConflict, Duplicate, InvalidState }
 
 public sealed record TriggerWriteResult(
@@ -307,9 +315,11 @@ public interface ITriggerRepository
     /// <summary>
     /// Leases every due, not-yet-terminal occurrence. Concurrent callers must never lease the same
     /// occurrence: exactly one wins, the loser sees it as unavailable until the lease expires.
+    /// "Due" is decided by the store's own clock, which is also returned so the caller resolves the
+    /// claim against the very instant the lease was cut from.
     /// </summary>
-    Task<IReadOnlyList<TriggerClaim>> ClaimDueAsync(
-        string workerId, DateTime now, int leaseSeconds, int limit, CancellationToken ct);
+    Task<TriggerClaimBatch> ClaimDueAsync(
+        string workerId, int leaseSeconds, int limit, CancellationToken ct);
 
     /// <summary>
     /// Fenced terminal write: rejected unless <paramref name="claimToken"/> still owns the lease, so

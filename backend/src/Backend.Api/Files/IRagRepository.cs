@@ -34,8 +34,10 @@ public interface IRagRepository
     Task CompleteDocumentAsync(
         string documentId, string tenantId, IReadOnlyList<string> chunks, IReadOnlyList<float[]> embeddings, CancellationToken ct);
 
-    /// <summary>將文件標記為 status='failed'(保留供查詢);文件列已被刪除則不影響任何列。</summary>
-    Task MarkFailedAsync(string documentId, string tenantId, CancellationToken ct);
+    /// <summary>將文件標記為 status='failed'(保留供查詢);文件列已被刪除則不影響任何列。
+    /// <paramref name="failureReason"/> 必須取自 <see cref="DocumentFailureReasons"/> 的封閉集合
+    /// (該欄位會回給瀏覽器);null 代表沒有分類,欄位保持 NULL。</summary>
+    Task MarkFailedAsync(string documentId, string tenantId, string? failureReason, CancellationToken ct);
 
     /// <summary>列出租戶文件(僅中繼資料,含 status),created_at ASC。</summary>
     Task<IReadOnlyList<DocumentInfo>> ListDocumentsAsync(string tenantId, CancellationToken ct);

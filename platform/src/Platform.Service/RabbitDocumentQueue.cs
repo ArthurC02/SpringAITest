@@ -20,22 +20,43 @@ public sealed class RabbitDocumentQueue : IDocumentQueue, IAsyncDisposable
     public const string QueueName = "documents.process";
 
     private readonly RabbitMqOptions _options;
+    private readonly Func<string?> _correlationId;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     private IConnection? _connection;
     private IChannel? _channel;
 
-    public RabbitDocumentQueue(RabbitMqOptions options) => _options = options;
+    /// <param name="correlationId">
+    /// 目前請求的追蹤編號來源。Web 層以 <c>HttpContext.TraceIdentifier</c> 供應(與
+    /// <c>X-Correlation-Id</c> 轉發的是同一個值);Platform.Service 因此不必相依 ASP.NET Core。
+    /// 省略時一律無編號(背景工作/測試),不造假值。
+    /// </param>
+    public RabbitDocumentQueue(RabbitMqOptions options, Func<string?>? correlationId = null)
+    {
+        _options = options;
+        _correlationId = correlationId ?? (() => null);
+    }
+
+    /// <summary>
+    /// 訊息本體與 AMQP 屬性。追蹤編號**兩處都寫**是刻意的:body 欄位供跨版本相容(消費端優先讀它),
+    /// AMQP 內建的 CorrelationId 屬性則讓 broker 管理介面與現成工具不必解析 payload 就看得到。
+    /// </summary>
+    internal static (byte[] Body, BasicProperties Props) Frame(DocumentMessage message, string? correlationId)
+    {
+        var id = string.IsNullOrWhiteSpace(correlationId) ? null : correlationId;
+        return (
+            JsonSerializer.SerializeToUtf8Bytes(message with { CorrelationId = id }, InternalRequest.Web),
+            new BasicProperties { Persistent = true, CorrelationId = id });
+    }
 
     public async Task PublishAsync(DocumentMessage message, CancellationToken ct = default)
     {
-        var body = JsonSerializer.SerializeToUtf8Bytes(message, InternalRequest.Web);
+        var (body, props) = Frame(message, _correlationId());
 
         await _gate.WaitAsync(ct);
         try
         {
             var channel = await EnsureChannelAsync(ct);
-            var props = new BasicProperties { Persistent = true };
             await channel.BasicPublishAsync(
                 exchange: string.Empty,
                 routingKey: QueueName,

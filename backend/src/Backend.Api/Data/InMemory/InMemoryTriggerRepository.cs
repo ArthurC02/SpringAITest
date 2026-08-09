@@ -15,6 +15,13 @@ public sealed class InMemoryTriggerRepository : ITriggerRepository
     private readonly Dictionary<Guid, Entry> _triggers = [];
     private readonly Dictionary<Guid, OccurrenceEntry> _occurrences = [];
 
+    /// <summary>
+    /// The store's clock, mirroring the Dapper side's authoritative <c>now()</c>. There is no second
+    /// clock in memory, so parity here means "sampled once per pass, used for every comparison in
+    /// it". Tests override it; the Dapper path deliberately has no injection point at all.
+    /// </summary>
+    public Func<DateTime> Clock { get; init; } = () => DateTime.UtcNow;
+
     public Task<TriggerWriteResult> CreateAsync(
         string tenantId, TriggerPrincipal principal, TriggerCreateInput input, CancellationToken ct)
     {
@@ -136,12 +143,15 @@ public sealed class InMemoryTriggerRepository : ITriggerRepository
         }
     }
 
-    public Task<IReadOnlyList<TriggerClaim>> ClaimDueAsync(
-        string workerId, DateTime now, int leaseSeconds, int limit, CancellationToken ct)
+    public Task<TriggerClaimBatch> ClaimDueAsync(
+        string workerId, int leaseSeconds, int limit, CancellationToken ct)
     {
         lock (_gate)
         {
-            var moment = Utc(now);
+            // One sample per pass: the due predicate, the expired-lease predicate, the new lease
+            // expiry and the returned instant are all this one value (Dapper's statement-stable
+            // now() equivalent).
+            var moment = Utc(Clock());
             var claimToken = Guid.NewGuid().ToString("N");
             var due = _occurrences.Values
                 .Where(x => x.ScheduledFor <= moment
@@ -159,12 +169,12 @@ public sealed class InMemoryTriggerRepository : ITriggerRepository
                 occurrence.ClaimToken = claimToken;
                 occurrence.ClaimExpiresAt = moment.AddSeconds(leaseSeconds);
                 occurrence.Attempt++;
-                occurrence.UpdatedAt = DateTime.UtcNow;
+                occurrence.UpdatedAt = moment;
                 claims.Add(new TriggerClaim(
                     occurrence.ToModel(), _triggers[occurrence.TriggerId].ToModel(), claimToken));
             }
 
-            return Task.FromResult<IReadOnlyList<TriggerClaim>>(claims);
+            return Task.FromResult(new TriggerClaimBatch(moment, claims));
         }
     }
 

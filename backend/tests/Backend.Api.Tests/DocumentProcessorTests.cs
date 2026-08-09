@@ -255,7 +255,9 @@ public sealed class DocumentProcessorTests
         Assert.Equal(
             DocumentProcessingOutcome.TerminalFailure,
             await failing.ProcessAsync(Message(id), retryCount: 0, CancellationToken.None));
-        Assert.Equal("failed", (Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None))).Status);
+        var failed = Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None));
+        Assert.Equal("failed", failed.Status);
+        Assert.Equal(DocumentFailureReasons.Unexpected, failed.FailureReason);
 
         // 重投(同一訊息)以正常 provider:failed 非 ready → 重跑至 ready;insert ON CONFLICT 不覆寫既有列。
         var recovering = new DocumentProcessor(repo, new FakeEmbeddingProvider(8), NullLogger<DocumentProcessor>.Instance);
@@ -266,6 +268,64 @@ public sealed class DocumentProcessorTests
         Assert.Equal(id, doc.Id);
         Assert.Equal("ready", doc.Status);
         Assert.Equal(2, doc.ChunkCount);
+        // 重跑成功後不得殘留上一輪的失敗原因。
+        Assert.Null(doc.FailureReason);
+    }
+
+    /// <summary>
+    /// failure_reason 會原樣回給瀏覽器,所以只能是封閉集合裡的固定字串:原始例外訊息(這裡塞了一段
+    /// 帶密碼的 sentinel)一個片段都不得外洩。每個等價類一個代表值。
+    /// </summary>
+    [Fact]
+    public async Task TerminalFailure_WritesOnlyClosedSetReasons_NeverTheExceptionText()
+    {
+        const string sentinel = "SENTINEL Password=hunter2 at RagRepository.cs:42";
+        (Exception Failure, string Expected)[] cases =
+        [
+            (new TimeoutException(sentinel), DocumentFailureReasons.Timeout),
+            (new TaskCanceledException(sentinel), DocumentFailureReasons.Timeout),
+            (new HttpRequestException(sentinel), DocumentFailureReasons.EmbeddingUnavailable),
+            (new FakeTransientDbException(sentinel), DocumentFailureReasons.Unexpected),
+            (new InvalidOperationException(sentinel), DocumentFailureReasons.Unexpected),
+        ];
+
+        foreach (var (failure, expected) in cases)
+        {
+            var repo = new FakeRagRepository();
+            var processor = new DocumentProcessor(
+                repo,
+                new TransientThrowingEmbeddingProvider(failure),
+                NullLogger<DocumentProcessor>.Instance);
+
+            // 暫時性等價類也走到這裡:重試已用盡,分類仍必須是同一組固定字串。
+            Assert.Equal(
+                DocumentProcessingOutcome.TerminalFailure,
+                await processor.ProcessAsync(
+                    Message(Guid.NewGuid().ToString()), DocumentProcessor.MaxRetries, CancellationToken.None));
+
+            var doc = Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None));
+            Assert.Equal("failed", doc.Status);
+            Assert.Equal(expected, doc.FailureReason);
+            Assert.DoesNotContain("SENTINEL", doc.FailureReason!, StringComparison.Ordinal);
+            Assert.DoesNotContain("hunter2", doc.FailureReason!, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// 舊列相容:reason 為 null 的 failed 文件必須照常讀得出來(欄位是 null,不是空字串)。
+    /// </summary>
+    [Fact]
+    public async Task MarkFailedWithoutAReason_LeavesTheFieldNull_NotAnEmptyString()
+    {
+        var repo = new FakeRagRepository();
+        var id = Guid.NewGuid().ToString();
+        await repo.InsertProcessingDocumentAsync(id, "demo-a", "手冊", CancellationToken.None);
+
+        await repo.MarkFailedAsync(id, "demo-a", null, CancellationToken.None);
+
+        var doc = Assert.Single(await repo.ListDocumentsAsync("demo-a", CancellationToken.None));
+        Assert.Equal("failed", doc.Status);
+        Assert.Null(doc.FailureReason);
     }
 
     [Fact]
@@ -514,10 +574,10 @@ public sealed class FaultyRagRepository : IRagRepository
         CancellationToken ct)
         => _inner.CompleteDocumentAsync(documentId, tenantId, chunks, embeddings, ct);
 
-    public Task MarkFailedAsync(string documentId, string tenantId, CancellationToken ct)
+    public Task MarkFailedAsync(string documentId, string tenantId, string? failureReason, CancellationToken ct)
     {
         FailIf(FaultyRagStep.MarkFailed);
-        return _inner.MarkFailedAsync(documentId, tenantId, ct);
+        return _inner.MarkFailedAsync(documentId, tenantId, failureReason, ct);
     }
 
     public Task<IReadOnlyList<DocumentInfo>> ListDocumentsAsync(string tenantId, CancellationToken ct)
@@ -547,14 +607,28 @@ public sealed class FaultyRagRepository : IRagRepository
         => _inner.SummaryAsync(tenantId, ct);
 }
 
-/// <summary>手寫 fake logger:記錄層級與格式化後的訊息字串,供斷言特定訊息確實被記錄。</summary>
+/// <summary>手寫 fake logger:記錄層級與格式化後的訊息字串,供斷言特定訊息確實被記錄。
+/// 另記錄開啟過的 log scope state,供斷言「哪些情況才開 scope」。</summary>
 public sealed class RecordingLogger<T> : ILogger<T>
 {
     public List<(LogLevel Level, string Message)> Entries { get; } = new();
 
     public IEnumerable<string> Messages => Entries.Select(e => e.Message);
 
-    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public List<object> Scopes { get; } = new();
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull
+    {
+        Scopes.Add(state);
+        return new NoopScope();
+    }
+
+    private sealed class NoopScope : IDisposable
+    {
+        public void Dispose()
+        {
+        }
+    }
 
     public bool IsEnabled(LogLevel logLevel) => true;
 

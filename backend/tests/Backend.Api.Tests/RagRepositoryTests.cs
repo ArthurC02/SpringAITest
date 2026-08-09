@@ -140,7 +140,7 @@ public sealed class RagRepositoryTests : IAsyncLifetime
         Assert.Equal("deleted", await Repo.GetDocumentStatusAsync(documentId, tenant, default));
 
         await Repo.CompleteDocumentAsync(documentId, tenant, new[] { "late" }, new[] { OneHot(0) }, default);
-        await Repo.MarkFailedAsync(documentId, tenant, default);
+        await Repo.MarkFailedAsync(documentId, tenant, DocumentFailureReasons.Unexpected, default);
         Assert.Equal("deleted", await Repo.GetDocumentStatusAsync(documentId, tenant, default));
         Assert.Equal(0, await ChunkCountAsync(guid));
         Assert.Empty(await Repo.ListDocumentsAsync(tenant, default));
@@ -149,6 +149,38 @@ public sealed class RagRepositoryTests : IAsyncLifetime
         var replay = await Repo.AllocateDocumentAsync(tenant, user, keyHash, requestHash, "title", default);
         Assert.Equal(DocumentIngestAllocationStatus.DeletedConflict, replay.Status);
         Assert.Equal(documentId, replay.DocumentId);
+    }
+
+    /// <summary>
+    /// failure_reason 的 SQL 這一側:寫入封閉集合的分類文字、轉 ready 時清成 NULL(重跑成功不得殘留
+    /// 舊原因)、以及沒有原因的舊列讀回來是 null 而不是空字串。與 InMemory 側的
+    /// <c>DocumentProcessorTests</c> 斷言逐項對應。
+    /// </summary>
+    [SkippableFact]
+    public async Task FailureReason_IsPersisted_ClearedOnReady_AndNullWhenAbsent()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "ragrepo-failure-reason";
+        var documentId = Guid.NewGuid().ToString("D");
+        Assert.True(await Repo.InsertProcessingDocumentAsync(documentId, tenant, "doc", default));
+
+        await Repo.MarkFailedAsync(documentId, tenant, DocumentFailureReasons.EmbeddingUnavailable, default);
+        var failed = Assert.Single(await Repo.ListDocumentsAsync(tenant, default));
+        Assert.Equal("failed", failed.Status);
+        Assert.Equal(DocumentFailureReasons.EmbeddingUnavailable, failed.FailureReason);
+
+        await Repo.CompleteDocumentAsync(documentId, tenant, new[] { "chunk" }, new[] { OneHot(0) }, default);
+        var ready = Assert.Single(await Repo.ListDocumentsAsync(tenant, default));
+        Assert.Equal("ready", ready.Status);
+        Assert.Null(ready.FailureReason);
+
+        // 舊列等價類:沒有分類的失敗,欄位保持 NULL(不是空字串,不是 "null")。另起一份文件,
+        // 因為上面那份已是 ready,MarkFailedAsync 的 status fence 對它是 no-op。
+        var reasonless = Guid.NewGuid().ToString("D");
+        Assert.True(await Repo.InsertProcessingDocumentAsync(reasonless, tenant, "doc-2", default));
+        await Repo.MarkFailedAsync(reasonless, tenant, null, default);
+        var stored = await Repo.ListDocumentsAsync(tenant, default);
+        Assert.Null(Assert.Single(stored, x => x.Id == reasonless).FailureReason);
     }
 
     [SkippableFact]
@@ -235,7 +267,7 @@ public sealed class RagRepositoryTests : IAsyncLifetime
         var applicationName = "ragrepo-failed-wait-" + Guid.NewGuid().ToString("N");
         await using var observedSource = CreateObservedDataSource(applicationName);
         var markFailed = new RagRepository(observedSource).MarkFailedAsync(
-            documentId.ToString("D"), tenant, default);
+            documentId.ToString("D"), tenant, DocumentFailureReasons.Unexpected, default);
         await AssertBlockedOnDatabaseLockAsync(applicationName, markFailed);
 
         await holder.ExecuteAsync(

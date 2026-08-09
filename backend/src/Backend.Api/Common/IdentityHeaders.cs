@@ -167,7 +167,17 @@ public static class IdentityHeaders
     public static string? SingleBoundedValue(this HttpRequest request, string name)
     {
         var values = request.Headers[name];
-        var value = values.Count == 1 ? values[0]?.Trim() : null;
+        return BoundedValue(values.Count == 1 ? values[0] : null);
+    }
+
+    /// <summary>
+    /// <see cref="SingleBoundedValue"/> 的值檢查部分,拆出來給非 HTTP 的入口共用:
+    /// 文件處理佇列的 correlationId 是從 AMQP 訊息(body 欄位/AMQP 屬性)來的,沒有 HttpRequest,
+    /// 但邊界必須與 header 那條路徑逐字相同 —— 兩套規則就是兩份事實。
+    /// </summary>
+    public static string? BoundedValue(string? raw)
+    {
+        var value = raw?.Trim();
         return string.IsNullOrWhiteSpace(value) || value.Length > 128 || value.Any(char.IsControl)
             ? null
             : value;

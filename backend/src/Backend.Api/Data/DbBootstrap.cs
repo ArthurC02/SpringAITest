@@ -62,6 +62,9 @@ public static class DbBootstrap
           chunk_count int NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
         -- 非同步處理:新增 status 欄位;舊資料自動視為 ready(冪等)。
         ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'ready';
+        -- 失敗原因:封閉集合中的固定分類文字(見 DocumentFailureReasons),會直接回給瀏覽器,
+        -- 絕不放原始例外訊息/stack trace/provider 回傳內容。nullable —— 既有 failed 舊列沒有原因。
+        ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS failure_reason text;
         -- Publish 前持久配置文件 identity。只保存 SHA-256，不保存 raw Idempotency-Key 或文件全文。
         -- rag_documents 的 deleted tombstone 必須保留，才能讓相同 key 永久 fail closed。
         CREATE TABLE IF NOT EXISTS document_ingest (

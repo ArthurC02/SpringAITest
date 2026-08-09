@@ -21,7 +21,10 @@ public sealed record DocumentAccepted(string Id, string Title, string Status);
 
 /// <summary>
 /// 發佈到 RabbitMQ 的文件處理訊息。JSON camelCase:
-/// { documentId, tenantId, userId, title, text }(與 backend 消費者共用契約)。
+/// { documentId, tenantId, userId, title, text, correlationId }(與 backend 消費者共用契約)。
+/// <c>correlationId</c> 由 <see cref="RabbitDocumentQueue"/> 在發佈當下填入(nullable:滾動部署期間
+/// 佇列裡會有舊版沒有這個欄位的訊息,消費端必須照常處理)。
 /// </summary>
 public sealed record DocumentMessage(
-    string DocumentId, string TenantId, string UserId, string Title, string Text);
+    string DocumentId, string TenantId, string UserId, string Title, string Text,
+    string? CorrelationId = null);

@@ -146,7 +146,15 @@ builder.Services.AddScoped<IConversationStore, ConversationStore>();
 builder.Services.AddScoped<IDocumentService, DocumentService>();
 
 // 文件處理訊息發佈者:lazy 單例連線,執行緒安全,關閉時優雅釋放。
-builder.Services.AddSingleton<IDocumentQueue, RabbitDocumentQueue>();
+// 追蹤編號取本請求的 TraceIdentifier(與 CorrelationIdForwardingHandler 同源),讓非同步文件鏈路
+// 的 consumer 端日誌 grep 得到使用者回報的那串編號;無 HttpContext 時為 null,不造假值。
+builder.Services.AddSingleton<IDocumentQueue>(sp =>
+{
+    var http = sp.GetRequiredService<IHttpContextAccessor>();
+    return new RabbitDocumentQueue(
+        sp.GetRequiredService<RabbitMqOptions>(),
+        () => http.HttpContext?.TraceIdentifier);
+});
 builder.Services.AddScoped<IAnalysisService, AnalysisService>();
 builder.Services.AddScoped<IConfigService, ConfigService>();
 builder.Services.AddScoped<ISkillService, SkillService>();

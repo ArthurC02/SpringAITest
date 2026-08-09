@@ -203,4 +203,34 @@ public sealed class DocumentServiceTests
 
         await Assert.ThrowsAsync<WorkflowInvocationException>(() => svc.DeleteAsync("d1", Ctx));
     }
+
+    // 追蹤編號要能從上傳的錯誤回應一路 grep 到 backend consumer 的處理日誌,所以發佈時 body 欄位與
+    // AMQP 屬性兩處都要帶到 —— 一處漏掉,鏈路就在該工具視角下斷開。
+    [Fact]
+    public void Publish_CarriesCorrelationId_InBothTheBodyAndTheAmqpProperty()
+    {
+        var (body, props) = RabbitDocumentQueue.Frame(Message, "corr-42");
+
+        Assert.Equal("corr-42", props.CorrelationId);
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal("corr-42", json.RootElement.GetProperty("correlationId").GetString());
+        // 其餘欄位不受影響。
+        Assert.Equal("doc-1", json.RootElement.GetProperty("documentId").GetString());
+    }
+
+    // 無 HttpContext(背景工作)或空白值:不造假編號,兩處都留空,消費端照常處理。
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Publish_WithoutACorrelationId_LeavesBothSidesEmpty(string? correlationId)
+    {
+        var (body, props) = RabbitDocumentQueue.Frame(Message, correlationId);
+
+        Assert.Null(props.CorrelationId);
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("correlationId").ValueKind);
+    }
+
+    private static readonly DocumentMessage Message = new("doc-1", "demo-a", "alice", "標題", "內容");
 }

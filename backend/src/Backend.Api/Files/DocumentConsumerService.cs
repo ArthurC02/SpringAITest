@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Backend.Api.Common;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using RabbitMQ.Client.Exceptions;
@@ -36,6 +37,7 @@ public sealed class DocumentConsumerService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<DocumentConsumerService> _logger;
     private readonly string _rabbitUrl;
+    private readonly DocumentConsumerState _state;
 
     private IConnection? _connection;
     private IChannel? _channel;
@@ -45,16 +47,22 @@ public sealed class DocumentConsumerService : BackgroundService
     private CancellationToken _stoppingToken;
 
     public DocumentConsumerService(
-        IServiceScopeFactory scopeFactory, ILogger<DocumentConsumerService> logger, string rabbitUrl)
+        IServiceScopeFactory scopeFactory,
+        ILogger<DocumentConsumerService> logger,
+        string rabbitUrl,
+        DocumentConsumerState? state = null)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
         _rabbitUrl = rabbitUrl;
+        _state = state ?? new DocumentConsumerState();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _stoppingToken = stoppingToken;
+        // 這個進程真的有 consumer,readiness 從現在起才會呈報 document_consumer 元件。
+        _state.Active = true;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -79,15 +87,23 @@ public sealed class DocumentConsumerService : BackgroundService
                 consumer.ReceivedAsync += OnReceivedAsync;
                 await _channel.BasicConsumeAsync(QueueName, autoAck: false, consumer, stoppingToken);
 
+                // 連線狀態由既有連線自己回報,不另開探測連線。之後由自動復原機制維持連線,
+                // 斷開/復原都靠下面兩個回呼翻轉旗標。
+                _connection.ConnectionShutdownAsync += OnConnectionShutdownAsync;
+                _connection.RecoverySucceededAsync += OnRecoverySucceededAsync;
+                _state.Connected = true;
+
                 _logger.LogInformation("已連上 RabbitMQ,開始消費佇列 {Queue}", QueueName);
                 return; // 訂閱成功;之後由自動復原機制維持連線,消費經由回呼進行。
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
+                _state.Connected = false;
                 return;
             }
             catch (Exception ex)
             {
+                _state.Connected = false;
                 _logger.LogWarning(ex, "連線 RabbitMQ 失敗,{Seconds} 秒後重試", RetryDelay.TotalSeconds);
                 try
                 {
@@ -103,15 +119,27 @@ public sealed class DocumentConsumerService : BackgroundService
 
     private async Task OnReceivedAsync(object sender, BasicDeliverEventArgs ea)
     {
-        DocumentMessage? message;
+        DocumentMessage? message = null;
+        JsonException? parseError = null;
         try
         {
             message = JsonSerializer.Deserialize<DocumentMessage>(ea.Body.Span, JsonOpts);
         }
         catch (JsonException ex)
         {
+            parseError = ex;
+        }
+
+        // 追蹤編號的 scope 包住這則訊息的**整段**處理(含死信/重試分支),否則失敗那一行日誌正好是
+        // operator 拿著編號來找的那一行。解析失敗時仍有 AMQP 屬性可用,所以 scope 開在解析之後、
+        // 所有分支之前。
+        using var correlationScope = BeginCorrelationScope(
+            _logger, ResolveCorrelationId(message, ea.BasicProperties));
+
+        if (parseError is not null)
+        {
             // poison payload:無法解析就無從得知 documentId,不重試 —— 搬進死信佇列供人工檢視。
-            _logger.LogError(ex, "收到無法解析的訊息(poison payload),轉入死信佇列 {Queue}", DeadLetterQueueName);
+            _logger.LogError(parseError, "收到無法解析的訊息(poison payload),轉入死信佇列 {Queue}", DeadLetterQueueName);
             await DeadLetterAsync(ea);
             await AckAsync(ea);
             return;
@@ -165,6 +193,34 @@ public sealed class DocumentConsumerService : BackgroundService
             await AckAsync(ea);
         }
     }
+
+    private Task OnConnectionShutdownAsync(object? sender, ShutdownEventArgs args)
+    {
+        _state.Connected = false;
+        return Task.CompletedTask;
+    }
+
+    private Task OnRecoverySucceededAsync(object? sender, AsyncEventArgs args)
+    {
+        _state.Connected = true;
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// 這則訊息的追蹤編號:優先 body 欄位(跨版本相容的權威來源),缺才退到 AMQP 內建的
+    /// CorrelationId 屬性。邊界檢查沿用 header 那條路徑的同一組規則
+    /// (<see cref="IdentityHeaders.BoundedValue"/>:trim 後 1..128 字元、無控制字元),
+    /// 未通過一律當作沒帶 —— 未消毒的字串絕不進日誌。
+    /// </summary>
+    internal static string? ResolveCorrelationId(DocumentMessage? message, IReadOnlyBasicProperties props)
+        => IdentityHeaders.BoundedValue(message?.CorrelationId)
+           ?? IdentityHeaders.BoundedValue(props.CorrelationId);
+
+    /// <summary>沒有(或不合格的)追蹤編號就不開 scope —— 降級,不是錯誤。</summary>
+    internal static IDisposable? BeginCorrelationScope(ILogger logger, string? correlationId)
+        => correlationId is null
+            ? null
+            : logger.BeginScope(new Dictionary<string, object> { ["CorrelationId"] = correlationId });
 
     private async Task AckAsync(BasicDeliverEventArgs ea)
     {
@@ -265,6 +321,7 @@ public sealed class DocumentConsumerService : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         await base.StopAsync(cancellationToken);
+        _state.Connected = false;
         if (_channel is not null)
         {
             await _channel.DisposeAsync();

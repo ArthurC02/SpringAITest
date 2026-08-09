@@ -140,7 +140,7 @@ public sealed class InMemoryRepositoriesTests
         await repo.CompleteDocumentAsync(created.DocumentId, tenant, new[] { "chunk" }, new[] { Vec(1f) }, default);
         Assert.True(await repo.DeleteDocumentAsync(tenant, created.DocumentId, default));
         await repo.CompleteDocumentAsync(created.DocumentId, tenant, new[] { "late" }, new[] { Vec(1f) }, default);
-        await repo.MarkFailedAsync(created.DocumentId, tenant, default);
+        await repo.MarkFailedAsync(created.DocumentId, tenant, DocumentFailureReasons.Unexpected, default);
 
         Assert.Equal("deleted", await repo.GetDocumentStatusAsync(created.DocumentId, tenant, default));
         Assert.Empty(await repo.ListDocumentsAsync(tenant, default));

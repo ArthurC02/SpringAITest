@@ -171,29 +171,35 @@ public sealed class TriggerRepository(NpgsqlDataSource dataSource) : ITriggerRep
         return rows.Select(x => x.ToModel()).ToArray();
     }
 
-    public async Task<IReadOnlyList<TriggerClaim>> ClaimDueAsync(
-        string workerId, DateTime now, int leaseSeconds, int limit, CancellationToken ct)
+    public async Task<TriggerClaimBatch> ClaimDueAsync(
+        string workerId, int leaseSeconds, int limit, CancellationToken ct)
     {
         var claimToken = Guid.NewGuid().ToString("N");
-        var moment = Utc(now);
         await using var connection = await dataSource.OpenConnectionAsync(ct);
         // SKIP LOCKED is the exclusivity: two concurrent pollers can never lease the same row, and
         // an expired lease is reclaimable without an operator action.
+        //
+        // The database clock is authoritative (same stance as OrchestratorRunRepository): the due
+        // predicate, the expired-lease predicate, the new lease expiry and the returned instant all
+        // read now(), which is *statement-stable* and is the same value the existing
+        // updated_at=now() writes. clock_timestamp() would advance between those four uses and hand
+        // back microsecond-different times for one claim.
         var rows = await connection.QueryAsync<ClaimRow>(new CommandDefinition(
             """
             WITH due AS (
               SELECT o.id FROM agent_trigger_occurrence o
-              WHERE o.scheduled_for <= @moment
-                AND (o.status='pending' OR (o.status='claimed' AND o.claim_expires_at < @moment))
+              WHERE o.scheduled_for <= now()
+                AND (o.status='pending' OR (o.status='claimed' AND o.claim_expires_at < now()))
               ORDER BY o.scheduled_for
               LIMIT @limit
               FOR UPDATE SKIP LOCKED)
             UPDATE agent_trigger_occurrence o
             SET status='claimed',claim_owner=@workerId,claim_token_sha256=@tokenHash,
-                claim_expires_at=@expiresAt,attempt=o.attempt+1,updated_at=now()
+                claim_expires_at=now() + make_interval(secs => @leaseSeconds),attempt=o.attempt+1,
+                updated_at=now()
             FROM due,agent_trigger t
             WHERE o.id=due.id AND t.id=o.trigger_id
-            RETURNING o.id OccurrenceId,o.trigger_id TriggerId,o.tenant_id TenantId,
+            RETURNING now() ClaimedAt,o.id OccurrenceId,o.trigger_id TriggerId,o.tenant_id TenantId,
               o.scheduled_for ScheduledFor,o.status OccurrenceStatus,o.root_run_id RootRunId,
               o.created_at OccurrenceCreatedAt,o.updated_at OccurrenceUpdatedAt,
               t.name Name,t.description Description,t.orchestrator_id OrchestratorId,
@@ -204,14 +210,18 @@ public sealed class TriggerRepository(NpgsqlDataSource dataSource) : ITriggerRep
             """,
             new
             {
-                moment,
                 limit,
                 workerId,
                 tokenHash = SkillHash.Sha256(claimToken),
-                expiresAt = moment.AddSeconds(leaseSeconds),
+                leaseSeconds = (double)leaseSeconds,
             },
             cancellationToken: ct));
-        return rows.Select(x => x.ToClaim(claimToken)).ToArray();
+        var claims = rows.ToArray();
+        // An empty pass has no claim to resolve, so there is nothing for Now to be compared against;
+        // the host clock only ever fills a value nobody reads.
+        return new TriggerClaimBatch(
+            claims.Length == 0 ? DateTime.UtcNow : claims[0].ClaimedAt,
+            claims.Select(x => x.ToClaim(claimToken)).ToArray());
     }
 
     public async Task<bool> CompleteOccurrenceAsync(
@@ -269,6 +279,7 @@ public sealed class TriggerRepository(NpgsqlDataSource dataSource) : ITriggerRep
     }
 
     private sealed record ClaimRow(
+        DateTime ClaimedAt,
         Guid OccurrenceId, Guid TriggerId, string TenantId, DateTime ScheduledFor,
         string OccurrenceStatus, Guid? RootRunId, DateTime OccurrenceCreatedAt,
         DateTime OccurrenceUpdatedAt, string Name, string Description, Guid OrchestratorId,

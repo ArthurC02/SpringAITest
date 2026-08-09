@@ -92,9 +92,13 @@ builder.Services.AddSingleton(new RunDiscoveryState(runDiscoveryEnabled));
 // command path -- with dispatch off, a due occurrence records failed_dispatch_disabled and no run.
 var agentTriggersEnabled = string.Equals(cfg["AGENT_TRIGGERS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 builder.Services.AddSingleton(new AgentTriggersState(agentTriggersEnabled, multiAgentDispatchEnabled));
+// 文件消費者的連線狀態。永遠註冊(readiness 要讀得到),但只有真的啟動 consumer 的進程會把
+// Active 翻成 true —— 沒有 consumer 的部署(Testing/lite)readiness 完全不出現該元件。
+builder.Services.AddSingleton(new DocumentConsumerState());
 builder.Services.AddSingleton(sp => new BackendReadinessProbe(
     databaseRequired: !useInMemoryDb && !builder.Environment.IsEnvironment("Testing"),
-    sp.GetService<Npgsql.NpgsqlDataSource>()));
+    sp.GetService<Npgsql.NpgsqlDataSource>(),
+    documentConsumer: sp.GetRequiredService<DocumentConsumerState>()));
 
 // ---------------------------------------------------------------------------
 // 資料層:預設 NpgsqlDataSource singleton + Dapper 儲存庫(薄介面,測試可換 fake)。
@@ -237,7 +241,8 @@ if (!builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHostedService(sp => new DocumentConsumerService(
         sp.GetRequiredService<IServiceScopeFactory>(),
         sp.GetRequiredService<ILogger<DocumentConsumerService>>(),
-        rabbitUrl));
+        rabbitUrl,
+        sp.GetRequiredService<DocumentConsumerState>()));
 }
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,12 @@ public sealed class AgentChatRuntime(
     AgentChatOptions options,
     ILogger<AgentChatRuntime> logger) : IAgentChatRuntime
 {
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
+    // ponytail: fixed interval, no backoff. A poll costs one HTTP round trip plus one Backend read,
+    // and the user never feels the difference -- the LLM's own seconds-scale latency swallows it --
+    // so 500ms simply spends an order of magnitude fewer Backend requests per run than the 100ms it
+    // replaces. If the canary widens and polling is still the bottleneck, the upgrade path is staged
+    // backoff or a push channel, not another turn of this dial.
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
 
     public async Task<AgentResponse?> RunAsync(
         string message, string conversationId, Guid? requestedOrchestratorId,

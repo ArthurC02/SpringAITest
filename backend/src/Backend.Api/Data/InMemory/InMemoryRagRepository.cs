@@ -21,6 +21,7 @@ public sealed class InMemoryRagRepository : IRagRepository
         public required DateTime CreatedAt { get; init; }
         public int ChunkCount { get; set; }
         public string Status { get; set; } = "processing";
+        public string? FailureReason { get; set; }
         public List<(string Id, string Content, float[] Embedding)> Chunks { get; set; } = new();
     }
 
@@ -118,13 +119,15 @@ public sealed class InMemoryRagRepository : IRagRepository
                 d.Chunks = chunks.Zip(embeddings, (c, e) => (Guid.NewGuid().ToString("D"), c, e)).ToList();
                 d.ChunkCount = chunks.Count;
                 d.Status = "ready";
+                // 與 Dapper 的 `failure_reason = NULL` 同語意:重跑成功不得殘留上一輪的原因。
+                d.FailureReason = null;
             }
         }
 
         return Task.CompletedTask;
     }
 
-    public Task MarkFailedAsync(string documentId, string tenantId, CancellationToken ct)
+    public Task MarkFailedAsync(string documentId, string tenantId, string? failureReason, CancellationToken ct)
     {
         lock (_lockObj)
         {
@@ -133,6 +136,8 @@ public sealed class InMemoryRagRepository : IRagRepository
                 && d.Status is "pending_publish" or "processing" or "failed")
             {
                 d.Status = "failed";
+                // 與 Dapper 同語意:原因**無條件**覆寫(含寫回 null),不是「有值才寫」。
+                d.FailureReason = failureReason;
             }
         }
 
@@ -146,7 +151,8 @@ public sealed class InMemoryRagRepository : IRagRepository
             return Task.FromResult<IReadOnlyList<DocumentInfo>>(
                 _docs.Values.Where(d => d.TenantId == tenantId && d.Status is not ("pending_publish" or "deleted"))
                     .OrderBy(d => d.CreatedAt)
-                    .Select(d => new DocumentInfo(d.Id, d.Title, d.ChunkCount, d.CreatedAt, d.Status)).ToList());
+                    .Select(d => new DocumentInfo(d.Id, d.Title, d.ChunkCount, d.CreatedAt, d.Status, d.FailureReason))
+                    .ToList());
         }
     }
 

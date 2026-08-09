@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Backend.Api.Common;
+using Backend.Api.Files;
 
 namespace Backend.Api.Tests;
 
@@ -136,9 +138,33 @@ public sealed class SecurityTests : IClassFixture<TestWebAppFactory>
         // GET 帶 status;種入已處理完成 → ready。
         Assert.Equal("ready", doc["status"]!.GetValue<string>());
         Assert.True(doc["chunk_count"]!.GetValue<int>() >= 1);
+        // 沒有失敗就沒有原因:欄位在,值是 JSON null(不是空字串)。JsonNode 把 JSON null 表示成
+        // C# null,所以這裡分開斷言「鍵存在」與「值為 null」。
+        Assert.True(doc.AsObject().ContainsKey("failure_reason"));
+        Assert.Null(doc["failure_reason"]);
 
         var del = await client.DeleteAsync($"/api/documents/{id}");
         Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
+    }
+
+    /// <summary>
+    /// 失敗原因走完整條對外路徑:DocumentProcessor 分類 → repository → GET /api/documents 的 JSON。
+    /// 這是使用者唯一看得到原因的地方,所以要在端點層釘住,不能只驗 repository。
+    /// </summary>
+    [Fact]
+    public async Task Documents_FailedDocument_ExposesTheSanitizedFailureReason()
+    {
+        const string tenant = "docs-failure-reason";
+        var id = Guid.NewGuid().ToString();
+        var rag = _factory.Fake<IRagRepository>();
+        await rag.InsertProcessingDocumentAsync(id, tenant, "手冊", CancellationToken.None);
+        await rag.MarkFailedAsync(id, tenant, DocumentFailureReasons.EmbeddingUnavailable, CancellationToken.None);
+
+        var list = await _factory.CreateInternalClient().WithTenant(tenant).GetAsync("/api/documents");
+
+        var doc = (await list.ReadJsonAsync()).AsArray().Single(n => n!["id"]!.GetValue<string>() == id)!;
+        Assert.Equal("failed", doc["status"]!.GetValue<string>());
+        Assert.Equal(DocumentFailureReasons.EmbeddingUnavailable, doc["failure_reason"]!.GetValue<string>());
     }
 
     [Fact]

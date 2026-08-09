@@ -96,7 +96,10 @@ public sealed class DocumentProcessor
             _logger.LogError(ex, "文件處理失敗,標記為 failed:documentId={DocumentId}", message.DocumentId);
             try
             {
-                await _rag.MarkFailedAsync(message.DocumentId, message.TenantId, ct);
+                // 原因取自封閉集合(見 DocumentFailureReasons)—— 這個欄位會直接回給瀏覽器,
+                // 例外訊息本身只留在上面那行伺服器日誌裡。
+                await _rag.MarkFailedAsync(
+                    message.DocumentId, message.TenantId, DocumentFailureReasons.Classify(ex), ct);
             }
             catch (Exception markEx)
             {

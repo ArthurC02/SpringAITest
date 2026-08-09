@@ -1,6 +1,8 @@
 using System.Net;
 using System.Diagnostics.Metrics;
 using Backend.Api.Common;
+using Backend.Api.Files;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Backend.Api.Tests;
 
@@ -299,5 +301,75 @@ public sealed class BackendHealthTests : IClassFixture<TestWebAppFactory>
         var probe = new BackendReadinessProbe(_ => Task.FromResult(true), metrics);
 
         Assert.True((await probe.CheckAsync(default)).Ready);
+    }
+
+    /// <summary>
+    /// 沒有 consumer 的部署(Testing、lite)不得出現這個元件 —— 「沒有 consumer」不可以看起來像
+    /// 「consumer 壞了」,那會讓監控對著一個永遠 DOWN 的元件叫。
+    /// </summary>
+    [Fact]
+    public async Task DocumentConsumer_NotStartedInThisProcess_IsAbsentFromComponents()
+    {
+        var probe = new BackendReadinessProbe(
+            _ => Task.FromResult(true), documentConsumer: new DocumentConsumerState());
+
+        var report = await probe.CheckAsync(default);
+
+        Assert.False(report.Components.ContainsKey("document_consumer"));
+        Assert.True(report.Ready);
+    }
+
+    [Fact]
+    public async Task DocumentConsumer_Connected_IsUp_AndReadyStillComesFromTheDatabaseCheck()
+    {
+        var probe = new BackendReadinessProbe(
+            _ => Task.FromResult(true),
+            documentConsumer: new DocumentConsumerState { Active = true, Connected = true });
+
+        var report = await probe.CheckAsync(default);
+
+        Assert.Equal(new HealthComponent("UP", Required: false), report.Components["document_consumer"]);
+        Assert.True(report.Ready);
+    }
+
+    /// <summary>
+    /// 本項最重要的取捨,刻意釘死:broker 斷線時元件是 DOWN,但 <c>Ready</c> 仍為 true、HTTP 仍 200。
+    /// 若它變成 gating,編排器會因為 broker 抖動重啟 backend —— 對停滯的文件處理毫無幫助,只多一次不穩定。
+    /// </summary>
+    [Fact]
+    public async Task DocumentConsumer_Disconnected_IsDown_ButDoesNotMakeTheServiceNotReady()
+    {
+        var probe = new BackendReadinessProbe(
+            _ => Task.FromResult(true),
+            documentConsumer: new DocumentConsumerState { Active = true, Connected = false });
+
+        var report = await probe.CheckAsync(default);
+
+        Assert.Equal(new HealthComponent("DOWN", Required: false), report.Components["document_consumer"]);
+        Assert.True(report.Ready);
+        Assert.Equal("UP", report.Status);
+    }
+
+    /// <summary>
+    /// 端點層:元件真的出現在 <c>GET /health/ready</c> 的 JSON 裡,且斷線時仍是 200
+    /// (整條 readiness 判定不受影響)。用獨立 factory 避免與其他測試共用探針的 2 秒快取。
+    /// </summary>
+    [Fact]
+    public async Task ReadyEndpoint_ExposesDocumentConsumerComponent_AndStays200WhenItIsDown()
+    {
+        using var factory = new TestWebAppFactory();
+        var client = factory.CreateClient();
+        var state = factory.Services.GetRequiredService<DocumentConsumerState>();
+        state.Active = true;
+        state.Connected = false;
+
+        var response = await client.GetAsync("/health/ready");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.True(body["ready"]!.GetValue<bool>());
+        var component = body["components"]!["document_consumer"]!;
+        Assert.Equal("DOWN", component["status"]!.GetValue<string>());
+        Assert.False(component["required"]!.GetValue<bool>());
     }
 }
