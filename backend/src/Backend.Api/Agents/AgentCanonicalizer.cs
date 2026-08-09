@@ -55,6 +55,14 @@ public static class AgentCanonicalizer
     private static readonly HashSet<string> ValidExecutionRoles =
         new(StringComparer.Ordinal) { "worker", "verifier" };
 
+    // Mirrors workflow's `_KEYS` in app/runtime/output_contract.py (D3 execution preflight).
+    // Only the output_contract object's own top-level keywords are checked here — same depth as
+    // that mirror, not the full recursive per-type schema validator Workflow also applies at
+    // run time. Keep both sides in sync if Workflow's `_KEYS` changes.
+    private static readonly HashSet<string> ValidOutputContractKeys =
+        new(StringComparer.Ordinal)
+        { "type", "properties", "required", "additionalProperties", "items", "enum" };
+
     /// <summary>由請求建出 canonical 定義 JSON 原文(不含 name/description/slug)。</summary>
     public static string Canonicalize(AgentUpsert req)
     {
@@ -100,19 +108,25 @@ public static class AgentCanonicalizer
 
     /// <summary>Read the canonical Agent direct-tool allowlist used to constrain Rule action references.</summary>
     public static IReadOnlyList<string> AllowedToolsOf(string canonicalDefinition)
-    {
-        var node = JsonNode.Parse(canonicalDefinition)?["allowed_tools"]?.AsArray();
-        if (node is null)
-        {
-            return Array.Empty<string>();
-        }
+        => StringsOf(JsonNode.Parse(canonicalDefinition)?["allowed_tools"]?.AsArray());
 
-        return node
-            .Select(item => item?.GetValue<string>())
-            .Where(item => !string.IsNullOrWhiteSpace(item))
-            .Select(item => item!)
-            .ToList();
-    }
+    /// <summary>Read the canonical execution_roles set (worker/verifier) of a definition.</summary>
+    public static IReadOnlyList<string> ExecutionRolesOf(string canonicalDefinition)
+        => StringsOf(JsonNode.Parse(canonicalDefinition)?["execution_roles"]?.AsArray());
+
+    /// <summary>
+    /// Project a canonical string-array node into its non-blank values (absent node → empty).
+    /// Shared by every "canonical set" reader, and by AgentRepository's published-revision
+    /// execution_roles projection, so the set semantics are defined exactly once.
+    /// </summary>
+    public static IReadOnlyList<string> StringsOf(JsonArray? array)
+        => array is null
+            ? Array.Empty<string>()
+            : array
+                .Select(item => item?.GetValue<string>())
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => item!)
+                .ToList();
 
     /// <summary>由 canonical definition 取出 pinned Agent-Runtime Workflow reference。</summary>
     public static AgentWorkflowRef WorkflowOf(string canonicalDefinition)
@@ -329,10 +343,24 @@ public static class AgentCanonicalizer
         ValidateList(
             def, "knowledge_sources", AgentExecutionContract.MaxKnowledgeSources, errors);
 
-        if (def["output_contract"] is not JsonObject)
+        if (def["output_contract"] is not JsonObject outputContract)
         {
             errors.Add(new AgentValidationError(
                 "output_contract", "output_contract 必須是 JSON object"));
+        }
+        else
+        {
+            var unknownKeys = outputContract
+                .Select(entry => entry.Key)
+                .Where(key => !ValidOutputContractKeys.Contains(key))
+                .OrderBy(key => key, StringComparer.Ordinal)
+                .ToList();
+            if (unknownKeys.Count > 0)
+            {
+                errors.Add(new AgentValidationError(
+                    "output_contract",
+                    $"output_contract 含不支援的頂層關鍵字：{string.Join(", ", unknownKeys)}"));
+            }
         }
         if (def["business_rules"] is not JsonObject)
         {

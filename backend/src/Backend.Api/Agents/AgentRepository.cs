@@ -30,13 +30,20 @@ public sealed class AgentRepository : IAgentRepository
     public async Task<IReadOnlyList<AgentInfo>> ListAsync(string tenantId, CancellationToken ct)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
-        var rows = await conn.QueryAsync<AgentInfo>(new CommandDefinition(
-            "SELECT id AS Id, slug AS Slug, name AS Name, description AS Description, enabled AS Enabled,"
-            + " draft_version AS DraftVersion, draft_validated_version AS DraftValidatedVersion,"
-            + " published_revision AS PublishedRevision, created_at AS CreatedAt, updated_at AS UpdatedAt"
-            + " FROM agent WHERE tenant_id = @tenantId ORDER BY slug",
+        // LEFT JOIN the currently-published revision (not the mutable draft) to surface its
+        // execution_roles — no extra round trip, and unpublished Agents naturally join to
+        // nothing (ExecutionRolesJson stays null → field omitted, 02-spec §5.5).
+        var rows = await conn.QueryAsync<AgentInfoRow>(new CommandDefinition(
+            "SELECT a.id AS Id, a.slug AS Slug, a.name AS Name, a.description AS Description,"
+            + " a.enabled AS Enabled, a.draft_version AS DraftVersion,"
+            + " a.draft_validated_version AS DraftValidatedVersion,"
+            + " a.published_revision AS PublishedRevision, a.created_at AS CreatedAt,"
+            + " a.updated_at AS UpdatedAt, r.execution_roles::text AS ExecutionRolesJson"
+            + " FROM agent a"
+            + " LEFT JOIN agent_revision r ON r.agent_id = a.id AND r.revision = a.published_revision"
+            + " WHERE a.tenant_id = @tenantId ORDER BY a.slug",
             new { tenantId }, cancellationToken: ct));
-        return rows.AsList();
+        return rows.Select(ToInfo).ToList();
     }
 
     public async Task<Agent?> GetAsync(string tenantId, Guid id, CancellationToken ct)
@@ -630,6 +637,47 @@ public sealed class AgentRepository : IAgentRepository
 
         return new ReferenceResolution(errors, resolved);
     }
+
+    private static AgentInfo ToInfo(AgentInfoRow row) => new(
+        row.Id, row.Slug, row.Name, row.Description, row.Enabled, row.DraftVersion,
+        row.DraftValidatedVersion, row.PublishedRevision, row.CreatedAt, row.UpdatedAt,
+        ParseExecutionRoles(row.ExecutionRolesJson));
+
+    /// <summary>
+    /// Tolerant jsonb-array parser for the published-revision execution_roles projection:
+    /// null (no published revision) stays null; anything present but not a clean string array
+    /// (legacy/unexpected shape) degrades to null instead of throwing — one malformed row must
+    /// never 500 the whole list.
+    /// </summary>
+    private static IReadOnlyList<string>? ParseExecutionRoles(string? json)
+    {
+        if (json is null)
+        {
+            return null;
+        }
+        try
+        {
+            return AgentCanonicalizer.StringsOf(JsonNode.Parse(json)?.AsArray());
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    // Dapper materializes records positionally: keep this parameter order identical to the SELECT list.
+    private sealed record AgentInfoRow(
+        Guid Id,
+        string Slug,
+        string Name,
+        string Description,
+        bool Enabled,
+        long DraftVersion,
+        long? DraftValidatedVersion,
+        int? PublishedRevision,
+        DateTime CreatedAt,
+        DateTime UpdatedAt,
+        string? ExecutionRolesJson);
 
     // Dapper materializes records positionally: keep this parameter order identical to the SELECT list.
     private sealed record RevisionRow(

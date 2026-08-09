@@ -371,8 +371,12 @@ public sealed class AgentRunSnapshotContractTests
 
         using var snapshot = JsonDocument.Parse(built.StoredSnapshot);
         Assert.False(snapshot.RootElement.GetProperty("agent").TryGetProperty("prompt_manifest", out _));
+        // 這條 pin 只鎖「無 prompt_manifest 時省略該 key」的形狀(P1 契約),不鎖 output_contract/
+        // business_rules 的填充位置 —— D1-R2 新增 output_contract 頂層關鍵字白名單後,
+        // DefinitionWithPadding() 改把填充值換去 business_rules,canonical bytes 因此改變,
+        // 這個字面雜湊值也要跟著重算(不是本測試守的不變量被破壞)。
         Assert.Equal(
-            "b070628a2e7247136c5c02d9f4afe33c970eaf05462bf38e94b6f6922b6c7afc",
+            "6948e89b1b32ae3fd5b2e47541fc50baaff8833f2d29215ee90030003946e9aa",
             built.SnapshotHash);
     }
 
@@ -721,14 +725,16 @@ public sealed class AgentRunSnapshotContractTests
             SystemPrompt: "bounded prompt",
             ExecutionRoles: new[] { "worker" },
             Capabilities: null,
-            OutputContract: JsonSerializer.SerializeToElement(new { padding }),
+            OutputContract: null,
             Audience: new[] { "ADMIN" },
             AllowedTools: Array.Empty<string>(),
             SkillBindings: bindings.Select(binding =>
                     new AgentSkillBinding(binding.Skill, "latest"))
                 .ToArray(),
             KnowledgeSources: Array.Empty<string>(),
-            BusinessRules: null,
+            // 純粹的位元組填充容器:business_rules 在這個驗證層只檢查「是不是 JSON object」，
+            // 不像 output_contract 有頂層關鍵字白名單,所以可以塞任意鍵撐開 byte 數。
+            BusinessRules: JsonSerializer.SerializeToElement(new { padding }),
             RuntimeLimits: runtimeLimits ?? new AgentRuntimeLimits(),
             RuntimeWorkflow: new AgentWorkflowRef(
                 AgentDefaults.RuntimeWorkflowId,

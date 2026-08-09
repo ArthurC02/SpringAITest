@@ -89,7 +89,13 @@ public sealed record AgentResponse(
         a.DraftValidatedVersion, a.PublishedRevision, a.DraftDefinition, a.CreatedAt, a.UpdatedAt);
 }
 
-/// <summary>清單項目(不含 draft 定義內文)。</summary>
+/// <summary>
+/// 清單項目(不含 draft 定義內文)。<see cref="PublishedExecutionRoles"/> 是選填欄位:取自
+/// **已發布 revision**(non-published → 完全不輸出此欄,WhenWritingNull),不是可變的 draft
+/// execution_roles ——這樣前端(例如 Verifier 下拉,02-spec §5.5)才能只看「當下實際在跑」的角色，
+/// 不會因為有人正在編輯 draft 就臨時看到/看不到候選人。舊資料或非預期格式一律容錯回 null，
+/// 不讓單一壞列讓整個清單 500。
+/// </summary>
 public sealed record AgentInfo(
     [property: JsonPropertyName("id")] Guid Id,
     [property: JsonPropertyName("slug")] string Slug,
@@ -100,7 +106,10 @@ public sealed record AgentInfo(
     [property: JsonPropertyName("draft_validated_version")] long? DraftValidatedVersion,
     [property: JsonPropertyName("published_revision")] int? PublishedRevision,
     [property: JsonPropertyName("created_at")] DateTime CreatedAt,
-    [property: JsonPropertyName("updated_at")] DateTime UpdatedAt);
+    [property: JsonPropertyName("updated_at")] DateTime UpdatedAt,
+    [property: JsonPropertyName("published_execution_roles")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? PublishedExecutionRoles = null);
 
 /// <summary>
 /// 不可變 revision 摘要(含固定的 Skill bindings 與 definition hash)。P1 prompt manifest pin 兩欄

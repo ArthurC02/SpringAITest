@@ -418,6 +418,9 @@ public sealed class InMemoryAgentRepository : IAgentRepository
             CreatedAt = Now(),
             PromptManifestRevision = promptManifestPin?.Revision,
             PromptManifestSha256 = promptManifestPin?.Sha256,
+            // 與 Dapper 的 agent_revision.execution_roles 欄位對等:固定在該 revision 落地當下的角色，
+            // 不隨之後 draft 編輯漂移(02-spec §5.5 的 Verifier 下拉只看已發布狀態)。
+            ExecutionRoles = AgentCanonicalizer.ExecutionRolesOf(definitionSnapshot),
         });
         entry.PublishedRevision = revision;
         entry.UpdatedAt = Now();
@@ -469,7 +472,10 @@ public sealed class InMemoryAgentRepository : IAgentRepository
 
     private static AgentInfo ToInfo(Entry e) => new(
         e.Id, e.Slug, e.Name, e.Description, e.Enabled, e.DraftVersion,
-        e.DraftValidatedVersion, e.PublishedRevision, e.CreatedAt, e.UpdatedAt);
+        e.DraftValidatedVersion, e.PublishedRevision, e.CreatedAt, e.UpdatedAt,
+        e.PublishedRevision is int published
+            ? e.Revisions.FirstOrDefault(r => r.Revision == published)?.ExecutionRoles
+            : null);
 
     private sealed class Entry
     {
@@ -524,6 +530,7 @@ public sealed class InMemoryAgentRepository : IAgentRepository
         public DateTime CreatedAt;
         public int? PromptManifestRevision;
         public string? PromptManifestSha256;
+        public IReadOnlyList<string> ExecutionRoles = Array.Empty<string>();
 
         public AgentRevisionInfo ToInfo() => new(
             Revision, Status, DefinitionSha256, RuntimeWorkflowId, RuntimeWorkflowRevision,

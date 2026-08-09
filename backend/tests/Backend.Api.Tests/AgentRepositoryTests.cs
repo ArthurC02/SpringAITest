@@ -207,6 +207,72 @@ public sealed class AgentRepositoryTests : IAsyncLifetime
         Assert.NotNull(await Repo.CreateAsync("agentrepo-dup-b", "shared", "n", "d", def, Sha(def), "a", default));
     }
 
+    // ---- list:published_execution_roles 反映已發布 revision,非 draft(02-spec §5.5 Verifier 下拉)----
+
+    [SkippableFact]
+    public async Task List_UnpublishedAgent_OmitsPublishedExecutionRoles()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-list-unpublished";
+        var def = Def();
+        await Repo.CreateAsync(tenant, "list-unpub", "n", "d", def, Sha(def), "a", default);
+
+        var list = await Repo.ListAsync(tenant, default);
+
+        Assert.Null(Assert.Single(list).PublishedExecutionRoles);
+    }
+
+    [SkippableFact]
+    public async Task List_PublishedAgent_ExposesPublishedRevisionRoles_NotLaterUnpublishedDraftEdits()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-list-published";
+        var def = Def(roles: new[] { "worker" });
+        var agent = await CreateValidatedAsync(tenant, "list-pub", def);
+        var publish = await Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "publisher", default);
+        Assert.Equal(AgentWriteStatus.Success, publish.Status);
+
+        var afterPublish = await Repo.ListAsync(tenant, default);
+        Assert.Equal(new[] { "worker" }, Assert.Single(afterPublish).PublishedExecutionRoles);
+
+        // draft 改成 worker+verifier,但不重新 publish:清單仍要維持已發布 revision 的角色,
+        // 不能因為有人正在編輯 draft 就讓 Verifier 候選集合臨時漂移。
+        var draftDef = Def(roles: new[] { "worker", "verifier" });
+        Assert.Equal(
+            AgentWriteStatus.Success,
+            (await Repo.UpdateDraftAsync(
+                tenant, agent.Id, agent.DraftVersion, "n", "d", draftDef, Sha(draftDef), default)).Status);
+
+        var afterDraftEdit = await Repo.ListAsync(tenant, default);
+        Assert.Equal(new[] { "worker" }, Assert.Single(afterDraftEdit).PublishedExecutionRoles);
+    }
+
+    /// <summary>
+    /// execution_roles 欄位形狀不如預期(非字串陣列)時的容錯 —— 模擬繞過本次寫入路徑產生的舊資料,
+    /// 一列壞資料不可讓整個清單查詢 500。
+    /// </summary>
+    [SkippableFact]
+    public async Task List_MalformedExecutionRolesColumn_TreatedAsLegacy_ReturnsNullInsteadOfThrowing()
+    {
+        _fx.SkipIfUnavailable();
+        const string tenant = "agentrepo-list-legacy";
+        var def = Def(roles: new[] { "worker" });
+        var agent = await CreateValidatedAsync(tenant, "list-legacy", def);
+        var publish = await Repo.PublishAsync(
+            tenant, agent.Id, agent.DraftVersion, def, Sha(def), "publisher", default);
+        Assert.Equal(AgentWriteStatus.Success, publish.Status);
+
+        await using var conn = await _fx.DataSource!.OpenConnectionAsync();
+        await conn.ExecuteAsync(
+            "UPDATE agent_revision SET execution_roles = '\"not-an-array\"'::jsonb"
+            + " WHERE agent_id = @id AND revision = 1",
+            new { id = agent.Id });
+
+        var list = await Repo.ListAsync(tenant, default);
+        Assert.Null(Assert.Single(list).PublishedExecutionRoles);
+    }
+
     // ---- publish:由 draft_definition 抽欄落 revision + pin skill(A-DATA-04/11)----
 
     [SkippableFact]

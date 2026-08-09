@@ -978,6 +978,118 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
         Assert.Equal(expectedMessage, error.Message);
     }
 
+    // ---- output_contract 頂層關鍵字白名單(鏡射 workflow/app/runtime/output_contract.py 的 _KEYS)----
+
+    [Fact]
+    public void Validate_OutputContractWithOnlyWhitelistedTopLevelKeys_Passes()
+    {
+        var body = ValidBody("contract-legal-keys");
+        body["output_contract"] = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject { ["summary"] = new JsonObject { ["type"] = "string" } },
+            ["required"] = new JsonArray("summary"),
+            ["additionalProperties"] = false,
+            ["items"] = new JsonObject { ["type"] = "string" },
+            ["enum"] = new JsonArray("a", "b"),
+        };
+
+        var definition = AgentCanonicalizer.Canonicalize(body.Deserialize<AgentUpsert>()!);
+
+        Assert.DoesNotContain(
+            AgentCanonicalizer.Validate(definition, "研究助手"),
+            e => e.Field == "output_contract");
+    }
+
+    [Theory]
+    [InlineData("propertiess", "output_contract 含不支援的頂層關鍵字：propertiess")]
+    [InlineData("$schema", "output_contract 含不支援的頂層關鍵字：$schema")]
+    public void Validate_OutputContractWithUnknownTopLevelKey_Rejects(
+        string badKey, string expectedMessage)
+    {
+        var body = ValidBody($"contract-bad-{badKey.TrimStart('$')}");
+        body["output_contract"] = new JsonObject { ["type"] = "object", [badKey] = true };
+
+        var definition = AgentCanonicalizer.Canonicalize(body.Deserialize<AgentUpsert>()!);
+
+        var error = Assert.Single(
+            AgentCanonicalizer.Validate(definition), e => e.Field == "output_contract");
+        Assert.Equal(expectedMessage, error.Message);
+    }
+
+    [Fact]
+    public void Validate_OutputContractWithMultipleUnknownTopLevelKeys_ListsAllSortedInMessage()
+    {
+        var body = ValidBody("contract-multi-bad-keys");
+        body["output_contract"] = new JsonObject { ["type"] = "object", ["zeta"] = 1, ["alpha"] = 2 };
+
+        var definition = AgentCanonicalizer.Canonicalize(body.Deserialize<AgentUpsert>()!);
+
+        var error = Assert.Single(
+            AgentCanonicalizer.Validate(definition), e => e.Field == "output_contract");
+        Assert.Equal("output_contract 含不支援的頂層關鍵字：alpha, zeta", error.Message);
+    }
+
+    // 只驗頂層關鍵字,不像 Workflow 的執行期驗證器那樣遞迴進 properties/items 的巢狀 schema
+    // (spec 明文只要求同深度,不自創更嚴格的巢狀驗證)。
+    [Fact]
+    public void Validate_OutputContractDoesNotRecurseIntoNestedSchemaKeys()
+    {
+        var body = ValidBody("contract-nested-not-checked");
+        body["output_contract"] = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["field"] = new JsonObject { ["type"] = "string", ["notARealKeyword"] = true },
+            },
+        };
+
+        var definition = AgentCanonicalizer.Canonicalize(body.Deserialize<AgentUpsert>()!);
+
+        Assert.DoesNotContain(
+            AgentCanonicalizer.Validate(definition, "研究助手"),
+            e => e.Field == "output_contract");
+    }
+
+    [Fact]
+    public async Task Validate_Endpoint_ReportsOutputContractUnknownKeyInErrorsArray()
+    {
+        var client = Admin();
+        var body = ValidBody("contract-http-validate");
+        body["output_contract"] = new JsonObject { ["type"] = "object", ["bogus"] = 1 };
+        var (id, _) = await CreateAsync(client, body);
+
+        var result = await (await ValidateAsync(client, id)).ReadJsonAsync();
+
+        Assert.False(result["valid"]!.GetValue<bool>());
+        Assert.Contains(
+            result["errors"]!.AsArray(),
+            e => e!["field"]!.GetValue<string>() == "output_contract"
+                 && e!["message"]!.GetValue<string>() == "output_contract 含不支援的頂層關鍵字：bogus");
+        // 沒過 → draft_validated_version 不落地,擋在 publish 之前(與既有 D3 邊界測試同一契約)。
+        Assert.Null(
+            (await (await client.GetAsync($"/api/agents/{id}")).ReadJsonAsync())["draft_validated_version"]);
+    }
+
+    [Fact]
+    public async Task Publish_WithFullyLegalOutputContract_Succeeds()
+    {
+        var client = Admin();
+        var body = ValidBody("contract-http-publish-legal");
+        body["output_contract"] = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject { ["summary"] = new JsonObject { ["type"] = "string" } },
+            ["required"] = new JsonArray("summary"),
+            ["additionalProperties"] = false,
+        };
+        var (id, _) = await CreateAsync(client, body);
+        Assert.True((await (await ValidateAsync(client, id)).ReadJsonAsync())["valid"]!.GetValue<bool>());
+
+        Assert.Equal(HttpStatusCode.OK, (await PublishAsync(client, id, 1)).StatusCode);
+    }
+
     // 筆數上限的兩側(16 通過 / 17 拒絕)。斷言鎖在 ValidateList 的計數訊息:只斷言「有沒有
     // execution_roles 錯誤」抓不到上限被改掉 —— 這些名稱本來就各自會觸發「不支援的 execution role」。
     [Theory]
@@ -1414,7 +1526,8 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
             (await (await client.GetAsync("/api/agents")).ReadJsonAsync()).AsArray(),
             n => n!["id"]!.GetValue<string>() == id)!.AsObject();
 
-        // 管理列表不批量外洩 prompt/policy:AgentInfo 沒有 draft 欄位。
+        // 管理列表不批量外洩 prompt/policy:AgentInfo 沒有 draft 欄位。未發布時
+        // published_execution_roles 也整個不輸出(WhenWritingNull)。
         Assert.Equal(
             new[]
             {
@@ -1422,6 +1535,56 @@ public sealed class AgentsApiTests : IClassFixture<TestWebAppFactory>
                 "enabled", "id", "name", "published_revision", "slug", "updated_at",
             },
             item.Select(p => p.Key).OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    // ---- list:published_execution_roles(02-spec §5.5 Verifier 下拉候選)----
+
+    [Theory]
+    [InlineData("worker")]
+    [InlineData("worker,verifier")]
+    public async Task List_PublishedAgent_ExposesPublishedExecutionRoles(string rolesCsv)
+    {
+        var roles = rolesCsv.Split(',');
+        var client = Admin();
+        var body = ValidBody($"roles-{string.Join('-', roles)}");
+        body["execution_roles"] = new JsonArray(roles.Select(r => (JsonNode)JsonValue.Create(r)).ToArray());
+        var (id, _) = await CreateAsync(client, body);
+        Assert.True((await (await ValidateAsync(client, id)).ReadJsonAsync())["valid"]!.GetValue<bool>());
+        Assert.Equal(HttpStatusCode.OK, (await PublishAsync(client, id, 1)).StatusCode);
+
+        var item = Assert.Single(
+            (await (await client.GetAsync("/api/agents")).ReadJsonAsync()).AsArray(),
+            n => n!["id"]!.GetValue<string>() == id)!.AsObject();
+
+        Assert.Equal(
+            roles.OrderBy(r => r, StringComparer.Ordinal),
+            item["published_execution_roles"]!.AsArray().Select(r => r!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task List_PublishedAgent_ExecutionRoles_ReflectPublishedRevisionNotLaterUnpublishedDraftEdits()
+    {
+        var client = Admin();
+        var body = ValidBody("roles-drift");
+        body["execution_roles"] = new JsonArray("worker");
+        var (id, etag) = await CreateAsync(client, body);
+        Assert.True((await (await ValidateAsync(client, id)).ReadJsonAsync())["valid"]!.GetValue<bool>());
+        Assert.Equal(HttpStatusCode.OK, (await PublishAsync(client, id, 1)).StatusCode);
+
+        // draft 改成 worker+verifier,但不重新 publish:清單仍要維持已發布 revision 的角色。
+        var draftBody = ValidBody("roles-drift");
+        draftBody["execution_roles"] = new JsonArray("worker", "verifier");
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await client.SendAsync(PutDraft(id, draftBody, etag))).StatusCode);
+
+        var item = Assert.Single(
+            (await (await client.GetAsync("/api/agents")).ReadJsonAsync()).AsArray(),
+            n => n!["id"]!.GetValue<string>() == id)!.AsObject();
+
+        Assert.Equal(
+            new[] { "worker" },
+            item["published_execution_roles"]!.AsArray().Select(r => r!.GetValue<string>()));
     }
 
     /// <summary>
