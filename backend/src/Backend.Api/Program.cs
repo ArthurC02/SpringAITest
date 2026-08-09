@@ -111,11 +111,16 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<ISkillRepository, InMemorySkillRepository>();
     builder.Services.AddSingleton<IConfigurationSetRepository, InMemoryConfigurationSetRepository>();
     builder.Services.AddSingleton<IAgentRepository, InMemoryAgentRepository>();
-    builder.Services.AddSingleton<IAgentRunRepository, InMemoryAgentRunRepository>();
-    builder.Services.AddSingleton<IAgentRunApprovalRepository, InMemoryAgentRunApprovalRepository>();
+    // 這三支同時以具體型別註冊:InMemoryCheckpointRetentionRepository 直接向資料所在處要候選
+    // 快照(見該類別註解的單向鎖序),需要具體型別而非介面。
+    builder.Services.AddSingleton<InMemoryAgentRunRepository>();
+    builder.Services.AddSingleton<IAgentRunRepository>(sp => sp.GetRequiredService<InMemoryAgentRunRepository>());
+    builder.Services.AddSingleton<InMemoryAgentRunApprovalRepository>();
+    builder.Services.AddSingleton<IAgentRunApprovalRepository>(sp => sp.GetRequiredService<InMemoryAgentRunApprovalRepository>());
     builder.Services.AddSingleton<IWorkflowRepository, InMemoryWorkflowRepository>();
     builder.Services.AddSingleton<IOrchestratorRepository, InMemoryOrchestratorRepository>();
-    builder.Services.AddSingleton<IOrchestratorRunRepository, InMemoryOrchestratorRunRepository>();
+    builder.Services.AddSingleton<InMemoryOrchestratorRunRepository>();
+    builder.Services.AddSingleton<IOrchestratorRunRepository>(sp => sp.GetRequiredService<InMemoryOrchestratorRunRepository>());
     builder.Services.AddSingleton<IRuntimeBindingRepository, InMemoryRuntimeBindingRepository>();
     builder.Services.AddSingleton<IOperationsGovernanceRepository, InMemoryOperationsGovernanceRepository>();
     builder.Services.AddSingleton<IEvalRepository, InMemoryEvalRepository>();

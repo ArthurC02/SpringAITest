@@ -79,6 +79,28 @@ public sealed class WorkflowAdminApiTests(TestWebAppFactory factory) : IClassFix
         Assert.Equal(expected, (await c.GetAsync("/api/admin/workflows")).StatusCode);
     }
 
+    // 有界化的另一半:畸形 capabilities header 拒絕**整個** header(400),不是截成部分授權集合。
+    // 兩格都額外帶著真正的 workflow.manage —— 若邊界檢查失效就會變成 200,失效無法偽裝成綠。
+    [Theory]
+    [InlineData("count")]
+    [InlineData("length")]
+    public async Task Workflow_MalformedCapabilitiesHeader_IsBadRequestNotAuthorized(string violation)
+    {
+        var capabilities = violation == "count"
+            ? string.Join(
+                ' ',
+                Enumerable
+                    .Range(0, IdentityHeaders.MaxCallerCapabilities + 1)
+                    .Select(i => $"tool.use:t{i}"))
+            : new string('c', IdentityHeaders.MaxCapabilityLength + 1);
+        var c = factory.CreateInternalClient().WithTenant("demo-a").WithUser("someone").WithRole("ADMIN");
+        c.DefaultRequestHeaders.TryAddWithoutValidation(
+            IdentityHeaders.CapabilitiesHeader,
+            capabilities + " workflow.manage");
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await c.GetAsync("/api/admin/workflows")).StatusCode);
+    }
+
     // D4 的門在 InternalTokenMiddleware **之後**(Program.cs:192),與 D7 的門(在之前)相反:
     // 帶了內部憑證才會看到 404,沒帶憑證仍是 401。這個差異沒測過,誤搬門的位置不會有任何測試變紅。
     [Theory]

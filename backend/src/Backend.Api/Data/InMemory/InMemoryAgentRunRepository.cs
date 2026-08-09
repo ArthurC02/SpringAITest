@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.AgentRuns;
 using Backend.Api.Agents;
+using Backend.Api.CheckpointRetention;
 using Backend.Api.RunDiscovery;
 using Backend.Api.Skills;
 
@@ -1984,6 +1985,51 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
             claimExpiresAt,
             command.DispatchAttempts,
             targetTerminal);
+
+    /// <summary>
+    /// Lite-mode mirror of the Dapper checkpoint-retention query's <c>agent_run</c> branch
+    /// (<see cref="CheckpointRetention.CheckpointRetentionRepository"/>): terminal status, a
+    /// completion older than <paramref name="retentionBefore"/>, no write and no live lease past
+    /// <paramref name="recoveryBefore"/>, and no command still awaiting dispatch completion.
+    /// The pending-approval exclusion lives in the retention repository because approvals are a
+    /// different aggregate — this method never reaches outside its own state.
+    ///
+    /// Returns a value snapshot taken under this repository's own gate; the caller must not hold
+    /// any other lock while calling it.
+    /// </summary>
+    public IReadOnlyList<CheckpointRetentionRow> RetentionCandidates(
+        DateTime retentionBefore,
+        DateTime recoveryBefore)
+    {
+        lock (_gate)
+        {
+            var awaitingDispatch = _commands.Values
+                .Where(command => command.DispatchCompletedAt is null)
+                .Select(command => command.RunId)
+                .ToHashSet();
+            return _runs.Values
+                .Where(run => AgentRunStatuses.Terminal.Contains(run.Status)
+                    && run.CompletedAt is not null
+                    && run.CompletedAt <= retentionBefore
+                    && run.UpdatedAt <= recoveryBefore
+                    && (run.LeaseExpiresAt is null || run.LeaseExpiresAt <= recoveryBefore)
+                    && !awaitingDispatch.Contains(run.Id))
+                .Select(run => new CheckpointRetentionRow(
+                    1,
+                    "agent_thread",
+                    string.Equals(run.RunKind, "direct-agent", StringComparison.Ordinal)
+                        ? "d3"
+                        : "d5-child",
+                    run.TenantId,
+                    run.UserId,
+                    run.Id,
+                    run.SnapshotHash,
+                    run.LeaseGeneration,
+                    run.CheckpointRef,
+                    run.CompletedAt!.Value))
+                .ToArray();
+        }
+    }
 
     private static JsonElement RuntimeLimitsOf(string snapshot)
     {

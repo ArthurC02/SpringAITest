@@ -56,6 +56,24 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
 
     private DateTime UtcNow() => _timeProvider.GetUtcNow().UtcDateTime;
 
+    /// <summary>
+    /// Lite-mode mirror of the Dapper checkpoint-retention query's
+    /// <c>NOT EXISTS (agent_run_approval ... status='pending')</c> guard: a cancelled run whose
+    /// approval never got decided still has durable pending work, so it is not retention-eligible.
+    /// Returns a value snapshot taken under this repository's own gate; the caller must not hold
+    /// any other lock while calling it.
+    /// </summary>
+    public IReadOnlySet<Guid> PendingApprovalRunIds()
+    {
+        lock (_gate)
+        {
+            return _items.Values
+                .Where(item => string.Equals(item.Status, "pending", StringComparison.Ordinal))
+                .Select(item => item.RunId)
+                .ToHashSet();
+        }
+    }
+
     public async Task<AgentRunApprovalWriteResult> CreateAsync(string tenantId, string userId, Guid runId, AgentRunApprovalCreateRequest request, CancellationToken ct)
     {
         if (request.ExpectedVersion < 1 || request.LeaseGeneration < 1 || string.IsNullOrWhiteSpace(request.LeaseToken)

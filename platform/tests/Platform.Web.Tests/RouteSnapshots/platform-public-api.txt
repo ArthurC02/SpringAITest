@@ -1,110 +1,110 @@
-DELETE /api/admin/orchestrators/{id:guid}
-DELETE /api/admin/workflows/{id:guid}
-DELETE /api/agents/{id:guid}
-DELETE /api/business-workflows/{name}
-DELETE /api/configuration-sets/{id:guid}
-DELETE /api/documents/{id}
-DELETE /api/skills/{name}
-GET /api/admin/operations/eval-runs
-GET /api/admin/operations/eval-runs/{runId}
-GET /api/admin/operations/eval-suites
-GET /api/admin/operations/eval-suites/{suiteId}
-GET /api/admin/operations/evidence-reconcile
-GET /api/admin/operations/legacy-inventory
-GET /api/admin/operations/metrics
-GET /api/admin/operations/version-comparison
-GET /api/admin/orchestrators
-GET /api/admin/orchestrators/{id:guid}
-GET /api/admin/orchestrators/{id:guid}/revisions
-GET /api/admin/triggers
-GET /api/admin/triggers/{id:guid}
-GET /api/admin/triggers/{id:guid}/occurrences
-GET /api/admin/workflows
-GET /api/admin/workflows/catalog/nodes
-GET /api/admin/workflows/{id:guid}
-GET /api/admin/workflows/{id:guid}/revisions
-GET /api/agents
-GET /api/agents/catalog/rule-actions
-GET /api/agents/catalog/rule-facts
-GET /api/agents/{id:guid}
-GET /api/agents/{id:guid}/revisions
-GET /api/analysis/summary
-GET /api/business-workflows
-GET /api/business-workflows/{name}
-GET /api/business-workflows/{name}/export
-GET /api/chat/history
-GET /api/chat/history/page
-GET /api/chat/orchestrators
-GET /api/config
-GET /api/configuration-sets
-GET /api/configuration-sets/{id:guid}
-GET /api/documents
-GET /api/features
-GET /api/nodes
-GET /api/orchestrator-runs/{id:guid}
-GET /api/orchestrator-runs/{id:guid}/events
-GET /api/runs
-GET /api/runs/approvals
-GET /api/runs/{runId:guid}
-GET /api/runs/{runId:guid}/approvals
-GET /api/runs/{runId:guid}/events
-GET /api/skills
-GET /api/skills/catalog
-GET /api/skills/{name}
-GET /api/skills/{name}/export
-GET /api/skills/{name}/revisions
-GET /api/tools
-POST /api/admin/operations/eval-runs
-POST /api/admin/operations/regression-overrides
-POST /api/admin/operations/regressions
-POST /api/admin/orchestrators
-POST /api/admin/orchestrators/{id:guid}/enable
-POST /api/admin/orchestrators/{id:guid}/publish
-POST /api/admin/orchestrators/{id:guid}/revisions/{revision:int}/restore
-POST /api/admin/orchestrators/{id:guid}/runs
-POST /api/admin/orchestrators/{id:guid}/validate
-POST /api/admin/triggers
-POST /api/admin/triggers/{id:guid}/cancel
-POST /api/admin/workflows
-POST /api/admin/workflows/{id:guid}/enable
-POST /api/admin/workflows/{id:guid}/publish
-POST /api/admin/workflows/{id:guid}/revisions/{revision:int}/restore
-POST /api/admin/workflows/{id:guid}/simulate
-POST /api/admin/workflows/{id:guid}/validate
-POST /api/agents
-POST /api/agents/rules/simulate
-POST /api/agents/rules/validate
-POST /api/agents/{agentId:guid}/runs
-POST /api/agents/{id:guid}/enable
-POST /api/agents/{id:guid}/publish
-POST /api/agents/{id:guid}/revisions/{revision:int}/restore
-POST /api/agents/{id:guid}/validate
-POST /api/auth/login
-POST /api/auth/register
-POST /api/business-workflows
-POST /api/business-workflows/validate
-POST /api/chat
-POST /api/chat/stream
-POST /api/configuration-sets
-POST /api/configuration-sets/{id:guid}/activate
-POST /api/copilot/agui
-POST /api/documents
-POST /api/orchestrator-runs/{id:guid}/cancel
-POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/approve
-POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/reject
-POST /api/runs/{runId:guid}/cancel
-POST /api/runs/{runId:guid}/resume
-POST /api/skills
-POST /api/skills/import
-POST /api/skills/validate
-POST /api/skills/{name}/import
-POST /api/skills/{name}/invoke
-POST /api/skills/{name}/revisions/{revision:int}/restore
-PUT /api/admin/operations/rollout
-PUT /api/admin/orchestrators/{id:guid}/draft
-PUT /api/admin/workflows/{id:guid}/draft
-PUT /api/agents/{id:guid}/draft
-PUT /api/business-workflows/{name}
-PUT /api/config/{key}
-PUT /api/configuration-sets/{id:guid}
-PUT /api/skills/{name}
+DELETE /api/admin/orchestrators/{id:guid} [authz:policy=workflow.manage]
+DELETE /api/admin/workflows/{id:guid} [authz:policy=workflow.manage]
+DELETE /api/agents/{id:guid} [authz:authenticated]
+DELETE /api/business-workflows/{name} [authz:authenticated]
+DELETE /api/configuration-sets/{id:guid} [authz:authenticated]
+DELETE /api/documents/{id} [authz:authenticated]
+DELETE /api/skills/{name} [authz:authenticated]
+GET /api/admin/operations/eval-runs [authz:policy=workflow.manage]
+GET /api/admin/operations/eval-runs/{runId} [authz:policy=workflow.manage]
+GET /api/admin/operations/eval-suites [authz:policy=workflow.manage]
+GET /api/admin/operations/eval-suites/{suiteId} [authz:policy=workflow.manage]
+GET /api/admin/operations/evidence-reconcile [authz:policy=workflow.manage]
+GET /api/admin/operations/legacy-inventory [authz:policy=workflow.manage]
+GET /api/admin/operations/metrics [authz:policy=workflow.manage]
+GET /api/admin/operations/version-comparison [authz:policy=workflow.manage]
+GET /api/admin/orchestrators [authz:policy=workflow.manage]
+GET /api/admin/orchestrators/{id:guid} [authz:policy=workflow.manage]
+GET /api/admin/orchestrators/{id:guid}/revisions [authz:policy=workflow.manage]
+GET /api/admin/triggers [authz:policy=workflow.manage]
+GET /api/admin/triggers/{id:guid} [authz:policy=workflow.manage]
+GET /api/admin/triggers/{id:guid}/occurrences [authz:policy=workflow.manage]
+GET /api/admin/workflows [authz:policy=workflow.manage]
+GET /api/admin/workflows/catalog/nodes [authz:policy=workflow.manage]
+GET /api/admin/workflows/{id:guid} [authz:policy=workflow.manage]
+GET /api/admin/workflows/{id:guid}/revisions [authz:policy=workflow.manage]
+GET /api/agents [authz:authenticated]
+GET /api/agents/catalog/rule-actions [authz:authenticated]
+GET /api/agents/catalog/rule-facts [authz:authenticated]
+GET /api/agents/{id:guid} [authz:authenticated]
+GET /api/agents/{id:guid}/revisions [authz:authenticated]
+GET /api/analysis/summary [authz:authenticated]
+GET /api/business-workflows [authz:authenticated]
+GET /api/business-workflows/{name} [authz:authenticated]
+GET /api/business-workflows/{name}/export [authz:authenticated]
+GET /api/chat/history [authz:authenticated]
+GET /api/chat/history/page [authz:authenticated]
+GET /api/chat/orchestrators [authz:authenticated]
+GET /api/config [authz:authenticated]
+GET /api/configuration-sets [authz:authenticated]
+GET /api/configuration-sets/{id:guid} [authz:authenticated]
+GET /api/documents [authz:authenticated]
+GET /api/features [authz:anonymous]
+GET /api/nodes [authz:authenticated]
+GET /api/orchestrator-runs/{id:guid} [authz:authenticated]
+GET /api/orchestrator-runs/{id:guid}/events [authz:authenticated]
+GET /api/runs [authz:policy=workflow.manage]
+GET /api/runs/approvals [authz:authenticated]
+GET /api/runs/{runId:guid} [authz:authenticated]
+GET /api/runs/{runId:guid}/approvals [authz:authenticated]
+GET /api/runs/{runId:guid}/events [authz:authenticated]
+GET /api/skills [authz:authenticated]
+GET /api/skills/catalog [authz:authenticated]
+GET /api/skills/{name} [authz:authenticated]
+GET /api/skills/{name}/export [authz:authenticated]
+GET /api/skills/{name}/revisions [authz:authenticated]
+GET /api/tools [authz:authenticated]
+POST /api/admin/operations/eval-runs [authz:policy=workflow.manage]
+POST /api/admin/operations/regression-overrides [authz:policy=workflow.manage]
+POST /api/admin/operations/regressions [authz:policy=workflow.manage]
+POST /api/admin/orchestrators [authz:policy=workflow.manage]
+POST /api/admin/orchestrators/{id:guid}/enable [authz:policy=workflow.manage]
+POST /api/admin/orchestrators/{id:guid}/publish [authz:policy=workflow.manage]
+POST /api/admin/orchestrators/{id:guid}/revisions/{revision:int}/restore [authz:policy=workflow.manage]
+POST /api/admin/orchestrators/{id:guid}/runs [authz:policy=workflow.manage]
+POST /api/admin/orchestrators/{id:guid}/validate [authz:policy=workflow.manage]
+POST /api/admin/triggers [authz:policy=workflow.manage]
+POST /api/admin/triggers/{id:guid}/cancel [authz:policy=workflow.manage]
+POST /api/admin/workflows [authz:policy=workflow.manage]
+POST /api/admin/workflows/{id:guid}/enable [authz:policy=workflow.manage]
+POST /api/admin/workflows/{id:guid}/publish [authz:policy=workflow.manage]
+POST /api/admin/workflows/{id:guid}/revisions/{revision:int}/restore [authz:policy=workflow.manage]
+POST /api/admin/workflows/{id:guid}/simulate [authz:policy=workflow.manage]
+POST /api/admin/workflows/{id:guid}/validate [authz:policy=workflow.manage]
+POST /api/agents [authz:authenticated]
+POST /api/agents/rules/simulate [authz:authenticated]
+POST /api/agents/rules/validate [authz:authenticated]
+POST /api/agents/{agentId:guid}/runs [authz:authenticated]
+POST /api/agents/{id:guid}/enable [authz:authenticated]
+POST /api/agents/{id:guid}/publish [authz:authenticated]
+POST /api/agents/{id:guid}/revisions/{revision:int}/restore [authz:authenticated]
+POST /api/agents/{id:guid}/validate [authz:authenticated]
+POST /api/auth/login [authz:anonymous]
+POST /api/auth/register [authz:anonymous]
+POST /api/business-workflows [authz:authenticated]
+POST /api/business-workflows/validate [authz:authenticated]
+POST /api/chat [authz:authenticated]
+POST /api/chat/stream [authz:authenticated]
+POST /api/configuration-sets [authz:authenticated]
+POST /api/configuration-sets/{id:guid}/activate [authz:authenticated]
+POST /api/copilot/agui [authz:authenticated]
+POST /api/documents [authz:authenticated]
+POST /api/orchestrator-runs/{id:guid}/cancel [authz:authenticated]
+POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/approve [authz:authenticated]
+POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/reject [authz:authenticated]
+POST /api/runs/{runId:guid}/cancel [authz:authenticated]
+POST /api/runs/{runId:guid}/resume [authz:authenticated]
+POST /api/skills [authz:authenticated]
+POST /api/skills/import [authz:authenticated]
+POST /api/skills/validate [authz:authenticated]
+POST /api/skills/{name}/import [authz:authenticated]
+POST /api/skills/{name}/invoke [authz:authenticated]
+POST /api/skills/{name}/revisions/{revision:int}/restore [authz:authenticated]
+PUT /api/admin/operations/rollout [authz:policy=workflow.manage]
+PUT /api/admin/orchestrators/{id:guid}/draft [authz:policy=workflow.manage]
+PUT /api/admin/workflows/{id:guid}/draft [authz:policy=workflow.manage]
+PUT /api/agents/{id:guid}/draft [authz:authenticated]
+PUT /api/business-workflows/{name} [authz:authenticated]
+PUT /api/config/{key} [authz:authenticated]
+PUT /api/configuration-sets/{id:guid} [authz:authenticated]
+PUT /api/skills/{name} [authz:authenticated]

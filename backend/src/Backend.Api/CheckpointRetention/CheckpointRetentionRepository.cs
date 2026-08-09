@@ -1,3 +1,5 @@
+using Backend.Api.Data.InMemory;
+using Backend.Api.OrchestratorRuns;
 using Dapper;
 using Npgsql;
 
@@ -112,18 +114,59 @@ public sealed class CheckpointRetentionRepository(NpgsqlDataSource dataSource)
     }
 }
 
-public sealed class InMemoryCheckpointRetentionRepository : ICheckpointRetentionRepository
+/// <summary>
+/// Lite-mode parity implementation. Candidate scanning lives in the repositories that own the
+/// data, so this type never reads another aggregate's state directly.
+/// </summary>
+public sealed class InMemoryCheckpointRetentionRepository(
+    InMemoryAgentRunRepository agentRuns,
+    InMemoryOrchestratorRunRepository orchestratorRuns,
+    InMemoryAgentRunApprovalRepository approvals) : ICheckpointRetentionRepository
 {
     private readonly HashSet<(string Kind, Guid RunId)> _acks = [];
     private readonly Lock _gate = new();
 
-    public Task<IReadOnlyList<CheckpointRetentionRow>> ListAsync(
+    public async Task<IReadOnlyList<CheckpointRetentionRow>> ListAsync(
         DateTime retentionBefore,
         DateTime recoveryBefore,
         CheckpointRetentionPosition? cursor,
         int take,
         CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<CheckpointRetentionRow>>([]);
+    {
+        // 鎖的方向是單一且不巢狀的:先在**鎖外**向每個來源要一份值快照(各自只鎖自己的 gate),
+        // 全部拿到之後才進本物件的 _gate 讀 _acks 快照,出鎖後才合併/過濾/排序。
+        // 絕不可在持有 _gate 時呼叫任何來源 —— 那正是這組 in-memory 倉儲出過 ABBA 死鎖的形狀。
+        var candidates = agentRuns.RetentionCandidates(retentionBefore, recoveryBefore).ToList();
+        var pendingApprovalRuns = approvals.PendingApprovalRunIds();
+        candidates.AddRange(
+            await orchestratorRuns.RetentionCandidatesAsync(retentionBefore, recoveryBefore, ct));
+
+        HashSet<(string Kind, Guid RunId)> acked;
+        lock (_gate)
+        {
+            acked = [.. _acks];
+        }
+
+        return candidates
+            .Where(row => !string.Equals(row.Kind, "agent_thread", StringComparison.Ordinal)
+                || !pendingApprovalRuns.Contains(row.RunId))
+            .Where(row => !acked.Contains((row.Kind, row.RunId)))
+            .Where(row => cursor is null || Follows(row, cursor))
+            .OrderBy(row => row.CompletedAt)
+            .ThenBy(row => row.KindOrder)
+            .ThenBy(row => row.RunId)
+            .Take(take)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Keyset predicate over the same <c>(completed_at, kind_order, run_id)</c> triple the Dapper
+    /// authority orders and compares by. Guid ordering is .NET's, not PostgreSQL's byte order —
+    /// the cursor comparison and the sort use the same comparer, so pages neither repeat nor skip.
+    /// </summary>
+    private static bool Follows(CheckpointRetentionRow row, CheckpointRetentionPosition cursor)
+        => (row.CompletedAt, row.KindOrder, row.RunId)
+            .CompareTo((cursor.CompletedAt, (int)cursor.Kind, cursor.RunId)) > 0;
 
     public Task AckAsync(
         string kind,

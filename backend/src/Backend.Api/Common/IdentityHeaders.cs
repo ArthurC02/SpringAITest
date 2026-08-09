@@ -23,16 +23,68 @@ public static class IdentityHeaders
     public static string? UserRole(this HttpRequest request) => Value(request, RoleHeader);
 
     /// <summary>
+    /// X-User-Capabilities 的 wire 邊界,與 X-User-Groups 同類的內部 header 上限(數字集中在此處)。
+    /// 只限制數量/長度/位元組,刻意不驗 capability 名稱文法:<see cref="RequireCapability"/> 是
+    /// Ordinal 精確比對,未知字串本來就命不中任何授權,加文法只會讓未來新增的合法名稱被 400。
+    /// </summary>
+    public const int MaxCallerCapabilities = 64;
+
+    /// <inheritdoc cref="MaxCallerCapabilities"/>
+    public const int MaxCapabilitiesWireUtf8Bytes = 4096;
+
+    /// <inheritdoc cref="MaxCallerCapabilities"/>
+    public const int MaxCapabilityLength = 256;
+
+    /// <summary>
     /// Persisted capability claims forwarded from Platform's authenticated JWT. Header values are
     /// space-delimited because individual capability names cannot contain whitespace.
+    /// Bounded like <see cref="UserGroups"/>: an absent header is the normal empty-grant path, but
+    /// a present header must be exactly one value, at most <see cref="MaxCapabilitiesWireUtf8Bytes"/>
+    /// UTF-8 wire bytes, at most <see cref="MaxCallerCapabilities"/> entries, control-char free, and
+    /// each entry at most <see cref="MaxCapabilityLength"/> chars. A malformed value rejects the
+    /// entire header (400) instead of skipping the offending entry, so no partial capability set can
+    /// be used for authorization.
     /// </summary>
     public static IReadOnlyList<string> UserCapabilities(this HttpRequest request)
-        => request.Headers[CapabilitiesHeader]
-            .SelectMany(value => (value ?? string.Empty).Split(
-                ' ',
-                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        var values = request.Headers[CapabilitiesHeader];
+        if (values.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        if (values.Count != 1)
+        {
+            throw InvalidCapabilitiesHeader();
+        }
+
+        var raw = values[0] ?? string.Empty;
+        // 控制字元檢查在整串上做(而非逐 entry):TrimEntries 會把「被空白包住的純控制字元 token」
+        // 吃成空字串而消失,只查 entry 會漏掉那一類 wire 值。
+        if (Encoding.UTF8.GetByteCount(raw) > MaxCapabilitiesWireUtf8Bytes
+            || raw.Any(char.IsControl))
+        {
+            throw InvalidCapabilitiesHeader();
+        }
+
+        var capabilities = raw.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (capabilities.Length > MaxCallerCapabilities
+            || capabilities.Any(capability => capability.Length > MaxCapabilityLength))
+        {
+            throw InvalidCapabilitiesHeader();
+        }
+
+        return capabilities
             .Distinct(StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private static ApiException InvalidCapabilitiesHeader()
+        => new(
+            StatusCodes.Status400BadRequest,
+            "X-User-Capabilities contains an invalid authenticated capability set");
 
     /// <summary>
     /// 需要具名 capability 的端點:缺該 claim 直接 403。Workflow designer management is intentionally

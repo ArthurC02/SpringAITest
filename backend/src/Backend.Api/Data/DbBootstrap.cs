@@ -1090,9 +1090,21 @@ public static class DbBootstrap
                 cancellationToken: ct));
         }
 
+        // 先查再動:欄位已是 NOT NULL 時完全不送 ALTER。無條件送出即使無事可做仍要取
+        // agent_run_command(D3/D5/D7 執行期熱表)的 ACCESS EXCLUSIVE 鎖,每次啟動都擋一次寫入。
         await conn.ExecuteAsync(new CommandDefinition(
-            "ALTER TABLE agent_run_command"
-            + " ALTER COLUMN command_input_sha256 SET NOT NULL",
+            """
+            DO $agent_run_command_input_sha256$
+            BEGIN
+              IF EXISTS (SELECT 1 FROM information_schema.columns
+                         WHERE table_schema='public' AND table_name='agent_run_command'
+                           AND column_name='command_input_sha256' AND is_nullable='YES') THEN
+                ALTER TABLE agent_run_command
+                  ALTER COLUMN command_input_sha256 SET NOT NULL;
+              END IF;
+            END
+            $agent_run_command_input_sha256$;
+            """,
             transaction: tx,
             cancellationToken: ct));
         await tx.CommitAsync(ct);
@@ -1107,6 +1119,9 @@ public static class DbBootstrap
         NpgsqlConnection conn, ILogger logger, CancellationToken ct)
     {
         await using var tx = await conn.BeginTransactionAsync(ct);
+        // ponytail: 每次啟動仍讀取並鎖住全部 skill 列(O(skills) 讀取,但已收斂為 0 寫入、0 dead
+        // tuple)。若 skill 數大到讀取本身成為啟動瓶頸,升級路徑是加 schema-version / migrated
+        // marker 欄位,讓這個 WHERE 能直接排除已遷移的列。
         var rows = (await conn.QueryAsync<SkillMigrationRow>(new CommandDefinition(
             "SELECT id AS Id, tenant_id AS TenantId, name AS Name, definition AS Definition,"
             + " kind AS Kind, package AS Package, current_revision AS CurrentRevision"
@@ -1220,12 +1235,16 @@ public static class DbBootstrap
                         : SkillPackageMigration.RewriteDefinitionName(
                             revision.Definition, targetName);
             }
+            // 遷移宣稱一次性:沒有任何欄位需要改寫的 revision 不送 UPDATE(否則每次啟動都全表
+            // 重寫並產生 dead tuple)。語意不變 —— 該改寫的列與改寫內容一個字都沒動。
+            var revisionChanged = revisionNeedsDefinitionRewrite;
             var revisionPackage = revision.Package;
             var revisionPackageSha = revision.PackageSha256;
             if (revisionPackage is not null
                 && SkillPackageMigration.PackageNeedsRewrite(
                     revisionPackage, targetName, revision.Kind))
             {
+                revisionChanged = true;
                 var migrated = SkillPackageMigration.Rewrite(
                     revisionPackage, targetName, revision.Kind, revision.Definition);
                 revisionPackage = migrated.Bytes;
@@ -1242,31 +1261,38 @@ public static class DbBootstrap
                 revisionPackage = package;
                 revisionPackageSha = packageSha;
                 revisionDefinition = definition;
+                revisionChanged = true;
             }
 
-            await conn.ExecuteAsync(new CommandDefinition(
-                "UPDATE skill_revision SET definition = @revisionDefinition,"
-                + " definition_sha256 = @definitionSha, kind = @Kind,"
-                + " package = @revisionPackage, package_sha256 = @revisionPackageSha"
-                + " WHERE skill_id = @Id AND revision = @Revision",
-                new
-                {
-                    row.Id,
-                    revision.Revision,
-                    revisionDefinition,
-                    definitionSha = SkillHash.Sha256(revisionDefinition),
-                    revision.Kind,
-                    revisionPackage,
-                    revisionPackageSha,
-                }, tx, cancellationToken: ct));
+            if (revisionChanged)
+            {
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "UPDATE skill_revision SET definition = @revisionDefinition,"
+                    + " definition_sha256 = @definitionSha, kind = @Kind,"
+                    + " package = @revisionPackage, package_sha256 = @revisionPackageSha"
+                    + " WHERE skill_id = @Id AND revision = @Revision",
+                    new
+                    {
+                        row.Id,
+                        revision.Revision,
+                        revisionDefinition,
+                        definitionSha = SkillHash.Sha256(revisionDefinition),
+                        revision.Kind,
+                        revisionPackage,
+                        revisionPackageSha,
+                    }, tx, cancellationToken: ct));
+            }
         }
 
-        await conn.ExecuteAsync(new CommandDefinition(
-            "UPDATE skill SET name = @targetName, definition = @definition,"
-            + " package = @package, kind = @Kind"
-            + " WHERE id = @Id",
-            new { row.Id, targetName, definition, package, row.Kind },
-            tx, cancellationToken: ct));
+        if (nameChanged || definitionNeedsRewrite || packageNeedsRewrite)
+        {
+            await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE skill SET name = @targetName, definition = @definition,"
+                + " package = @package, kind = @Kind"
+                + " WHERE id = @Id",
+                new { row.Id, targetName, definition, package, row.Kind },
+                tx, cancellationToken: ct));
+        }
     }
 
     private sealed record SkillMigrationRow(

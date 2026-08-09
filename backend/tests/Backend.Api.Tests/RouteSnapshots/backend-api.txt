@@ -1,153 +1,153 @@
-DELETE /api/admin/orchestrators/{id:guid}
-DELETE /api/admin/workflows/{id:guid}
-DELETE /api/agents/{id:guid}
-DELETE /api/business-workflows/{name}
-DELETE /api/configuration-sets/{id:guid}
-DELETE /api/documents/{id}
-DELETE /api/skills/{name}
-GET /api/admin/operations/eval-runs
-GET /api/admin/operations/eval-runs/{runId:guid}
-GET /api/admin/operations/eval-suites
-GET /api/admin/operations/eval-suites/{suiteId}
-GET /api/admin/operations/eval-suites/{suiteId}/revisions/{revision:int}
-GET /api/admin/operations/evidence-reconcile
-GET /api/admin/operations/legacy-inventory
-GET /api/admin/operations/metrics
-GET /api/admin/operations/version-comparison
-GET /api/admin/orchestrators
-GET /api/admin/orchestrators/{id:guid}
-GET /api/admin/orchestrators/{id:guid}/revisions
-GET /api/admin/runtime-binding
-GET /api/admin/triggers
-GET /api/admin/triggers/{id:guid}
-GET /api/admin/triggers/{id:guid}/occurrences
-GET /api/admin/workflows
-GET /api/admin/workflows/catalog/nodes
-GET /api/admin/workflows/{id:guid}
-GET /api/admin/workflows/{id:guid}/revisions
-GET /api/agent-runs/{runId:guid}/approvals/{approvalId:guid}/execution-identity
-GET /api/agent-runs/{runId:guid}/execution-artifact
-GET /api/agents
-GET /api/agents/{id:guid}
-GET /api/agents/{id:guid}/revisions
-GET /api/analysis/summary
-GET /api/business-workflows
-GET /api/business-workflows/{name}
-GET /api/business-workflows/{name}/export
-GET /api/chat-runs/active
-GET /api/chat-runs/{runId:guid}
-GET /api/config
-GET /api/config/runtime/{key}
-GET /api/configuration-sets
-GET /api/configuration-sets/active
-GET /api/configuration-sets/{id:guid}
-GET /api/context-policies
-GET /api/context-views/{viewId:guid}
-GET /api/contexts/{contextId:guid}/revisions/{revision:int}
-GET /api/conversations
-GET /api/conversations/page
-GET /api/documents
-GET /api/internal/checkpoint-retention/candidates
-GET /api/orchestrator-runs/{runId:guid}
-GET /api/orchestrator-runs/{runId:guid}/children/{childId:guid}
-GET /api/orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests/{requestId:guid}
-GET /api/orchestrator-runs/{runId:guid}/events
-GET /api/orchestrator-runs/{runId:guid}/execution-artifact
-GET /api/prompt-components
-GET /api/prompt-components/{kind}/{revision:int}
-GET /api/prompt-manifests
-GET /api/prompt-manifests/by-sha/{sha}
-GET /api/prompt-manifests/{revision:int}
-GET /api/prompt-manifests/{revision:int}/resolved
-GET /api/runs
-GET /api/runs/approvals
-GET /api/runs/{runId:guid}
-GET /api/runs/{runId:guid}/approvals
-GET /api/runs/{runId:guid}/events
-GET /api/runtime-discovery/orchestrators
-GET /api/skills
-GET /api/skills/{name}
-GET /api/skills/{name}/export
-GET /api/skills/{name}/package
-GET /api/skills/{name}/revisions
-GET /api/skills/{name}/revisions/{revision:int}/execution-artifact
-POST /api/admin/operations/eval-runs
-POST /api/admin/operations/regression-overrides
-POST /api/admin/operations/regressions
-POST /api/admin/orchestrators
-POST /api/admin/orchestrators/{id:guid}/enable
-POST /api/admin/orchestrators/{id:guid}/publish
-POST /api/admin/orchestrators/{id:guid}/revisions/{revision:int}/restore
-POST /api/admin/orchestrators/{id:guid}/validate
-POST /api/admin/orchestrators/{orchestratorId:guid}/runs
-POST /api/admin/triggers
-POST /api/admin/triggers/{id:guid}/cancel
-POST /api/admin/workflows
-POST /api/admin/workflows/{id:guid}/enable
-POST /api/admin/workflows/{id:guid}/publish
-POST /api/admin/workflows/{id:guid}/revisions/{revision:int}/restore
-POST /api/admin/workflows/{id:guid}/simulate
-POST /api/admin/workflows/{id:guid}/validate
-POST /api/agent-run-approval-executions/recovery/claim
-POST /api/agent-run-approval-executions/{approvalId:guid}/complete
-POST /api/agent-runs/recovery/claim
-POST /api/agent-runs/{runId:guid}/approvals
-POST /api/agent-runs/{runId:guid}/approvals/{approvalId:guid}/consume
-POST /api/agent-runs/{runId:guid}/approvals/{approvalId:guid}/execute/claim
-POST /api/agent-runs/{runId:guid}/commands/{commandId:guid}/claim
-POST /api/agent-runs/{runId:guid}/commands/{commandId:guid}/dispatch/complete
-POST /api/agent-runs/{runId:guid}/events
-POST /api/agent-runs/{runId:guid}/lease
-POST /api/agent-runs/{runId:guid}/transitions
-POST /api/agent-runs/{runId:guid}/write-effects/{effectId:guid}/complete
-POST /api/agent-runs/{runId:guid}/write-effects/{effectId:guid}/evidence
-POST /api/agents
-POST /api/agents/{agentId:guid}/runs
-POST /api/agents/{id:guid}/enable
-POST /api/agents/{id:guid}/publish
-POST /api/agents/{id:guid}/revisions/{revision:int}/restore
-POST /api/agents/{id:guid}/validate
-POST /api/auth/login
-POST /api/auth/register
-POST /api/business-workflows
-POST /api/chat-runs
-POST /api/chat-runs/replay
-POST /api/chat-runs/{runId:guid}/resume
-POST /api/configuration-sets
-POST /api/configuration-sets/{id:guid}/activate
-POST /api/contexts/{contextId:guid}/revisions
-POST /api/conversations
-POST /api/documents/ingest-intents
-POST /api/internal/checkpoint-retention/ack
-POST /api/operations/telemetry
-POST /api/orchestrator-runs/recovery/claim
-POST /api/orchestrator-runs/{runId:guid}/cancel
-POST /api/orchestrator-runs/{runId:guid}/children
-POST /api/orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests
-POST /api/orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests/{requestId:guid}/deltas
-POST /api/orchestrator-runs/{runId:guid}/commands/{commandId:guid}/claim
-POST /api/orchestrator-runs/{runId:guid}/commands/{commandId:guid}/dispatch/complete
-POST /api/orchestrator-runs/{runId:guid}/commands/{commandId:guid}/lease/renew
-POST /api/orchestrator-runs/{runId:guid}/context/acquire
-POST /api/orchestrator-runs/{runId:guid}/transitions
-POST /api/prompt-components
-POST /api/prompt-manifests
-POST /api/retrieval/search
-POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/approve
-POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/reject
-POST /api/runs/{runId:guid}/cancel
-POST /api/runs/{runId:guid}/resume
-POST /api/runtime-discovery/resolve
-POST /api/skills
-POST /api/skills/import
-POST /api/skills/{name}/import
-POST /api/skills/{name}/revisions/{revision:int}/restore
-PUT /api/admin/operations/rollout
-PUT /api/admin/orchestrators/{id:guid}/draft
-PUT /api/admin/runtime-binding
-PUT /api/admin/workflows/{id:guid}/draft
-PUT /api/agents/{id:guid}/draft
-PUT /api/business-workflows/{name}
-PUT /api/config/{key}
-PUT /api/configuration-sets/{id:guid}
-PUT /api/skills/{name}
+DELETE /api/admin/orchestrators/{id:guid} [authz:none]
+DELETE /api/admin/workflows/{id:guid} [authz:none]
+DELETE /api/agents/{id:guid} [authz:admin-only]
+DELETE /api/business-workflows/{name} [authz:admin-only]
+DELETE /api/configuration-sets/{id:guid} [authz:admin-only]
+DELETE /api/documents/{id} [authz:none]
+DELETE /api/skills/{name} [authz:admin-only]
+GET /api/admin/operations/eval-runs [authz:none]
+GET /api/admin/operations/eval-runs/{runId:guid} [authz:none]
+GET /api/admin/operations/eval-suites [authz:none]
+GET /api/admin/operations/eval-suites/{suiteId} [authz:none]
+GET /api/admin/operations/eval-suites/{suiteId}/revisions/{revision:int} [authz:none]
+GET /api/admin/operations/evidence-reconcile [authz:none]
+GET /api/admin/operations/legacy-inventory [authz:none]
+GET /api/admin/operations/metrics [authz:none]
+GET /api/admin/operations/version-comparison [authz:none]
+GET /api/admin/orchestrators [authz:none]
+GET /api/admin/orchestrators/{id:guid} [authz:none]
+GET /api/admin/orchestrators/{id:guid}/revisions [authz:none]
+GET /api/admin/runtime-binding [authz:none]
+GET /api/admin/triggers [authz:none]
+GET /api/admin/triggers/{id:guid} [authz:none]
+GET /api/admin/triggers/{id:guid}/occurrences [authz:none]
+GET /api/admin/workflows [authz:none]
+GET /api/admin/workflows/catalog/nodes [authz:none]
+GET /api/admin/workflows/{id:guid} [authz:none]
+GET /api/admin/workflows/{id:guid}/revisions [authz:none]
+GET /api/agent-runs/{runId:guid}/approvals/{approvalId:guid}/execution-identity [authz:none]
+GET /api/agent-runs/{runId:guid}/execution-artifact [authz:admin-only]
+GET /api/agents [authz:admin-only]
+GET /api/agents/{id:guid} [authz:admin-only]
+GET /api/agents/{id:guid}/revisions [authz:admin-only]
+GET /api/analysis/summary [authz:none]
+GET /api/business-workflows [authz:none]
+GET /api/business-workflows/{name} [authz:none]
+GET /api/business-workflows/{name}/export [authz:none]
+GET /api/chat-runs/active [authz:none]
+GET /api/chat-runs/{runId:guid} [authz:none]
+GET /api/config [authz:admin-only]
+GET /api/config/runtime/{key} [authz:none]
+GET /api/configuration-sets [authz:admin-only]
+GET /api/configuration-sets/active [authz:none]
+GET /api/configuration-sets/{id:guid} [authz:admin-only]
+GET /api/context-policies [authz:none]
+GET /api/context-views/{viewId:guid} [authz:none]
+GET /api/contexts/{contextId:guid}/revisions/{revision:int} [authz:none]
+GET /api/conversations [authz:none]
+GET /api/conversations/page [authz:none]
+GET /api/documents [authz:none]
+GET /api/internal/checkpoint-retention/candidates [authz:none]
+GET /api/orchestrator-runs/{runId:guid} [authz:none]
+GET /api/orchestrator-runs/{runId:guid}/children/{childId:guid} [authz:none]
+GET /api/orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests/{requestId:guid} [authz:none]
+GET /api/orchestrator-runs/{runId:guid}/events [authz:none]
+GET /api/orchestrator-runs/{runId:guid}/execution-artifact [authz:none]
+GET /api/prompt-components [authz:admin-only]
+GET /api/prompt-components/{kind}/{revision:int} [authz:admin-only]
+GET /api/prompt-manifests [authz:admin-only]
+GET /api/prompt-manifests/by-sha/{sha} [authz:admin-only]
+GET /api/prompt-manifests/{revision:int} [authz:admin-only]
+GET /api/prompt-manifests/{revision:int}/resolved [authz:none]
+GET /api/runs [authz:none]
+GET /api/runs/approvals [authz:none]
+GET /api/runs/{runId:guid} [authz:admin-only]
+GET /api/runs/{runId:guid}/approvals [authz:none]
+GET /api/runs/{runId:guid}/events [authz:admin-only]
+GET /api/runtime-discovery/orchestrators [authz:none]
+GET /api/skills [authz:none]
+GET /api/skills/{name} [authz:none]
+GET /api/skills/{name}/export [authz:none]
+GET /api/skills/{name}/package [authz:none]
+GET /api/skills/{name}/revisions [authz:none]
+GET /api/skills/{name}/revisions/{revision:int}/execution-artifact [authz:admin-only]
+POST /api/admin/operations/eval-runs [authz:none]
+POST /api/admin/operations/regression-overrides [authz:none]
+POST /api/admin/operations/regressions [authz:none]
+POST /api/admin/orchestrators [authz:none]
+POST /api/admin/orchestrators/{id:guid}/enable [authz:none]
+POST /api/admin/orchestrators/{id:guid}/publish [authz:none]
+POST /api/admin/orchestrators/{id:guid}/revisions/{revision:int}/restore [authz:none]
+POST /api/admin/orchestrators/{id:guid}/validate [authz:none]
+POST /api/admin/orchestrators/{orchestratorId:guid}/runs [authz:none]
+POST /api/admin/triggers [authz:none]
+POST /api/admin/triggers/{id:guid}/cancel [authz:none]
+POST /api/admin/workflows [authz:none]
+POST /api/admin/workflows/{id:guid}/enable [authz:none]
+POST /api/admin/workflows/{id:guid}/publish [authz:none]
+POST /api/admin/workflows/{id:guid}/revisions/{revision:int}/restore [authz:none]
+POST /api/admin/workflows/{id:guid}/simulate [authz:none]
+POST /api/admin/workflows/{id:guid}/validate [authz:none]
+POST /api/agent-run-approval-executions/recovery/claim [authz:none]
+POST /api/agent-run-approval-executions/{approvalId:guid}/complete [authz:none]
+POST /api/agent-runs/recovery/claim [authz:none]
+POST /api/agent-runs/{runId:guid}/approvals [authz:none]
+POST /api/agent-runs/{runId:guid}/approvals/{approvalId:guid}/consume [authz:none]
+POST /api/agent-runs/{runId:guid}/approvals/{approvalId:guid}/execute/claim [authz:none]
+POST /api/agent-runs/{runId:guid}/commands/{commandId:guid}/claim [authz:admin-only]
+POST /api/agent-runs/{runId:guid}/commands/{commandId:guid}/dispatch/complete [authz:admin-only]
+POST /api/agent-runs/{runId:guid}/events [authz:admin-only]
+POST /api/agent-runs/{runId:guid}/lease [authz:admin-only]
+POST /api/agent-runs/{runId:guid}/transitions [authz:admin-only]
+POST /api/agent-runs/{runId:guid}/write-effects/{effectId:guid}/complete [authz:none]
+POST /api/agent-runs/{runId:guid}/write-effects/{effectId:guid}/evidence [authz:none]
+POST /api/agents [authz:admin-only]
+POST /api/agents/{agentId:guid}/runs [authz:admin-only]
+POST /api/agents/{id:guid}/enable [authz:admin-only]
+POST /api/agents/{id:guid}/publish [authz:admin-only]
+POST /api/agents/{id:guid}/revisions/{revision:int}/restore [authz:admin-only]
+POST /api/agents/{id:guid}/validate [authz:admin-only]
+POST /api/auth/login [authz:none]
+POST /api/auth/register [authz:none]
+POST /api/business-workflows [authz:admin-only]
+POST /api/chat-runs [authz:none]
+POST /api/chat-runs/replay [authz:none]
+POST /api/chat-runs/{runId:guid}/resume [authz:none]
+POST /api/configuration-sets [authz:admin-only]
+POST /api/configuration-sets/{id:guid}/activate [authz:admin-only]
+POST /api/contexts/{contextId:guid}/revisions [authz:none]
+POST /api/conversations [authz:none]
+POST /api/documents/ingest-intents [authz:none]
+POST /api/internal/checkpoint-retention/ack [authz:none]
+POST /api/operations/telemetry [authz:none]
+POST /api/orchestrator-runs/recovery/claim [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/cancel [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/children [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/children/{childId:guid}/context-requests/{requestId:guid}/deltas [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/commands/{commandId:guid}/claim [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/commands/{commandId:guid}/dispatch/complete [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/commands/{commandId:guid}/lease/renew [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/context/acquire [authz:none]
+POST /api/orchestrator-runs/{runId:guid}/transitions [authz:none]
+POST /api/prompt-components [authz:admin-only]
+POST /api/prompt-manifests [authz:admin-only]
+POST /api/retrieval/search [authz:none]
+POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/approve [authz:none]
+POST /api/runs/{runId:guid}/approvals/{approvalId:guid}/reject [authz:none]
+POST /api/runs/{runId:guid}/cancel [authz:admin-only]
+POST /api/runs/{runId:guid}/resume [authz:admin-only]
+POST /api/runtime-discovery/resolve [authz:none]
+POST /api/skills [authz:admin-only]
+POST /api/skills/import [authz:admin-only]
+POST /api/skills/{name}/import [authz:admin-only]
+POST /api/skills/{name}/revisions/{revision:int}/restore [authz:admin-only]
+PUT /api/admin/operations/rollout [authz:none]
+PUT /api/admin/orchestrators/{id:guid}/draft [authz:none]
+PUT /api/admin/runtime-binding [authz:none]
+PUT /api/admin/workflows/{id:guid}/draft [authz:none]
+PUT /api/agents/{id:guid}/draft [authz:admin-only]
+PUT /api/business-workflows/{name} [authz:admin-only]
+PUT /api/config/{key} [authz:admin-only]
+PUT /api/configuration-sets/{id:guid} [authz:admin-only]
+PUT /api/skills/{name} [authz:admin-only]

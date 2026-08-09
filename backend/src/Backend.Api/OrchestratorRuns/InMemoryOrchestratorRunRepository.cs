@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Backend.Api.AgentRuns;
+using Backend.Api.CheckpointRetention;
 using Backend.Api.Common;
 using Backend.Api.Orchestrators;
 using Backend.Api.RunDiscovery;
@@ -476,6 +477,35 @@ public sealed class InMemoryOrchestratorRunRepository(
 
     private static readonly HashSet<string> TerminalRootStatuses = new(
         ["completed", "failed", "cancelled", "timed_out"], StringComparer.Ordinal);
+
+    /// <summary>
+    /// Lite-mode mirror of the Dapper checkpoint-retention query's <c>orchestrator_run</c> branch
+    /// (<see cref="CheckpointRetention.CheckpointRetentionRepository"/>): terminal root status, a
+    /// completion older than <paramref name="retentionBefore"/>, no write past
+    /// <paramref name="recoveryBefore"/>, and no root command still open. <c>completed_at</c> uses
+    /// the same "last write while terminal" approximation as <see cref="ToRunSummaryItem"/>.
+    ///
+    /// Returns a value snapshot taken under this repository's own gate; the caller must not hold
+    /// any other lock while awaiting it (this gate is a non-reentrant semaphore).
+    /// </summary>
+    public async Task<IReadOnlyList<CheckpointRetentionRow>> RetentionCandidatesAsync(
+        DateTime retentionBefore, DateTime recoveryBefore, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            return _runs.Values
+                .Where(x => TerminalRootStatuses.Contains(x.Status)
+                    && x.CommandCompleted
+                    && x.Updated <= retentionBefore
+                    && x.Updated <= recoveryBefore)
+                .Select(x => new CheckpointRetentionRow(
+                    2, "root_context", "d5-root", x.Tenant, x.User, x.Id, x.Hash,
+                    0, x.CheckpointRef, x.Updated))
+                .ToArray();
+        }
+        finally { _gate.Release(); }
+    }
 
     /// <summary>
     /// O2 unified list source (<see cref="IRunDiscoverySource"/>). <see cref="Entry.Children"/>'s
