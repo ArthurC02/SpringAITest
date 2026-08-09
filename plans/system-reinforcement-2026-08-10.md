@@ -81,7 +81,7 @@
 
 ### P2 — 文件與建置
 
-- [ ] **W1-19** 三份旗標清單／健康檢查／腳本 OS 慣例同步（`README.md:36,75-83`、`infra/.env.example`、`platform/AGENTS.md`）：README 補 6 個缺漏旗標、.env.example 補 `RUN_DISCOVERY_ENABLED`/`AGENT_TRIGGERS_ENABLED`、platform/AGENTS.md 補 `/actuator/health/ready` 及其六項依賴檢查、README 補一句 verify-* 腳本僅 pwsh 版。**以程式碼與 compose 檔為準逐一核對，不照抄本計畫的清單。**
+- [x] **W1-19** 三份旗標清單／健康檢查／腳本 OS 慣例同步（`README.md:36,75-83`、`infra/.env.example`、`platform/AGENTS.md`）：README 補 6 個缺漏旗標、.env.example 補 `RUN_DISCOVERY_ENABLED`/`AGENT_TRIGGERS_ENABLED`、platform/AGENTS.md 補 `/actuator/health/ready` 及其六項依賴檢查、README 補一句 verify-* 腳本僅 pwsh 版。**以程式碼與 compose 檔為準逐一核對，不照抄本計畫的清單。**
 - [x] **W1-21** backend/platform Dockerfile restore 層分離（`backend/Dockerfile:3-7`、`platform/Dockerfile:3-7`）：`COPY *.csproj` + `dotnet restore` 獨立成層，再 `COPY . .` + `publish --no-restore`。與 `workflow/Dockerfile:9-14` 已有的做法一致。**紅線：不得抽共用 csproj**（已否決提案）。
 - [x] **W1-20** start-infra 提示需手動 build（`scripts/start-infra.ps1:9`、`scripts/start-infra.sh:11`）：加 `-Build`/`--build` opt-in 開關；未帶時印提示。不預設 build（多數模式 A 使用者只改主機上的 platform/frontend）。`*.sh` 維持 LF。
 

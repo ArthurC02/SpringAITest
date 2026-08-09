@@ -127,6 +127,12 @@ wait_http "$workflow" "$(port_of "$workflow" 8000)" /health
 wait_http "$platform" "$(port_of "$platform" 8080)" /actuator/health
 wait_http "$frontend" "$(port_of "$frontend" 8080)" /
 
+# frontend/nginx.conf 的縱深防禦標頭沒有任何自動化斷言,靜默被移除也不會讓測試變紅。
+frontend_headers="$(curl --fail --silent --show-error --max-time 2 -I "http://127.0.0.1:$(port_of "$frontend" 8080)/")"
+for header in 'X-Content-Type-Options' 'Referrer-Policy' 'X-Frame-Options' 'Content-Security-Policy'; do
+  echo "$frontend_headers" | grep -qi "^$header:" || { echo "frontend response missing $header header" >&2; exit 1; }
+done
+
 for container in "${containers[@]}"; do
   [ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = true ]
   docker inspect --format '{{json .HostConfig.CapDrop}}' "$container" | grep -q 'ALL'

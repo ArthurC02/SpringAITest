@@ -33,7 +33,7 @@ ASP.NET Core 10 + Python LangGraph + React 19 **monorepo**：平台層（.NET �
 | **B 全容器** | `./scripts/start-full.ps1` | 容器 | 容器 | 容器 | 容器 nginx |
 | **C 無容器** | `./scripts/start-lite.ps1` | 本機 | 本機 | 主機 `dotnet run` | 主機 `npm run dev` |
 
-Windows 用 `.ps1`（需 PowerShell 7+），Linux/macOS 用同名 `.sh`（首次需 `chmod +x scripts/*.sh`）。
+Windows 用 `.ps1`（需 PowerShell 7+），Linux/macOS 用同名 `.sh`（首次需 `chmod +x scripts/*.sh`）。例外：D3/D5/D6/D7 與 copilot-shared-core 系列的 `verify-*` 驗證腳本目前只提供 pwsh 版本（`scripts/verify-agent-runtime-d3.ps1`、`verify-multi-agent-d5.ps1`、`verify-agent-chat-d6.ps1`、`verify-agent-governance-d7.ps1`、`verify-copilot-shared-core.ps1`、`verify-copilot-shared-core-evidence.ps1`），任何 OS 執行都需要安裝 PowerShell 7+。
 
 模式 A 預設不重建容器 image（多數人只在主機上改 platform/frontend）；backend/ 或 workflow/ 原始碼有異動時，加 `-Build`（`./scripts/start-infra.ps1 -Build`）或 `--build`（`./scripts/start-infra.sh --build`）才會重建。
 
@@ -77,12 +77,18 @@ Windows 用 `.ps1`（需 PowerShell 7+），Linux/macOS 用同名 `.sh`（首次
 | 旗標 | 開啟後功能 | 權限需求 |
 |------|-----------|---------|
 | `AGENT_BUILDER_ENABLED` | Agent 平台 Agents 標籤 | ADMIN |
+| `AGENT_TEST_RUN_ENABLED` | D3 Agent 測試主控台（system-admin test run）；需同時開啟 `AGENT_BUILDER_ENABLED` | ADMIN |
 | `WORKFLOW_DESIGNER_ENABLED` | Workflow Designer | `workflow.manage` |
 | `MULTI_AGENT_DISPATCH_ENABLED` | Root Orchestrator 執行 | `workflow.manage` |
+| `CONTEXT_ENRICHMENT_ENABLED` | E1/E3 Root Orchestrator context 豐富化（伺服端 context revisions）；需同時開啟 `MULTI_AGENT_DISPATCH_ENABLED` | 內部 API，無獨立使用者角色 |
 | `AGENT_CHAT_ENABLED` | Chat 路由至 Orchestrator | (需 allowlist) |
 | `AGENT_WRITE_TOOLS_ENABLED` | 寫入工具 + 批准工作流 | 批准者無需 `workflow.manage` |
 | `RUN_DISCOVERY_ENABLED` | 執行總覽 | `workflow.manage` |
 | `AGENT_TRIGGERS_ENABLED` | 排程觸發管理 | `workflow.manage` |
+| `PROMPT_ARTIFACTS_ENABLED` | P1 prompt manifest 組裝（租戶 canary；關閉時走常數組裝） | 無（伺服端行為，經租戶 config 生效） |
+| `PROMPT_ARTIFACTS_SHADOW` | P1 shadow 模式（observe-only 比對雜湊，仍用常數；僅在上一旗標開啟時有意義） | 無 |
+| `RUN_EVIDENCE_ENABLED` | E1 執行證據 ledger（`operations_run_evidence`） | `workflow.manage` + 需同時開啟 `AGENT_WRITE_TOOLS_ENABLED` |
+| `RUN_EVAL_ENABLED` | E2/E3 eval 套件與 runner | `workflow.manage` + 需同時開啟 `AGENT_WRITE_TOOLS_ENABLED` |
 
 ## 文件導覽
 
