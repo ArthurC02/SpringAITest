@@ -191,6 +191,14 @@ internal static class TestHelpers
         return client;
     }
 
+    public static HttpClient WithCapabilities(this HttpClient client, params string[] capabilities)
+    {
+        client.DefaultRequestHeaders.TryAddWithoutValidation(
+            IdentityHeaders.CapabilitiesHeader,
+            string.Join(' ', capabilities));
+        return client;
+    }
+
     public static async Task<JsonNode> ReadJsonAsync(this HttpResponseMessage response)
         => JsonNode.Parse(await response.Content.ReadAsStringAsync())
            ?? throw new InvalidOperationException("回應 body 不是有效 JSON");

@@ -23,7 +23,9 @@ public sealed class FeaturesApiTests
         Assert.False(body["contextEnrichmentEnabled"]!.GetValue<bool>());
         Assert.False(body["agentChatEnabled"]!.GetValue<bool>());
         Assert.False(body["agentWriteToolsEnabled"]!.GetValue<bool>());
-        Assert.Equal(7, body.AsObject().Count);
+        Assert.False(body["runDiscoveryEnabled"]!.GetValue<bool>());
+        Assert.False(body["agentTriggersEnabled"]!.GetValue<bool>());
+        Assert.Equal(9, body.AsObject().Count);
     }
 
     [Fact]
@@ -149,6 +151,29 @@ public sealed class FeaturesApiTests
         var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
         Assert.True(body["agentWriteToolsEnabled"]!.GetValue<bool>());
         Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
+    }
+
+    // O2(04-operations-trigger-plan.md §8):獨立 fail-closed,不依賴也不被任何其他旗標耦合。
+    [Fact]
+    public async Task Features_RunDiscoveryFlagIsIndependent()
+    {
+        using var factory = TestWebAppFactory.WithFlags("RUN_DISCOVERY_ENABLED");
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+        Assert.True(body["runDiscoveryEnabled"]!.GetValue<bool>());
+        Assert.False(body["agentTestRunEnabled"]!.GetValue<bool>());
+        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+    }
+
+    // O5(04-operations-trigger-plan.md §8):同樣獨立 fail-closed。實際發火另需 D5 dispatch,
+    // 但那是 backend 的執行期決策,不得在這個入口旗標上做 AND —— 兩者耦合會讓前端誤判入口。
+    [Fact]
+    public async Task Features_AgentTriggersFlagIsIndependent()
+    {
+        using var factory = TestWebAppFactory.WithFlags("AGENT_TRIGGERS_ENABLED");
+        var body = await (await factory.CreateClient().GetAsync("/api/features")).ReadJsonAsync();
+        Assert.True(body["agentTriggersEnabled"]!.GetValue<bool>());
+        Assert.False(body["multiAgentDispatchEnabled"]!.GetValue<bool>());
+        Assert.False(body["runDiscoveryEnabled"]!.GetValue<bool>());
     }
 
     // 每個旗標的「獨立」測試都只在其他旗標全關的基準上開一個;全開這格補上另一端:

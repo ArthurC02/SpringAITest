@@ -19,6 +19,8 @@ using Backend.Api.OperationsGovernance;
 using Backend.Api.Contexts;
 using Backend.Api.PromptArtifacts;
 using Backend.Api.CheckpointRetention;
+using Backend.Api.RunDiscovery;
+using Backend.Api.Triggers;
 using Microsoft.AspNetCore.Mvc;
 
 // 專用 migration 行程:與一般啟動完全分離的分支,在建 host 之前就結束。
@@ -79,6 +81,17 @@ var runEvalEnabled = string.Equals(cfg["RUN_EVAL_ENABLED"], "true", StringCompar
 // publish ignore `prompt_manifest_revision`, leaving the publish path byte-for-byte unchanged.
 var promptArtifactsEnabled = string.Equals(cfg["PROMPT_ARTIFACTS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 builder.Services.AddSingleton(new PromptArtifactsState(promptArtifactsEnabled));
+// O2: independently fail-closed (04-operations-trigger-plan.md §8, "tenant + exact capability").
+// Off hides the entire GET /api/runs unified list; it neither depends on nor gates any other flag
+// and never changes the pre-existing per-run detail/approval/orchestrator-run endpoints.
+var runDiscoveryEnabled = string.Equals(cfg["RUN_DISCOVERY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+builder.Services.AddSingleton(new RunDiscoveryState(runDiscoveryEnabled));
+// O5 one-shot durable triggers (04-operations-trigger-plan.md §8): independently fail-closed. Off
+// hides the whole /api/admin/triggers family and never starts the poller. It carries
+// MULTI_AGENT_DISPATCH_ENABLED alongside because a fire may only ever go through the D5 root
+// command path -- with dispatch off, a due occurrence records failed_dispatch_disabled and no run.
+var agentTriggersEnabled = string.Equals(cfg["AGENT_TRIGGERS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+builder.Services.AddSingleton(new AgentTriggersState(agentTriggersEnabled, multiAgentDispatchEnabled));
 builder.Services.AddSingleton(sp => new BackendReadinessProbe(
     databaseRequired: !useInMemoryDb && !builder.Environment.IsEnvironment("Testing"),
     sp.GetService<Npgsql.NpgsqlDataSource>()));
@@ -109,6 +122,8 @@ if (useInMemoryDb)
     builder.Services.AddSingleton<IContextRepository, InMemoryContextRepository>();
     builder.Services.AddSingleton<IPromptArtifactRepository, InMemoryPromptArtifactRepository>();
     builder.Services.AddSingleton<ICheckpointRetentionRepository, InMemoryCheckpointRetentionRepository>();
+    builder.Services.AddSingleton<IRunDiscoveryRepository, InMemoryRunDiscoveryRepository>();
+    builder.Services.AddSingleton<ITriggerRepository, InMemoryTriggerRepository>();
 }
 else
 {
@@ -131,6 +146,19 @@ else
     builder.Services.AddScoped<IEvalRepository, EvalRepository>();
     builder.Services.AddScoped<IContextRepository, ContextRepository>();
     builder.Services.AddScoped<IPromptArtifactRepository, PromptArtifactRepository>();
+    builder.Services.AddScoped<IRunDiscoveryRepository, RunDiscoveryRepository>();
+    builder.Services.AddScoped<ITriggerRepository, TriggerRepository>();
+}
+
+// O5 fire path: registered regardless of the flag so the controller/DI graph stays uniform; only
+// the polling host below is conditional (an off flag must not start a worker).
+builder.Services.AddScoped<TriggerDispatcher>();
+if (agentTriggersEnabled && !builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddHostedService(sp => new TriggerDispatchService(
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<ILogger<TriggerDispatchService>>(),
+        TimeSpan.FromSeconds(15)));
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +343,16 @@ GateWhenDisabled(agentChatEnabled, path =>
     path.StartsWithSegments("/api/runtime-discovery")
     || path.StartsWithSegments("/api/chat-runs")
     || path.StartsWithSegments("/api/admin/runtime-binding"));
+
+// O2 unified runs/tasks list: exact-path match only (never a prefix) so the pre-existing
+// GET /api/runs/{id} (D3) and GET /api/runs/approvals (O3, reuses AGENT_WRITE_TOOLS_ENABLED) stay
+// unaffected while this flag is off.
+GateWhenDisabled(runDiscoveryEnabled, path =>
+    string.Equals(path.Value?.TrimEnd('/'), "/api/runs", StringComparison.OrdinalIgnoreCase));
+
+// O5 durable triggers: the whole family disappears while off, indistinguishable from a route that
+// was never registered (§8, "disabled 404 fail-closed").
+GateWhenDisabled(agentTriggersEnabled, path => path.StartsWithSegments("/api/admin/triggers"));
 
 // E2/E3 eval-suite/eval-run routes stay invisible while off, independently of every other flag
 // (including AGENT_WRITE_TOOLS_ENABLED, which separately gates the whole /api/admin/operations

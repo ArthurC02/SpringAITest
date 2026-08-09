@@ -1,11 +1,12 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useCopilotReadable, useCopilotAction } from '@copilotkit/react-core'
-import { CopilotSidebar } from '@copilotkit/react-ui'
-import type { ChatOrchestrator, Session } from '../types'
+import { CopilotSidebar, useChatContext } from '@copilotkit/react-ui'
+import type { ChatOrchestrator, DocumentInfo, Session } from '../types'
 import { useDocuments } from '../hooks/useDocuments'
 import { invokeSkill } from '../api/skills'
 import { getFeatures } from '../api/agents'
 import { listChatOrchestrators } from '../api/chatOrchestrators'
+import { COPILOT_INTRO_SHOWN_KEY } from '../storageKeys'
 import { ConfirmProvider } from './ConfirmDialog'
 import { ToastProvider } from './Toast'
 import ErrorBoundary from './ErrorBoundary'
@@ -13,13 +14,27 @@ import ChatView from './ChatView'
 import DocumentsView from './DocumentsView'
 import AnalysisView from './AnalysisView'
 import ConfigView from './ConfigView'
+import FeatureStatusView from './FeatureStatusView'
+import DocumentReadyNotifier, { type DocumentSettledEvent } from './DocumentReadyNotifier'
 import { agentPlatformTabs } from '../agentPlatformTabs'
 
 const AgentPlatformView = lazy(() => import('./AgentPlatformView'))
 const ApprovalInbox = lazy(() => import('./ApprovalInbox'))
 const OperationsGovernanceView = lazy(() => import('./OperationsGovernanceView'))
+const RunsView = lazy(() => import('./RunsView'))
+const TriggersView = lazy(() => import('./TriggersView'))
 
-type View = 'chat' | 'documents' | 'analysis' | 'config' | 'agentPlatform' | 'approvals' | 'operations'
+type View =
+  | 'chat'
+  | 'documents'
+  | 'analysis'
+  | 'config'
+  | 'features'
+  | 'agentPlatform'
+  | 'approvals'
+  | 'operations'
+  | 'runs'
+  | 'triggers'
 
 // copilot 的 switchView 只認四個原視圖(不含 Agent 平台,副駕不涉入 Agent Builder)。
 const VIEWS: View[] = ['chat', 'documents', 'analysis', 'config']
@@ -29,6 +44,9 @@ const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
   { id: 'documents', icon: '📄', label: '文件' },
   { id: 'analysis', icon: '📊', label: '分析' },
   { id: 'config', icon: '🔧', label: '系統設定', adminOnly: true },
+  // W4(規格 §4):唯讀呈現既有 /api/features 已取回的旗標,ADMIN-only 比照系統設定的
+  // adminOnly 側欄過濾模式(後端 /api/features 本身 AllowAnonymous,這裡只是 UX 慣例)。
+  { id: 'features', icon: '🚦', label: '功能開通狀態', adminOnly: true },
 ]
 
 // Agent 平台入口:Agents(D1)/Workflow Designer(D4)/Orchestrators(D4)三個分頁的共用入口,
@@ -36,6 +54,22 @@ const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
 const AGENT_PLATFORM_NAV = { id: 'agentPlatform' as const, icon: '🧑‍💼', label: 'Agent 平台' }
 const APPROVALS_NAV = { id: 'approvals' as const, icon: '✅', label: 'Approvals' }
 const OPERATIONS_NAV = { id: 'operations' as const, icon: '📈', label: 'Operations' }
+// O2(04-operations-trigger-plan.md §3):獨立側欄入口,gate 比照 Operations
+// (runDiscoveryEnabled && workflow.manage),與 agentWriteToolsEnabled 無關。
+const RUNS_NAV = { id: 'runs' as const, icon: '🗂️', label: '執行總覽' }
+// O5(04-operations-trigger-plan.md §6):一次性排程觸發器,gate 比照執行總覽
+// (agentTriggersEnabled && workflow.manage)。
+const TRIGGERS_NAV = { id: 'triggers' as const, icon: '⏰', label: '排程觸發' }
+
+/** 分頁標題查表:所有視圖(含旗標控管的入口)的中文 label,不另建第二份映射。 */
+const ALL_NAV: { id: View; label: string }[] = [
+  ...NAV,
+  AGENT_PLATFORM_NAV,
+  APPROVALS_NAV,
+  OPERATIONS_NAV,
+  RUNS_NAV,
+  TRIGGERS_NAV,
+]
 
 /** fail-closed 起始值:也是 GET /api/features 失敗時要回到的狀態。 */
 const FLAGS_OFF = {
@@ -45,6 +79,58 @@ const FLAGS_OFF = {
   multiAgentDispatchEnabled: false,
   agentChatEnabled: false,
   agentWriteToolsEnabled: false,
+  runDiscoveryEnabled: false,
+  agentTriggersEnabled: false,
+}
+
+/**
+ * 首次登入自動展開副駕一次（C8/WS3）：localStorage 旗標一旦寫入就不再自動展開，
+ * 之後尊重使用者自己的開關狀態。純前端偏好，不建後端 API（YAGNI）。
+ * `defaultOpen` 只在 CopilotSidebar 掛載當下讀一次，所以這裡必須在 render 階段
+ * 同步算出結果（不能用 useEffect，否則副駕已經用舊值掛載完了）。
+ */
+function shouldOpenCopilotOnFirstLogin(): boolean {
+  try {
+    if (localStorage.getItem(COPILOT_INTRO_SHOWN_KEY)) return false
+    localStorage.setItem(COPILOT_INTRO_SHOWN_KEY, '1')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 橋接元件：CopilotSidebar 的開合狀態只活在函式庫內部（無受控 `open` prop），
+ * 但 `useChatContext()` 在 children 位置就能拿到內部的 `setOpen`。掛在
+ * `<CopilotSidebar>` 的 children 裡把 setOpen 交給外層 ref，讓「問這份文件」之類
+ * 的外部動作也能展開副駕。
+ */
+function CopilotOpenController({ onReady }: { onReady: (setOpen: (open: boolean) => void) => void }) {
+  const { setOpen } = useChatContext()
+  useEffect(() => {
+    onReady(setOpen)
+  }, [setOpen, onReady])
+  return null
+}
+
+// 副駕浮動開合鈕加文字標籤（C8/WS3）：CopilotSidebar 的 `Button` prop 是官方客製 slot
+// （見 @copilotkit/react-ui Modal.tsx），不需要硬改函式庫內部 DOM。沿用 useChatContext
+// 拿 open/setOpen，樣式走自訂 class（.copilot-launcher，見 App.css），不重用函式庫的
+// 圓形圖示按鈕內部結構。
+function CopilotLauncherButton() {
+  const { open, setOpen } = useChatContext()
+  return (
+    <button
+      type="button"
+      className="copilot-launcher"
+      aria-label={open ? '收合 AI 助理' : '開啟 AI 助理'}
+      aria-expanded={open}
+      onClick={() => setOpen(!open)}
+    >
+      <span aria-hidden="true">{open ? '✕' : '💬'}</span>
+      <span>AI 助理</span>
+    </button>
+  )
 }
 
 interface Props {
@@ -64,6 +150,10 @@ export default function AppShell({
   const [view, setView] = useState<View>('chat')
   const [flags, setFlags] = useState(FLAGS_OFF)
   const [chatOrchestrators, setChatOrchestrators] = useState<ChatOrchestrator[]>([])
+  const [copilotDefaultOpen] = useState(shouldOpenCopilotOnFirstLogin)
+  const copilotSetOpenRef = useRef<((open: boolean) => void) | null>(null)
+  const [focusedDocument, setFocusedDocument] = useState<{ id: string; title: string } | null>(null)
+  const [documentEvents, setDocumentEvents] = useState<DocumentSettledEvent[]>([])
   const isAdmin = session.role === 'ADMIN'
   // Capability comparison is exact: `workflow.manage.other` is never sufficient.
   const canManageWorkflow = (session.capabilities ?? []).includes('workflow.manage')
@@ -81,6 +171,8 @@ export default function AppShell({
     ...(showAgentPlatform ? [AGENT_PLATFORM_NAV] : []),
     ...(flags.agentWriteToolsEnabled ? [APPROVALS_NAV] : []),
     ...(flags.agentWriteToolsEnabled && canManageWorkflow ? [OPERATIONS_NAV] : []),
+    ...(flags.runDiscoveryEnabled && canManageWorkflow ? [RUNS_NAV] : []),
+    ...(flags.agentTriggersEnabled && canManageWorkflow ? [TRIGGERS_NAV] : []),
   ]
 
   // features flag:失敗或 false 一律 fail-closed(不顯示 Agents 入口)。登入即取一次。
@@ -97,6 +189,8 @@ export default function AppShell({
             multiAgentDispatchEnabled: !!f.multiAgentDispatchEnabled,
             agentChatEnabled: !!f.agentChatEnabled,
             agentWriteToolsEnabled: !!f.agentWriteToolsEnabled,
+            runDiscoveryEnabled: !!f.runDiscoveryEnabled,
+            agentTriggersEnabled: !!f.agentTriggersEnabled,
           })
         }
       })
@@ -134,15 +228,26 @@ export default function AppShell({
 
   // useDocuments 提升到此層：AppShell 的 copilot action(建立/刪除)與 DocumentsView 共用
   // 同一份狀態,避免兩處各自實例化造成雙重輪詢(見契約)。DocumentsView 改吃 props。
-  const documents = useDocuments()
+  // onSettled(WS1-b):文件轉態偵測留在 useDocuments 內部,這裡只是把已發生的事件
+  // 轉存成 state,實際跳 toast 交給常駐的 DocumentReadyNotifier(見下方 render)。
+  const documents = useDocuments((doc) => {
+    setDocumentEvents((events) => [...events, { key: crypto.randomUUID(), doc }])
+  })
+
+  // 「問這份文件」(WS1-a):展開副駕並把目標文件寫進 readable,讓使用者接著提問時
+  // 副駕已經知道「問的是哪份文件」——不新增 API 欄位,純前端上下文注入。
+  function askAboutDocument(doc: DocumentInfo) {
+    setFocusedDocument({ id: doc.id, title: doc.title })
+    copilotSetOpenRef.current?.(true)
+  }
+
+  const registerCopilotSetOpen = useCallback((setOpen: (open: boolean) => void) => {
+    copilotSetOpenRef.current = setOpen
+  }, [])
 
   // 分頁標題隨視圖更新（沿用 NAV 的中文 label，不另建映射）。
   useEffect(() => {
-    const label =
-      view === 'agentPlatform' ? AGENT_PLATFORM_NAV.label
-        : view === 'approvals' ? APPROVALS_NAV.label
-          : view === 'operations' ? OPERATIONS_NAV.label
-            : NAV.find((n) => n.id === view)?.label ?? ''
+    const label = ALL_NAV.find((n) => n.id === view)?.label ?? ''
     document.title = `${label} — 資料分析平台`
   }, [view])
 
@@ -166,6 +271,14 @@ export default function AppShell({
       })),
     },
     [documents.docs],
+  )
+  useCopilotReadable(
+    {
+      description:
+        '使用者剛在文件列表按下「問這份文件」動作,目前想問的文件(若非 null,回答問題前先假設問的是這份文件,除非使用者另外說明)',
+      value: focusedDocument,
+    },
+    [focusedDocument],
   )
   // 分析摘要的 readable 刻意掛在 AnalysisView 內(只有該視圖開著才餵),避免此層多一支常駐輪詢。
 
@@ -265,6 +378,9 @@ export default function AppShell({
 
   return (
     <ToastProvider>
+      {/* 常駐於 ToastProvider 子樹、與 view 切換無關,確保「文件轉 ready」通知
+          在任何視圖都能跳出來(見 useDocuments 的 onSettled 與 DocumentReadyNotifier 註解)。 */}
+      <DocumentReadyNotifier events={documentEvents} />
       <ConfirmProvider>
       <div className="shell">
         <aside className="shell__sidebar">
@@ -310,9 +426,12 @@ export default function AppShell({
                   onSelectOrchestrator={onSelectOrchestrator}
                 />
               )}
-              {view === 'documents' && <DocumentsView documents={documents} />}
+              {view === 'documents' && (
+                <DocumentsView documents={documents} onAskDocument={askAboutDocument} />
+              )}
               {view === 'analysis' && <AnalysisView />}
               {view === 'config' && <ConfigView isAdmin={isAdmin} />}
+              {view === 'features' && <FeatureStatusView flags={flags} />}
               {view === 'agentPlatform' && showAgentPlatform && (
                 <AgentPlatformView
                   isAdmin={isAdmin}
@@ -327,20 +446,24 @@ export default function AppShell({
               {view === 'operations' && flags.agentWriteToolsEnabled && canManageWorkflow && (
                 <OperationsGovernanceView />
               )}
+              {view === 'runs' && flags.runDiscoveryEnabled && canManageWorkflow && <RunsView />}
+              {view === 'triggers' && flags.agentTriggersEnabled && canManageWorkflow && <TriggersView />}
               </Suspense>
             </ErrorBoundary>
           </main>
         </div>
 
-        {/* 全站 AI 副駕:浮動側欄(自帶開合鈕),不動既有五視圖版面。defaultOpen=false。 */}
+        {/* 全站 AI 副駕:浮動側欄(自帶開合鈕),不動既有五視圖版面。
+            首次登入 defaultOpen 一次性為 true(見 shouldOpenCopilotOnFirstLogin),之後尊重使用者自己的開關狀態。 */}
         <div data-testid="copilot-sidebar">
           <CopilotSidebar
-            defaultOpen={false}
+            defaultOpen={copilotDefaultOpen}
+            Button={CopilotLauncherButton}
             instructions={[
               '你是「資料分析平台」的操作助理,一律以繁體中文簡潔回答。',
               '',
               '平台操作手冊(使用者問「怎麼做」時照此說明步驟):',
-              '- 文件:AI 檢索用的知識庫。新增:文件視圖 → 填標題 → 內容來源選「上傳檔案」(.txt/.md)或「貼上文字」→ 按「新增文件」。送出後狀態「處理中」,背景切塊與向量化完成後轉「就緒」,失敗則顯示「失敗」;清單可刪除文件。',
+              '- 文件:AI 檢索用的知識庫。新增:文件視圖 → 填標題 → 內容來源選「上傳檔案」(.txt/.md)或「貼上文字」→ 按「新增文件」。送出後狀態「處理中」,背景切塊與向量化完成後轉「就緒」,失敗則顯示「失敗」;清單可刪除文件。就緒的文件列會有「問這份文件」鈕,按下會展開你並帶入該文件,之後的提問預設針對這份文件(除非使用者另外說明)。',
               '- 聊天:與 AI 對話(串流回覆),「新對話」會重開上下文。',
               '- 分析:查看統計摘要。',
               '- 系統設定:僅管理員(ADMIN)可見可改。「業務流程」管理 YAML 宣告式流程；「Agent Skills」管理 SKILL.md 套件並可上傳、編輯、下載。兩區都可試跑與查看版本；試跑會執行已存在的能力並可展開節點軌跡。',
@@ -356,7 +479,9 @@ export default function AppShell({
                 '嗨,我是 AI 副駕,懂這個平台的操作,也能直接代勞。試試:\n・「文件功能怎麼用?」\n・「幫我把這段文字存成文件:…」\n・「用知識庫回答:…」\n・「切到分析頁」',
               placeholder: '輸入訊息…',
             }}
-          />
+          >
+            <CopilotOpenController onReady={registerCopilotSetOpen} />
+          </CopilotSidebar>
         </div>
       </div>
       </ConfirmProvider>

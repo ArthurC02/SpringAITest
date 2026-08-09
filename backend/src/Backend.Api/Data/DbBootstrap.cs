@@ -414,6 +414,9 @@ public static class DbBootstrap
             REFERENCES workflow_revision(workflow_id, revision));
         CREATE INDEX IF NOT EXISTS ix_agent_run_tenant_owner_updated
           ON agent_run (tenant_id, user_id, updated_at DESC);
+        -- O2 unified runs/tasks list: cross-run keyset pagination by (tenant, owner, created_at DESC, id DESC).
+        CREATE INDEX IF NOT EXISTS ix_agent_run_tenant_owner_created
+          ON agent_run (tenant_id, user_id, created_at DESC, id DESC);
         -- D7: an approval binds exactly one server-generated action fingerprint and
         -- has no reusable browser token. Decisions are append-only/idempotent.
         ALTER TABLE agent_run DROP CONSTRAINT IF EXISTS ck_agent_run_status;
@@ -429,6 +432,8 @@ public static class DbBootstrap
           CHECK(action_fingerprint ~ '^[0-9a-f]{64}$'),
           CHECK(required_role ~ '^[A-Z][A-Z0-9_]{0,63}$'));
         CREATE INDEX IF NOT EXISTS ix_agent_run_approval_pending ON agent_run_approval(run_id,status,expires_at);
+        -- O3 discoverable approval queue: cross-run keyset pagination by (tenant, created_at DESC, id DESC).
+        CREATE INDEX IF NOT EXISTS ix_agent_run_approval_tenant_created ON agent_run_approval(tenant_id,created_at DESC,id DESC);
         CREATE TABLE IF NOT EXISTS agent_run_approval_decision (
           approval_id uuid NOT NULL REFERENCES agent_run_approval(id), idempotency_key_sha256 text NOT NULL,
           decision text NOT NULL CHECK(decision IN ('approved','rejected')), approver_id text NOT NULL,
@@ -471,6 +476,9 @@ public static class DbBootstrap
           checkpoint_ref text, checkpoint_version bigint NOT NULL DEFAULT 0,
           deadline_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
           UNIQUE(tenant_id,user_id,idempotency_key_sha256));
+        -- O2 unified runs/tasks list: cross-run keyset pagination by (tenant, owner, created_at DESC, id DESC).
+        CREATE INDEX IF NOT EXISTS ix_orchestrator_run_tenant_owner_created
+          ON orchestrator_run (tenant_id, user_id, created_at DESC, id DESC);
         ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS workflow_dispatch_snapshot jsonb;
         ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS workflow_dispatch_snapshot_canonical bytea;
         ALTER TABLE orchestrator_run ADD COLUMN IF NOT EXISTS workflow_dispatch_snapshot_sha256 text;
@@ -945,6 +953,55 @@ public static class DbBootstrap
         ALTER TABLE agent_revision
           ADD COLUMN IF NOT EXISTS prompt_manifest_revision integer,
           ADD COLUMN IF NOT EXISTS prompt_manifest_sha256 text;
+        -- O5 one-shot durable triggers (AGENT_TRIGGERS_ENABLED, 04-operations-trigger-plan.md §6).
+        -- principal_snapshot is the immutable grant snapshot taken from the creator at creation time
+        -- (§6.1): firing re-reads it instead of the creator's current permissions, so authority can
+        -- never silently widen. input_mapping is the sanitized flat string map validated by
+        -- TriggerInputMapping before it ever reaches this table. `version` is the D1-style
+        -- optimistic-lock counter surfaced as the ETag.
+        CREATE TABLE IF NOT EXISTS agent_trigger (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL,
+          name text NOT NULL, description text NOT NULL DEFAULT '',
+          orchestrator_id uuid NOT NULL, orchestrator_revision integer NOT NULL,
+          -- Canonical JSON *text*, not jsonb: jsonb reorders object keys on read, which would make
+          -- the stored mapping differ byte-for-byte from the canonical form the caller pinned.
+          input_mapping text NOT NULL, fire_at timestamptz NOT NULL,
+          misfire_window_seconds integer NOT NULL,
+          status text NOT NULL DEFAULT 'scheduled'
+            CHECK(status IN ('scheduled','cancelled','fired','misfired','failed')),
+          created_by text NOT NULL, principal_snapshot jsonb NOT NULL,
+          version bigint NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+          CHECK (char_length(name) BETWEEN 1 AND 128),
+          CHECK (orchestrator_revision >= 1),
+          CHECK (misfire_window_seconds BETWEEN 1 AND 86400));
+        -- Name uniqueness is scoped to *scheduled* triggers only: §1 makes one-shot rescheduling
+        -- "cancel then recreate" (no in-place update route), so a cancelled/fired/misfired row must
+        -- free its name back up or that documented recreate path 409s forever. A table-level UNIQUE
+        -- constraint can't express that, so existing deployments drop it and replace it with the
+        -- partial index below (idempotent: DROP CONSTRAINT IF EXISTS no-ops once already migrated).
+        ALTER TABLE agent_trigger DROP CONSTRAINT IF EXISTS uq_agent_trigger_tenant_name;
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_trigger_tenant_name
+          ON agent_trigger (tenant_id, name) WHERE status = 'scheduled';
+        -- The fire ledger. `id` is derived from (trigger id, scheduled_for) by TriggerOccurrenceId,
+        -- so a restart re-deriving it collides with the existing primary key instead of creating a
+        -- second occurrence -- that primary key is the at-most-once guarantee. claim_token_sha256 /
+        -- claim_expires_at follow orchestrator_run_command's fencing shape and are never projected
+        -- into any response DTO.
+        CREATE TABLE IF NOT EXISTS agent_trigger_occurrence (
+          id uuid PRIMARY KEY, trigger_id uuid NOT NULL REFERENCES agent_trigger(id) ON DELETE CASCADE,
+          tenant_id text NOT NULL, scheduled_for timestamptz NOT NULL,
+          status text NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','claimed','fired','skipped_cancelled','skipped_misfired',
+              'failed_principal_unavailable','failed_target_missing','failed_target_unpublished',
+              'failed_target_revision_changed','failed_dispatch_disabled','failed_root_rejected')),
+          claim_owner text, claim_token_sha256 text, claim_expires_at timestamptz,
+          attempt integer NOT NULL DEFAULT 0, root_run_id uuid,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+        CREATE INDEX IF NOT EXISTS ix_agent_trigger_occurrence_due
+          ON agent_trigger_occurrence (scheduled_for) WHERE status IN ('pending','claimed');
+        CREATE INDEX IF NOT EXISTS ix_agent_trigger_occurrence_trigger
+          ON agent_trigger_occurrence (trigger_id, scheduled_for DESC, id DESC);
         """;
 
     public static async Task RunAsync(NpgsqlDataSource dataSource, ILogger logger, CancellationToken ct = default)

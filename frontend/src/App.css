@@ -59,6 +59,17 @@
   padding: 0 4px;
 }
 
+/* 聊天氣泡的 skill 來源徽章（WS1-c）：剝離尾端 sentinel 後才會出現。 */
+.bubble__source {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--code-bg);
+  color: var(--text);
+  align-self: flex-start;
+}
+
 .bubble__content {
   padding: 10px 14px;
   border-radius: 14px;
@@ -326,6 +337,15 @@
   gap: 4px;
   margin-bottom: 12px;
 }
+/* 並排過濾欄位(例：執行總覽的狀態/種類下拉)；窄螢幕自動換行。 */
+.field-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.field-row .field {
+  min-width: 160px;
+}
 .field label,
 #doc-source-label {
   font-size: 13px;
@@ -433,6 +453,11 @@
   color: var(--text);
   font-weight: 600;
   font-size: 12px;
+}
+.table__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .cards {
@@ -994,6 +1019,37 @@ cpk-thread-inspector {
   align-items: flex-start;
 }
 
+/* 副駕浮動開合鈕加文字標籤（C8/WS3）：透過 CopilotSidebar 的官方 Button slot
+   客製（見 AppShell 的 CopilotLauncherButton),定位沿用函式庫 .copilotKitSidebar
+   本身的 fixed bottom/right,這裡只管按鈕外觀,不碰函式庫內部 DOM。 */
+.copilot-launcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--copilot-kit-shadow-md, 0 2px 10px rgba(0, 0, 0, 0.2));
+  transition: transform 0.2s ease;
+}
+.copilot-launcher:hover {
+  transform: scale(1.03);
+}
+.copilot-launcher:active {
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  .copilot-launcher {
+    transition: none;
+  }
+}
+
 /* ── loading 骨架（各視圖共用一套；微光受 prefers-reduced-motion 保護） ── */
 .skeleton-group {
   display: flex;
@@ -1324,6 +1380,10 @@ cpk-thread-inspector {
   font-size: 12px;
   margin: 0 0 6px;
 }
+/* Approvals 佇列:過期／不可核准項降低視覺權重，但仍可點開查看。 */
+.approval-queue-item--muted {
+  opacity: 0.65;
+}
 .agent-set__empty {
   border: 1px solid var(--warning);
   background: var(--warning-bg);
@@ -1371,6 +1431,51 @@ cpk-thread-inspector {
 .agent-set__add .input {
   width: auto;
   flex: 1;
+}
+/* W5：Output contract 鍵值對編輯器（AgentEditor 的 AgentCapabilityOutputSection）。 */
+.agent-kv {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-kv__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.agent-kv__key {
+  font-family: var(--mono);
+  font-size: 13px;
+  min-width: 100px;
+}
+.agent-kv__row .input {
+  flex: 1;
+  min-width: 120px;
+}
+/* W5 補充：Output contract 頂層鍵不在 D3 執行期白名單內的非阻斷提示
+   (workflow/app/runtime/output_contract.py `_KEYS`，兩邊需同步)。 */
+.agent-kv__warnings {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.agent-kv__warn {
+  border: 1px solid var(--warning);
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 .agent-roles {
   display: flex;

@@ -37,6 +37,8 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
         ["MULTI_AGENT_DISPATCH_ENABLED"] = "false",
         ["CONTEXT_ENRICHMENT_ENABLED"] = "false",
         ["AGENT_WRITE_TOOLS_ENABLED"] = "false",
+        ["RUN_DISCOVERY_ENABLED"] = "false",
+        ["AGENT_TRIGGERS_ENABLED"] = "false",
         // D6 chat canary:旗標與逗號分隔的伺服器端租戶白名單是兩個獨立條件(兩者皆通過才進 canary),
         // 故兩個鍵分開,允許測「已啟用但租戶不在白名單」這一格。
         ["AGENT_CHAT_ENABLED"] = "false",
@@ -203,6 +205,9 @@ public class TestWebAppFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IOrchestratorRunService>();
             services.AddScoped<IOrchestratorRunService, FakeOrchestratorRunService>();
+
+            services.RemoveAll<IRunDiscoveryService>();
+            services.AddScoped<IRunDiscoveryService, FakeRunDiscoveryService>();
         });
     }
 

@@ -594,6 +594,88 @@ export interface RunApproval {
   decidedAt: string | null
 }
 
+/** O3 discoverable approval queue scope predicate. */
+export type ApprovalQueueScope = 'visible' | 'actionable'
+
+/**
+ * GET /api/runs/approvals 一列。跨 run 的佇列投影，比 {@link RunApproval} 多帶 run/Agent identity
+ * 與 server 授權判斷結果（actionable），但同樣絕不含 raw arguments、fingerprints、checkpoint、
+ * effect identity 或 lease（O3 §4 明文）。
+ */
+export interface ApprovalQueueEntry {
+  approvalId: string
+  runId: string | null
+  agentId: string | null
+  agentRevision: number | null
+  status: string
+  requiredRole: string | null
+  actionSummary: string | null
+  createdAt: string | null
+  expiresAt: string | null
+  actionable: boolean
+}
+
+/** GET /api/runs/approvals 分頁信封；cursor 為 opaque token，只能原樣回帶，不解析內容。 */
+export interface ApprovalQueuePage {
+  items: ApprovalQueueEntry[]
+  hasMore: boolean
+  cursor: string | null
+}
+
+// ── O2 Unified Runs and Tasks center(Phase O2,GET /api/runs)。Backend 契約固定
+// snake_case(見 RunDiscoveryDtos.cs 逐一 JsonPropertyName),沒有 camelCase 別名要並存,
+// 故正規化只取單一鍵名(見 api/runs.ts),不比照 D7/O3 那種雙命名 pick()。────────────
+
+export interface RunChildProgress {
+  total: number
+  queued: number
+  running: number
+  completed: number
+  failed: number
+  cancelled: number
+}
+
+/**
+ * GET /api/runs 一列(O2 安全摘要投影)。刻意排除 prompt 文字、工具參數/結果值、
+ * checkpoint identity、effect identity、lease 或 idempotency key(比照 D5 公開 root events
+ * 與 O3 佇列投影的去識別化原則)。`kind` 未列舉值原樣顯示,不擋新種類。
+ */
+export interface RunSummaryItem {
+  id: string
+  kind: string
+  status: string
+  orchestratorRootRunId: string | null
+  taskId: string | null
+  agentId: string | null
+  agentRevision: number | null
+  orchestratorId: string | null
+  orchestratorRevision: number | null
+  workflowId: string
+  workflowRevision: number
+  cancelRequested: boolean
+  /** 任意形狀的技術欄位,只放展開區逐鍵顯示,不整包 JSON dump。 */
+  budgetSummary: unknown
+  lastEventType: string | null
+  lastEventAt: string | null
+  /** 僅協作 root 列才有(其餘 kind 為 null)。 */
+  childProgress: RunChildProgress | null
+  errorClass: string | null
+  pendingApproval: boolean
+  needsRecovery: boolean
+  startedAt: string | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+  elapsedSeconds: number
+}
+
+/** GET /api/runs 分頁信封;cursor 為 opaque token,只能原樣回帶。 */
+export interface RunDiscoveryPage {
+  items: RunSummaryItem[]
+  hasMore: boolean
+  cursor: string | null
+}
+
 // ── D7 Operations/release cockpit(Phase O1)。metrics 混用命名:外層/release_gate 是
 // 顯式 snake_case,agents/skills/tools/nodes/aggregation 內層是 record 預設 camelCase
 // (backend 沒有額外標 JsonPropertyName)——這裡統一正規化成 camelCase 給前端用,
@@ -800,7 +882,11 @@ export interface AgentDraft {
   runtime_workflow?: AgentWorkflowRef
 }
 
-/** GET /api/agents 一列（清單）。`published_revision=null` 表示尚未發布。 */
+/**
+ * GET /api/agents 一列（清單）。`published_revision=null` 表示尚未發布。
+ * `published_execution_roles`:已發布 revision 的執行角色（如 `worker`/`verifier`）；
+ * 選填——未發布時省略，legacy 資料容錯為 null（呼叫端須 fail-open：缺席/null 不代表沒有角色）。
+ */
 export interface AgentSummary {
   id: string
   name: string
@@ -808,6 +894,7 @@ export interface AgentSummary {
   description: string
   enabled: boolean
   published_revision: number | null
+  published_execution_roles?: string[] | null
   updated_at: string
 }
 
@@ -898,4 +985,47 @@ export interface TraceEntry {
   error_code?: string
   component_version?: string
   failure_codes?: string[]
+}
+
+/**
+ * O5 一次性排程觸發器(plans/agent-architecture-improvements/04-operations-trigger-plan.md §6)。
+ * 白名單投影:principal 快照全文、lease/fencing token、idempotency key 一律不落地、不渲染。
+ */
+export interface Trigger {
+  id: string
+  name: string
+  orchestratorId: string | null
+  orchestratorRevision: number | null
+  fireAt: string | null
+  status: string
+  inputMapping: Record<string, unknown>
+  createdBy: string | null
+}
+
+/**
+ * fire ledger 一列;`status` 是後端的 bounded enum,失敗/略過的原因就併在它的前綴裡
+ * (`skipped_*`/`failed_*`),後端刻意不另開原因欄位,也不回原始訊息。
+ * 觸發結果(root run)只存在於 occurrence,trigger 本身沒有這個欄位。
+ */
+export interface TriggerOccurrence {
+  id: string
+  scheduledFor: string | null
+  status: string
+  rootRunId: string | null
+  createdAt: string | null
+}
+
+export interface TriggerOccurrencePage {
+  items: TriggerOccurrence[]
+  hasMore: boolean
+  cursor: string | null
+}
+
+export interface TriggerCreateRequest {
+  name: string
+  orchestratorId: string
+  orchestratorRevision: number
+  /** 絕對 UTC 時刻(ISO 8601);timezone 只在前端輸入層轉換。 */
+  fireAt: string
+  inputMapping: Record<string, unknown>
 }

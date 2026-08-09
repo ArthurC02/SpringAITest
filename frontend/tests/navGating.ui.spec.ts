@@ -14,13 +14,15 @@ const CHAT = /聊天/
 const DOCUMENTS = /文件/
 const ANALYSIS = /分析/
 const CONFIG = /系統設定/
+// W4:功能開通狀態頁,adminOnly 側欄過濾(比照系統設定),不受任何 feature flag 影響。
+const FEATURES = /功能開通狀態/
 // D1/D4 now share one sidebar entry; the per-tab flag+capability gating lives inside
 // `AgentPlatformView` and is asserted by the tab-level cases at the bottom of this file.
 const AGENT_PLATFORM = /Agent 平台/
 const APPROVALS = /Approvals/
 const OPERATIONS = /Operations/
 
-const ADMIN_BASE = [CHAT, DOCUMENTS, ANALYSIS, CONFIG]
+const ADMIN_BASE = [CHAT, DOCUMENTS, ANALYSIS, CONFIG, FEATURES]
 const USER_BASE = [CHAT, DOCUMENTS, ANALYSIS]
 
 interface Scenario {

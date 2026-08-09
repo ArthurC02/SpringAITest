@@ -80,6 +80,14 @@ var agentChatEnabled = string.Equals(
     cfg["AGENT_CHAT_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 var agentWriteToolsEnabled = string.Equals(
     cfg["AGENT_WRITE_TOOLS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+// O2 "Unified Runs and Tasks center"(04-operations-trigger-plan.md §8):獨立 fail-closed,
+// 關閉時整個 GET /api/runs fail-closed 回 404,在認證之前;不依賴也不影響任何其他旗標。
+var runDiscoveryEnabled = string.Equals(
+    cfg["RUN_DISCOVERY_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
+// O5 one-shot durable triggers(04-operations-trigger-plan.md §8):獨立 fail-closed,
+// 關閉時整個 /api/admin/triggers* 在認證之前回 404;不依賴也不影響任何其他旗標。
+var agentTriggersEnabled = string.Equals(
+    cfg["AGENT_TRIGGERS_ENABLED"], "true", StringComparison.OrdinalIgnoreCase);
 // P1 prompt manifest(plans/agent-architecture-improvements/03-prompt-model-runtime-plan.md §7):
 // 關閉時 PromptCompositionResolver 完全不註冊,兩條聊天鏈路的組成逐位元回到現行 constants;
 // shadow 是它的子模式(兩種組成都算、只比 hash、實際仍用 constants)。
@@ -145,6 +153,10 @@ builder.Services.AddScoped<ISkillService, SkillService>();
 builder.Services.AddScoped<IConfigurationSetService, ConfigurationSetService>();
 builder.Services.AddScoped<IAgentService, AgentService>();
 builder.Services.AddScoped<IWorkflowAdminService, WorkflowAdminService>();
+// O2 "Unified Runs and Tasks center": pure read-only Backend proxy, no separate outbound
+// Workflow kick — same posture as AgentService/ConfigService, no dedicated HttpClient needed
+// beyond the shared BackendClient.
+builder.Services.AddScoped<IRunDiscoveryService, RunDiscoveryService>();
 builder.Services.AddHttpClient<IAgentRunService, AgentRunService>(
         c => c.Timeout = TimeSpan.FromSeconds(150))
     .WithInternalDownstreamDefaults();
@@ -546,14 +558,35 @@ UseDisabledFeatureGate(
         // is disabled.  Its own gate below remains fail-closed.
         var isApprovalRoute = path.StartsWith("/api/runs/", StringComparison.OrdinalIgnoreCase)
             && path.Contains("/approvals", StringComparison.OrdinalIgnoreCase);
-        var isRunRoute = context.Request.Path.StartsWithSegments("/api/runs") && !isApprovalRoute;
         var normalizedPath = path.TrimEnd('/');
+        // O2's unified list (04-operations-trigger-plan.md §8) is independently fail-closed and
+        // also spans D5 orchestrator roots, which have nothing to do with the D3 test console --
+        // its own gate below is the only thing that may hide this exact bare path.
+        var isUnifiedListRoute = string.Equals(normalizedPath, "/api/runs", StringComparison.OrdinalIgnoreCase);
+        var isRunRoute = context.Request.Path.StartsWithSegments("/api/runs")
+            && !isApprovalRoute && !isUnifiedListRoute;
         var isAgentRunStart = normalizedPath.StartsWith(
                 "/api/agents/",
                 StringComparison.OrdinalIgnoreCase)
             && normalizedPath.EndsWith("/runs", StringComparison.OrdinalIgnoreCase);
         return isRunRoute || isAgentRunStart;
     });
+
+// O2 "Unified Runs and Tasks center": independently fail-closed, exact-path match only so the
+// pre-existing GET /api/runs/{id} (D3, its own agentTestRunEnabled gate above) and
+// GET /api/runs/approvals (O3, agentWriteToolsEnabled gate below) stay unaffected.
+UseDisabledFeatureGate(
+    runDiscoveryEnabled,
+    context => string.Equals(
+        (context.Request.Path.Value ?? string.Empty).TrimEnd('/'),
+        "/api/runs",
+        StringComparison.OrdinalIgnoreCase));
+
+// O5 durable triggers: independently fail-closed before authentication, so the whole family is
+// indistinguishable from a route that was never registered while the rollout is off.
+UseDisabledFeatureGate(
+    agentTriggersEnabled,
+    context => context.Request.Path.StartsWithSegments("/api/admin/triggers"));
 
 // D7 write actions/approvals are independently fail-closed before authentication.  Do not
 // fold this into Builder or workflow.manage: approvers are ordinary authenticated users and
@@ -623,7 +656,7 @@ app.MapGet("/actuator/health", PlatformHealthEndpoints.Live).AllowAnonymous();
 // 刻意不受上面的 /api/agents* 404 中介軟體影響(路徑不同),也不揭露任何其他組態。
 app.MapGet(
     "/api/features",
-    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled, contextEnrichmentEnabled, agentChatEnabled, agentWriteToolsEnabled }))
+    () => Results.Ok(new { agentBuilderEnabled, agentTestRunEnabled, workflowDesignerEnabled, multiAgentDispatchEnabled, contextEnrichmentEnabled, agentChatEnabled, agentWriteToolsEnabled, runDiscoveryEnabled, agentTriggersEnabled }))
     .AllowAnonymous();
 
 // ---------------------------------------------------------------------------

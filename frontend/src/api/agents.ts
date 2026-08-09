@@ -23,6 +23,8 @@ interface FeatureFlags {
   multiAgentDispatchEnabled?: boolean
   agentChatEnabled?: boolean
   agentWriteToolsEnabled?: boolean
+  runDiscoveryEnabled?: boolean
+  agentTriggersEnabled?: boolean
 }
 
 export function getFeatures(): Promise<FeatureFlags> {

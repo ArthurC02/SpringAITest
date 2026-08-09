@@ -823,6 +823,32 @@ public sealed class FakeAgentRunService : IAgentRunService
         return Task.FromResult(new AgentProxyResponse(202,
             """{"id":"66666666-6666-4666-8666-666666666666","status":"approved"}""", null));
     }
+
+    public Task<AgentProxyResponse> QueueAsync(string scope, string? cursor, int limit, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add($"queue:{scope}:{cursor}:{limit}:{ctx.UserId}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(200,
+            """{"items":[],"next_cursor":null,"has_more":false}""", null));
+    }
+}
+
+/// <summary>O2 unified runs/tasks list (04-operations-trigger-plan.md §3): a transparent proxy
+/// like <see cref="FakeAgentRunService"/>'s O3 queue, but forwards the raw query string instead of
+/// typed scope/cursor/limit -- see RunDiscoveryController's own doc comment for why.</summary>
+public sealed class FakeRunDiscoveryService : IRunDiscoveryService
+{
+    public static readonly List<string> Calls = new();
+    public static UserContext? LastContext { get; set; }
+    public FakeRunDiscoveryService(FakeCallScope scope) => scope.Own(Calls);
+
+    public Task<AgentProxyResponse> ListAsync(string queryString, UserContext ctx, CancellationToken ct = default)
+    {
+        Calls.Add($"list:{queryString}:{ctx.UserId}");
+        LastContext = ctx;
+        return Task.FromResult(new AgentProxyResponse(200,
+            """{"items":[],"next_cursor":null,"has_more":false}""", null));
+    }
 }
 
 public sealed class FakeOrchestratorRunService : IOrchestratorRunService

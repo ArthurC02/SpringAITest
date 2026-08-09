@@ -15,6 +15,11 @@ public sealed class CapturingBackendHandler : HttpMessageHandler
     private HttpRequestMessage? _last;
 
     public string? Path { get; private set; }
+
+    /// <summary>Raw forwarded query string (leading '?', empty when absent) — proxies that pass a
+    /// caller query through verbatim assert on this rather than on <see cref="Path"/>.</summary>
+    public string? Query { get; private set; }
+
     public string? Method { get; private set; }
     public string? ContentType { get; private set; }
     public long? ContentLength { get; private set; }
@@ -35,6 +40,7 @@ public sealed class CapturingBackendHandler : HttpMessageHandler
     {
         _last = request;
         Path = request.RequestUri!.AbsolutePath;
+        Query = request.RequestUri.Query;
         Method = request.Method.Method;
         if (request.Content is not null)
         {

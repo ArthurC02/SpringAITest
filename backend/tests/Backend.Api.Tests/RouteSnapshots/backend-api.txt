@@ -18,6 +18,9 @@ GET /api/admin/orchestrators
 GET /api/admin/orchestrators/{id:guid}
 GET /api/admin/orchestrators/{id:guid}/revisions
 GET /api/admin/runtime-binding
+GET /api/admin/triggers
+GET /api/admin/triggers/{id:guid}
+GET /api/admin/triggers/{id:guid}/occurrences
 GET /api/admin/workflows
 GET /api/admin/workflows/catalog/nodes
 GET /api/admin/workflows/{id:guid}
@@ -56,6 +59,8 @@ GET /api/prompt-manifests
 GET /api/prompt-manifests/by-sha/{sha}
 GET /api/prompt-manifests/{revision:int}
 GET /api/prompt-manifests/{revision:int}/resolved
+GET /api/runs
+GET /api/runs/approvals
 GET /api/runs/{runId:guid}
 GET /api/runs/{runId:guid}/approvals
 GET /api/runs/{runId:guid}/events
@@ -75,6 +80,8 @@ POST /api/admin/orchestrators/{id:guid}/publish
 POST /api/admin/orchestrators/{id:guid}/revisions/{revision:int}/restore
 POST /api/admin/orchestrators/{id:guid}/validate
 POST /api/admin/orchestrators/{orchestratorId:guid}/runs
+POST /api/admin/triggers
+POST /api/admin/triggers/{id:guid}/cancel
 POST /api/admin/workflows
 POST /api/admin/workflows/{id:guid}/enable
 POST /api/admin/workflows/{id:guid}/publish
