@@ -120,8 +120,13 @@ function mockDeleteDocumentFlow(page: Page, marker: string, overrides: FlowOverr
 
 async function openCopilotAndAskToDelete(page: Page, marker: string): Promise<void> {
   const sidebar = page.getByTestId('copilot-sidebar')
-  await sidebar.locator('.copilotKitButton').click()
-  await expect(sidebar.locator('.copilotKitWindow')).toHaveClass(/\bopen\b/)
+  const window = sidebar.locator('.copilotKitWindow')
+  // WS3: first login auto-opens the sidebar once, so this must tolerate either
+  // starting state instead of unconditionally clicking the launcher.
+  if (!(await window.evaluate((element) => element.classList.contains('open')))) {
+    await sidebar.locator('.copilot-launcher').click()
+    await expect(window).toHaveClass(/\bopen\b/)
+  }
   const input = sidebar.getByTestId('copilot-chat-textarea')
   await input.fill(`請刪除文件:${marker}`)
   await input.press('Enter')

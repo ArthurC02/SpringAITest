@@ -5,8 +5,16 @@ import type { DocumentInfo } from '../types'
 const POLL_MS = 2000
 const POLL_MAX_MS = 60000
 
-/** Keeps optimistic 202 rows visible while the backend processes them. */
-export function useDocuments() {
+/**
+ * Keeps optimistic 202 rows visible while the backend processes them.
+ *
+ * `onSettled` (optional) fires once per document the moment its status is
+ * observed to move away from `processing` (→ `ready`/`failed`) — the signal
+ * WS1-b's toast notification is built on. It lives here (not DocumentsView)
+ * so there is still exactly one poll instance; callers that don't need the
+ * signal can simply omit the argument.
+ */
+export function useDocuments(onSettled?: (doc: DocumentInfo) => void) {
   const [docs, setDocs] = useState<DocumentInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -17,6 +25,9 @@ export function useDocuments() {
   const pollStartRef = useRef(0)
   const pendingRef = useRef<Map<string, DocumentInfo>>(new Map())
   const deletedRef = useRef<Set<string>>(new Set())
+  const previousStatusRef = useRef<Map<string, DocumentInfo['status']>>(new Map())
+  const onSettledRef = useRef(onSettled)
+  onSettledRef.current = onSettled
 
   const stopPolling = useCallback(() => {
     pollGenerationRef.current += 1
@@ -29,7 +40,14 @@ export function useDocuments() {
   const fetchList = useCallback(async (lifecycleGeneration: number): Promise<DocumentInfo[]> => {
     const list = (await listDocuments()).filter((document) => !deletedRef.current.has(document.id))
     if (lifecycleGenerationRef.current !== lifecycleGeneration) return []
-    for (const document of list) pendingRef.current.delete(document.id)
+    for (const document of list) {
+      pendingRef.current.delete(document.id)
+      const previousStatus = previousStatusRef.current.get(document.id)
+      if (previousStatus === 'processing' && document.status !== 'processing') {
+        onSettledRef.current?.(document)
+      }
+      previousStatusRef.current.set(document.id, document.status)
+    }
     const merged = [...pendingRef.current.values(), ...list]
     setDocs(merged)
     return merged
@@ -96,6 +114,7 @@ export function useDocuments() {
       }
       deletedRef.current.delete(optimistic.id)
       pendingRef.current.set(optimistic.id, optimistic)
+      previousStatusRef.current.set(optimistic.id, optimistic.status)
       setDocs((previous) => [optimistic, ...previous.filter((document) => document.id !== optimistic.id)])
       startPolling()
     },

@@ -874,11 +874,13 @@ public sealed class CopilotAguiApiTests : IClassFixture<TestWebAppFactory>
             var invoke = Assert.Single(FakeWorkflowEngineClient.SkillInvokes, i => i.Name == "sales-helper");
             Assert.Equal("這季毛利率多少?", invoke.Input["question"].GetString());
 
-            // (c) 最終內容由 answer 鍵萃取(FakeWorkflowEngineClient 預設 output.answer = "42"),摘要如實帶出。
+            // (c) 最終內容由 answer 鍵萃取(FakeWorkflowEngineClient 預設 output.answer = "42"),摘要如實帶出,
+            // 結尾多一個獨立的來源標記(跨服務 sentinel 約定,02-spec §1.5)——走既有 TEXT_MESSAGE_CONTENT
+            // delta 通道,不是新事件類型,與斷言 (a) 不衝突。
             var finalText = string.Concat(frames
                 .Where(f => f.GetProperty("type").GetString() == "TEXT_MESSAGE_CONTENT")
                 .Select(f => f.GetProperty("delta").GetString()));
-            Assert.Equal("42", finalText);
+            Assert.Equal("42\n<!--skill:sales-helper-->", finalText);
         }
         finally
         {

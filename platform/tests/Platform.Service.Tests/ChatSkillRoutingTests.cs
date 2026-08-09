@@ -768,11 +768,110 @@ public sealed class ChatSkillRoutingTests
         // 路由 + 執行在串流前完成:skill 以原訊息被呼叫。
         var invoke = Assert.Single(wf.SkillInvokes);
         Assert.Equal("這季毛利率?", invoke.Input["query"].GetString());
-        // 串流吐出摘要 chunks;摘要 LLM 的 user 訊息帶入工具結果(StreamAsync 的最後一則)。
-        Assert.Equal(new[] { "本季", "毛利率", "32.8%" }, collected);
+        // 串流吐出摘要 chunks,結尾多一個獨立的來源標記 chunk(跨服務 sentinel 約定,02-spec §1.5)。
+        Assert.Equal(new[] { "本季", "毛利率", "32.8%", "\n<!--skill:kb-query-->" }, collected);
         Assert.Contains("毛利率 32.8%", agent.LastMessages!.Last().Content);
-        // 串流結束後持久化串接全文。
-        Assert.Equal("本季毛利率32.8%", Assert.Single(convos.Saved).Reply);
+        // 串流結束後持久化串接全文——標記由 ChatTurnRecorder(SkillRoutingAgent 外層)無條件累積 wire 產出的
+        // 每個 chunk,因此隨內容一併持久化(持久化邊界決策見本檔下方三案 XML doc);前端渲染層剝離。
+        Assert.Equal("本季毛利率32.8%\n<!--skill:kb-query-->", Assert.Single(convos.Saved).Reply);
+    }
+
+    // ============================================================================
+    // 來源標記 sentinel(02-spec §1.4/§1.5,ux-core-journey WS1):命中 skill 路由且摘要串流「正常完成」後,
+    // 於串流末端追加一個獨立的內容 chunk,恰為 "\n<!--skill:{skillName}-->",不新增 SSE 欄位/事件、
+    // 不改 data:/event: frame 結構——標記走既有 token 內容通道。
+    //
+    // 持久化邊界決策:SkillRoutingAgent 自己的短期 session 累積文字(AppendExchangeToSessionAsync 用的
+    // accumulated)刻意不含標記(yield 標記時不寫進該 StringBuilder)——下一輪路由/摘要看到的短期歷史乾淨。
+    // 但 ChatTurnRecorder 掛在 SkillRoutingAgent「外側」(既有架構,見 ChatTurnRecorder 類頂文件),
+    // 它對 InnerAgent.RunStreamingAsync 吐出的每個 AgentResponseUpdate.Text 一律累積,不知道 skill 路由
+    // 語意,因此標記仍會流進它的 accumulated → 隨全文一併 persist(ConversationStore)與 mem0 remember。
+    // 要把標記也從這條路徑剔除,需要讓「不認識標記語意」的共用 recorder 學會剝離特定格式字串,
+    // 耦合/複雜度不成比例(ponytail 階梯:目前唯一消費端是前端渲染層,它本來就要做這次剝離)。
+    // 故採 spec §1.4 允許的退路:標記隨內容一併持久化,由前端渲染層(ChatBubble)剝離;
+    // 下列測試把這個選擇釘死成迴歸測試,不是留白。
+    // ============================================================================
+
+    // 命中路由 + 串流正常結束 → 串流末尾恰有一個格式正確的標記("\n<!--skill:kb-query-->"),
+    // 且是獨立的最後一個 chunk(不是併進摘要最後一塊)。
+    [Fact]
+    public async Task RoutedPath_Streaming_SentinelIsExactlyOneWellFormedMarker_AtStreamEnd()
+    {
+        var agent = new FakeLlmAgent { Chunks = new[] { "答案" } };
+        agent.Responses.Enqueue("kb-query");
+        var wf = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat(SampleCatalog),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
+        };
+        var svc = Build(agent, wf);
+
+        var collected = new List<string>();
+        await foreach (var c in svc.StreamChatAsync("這季毛利率?", "u1", "c1", UserA))
+        {
+            collected.Add(c);
+        }
+
+        // 恰一個標記,且是最後一個 chunk;格式 "\n<!--skill:{name}-->",name 恰為命中的 skill 名。
+        var sentinelChunks = collected.Where(c => c.Contains("<!--skill:")).ToList();
+        var sentinel = Assert.Single(sentinelChunks);
+        Assert.Equal(collected[^1], sentinel);
+        Assert.Matches(@"^\n<!--skill:[a-z0-9-]+-->$", sentinel);
+        Assert.Equal("\n<!--skill:kb-query-->", sentinel);
+    }
+
+    // 未命中路由(兩次皆 NONE,兜底純聊天)→ 串流全程沒有任何標記 chunk,純聊天路徑完全不變。
+    [Fact]
+    public async Task MissRoutedPath_Streaming_NoSentinel()
+    {
+        var agent = new FakeLlmAgent();
+        agent.Responses.Enqueue("NONE");
+        agent.Responses.Enqueue("NONE");
+        var chatClient = new FakeChatClient { Chunks = new[] { "純聊天", "回覆" } };
+        var wf = new FakeWorkflowEngineClient { Catalog = Cat(SampleCatalog) };
+        var svc = Build(agent, wf, chatClient);
+
+        var collected = new List<string>();
+        await foreach (var c in svc.StreamChatAsync("你好呀", "u1", "c1", UserA))
+        {
+            collected.Add(c);
+        }
+
+        Assert.Equal(new[] { "純聊天", "回覆" }, collected);
+        Assert.DoesNotContain(collected, c => c.Contains("<!--skill:"));
+    }
+
+    // 命中路由,但摘要串流中途(裸 ILlmAgent.StreamAsync)拋例外 → §9.3 鐵律:例外原樣冒泡,
+    // 不得被路由的 try/catch 吞掉;半截回覆不追加標記、不持久化、不 remember(A-17 同款保證延伸到 HIT 路徑)。
+    [Fact]
+    public async Task RoutedPath_Streaming_SummaryMidStreamException_PropagatesWithoutSentinel_AndDoesNotPersist()
+    {
+        var agent = new FakeLlmAgent { Chunks = new[] { "半截" }, ThrowAfterChunks = 1 };
+        agent.Responses.Enqueue("kb-query");
+        var mem0 = new FakeMem0Client();
+        var convos = new FakeConversationStore();
+        var wf = new FakeWorkflowEngineClient
+        {
+            Catalog = Cat(SampleCatalog),
+            SkillOutput = Cat("""{ "skill":"kb-query", "output": { "business_result":"命中" } }"""),
+        };
+        var identity = new FakeChatIdentityAccessor();
+        var (hostAgent, _, _) = TestChatAgent.Build(mem0: mem0, convos: convos, identity: identity, llmAgent: agent, workflows: wf);
+        var svc = new ChatService(hostAgent, convos, identity, new LlmOptions(), NullLogger<ChatService>.Instance);
+
+        var collected = new List<string>();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var c in svc.StreamChatAsync("這季毛利率?", "u1", "c1", UserA))
+            {
+                collected.Add(c);
+            }
+        });
+
+        Assert.Equal(new[] { "半截" }, collected);   // 只送出例外「之前」已吐出的 chunk,沒有標記。
+        Assert.DoesNotContain(collected, c => c.Contains("<!--skill:"));
+        Assert.Empty(convos.Saved);
+        Assert.Empty(mem0.Remembered);
     }
 
     // 寬鬆比對(路由回覆只含工具名 token)由 ChatBehaviorBaselineTests.A10 覆蓋,且嚴格更強:

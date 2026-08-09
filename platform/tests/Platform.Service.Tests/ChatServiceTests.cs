@@ -221,7 +221,8 @@ public sealed class ChatServiceTests
             collected.Add(chunk);
         }
 
-        Assert.Equal(new[] { "摘要", "片段" }, collected);
+        // 路由命中 + 串流正常結束 → 結尾多一個獨立的來源標記 chunk(跨服務 sentinel 約定,02-spec §1.5)。
+        Assert.Equal(new[] { "摘要", "片段", "\n<!--skill:kb-query-->" }, collected);
         Assert.Single(mem0.Remembered);
     }
 

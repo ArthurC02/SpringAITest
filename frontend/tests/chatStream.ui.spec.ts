@@ -110,17 +110,26 @@ test('conversation id comes from the response and new conversation clears it', a
   })
 
   await login(page)
+  const answer = page.locator('.bubble--assistant .bubble__content')
+
+  // streamChat() commits the response's X-Conversation-Id to localStorage before it reads a
+  // single SSE token (see api/chat.ts), so waiting for the rendered reply is a deterministic
+  // proxy for "the response has been fully processed" — checking localStorage or `bodies` right
+  // after `send()` returns races the fetch's own network round trip instead.
   await send(page, 'first')
+  await expect(answer).toHaveText('ok')
   expect(bodies[0]).not.toHaveProperty('userId')
   expect(bodies[0]).not.toHaveProperty('conversationId')
   expect(await readKey(page, CONVERSATION_KEY)).toBe('server-1')
 
   await send(page, 'second')
+  await expect(answer).toHaveText(['ok', 'ok'])
   expect(bodies[1].conversationId).toBe('server-1')
 
   await page.locator('.chatview__bar button').click()
   expect(await readKey(page, CONVERSATION_KEY)).toBeNull()
   await send(page, 'third')
+  await expect(answer).toHaveText('ok')
   expect(bodies[2]).not.toHaveProperty('conversationId')
 })
 
@@ -341,7 +350,7 @@ test('any 401 while logged in clears the session and chat keys and shows the exp
   // Any authenticated call, not just chat, routes a 401 through the one global logout.
   await page.getByTestId('nav-analysis').click()
   await expect(page.getByTestId('auth-page')).toBeVisible()
-  await expect(page.getByText('session 已過期，請重新登入。')).toBeVisible()
+  await expect(page.getByText('登入已逾時，請重新登入。')).toBeVisible()
   expect(await readKey(page, SESSION_KEY)).toBeNull()
   expect(await readKey(page, MESSAGES_KEY)).toBeNull()
   expect(await readKey(page, CONVERSATION_KEY)).toBeNull()
@@ -367,7 +376,7 @@ test('a 401 stream response uses the global logout path', async ({ page }) => {
 
   // Same global logout as a 401: session and chat keys gone, expiry notice on the login page.
   await expect(page.getByTestId('auth-page')).toBeVisible()
-  await expect(page.getByText('session 已過期，請重新登入。')).toBeVisible()
+  await expect(page.getByText('登入已逾時，請重新登入。')).toBeVisible()
   expect(await readKey(page, SESSION_KEY)).toBeNull()
   expect(await readKey(page, MESSAGES_KEY)).toBeNull()
 })

@@ -4,6 +4,9 @@ export const CHAT_USER_ID_KEY = 'springai-chat:userId'
 export const CHAT_CONVERSATION_ID_KEY = 'springai-chat:conversationId'
 export const CHAT_MESSAGES_KEY = 'springai-chat:messages'
 
+/** 是否已經自動展開過副駕一次（WS3 首次登入引導）。純前端偏好，跨帳號不清也無妨。 */
+export const COPILOT_INTRO_SHOWN_KEY = 'springai-copilot:introShown'
+
 /**
  * 登出時清掉同一前綴的所有鍵（跨使用者殘留是隱私邊界）。先蒐集再刪：
  * 邊走訪邊 removeItem 會讓 storage.key(index) 的索引位移而漏刪。

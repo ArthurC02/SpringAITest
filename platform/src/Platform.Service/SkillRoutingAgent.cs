@@ -77,17 +77,18 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
         var identity = scope.ServiceProvider.GetRequiredService<IChatIdentityAccessor>();
         var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowEngineClient>();
 
-        var summaryMessages = await TryRouteAndExecuteAsync(
+        var routed = await TryRouteAndExecuteAsync(
             lastUser, identity.CurrentUser, identity, workflows, scope.ServiceProvider, cancellationToken);
 
-        if (summaryMessages is null)
+        if (routed is null)
         {
             // 未命中:原樣委派,client tools / 短期記憶 / mem0 recall / 護欄全部照常(ChatClientAgent 內層)。
             return await base.RunCoreAsync(messageList, session, options, cancellationToken);
         }
 
         // 命中:用「裸」LLM 潤飾摘要,完全不經過 innerAgent(見類別頂端文件)。
-        var reply = await _bareLlm.CompleteAsync(summaryMessages, cancellationToken);
+        // ponytail: 阻塞路徑不追加來源標記(02-spec §1.4 只鎖串流末端;阻塞回覆目前沒有徽章消費端)。
+        var reply = await _bareLlm.CompleteAsync(routed.Value.Summary, cancellationToken);
         await AppendExchangeToSessionAsync(session, lastUserMessage, lastUser, reply, cancellationToken);
 
         return new AgentResponse(new ChatMessage(ChatRole.Assistant, reply));
@@ -105,10 +106,10 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
         var identity = scope.ServiceProvider.GetRequiredService<IChatIdentityAccessor>();
         var workflows = scope.ServiceProvider.GetRequiredService<IWorkflowEngineClient>();
 
-        var summaryMessages = await TryRouteAndExecuteAsync(
+        var routed = await TryRouteAndExecuteAsync(
             lastUser, identity.CurrentUser, identity, workflows, scope.ServiceProvider, cancellationToken);
 
-        if (summaryMessages is null)
+        if (routed is null)
         {
             // §9.3 鐵律:委派呼叫本身絕不可包在路由的 try/catch 內——串流中途下游例外必須原樣冒泡到
             // ChatTurnRecorder/ChatController,補一個 event:error 終止幀,不可被本類吞成靜默空話。
@@ -120,6 +121,8 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
             yield break;
         }
 
+        var (summaryMessages, skillName) = routed.Value;
+
         // 命中:用「裸」LLM 串流摘要,不經 innerAgent(理由同阻塞版)。
         var accumulated = new StringBuilder();
         await foreach (var chunk in _bareLlm.StreamAsync(summaryMessages, cancellationToken))
@@ -127,6 +130,12 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
             accumulated.Append(chunk);
             yield return new AgentResponseUpdate(ChatRole.Assistant, chunk);
         }
+
+        // 摘要串流正常結束(沒有中途例外冒出,§9.3)才會執行到這裡——跨服務 sentinel 約定(02-spec §1.5):
+        // 追加一個獨立的內容 chunk,前端剝離渲染成來源徽章;不改 SSE frame 結構,標記走既有 token 內容通道。
+        // 只進 wire 串流,不進 accumulated(AppendExchangeToSessionAsync 寫回短期 session 的仍是純摘要文字,
+        // 標記不污染下一輪路由/摘要看到的歷史)。
+        yield return new AgentResponseUpdate(ChatRole.Assistant, $"\n<!--skill:{skillName}-->");
 
         await AppendExchangeToSessionAsync(session, lastUserMessage, lastUser, accumulated.ToString(), cancellationToken);
     }
@@ -193,10 +202,11 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
     /// <summary>
     /// 路由 + 執行(確定性管線)。userCtx 為 null / 無工具 / NONE / 任一步失敗 → 回 null,由呼叫端走純聊天兜底;
-    /// 命中工具則執行工具並回「摘要訊息」,交由呼叫端做最後一次(阻塞或串流)LLM 潤飾。
+    /// 命中工具則執行工具並回「摘要訊息 + 命中的 skill 名稱」,交由呼叫端做最後一次(阻塞或串流)LLM 潤飾
+    /// (skill 名稱給串流端在結尾追加來源標記用,見 <see cref="RunCoreStreamingAsync"/>)。
     /// 整段以 try/catch 包住:任何例外都吞成 null(退純聊天)並記 warning——一輪聊天絕不可因路由失敗而 500。
     /// </summary>
-    private async Task<IReadOnlyList<LlmMessage>?> TryRouteAndExecuteAsync(
+    private async Task<(IReadOnlyList<LlmMessage> Summary, string SkillName)?> TryRouteAndExecuteAsync(
         string message, UserContext? userCtx, IChatIdentityAccessor identity, IWorkflowEngineClient workflows,
         IServiceProvider scoped, CancellationToken ct)
     {
@@ -245,7 +255,7 @@ public sealed class SkillRoutingAgent : DelegatingAIAgent
 
             // 執行確定性工具:以使用者原訊息為輸入;回傳已是抽取後的答案字串(business_result 等)或工具自身的錯誤/查無字串。
             var toolResult = await selected.InvokeAsync(message, ct);
-            return BuildSummaryMessages(message, toolResult, prompts.Summary);
+            return (BuildSummaryMessages(message, toolResult, prompts.Summary), selected.Name);
         }
         catch (Exception ex)
         {

@@ -32,7 +32,7 @@ export default function AuthPage({ login, register }: Props) {
   // 被 401 踢出時顯示一次過期提示（旗標讀後即清；StrictMode 二次執行時
   // 旗標已清但 state 保留，行為一致）。使用者一提交就清掉。
   useEffect(() => {
-    if (consumeSessionExpired()) setError('session 已過期，請重新登入。')
+    if (consumeSessionExpired()) setError('登入已逾時，請重新登入。')
   }, [])
 
   // 前端驗證規則：說「怎麼修」而非只說「錯了」。伺服器端錯誤另走 fieldErrors，不動。
@@ -205,11 +205,15 @@ export default function AuthPage({ login, register }: Props) {
           </button>
         </p>
 
-        <div className="auth__seed">
-          種子帳號（密碼 password123）:<br />
-          admin-a · user-a（租戶 demo-a，邀請碼 demo-a-invite）<br />
-          user-b（租戶 demo-b，邀請碼 demo-b-invite）
-        </div>
+        {/* USER 層不該看到種子帳密（C10）：只在 `npm run dev` 的 Vite Development
+            模式渲染；build 產物（含容器化 Development posture）一律不顯示，見 02-spec §4.5。 */}
+        {import.meta.env.DEV && (
+          <div className="auth__seed">
+            種子帳號（密碼 password123）:<br />
+            admin-a · user-a（租戶 demo-a，邀請碼 demo-a-invite）<br />
+            user-b（租戶 demo-b，邀請碼 demo-b-invite）
+          </div>
+        )}
       </form>
     </div>
   )

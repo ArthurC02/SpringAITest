@@ -122,7 +122,8 @@ public sealed class ChatBehaviorBaselineTests
             chunks.Add(chunk);
         }
 
-        Assert.Equal(new[] { "已如實", "轉達錯誤的摘要" }, chunks);
+        // 工具失敗仍是「路由命中」語意(選中了 kb-query,只是它自己執行失敗)→ 串流正常結束後仍追加來源標記。
+        Assert.Equal(new[] { "已如實", "轉達錯誤的摘要", "\n<!--skill:kb-query-->" }, chunks);
         // 工具失敗被轉成文字交給摘要 LLM 照實轉述(SkillRoutingAgent.InvokeSkillToolAsync 的 catch),
         // 而不是讓例外穿過串流。
         Assert.Contains(agent.LastMessages!, m => m.Content.Contains("Skill kb-query 呼叫失敗"));

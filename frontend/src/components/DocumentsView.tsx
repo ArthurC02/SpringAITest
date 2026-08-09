@@ -1,7 +1,9 @@
 import { useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import type { useDocuments } from '../hooks/useDocuments'
+import type { DocumentInfo } from '../types'
 import { isConflict } from '../api/http'
 import { fmtDate } from '../format'
+import { extractDocumentText } from '../documentExtract'
 import ErrorText from './ErrorText'
 import FormField from './FormField'
 import { useConfirm } from './ConfirmDialog'
@@ -14,13 +16,35 @@ const STATUS_LABEL: Record<string, string> = {
   failed: '失敗',
 }
 
+// 「問這份文件」(WS1-a):非 ready 狀態的停用原因文字,掛在按鈕 title 上(沿用既有
+// title 屬性當 tooltip 的慣例,見 ChatView 的「新對話」鈕)。
+const ASK_DISABLED_REASON: Record<string, string> = {
+  processing: '文件仍在處理中,尚無法提問',
+  failed: '文件處理失敗,無法提問',
+}
+
+function filePickStatus(extracting: boolean, fileName: string, charCount: number): string {
+  if (extracting) return '讀取檔案中…'
+  if (!fileName) return '尚未選擇檔案'
+  return `${fileName}（已讀入 ${charCount} 字）`
+}
+
+function submitLabel(extracting: boolean, busy: boolean, retryable: boolean): string {
+  if (extracting) return '讀取檔案中…'
+  if (busy) return '送出中…'
+  if (retryable) return '再試一次'
+  return '新增文件'
+}
+
 interface Props {
   // 狀態由 AppShell 提升後以 props 傳入(與 copilot action 共用同一份,避免雙重輪詢)。
   documents: ReturnType<typeof useDocuments>
+  // 展開副駕並帶入該文件脈絡(見 AppShell.askAboutDocument);不新增 API 欄位。
+  onAskDocument: (doc: DocumentInfo) => void
 }
 
 /** 文件視圖：新增表單 + 清單，含 202→processing→輪詢至就緒的完整流程（見 useDocuments）。 */
-export default function DocumentsView({ documents }: Props) {
+export default function DocumentsView({ documents, onAskDocument }: Props) {
   const { docs, loading, error, timedOut, create, remove } = documents
   const toast = useToast()
   const confirm = useConfirm()
@@ -32,6 +56,7 @@ export default function DocumentsView({ documents }: Props) {
   const [busy, setBusy] = useState(false)
   const [fileName, setFileName] = useState('')
   const [mode, setMode] = useState<'file' | 'text'>('file')
+  const [extracting, setExtracting] = useState(false)
   const attemptRef = useRef<{ title: string; text: string; key: string } | null>(null)
   const formVersionRef = useRef(0)
 
@@ -88,17 +113,37 @@ export default function DocumentsView({ documents }: Props) {
     }
   }
 
-  // ponytail: 檔案匯入只做前端讀文字填表單,API 不變;PDF/Word 解析需要後端支援時再加。
+  // ponytail(WS2-a): PDF/Word 在瀏覽器內用 pdf.js/mammoth 抽字（documentExtract.ts,動態
+  // import 懶載入,不進主 bundle）,抽出結果沿用這裡既有的 create(title, text) 路徑,
+  // backend 完全不變。.txt/.md 仍直接用 File.text()。
   async function onFile(e: ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]
     e.target.value = '' // 允許重選同一檔案
     if (!f) return
     formChanged()
-    setText(await f.text())
     setFileName(f.name)
+    let extractedText: string
+    if (/\.(pdf|docx)$/i.test(f.name)) {
+      setExtracting(true)
+      setTextErr('')
+      try {
+        const result = await extractDocumentText(f)
+        if ('errorMessage' in result) {
+          setText('')
+          setTextErr(result.errorMessage)
+          return
+        }
+        extractedText = result.text
+      } finally {
+        setExtracting(false)
+      }
+    } else {
+      extractedText = await f.text()
+    }
+    setText(extractedText)
     setTextErr('')
     if (!title.trim()) {
-      setTitle(f.name.replace(/\.(txt|md)$/i, ''))
+      setTitle(f.name.replace(/\.(txt|md|pdf|docx)$/i, ''))
       setTitleErr('')
     }
   }
@@ -155,21 +200,20 @@ export default function DocumentsView({ documents }: Props) {
         </div>
         {mode === 'file' ? (
           <div className="field">
-            <label htmlFor="doc-file">檔案（.txt／.md）</label>
+            <label htmlFor="doc-file">檔案（.txt／.md／.pdf／.docx）</label>
             <div className="file-pick">
               <input
                 id="doc-file"
                 className="file-pick__input"
                 type="file"
-                accept=".txt,.md"
+                accept=".txt,.md,.pdf,.docx"
                 onChange={onFile}
+                disabled={extracting}
                 aria-invalid={!!textErr}
                 aria-describedby={textErr ? 'doc-text-err' : undefined}
               />
               <label htmlFor="doc-file" className="btn">選擇檔案…</label>
-              <span className="muted">
-                {fileName ? `${fileName}（已讀入 ${text.length} 字）` : '尚未選擇檔案'}
-              </span>
+              <span className="muted">{filePickStatus(extracting, fileName, text.length)}</span>
             </div>
             {textErr && (
               <span className="field-error" id="doc-text-err" role="alert">
@@ -200,8 +244,8 @@ export default function DocumentsView({ documents }: Props) {
             )}
           </div>
         )}
-        <button className="btn btn--info" type="submit" disabled={busy}>
-          {busy ? '送出中…' : submitError && attemptRef.current ? '再試一次' : '新增文件'}
+        <button className="btn btn--info" type="submit" disabled={busy || extracting}>
+          {submitLabel(extracting, busy, !!submitError && attemptRef.current !== null)}
         </button>
         <ErrorText msg={submitError} />
       </form>
@@ -240,7 +284,15 @@ export default function DocumentsView({ documents }: Props) {
                 </td>
                 <td>{d.chunk_count}</td>
                 <td className="muted">{fmtDate(d.created_at)}</td>
-                <td>
+                <td className="table__actions">
+                  <button
+                    className="btn"
+                    disabled={d.status !== 'ready'}
+                    title={ASK_DISABLED_REASON[d.status]}
+                    onClick={() => onAskDocument(d)}
+                  >
+                    問這份文件
+                  </button>
                   <button className="btn btn--danger" onClick={() => onDelete(d.id, d.title)}>
                     刪除
                   </button>
