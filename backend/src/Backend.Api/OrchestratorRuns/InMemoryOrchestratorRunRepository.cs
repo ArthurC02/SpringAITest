@@ -2,6 +2,7 @@ using System.Text.Json;
 using Backend.Api.AgentRuns;
 using Backend.Api.Common;
 using Backend.Api.Orchestrators;
+using Backend.Api.RunDiscovery;
 using Backend.Api.Workflows;
 using Backend.Api.Contexts;
 
@@ -12,7 +13,7 @@ public sealed class InMemoryOrchestratorRunRepository(
     IOrchestratorRepository orchestrators, IWorkflowRepository workflows,
     Backend.Api.Agents.IAgentRepository agents,
     IAgentRunRepository? agentRuns = null, IContextRepository? contexts = null,
-    ContextEnrichmentState? contextState = null) : IOrchestratorRunRepository
+    ContextEnrichmentState? contextState = null) : IOrchestratorRunRepository, IRunDiscoverySource
 {
     // Several critical sections await other repositories, so a plain `lock` cannot be used.
     // SemaphoreSlim is not reentrant; helpers invoked while holding this gate must not acquire it again.
@@ -472,6 +473,88 @@ public sealed class InMemoryOrchestratorRunRepository(
         finally { _gate.Release(); }
     }
     private static OrchestratorRunResponse ToResponse(Entry x) { using var d = JsonDocument.Parse(x.Snapshot); return new(x.Id, x.OrchestratorId, x.OrchestratorRevision, x.Conversation, x.WorkflowId, x.WorkflowRevision, x.Hash, x.Status, x.CancelRequested, x.Version, x.Deadline, OrchestratorRunSnapshotProjection.Budgets(d.RootElement), x.Created, x.Updated, ErrorCode: x.ErrorCode, ErrorMessage: x.ErrorMessage); }
+
+    private static readonly HashSet<string> TerminalRootStatuses = new(
+        ["completed", "failed", "cancelled", "timed_out"], StringComparer.Ordinal);
+
+    /// <summary>
+    /// O2 unified list source (<see cref="IRunDiscoverySource"/>). <see cref="Entry.Children"/>'s
+    /// own <c>Status</c> field is a write-path cache (only refreshed by <c>GetChildAsync</c>/cascade
+    /// cancel — see the field's own doc comment above); the live agent_run row is authoritative,
+    /// matching the Dapper authority's <c>COALESCE(ar.status, ch.status)</c> precedence in its own
+    /// <c>GetChildAsync</c>. This is a synchronous seam, so rather than awaiting
+    /// <see cref="IAgentRunRepository.GetAsync"/> per child, it reads the already-materialized D3
+    /// rows off <paramref name="agentRuns"/>'s own <see cref="IRunDiscoverySource"/> implementation
+    /// once per call.
+    /// </summary>
+    IReadOnlyList<RunSummaryItem> IRunDiscoverySource.ListRunSummaries(string tenantId, string userId, DateTime now)
+    {
+        var liveAgentRuns = agentRuns is IRunDiscoverySource agentSource
+            ? agentSource.ListRunSummaries(tenantId, userId, now).ToDictionary(x => x.Id)
+            : new Dictionary<Guid, RunSummaryItem>();
+
+        _gate.Wait();
+        try
+        {
+            return _runs.Values
+                .Where(x => x.Tenant == tenantId && x.User == userId)
+                .Select(x => ToRunSummaryItem(x, liveAgentRuns, now))
+                .ToArray();
+        }
+        finally { _gate.Release(); }
+    }
+
+    private static RunSummaryItem ToRunSummaryItem(
+        Entry x, IReadOnlyDictionary<Guid, RunSummaryItem> liveAgentRuns, DateTime now)
+    {
+        var childStatuses = x.Children
+            .Select(c => liveAgentRuns.TryGetValue(c.AgentRunId, out var live) ? live.Status : c.Status)
+            .ToArray();
+        var childProgress = new RunChildProgress(
+            childStatuses.Length,
+            childStatuses.Count(s => s == "queued"),
+            childStatuses.Count(s => s == "running"),
+            childStatuses.Count(s => s == "completed"),
+            childStatuses.Count(s => s == "failed"),
+            childStatuses.Count(s => s == "cancelled"));
+        var pendingApproval = childStatuses.Any(s => s == AgentRunStatuses.WaitingApproval);
+        var needsRecovery = !x.CommandCompleted
+            && x.ClaimExpiresAt != DateTime.MinValue
+            && x.ClaimExpiresAt < now;
+        var terminal = TerminalRootStatuses.Contains(x.Status);
+        // Entry tracks no distinct "completed_at" moment (unlike the Dapper authority's
+        // orchestrator_run.completed_at column) — Updated is the closest available approximation
+        // once the root has reached a terminal status.
+        // ponytail: approximation only; upgrade path is adding a real CompletedAt field to Entry
+        // if a caller ever needs the precise moment rather than "last write while terminal".
+        DateTime? completedAt = terminal ? x.Updated : null;
+        using var snapshot = JsonDocument.Parse(x.Snapshot);
+        return new RunSummaryItem(
+            x.Id,
+            RunDiscoveryKinds.Orchestrator,
+            x.Status,
+            null,
+            null,
+            null,
+            null,
+            x.OrchestratorId,
+            x.OrchestratorRevision,
+            x.WorkflowId,
+            x.WorkflowRevision,
+            x.CancelRequested,
+            OrchestratorRunSnapshotProjection.Budgets(snapshot.RootElement),
+            x.Events.Count > 0 ? x.Events[^1].Type : null,
+            x.Events.Count > 0 ? x.Events[^1].At : null,
+            childProgress,
+            x.ErrorCode,
+            pendingApproval,
+            needsRecovery,
+            null,
+            x.Created,
+            x.Updated,
+            completedAt,
+            Math.Max(0, ((completedAt ?? now) - x.Created).TotalSeconds));
+    }
     private async Task<(PublishedAgentSnapshotSource Agent, WorkflowSnapshotSource Workflow)?> ResolveChildSourceAsync(string tenant, Guid agentId, int revision, CancellationToken ct)
     { var agent = await agents.GetAsync(tenant, agentId, ct); var definition = await agents.GetRevisionDefinitionAsync(tenant, agentId, revision, ct); var info = (await agents.ListRevisionsAsync(tenant, agentId, ct)).SingleOrDefault(x => x.Revision == revision); if (agent is null || definition is null || info is null || !agent.Enabled || agent.PublishedRevision != revision || info.RuntimeWorkflowId is not Guid workflowId || info.RuntimeWorkflowRevision is not int workflowRevision) return null; var workflow = await workflows.GetRevisionAsync(tenant, workflowId, workflowRevision, ct); if (workflow is null) return null; return (new(agentId, agent.Name, revision, definition, info.DefinitionSha256, workflowId, workflowRevision, info.SkillBindings, info.PromptManifestRevision, info.PromptManifestSha256), new(workflowId, workflowRevision, 1, workflow.Value.Definition, WorkflowCanonicalizer.Hash(workflow.Value.Definition), WorkflowCompilerContracts.Current)); }
     private static IReadOnlyCollection<string> Strings(JsonElement value) => value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray() : Array.Empty<string>();

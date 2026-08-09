@@ -2,11 +2,12 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Backend.Api.AgentRuns;
 using Backend.Api.Agents;
+using Backend.Api.RunDiscovery;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Data.InMemory;
 
-public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestratorChildRunRepository, IAgentRunApprovalLeaseVerifier, IAgentRunApprovalDecisionTransition, IAgentRunCancellationFence
+public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestratorChildRunRepository, IAgentRunApprovalLeaseVerifier, IAgentRunApprovalDecisionTransition, IAgentRunCancellationFence, IRunDiscoverySource
 {
     private static readonly IReadOnlySet<string> CancelAuditEventTypes =
         new HashSet<string>(StringComparer.Ordinal)
@@ -1897,6 +1898,56 @@ public sealed class InMemoryAgentRunRepository : IAgentRunRepository, IOrchestra
                 s.Name, s.Revision, s.Kind, s.DefinitionSha256, s.PackageSha256))
             .ToList(),
         RuntimeLimitsOf(e.Snapshot));
+
+    /// <summary>O2 unified list source (<see cref="IRunDiscoverySource"/>): every direct-agent/
+    /// worker/verifier row this tenant/user owns. <c>OrchestratorRootRunId</c> reuses
+    /// <see cref="Entry.ParentRunId"/> — the InMemory child-creation path already stores the
+    /// owning root there (see <c>CreateOrchestratorChildAsync</c>), unlike the Dapper authority
+    /// which uses a dedicated <c>orchestrator_root_run_id</c> column because its own
+    /// <c>root_run_id</c>/<c>parent_run_id</c> stay self-referential/null for children.</summary>
+    IReadOnlyList<RunSummaryItem> IRunDiscoverySource.ListRunSummaries(string tenantId, string userId, DateTime now)
+    {
+        lock (_gate)
+        {
+            return _runs.Values
+                .Where(e => e.TenantId == tenantId && e.UserId == userId)
+                .Select(e => ToRunSummaryItem(e, now))
+                .ToArray();
+        }
+    }
+
+    private static RunSummaryItem ToRunSummaryItem(Entry e, DateTime now)
+    {
+        var lastEvent = e.Events.Count > 0 ? e.Events[^1] : null;
+        var start = e.StartedAt ?? e.CreatedAt;
+        var end = e.CompletedAt ?? now;
+        return new RunSummaryItem(
+            e.Id,
+            e.RunKind,
+            e.Status,
+            e.RunKind == "direct-agent" ? null : e.ParentRunId,
+            e.TaskId,
+            e.AgentId,
+            e.AgentRevision,
+            null,
+            null,
+            e.WorkflowId,
+            e.WorkflowRevision,
+            e.CancelRequestedAt is not null,
+            RuntimeLimitsOf(e.Snapshot),
+            lastEvent?.EventType,
+            lastEvent?.CreatedAt,
+            null,
+            e.ErrorCode,
+            e.Status == AgentRunStatuses.WaitingApproval,
+            e.Status is AgentRunStatuses.Queued or AgentRunStatuses.Running
+                && e.LeaseExpiresAt is { } leaseExpiresAt && leaseExpiresAt < now,
+            e.StartedAt,
+            e.CreatedAt,
+            e.UpdatedAt,
+            e.CompletedAt,
+            Math.Max(0, (end - start).TotalSeconds));
+    }
 
     private static AgentRunRecoveryItem BuildCommandItem(
         CommandEntry command,
