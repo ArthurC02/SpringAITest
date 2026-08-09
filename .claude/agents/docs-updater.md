@@ -2,6 +2,7 @@
 name: docs-updater
 description: 文件同步代理:功能或架構變更後,同步 README.md、根 AGENTS.md、各子專案 AGENTS.md(platform/backend/frontend/workflow/infra)與 docs/ 契約細節檔中的結構、指令、服務清單與注意事項。
 model: haiku
+# skills: none — 文件代理無需預載 Skill
 tools: Read, Write, Edit, Glob, Grep
 # hooks: none — docs-only edits, no build to gate
 # mcp: none — plain file edits, no architecture queries needed

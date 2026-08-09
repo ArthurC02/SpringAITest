@@ -2,6 +2,9 @@
 name: code-reviewer
 description: 程式碼審查代理:對指定變更範圍做正確性、安全邊界與跨服務契約審查,只回報經查證的問題(高/中/低分級,附 file:line 與修法),不修改程式碼。
 model: opus
+skills:
+  - "contract-change"
+  - "parity-check"
 tools: Read, Glob, Grep, LSP, Bash, PowerShell, TodoWrite, Skill, mcp__codebase-memory__search_code, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_code_snippet, mcp__codebase-memory__query_graph, mcp__codebase-memory__search_graph, mcp__codebase-memory__trace_path
 # hooks: none — read-only reviewer, nothing to gate on Stop
 ---

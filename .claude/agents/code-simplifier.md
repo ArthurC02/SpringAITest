@@ -2,6 +2,7 @@
 name: code-simplifier
 description: 程式碼簡化代理:在不改變行為的前提下,精簡最近變更的程式碼(清晰度、一致性、可維護性)。重視可讀、explicit 的程式碼,而非過度壓縮。審查之後、宣告完成之前執行。
 model: opus
+# skills: none — 簡化代理行為由自身定義約束,不預載
 tools: Read, Write, Edit, Glob, Grep, LSP, Bash, PowerShell, TodoWrite, Skill, mcp__codebase-memory__search_code, mcp__codebase-memory__search_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__query_graph, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_code_snippet
 # hooks: none — 簡化的驗證靠既有測試/建置,無需額外 Stop gate
 # mcp: codebase-memory — 找既有可重用實作與呼叫鏈確認,取代盲 grep

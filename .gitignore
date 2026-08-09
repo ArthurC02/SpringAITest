@@ -41,3 +41,6 @@ artifacts/copilot-shared-core/
 
 # Local resource-calibration bundles contain machine-specific measurements.
 artifacts/resource-calibration/
+
+# claude runtime state (no-touch sentinel etc.)
+.claude/state/

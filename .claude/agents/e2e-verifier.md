@@ -2,6 +2,8 @@
 name: e2e-verifier
 description: 端到端驗證代理:以 docker compose --profile full 啟動全套服務,用 curl 驗證整條鏈路(auth、SSE 聊天、文件 202→ready、rag-qa、AG-UI、角色權限、錯誤格式),跨服務 UI 變更時再用 Playwright MCP 開真瀏覽器驗前端(login、核心四 view 與依 feature flag 開啟的管理 view、CopilotKit sidebar、瀏覽器內 SSE 逐字流),完成後收攤且保留 volume。
 model: sonnet
+skills:
+  - "verify-phase"
 tools: Read, Glob, Grep, Bash, PowerShell, LSP, mcp__playwright__browser_navigate, mcp__playwright__browser_snapshot, mcp__playwright__browser_click, mcp__playwright__browser_type, mcp__playwright__browser_fill_form, mcp__playwright__browser_press_key, mcp__playwright__browser_wait_for, mcp__playwright__browser_console_messages, mcp__playwright__browser_network_requests, mcp__playwright__browser_tabs, mcp__playwright__browser_evaluate, mcp__playwright__browser_take_screenshot, mcp__playwright__browser_select_option, mcp__playwright__browser_handle_dialog, mcp__playwright__browser_close
 # mcp: playwright — curl 驗鏈路;真瀏覽器行為(React 渲染、SSE 逐字流、CopilotKit)curl 測不到,靠 Playwright MCP 補
 hooks:

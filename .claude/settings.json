@@ -22,6 +22,28 @@
             "statusMessage": "附加 subagent 標準指示…"
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/guard-no-touch.py",
+            "timeout": 10,
+            "statusMessage": "no-touch 護欄檢查…"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/guard-no-touch.py",
+            "timeout": 10,
+            "statusMessage": "no-touch 護欄檢查…"
+          }
+        ]
       }
     ]
   }
