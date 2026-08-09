@@ -11,15 +11,15 @@ public sealed class CurrentSchemaBaselineTests(PostgresFixture fixture)
     [Fact]
     public void ProductionManifestPinsTheCurrentInventoryWithoutShippingSql()
     {
-        Assert.Equal(52, MigrationManifest.SpringAITestApplicationTables.Length);
-        Assert.Equal(52, MigrationManifest.SpringAITestApplicationTables.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(54, MigrationManifest.SpringAITestApplicationTables.Length);
+        Assert.Equal(54, MigrationManifest.SpringAITestApplicationTables.Distinct(StringComparer.Ordinal).Count());
         Assert.Contains("document_ingest", MigrationManifest.SpringAITestApplicationTables);
         Assert.Contains("checkpoint_retention_ack", MigrationManifest.SpringAITestApplicationTables);
 
         Assert.Equal(
             ["checkpoint_blobs", "checkpoint_migrations", "checkpoint_writes", "checkpoints", "workflow_root_context_checkpoint"],
             MigrationManifest.OptionalWorkflowCheckpointTables.Order(StringComparer.Ordinal));
-        Assert.Equal(57, MigrationManifest.SpringAITestLegacyObjects.Length);
+        Assert.Equal(59, MigrationManifest.SpringAITestLegacyObjects.Length);
         Assert.Equal(["plpgsql", "vector"], MigrationManifest.Production.AllowedExtensions.Order(StringComparer.Ordinal));
 
         Assert.Equal(0, MigrationManifest.Production.BundleThroughVersion);
@@ -28,7 +28,7 @@ public sealed class CurrentSchemaBaselineTests(PostgresFixture fixture)
     }
 
     [SkippableFact]
-    public async Task CurrentDbBootstrapSchemaMatchesThe52TableBaselineAndRequiredIndex()
+    public async Task CurrentDbBootstrapSchemaMatchesThe54TableBaselineAndRequiredIndex()
     {
         fixture.SkipIfUnavailable();
 

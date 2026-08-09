@@ -70,7 +70,7 @@ public sealed class MigrationManifest
         "agent_run_command", "context_policy", "source_catalog", "metric_definition", "context_revision",
         "context_evidence", "context_view", "context_request", "context_delta", "eval_suite",
         "eval_suite_revision", "eval_run", "eval_case_result", "prompt_component_revision",
-        "prompt_manifest_revision", "checkpoint_retention_ack",
+        "prompt_manifest_revision", "checkpoint_retention_ack", "agent_trigger", "agent_trigger_occurrence",
     ];
 
     public static readonly string[] OptionalWorkflowCheckpointTables =
