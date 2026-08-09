@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { cancelTrigger, createTrigger, listTriggerOccurrences, listTriggers } from '../api/triggers'
 import { listOrchestrators } from '../api/orchestrators'
 import { useResource } from '../hooks/useResource'
@@ -165,19 +165,24 @@ function TriggerDetails({ trigger }: { trigger: Trigger }) {
   const [cursor, setCursor] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const mappingEntries = Object.entries(trigger.inputMapping)
+  // 世代守衛：避免連點「重新載入」或與「載入更多」交錯時，較舊的回應晚到覆寫較新的畫面狀態
+  // （與 ApprovalInbox 的 queueGenerationRef、RunsView 的 generationRef 同一個手法）。
+  const generationRef = useRef(0)
 
   const load = useCallback(async (from: string | null) => {
+    const generation = ++generationRef.current
     setLoading(true)
     setError(null)
     try {
       const page = await listTriggerOccurrences(triggerId, { cursor: from })
+      if (generation !== generationRef.current) return
       setItems((prev) => (from && prev ? [...prev, ...page.items] : page.items))
       setCursor(page.cursor)
       setHasMore(page.hasMore)
     } catch (e) {
-      setError((e as Error).message)
+      if (generation === generationRef.current) setError((e as Error).message)
     } finally {
-      setLoading(false)
+      if (generation === generationRef.current) setLoading(false)
     }
   }, [triggerId])
 
@@ -206,7 +211,7 @@ function TriggerDetails({ trigger }: { trigger: Trigger }) {
       {error && (
         <div className="agent-errors" role="alert">
           載入失敗：{error}
-          <button className="btn" type="button" onClick={() => void load(null)}>重新載入</button>
+          <button className="btn" type="button" disabled={loading} onClick={() => void load(null)}>重新載入</button>
         </div>
       )}
       {items !== null && items.length === 0 && !error && <p className="muted">尚未有觸發紀錄。</p>}

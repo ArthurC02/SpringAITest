@@ -165,6 +165,59 @@ test('409 ends the logical attempt so the next submit receives a new key', async
   expect(keys[1]).not.toBe(keys[0])
 })
 
+// 載入失敗不得偽裝成「尚無文件」：docs 初值是空陣列，所以錯誤與「新增一份讓 AI 檢索」
+// 的邀請文案原本會同時出現，等於叫使用者去解決一個並不存在的問題。
+test('a failed first list offers a reload instead of the empty-state invitation', async ({ page }) => {
+  let mode: 'fail' | 'ok' = 'fail'
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/documents' && request.method() === 'GET') {
+      if (mode === 'fail') {
+        return json(route, {
+          timestamp: '2026-08-09T00:00:00Z', status: 500,
+          message: '伺服器暫時無法回應', fieldErrors: {},
+        }, 500)
+      }
+      return json(route, [{ id: DOC_ID, title: '季報', status: 'ready', chunk_count: 3, created_at: '2026-07-25T00:00:00Z' }])
+    }
+    return json(route, [])
+  })
+
+  await openDocuments(page)
+  await expect(page.getByText('伺服器暫時無法回應')).toBeVisible()
+  await expect(page.getByText('尚無文件,新增一份讓 AI 檢索。')).toHaveCount(0)
+
+  mode = 'ok'
+  await page.getByRole('button', { name: '重新載入' }).click()
+  await expect(page.locator('tbody tr').filter({ hasText: '季報' })).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '重新載入' })).toHaveCount(0)
+})
+
+test('an empty 200 list still shows the empty-state invitation', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/documents' && request.method() === 'GET') return json(route, [])
+    return json(route, [])
+  })
+
+  await openDocuments(page)
+  await expect(page.getByText('尚無文件,新增一份讓 AI 檢索。')).toBeVisible()
+  await expect(page.getByRole('button', { name: '重新載入' })).toHaveCount(0)
+})
+
 test('late success does not clear form content edited after submit', async ({ page }) => {
   let releasePost!: () => void
   const postGate = new Promise<void>((resolve) => { releasePost = resolve })

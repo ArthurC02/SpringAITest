@@ -55,13 +55,40 @@ export function consumeSessionExpired(): boolean {
 }
 
 /**
+ * 追蹤編號的有界化：trim 後 1..128 字元且不含控制字元才採用，與 backend
+ * `Common/IdentityHeaders.SingleBoundedValue` 的邊界一致。不符就當作沒有，
+ * 不把未消毒的字串顯示給使用者。
+ */
+function boundedCorrelationId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const id = raw.trim()
+  if (id.length === 0 || id.length > 128) return null
+  for (let i = 0; i < id.length; i += 1) {
+    const code = id.charCodeAt(i)
+    if (code < 0x20 || code === 0x7f) return null
+  }
+  return id
+}
+
+/**
  * 從錯誤回應 body 解析出訊息：body 是 ApiError JSON 且有字串 message 就用它，
  * 否則用呼叫端給的 fallback 文案。`request()`（apiFetch/apiFetchBlob 共用）與
  * chat.ts 的 streamChat()（不走 apiFetch，SSE 需要原始 ReadableStream）共用這個解析。
+ *
+ * 5xx 另外把追蹤編號併進 message 字串（而非另開 ApiError 欄位）：呼叫端普遍以
+ * `(e as Error).message` 存成 string state，單點併入即可一次覆蓋 toast / ErrorText /
+ * 聊天錯誤氣泡三條顯示路徑，零呼叫端改動。只對 5xx 附加——4xx 的訊息本身已是可行動
+ * 的人話，附編號只是噪音；且 404 偽裝契約要求「旗標關閉」與「路由不存在」不可區分，
+ * 不得在該路徑上引入任何額外資訊。
  */
 export async function parseErrorMessage(res: Response, fallback: string): Promise<string> {
   const data = await res.json().catch(() => null)
-  return data && typeof data.message === 'string' ? data.message : fallback
+  const message = data && typeof data.message === 'string' ? data.message : fallback
+  if (res.status < 500) return message
+  const id =
+    boundedCorrelationId(data?.correlationId) ??
+    boundedCorrelationId(res.headers.get('X-Correlation-Id'))
+  return id ? `${message}(追蹤編號:${id})` : message
 }
 
 /**

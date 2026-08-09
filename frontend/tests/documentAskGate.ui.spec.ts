@@ -53,6 +53,19 @@ test.describe('「問這份文件」狀態閘', () => {
     await expect(failedBtn).toHaveAttribute('title', '文件處理失敗,無法提問')
   })
 
+  // 副駕多數時候本來就開著（首次登入自動展開後常駐），所以「展開副駕」不是可見回饋；
+  // 指示條才是使用者唯一看得到「現在問的是哪份文件」的訊號，也是唯一的清除入口。
+  test('聚焦後出現指示條,× 可清除', async ({ page }) => {
+    await mountDocuments(page)
+
+    await expect(page.getByText('目前聚焦:')).toHaveCount(0)
+    await askButton(page, READY_DOC.title).click()
+    await expect(page.getByText(`目前聚焦:《${READY_DOC.title}》`)).toBeVisible()
+
+    await page.getByRole('button', { name: '清除聚焦文件' }).click()
+    await expect(page.getByText('目前聚焦:')).toHaveCount(0)
+  })
+
   test('點 ready 列的「問這份文件」會展開副駕側欄', async ({ page }) => {
     await mountDocuments(page)
 

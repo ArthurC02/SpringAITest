@@ -1050,6 +1050,45 @@ cpk-thread-inspector {
   }
 }
 
+/* 「問這份文件」聚焦指示條（WS1-a）：渲染在 CopilotSidebar 的 children 區，而該區是
+   .shell 這個 flex 容器的一員——不 fixed 定位的話會變成版面上的第三欄擠壓主內容區，
+   所以比照 .copilot-launcher 一樣脫離文件流。靠左下角（左側欄寬 208px + 間距）是因為
+   副駕面板固定在右側，展開時會蓋住右下角並攔截點擊，清除鈕就按不到了。 */
+.copilot-focus {
+  position: fixed;
+  left: 224px;
+  bottom: 16px;
+  z-index: 31;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 320px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: var(--copilot-kit-shadow-md, 0 2px 10px rgba(0, 0, 0, 0.2));
+}
+.copilot-focus .chip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copilot-focus__clear {
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.copilot-focus__clear:hover {
+  color: var(--text-h);
+}
+
 /* ── loading 骨架（各視圖共用一套；微光受 prefers-reduced-motion 保護） ── */
 .skeleton-group {
   display: flex;

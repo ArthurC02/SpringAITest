@@ -8,6 +8,7 @@ import {
 } from '../logicalAttemptKey'
 import type { ApprovalQueueEntry, ApprovalQueueScope, RunApproval } from '../types'
 import { fmtDate } from '../format'
+import { useConfirm } from './ConfirmDialog'
 import { runWithToast, useToast } from './Toast'
 
 const ATTEMPT_KEY = `${RUN_APPROVAL_ATTEMPT_STORAGE_PREFIX}idempotency`
@@ -30,6 +31,24 @@ const ACTION_SUMMARY_LABEL: Record<string, string> = {
 function actionSummaryLabel(summary: string | null): string {
   if (!summary) return '（無動作摘要）'
   return ACTION_SUMMARY_LABEL[summary] ?? summary
+}
+
+/**
+ * 二次確認文案裡用來指認「你正在決定哪一筆」的描述。decide() 只拿得到 RunApproval
+ * （沒有佇列項的 action_summary），所以只用它自己已有的欄位組出來——不從佇列 state
+ * 反查（手輸 Run ID 動線根本沒有佇列項，反查只會讓文案時有時無），也不新增 API 欄位。
+ * decide() 的 guard 已限定 status 必為 'pending'，放進文案對每一筆都相同、起不到辨識
+ * 作用，故改用 Run ID + 核准項 ID（各取前 8 碼，兩者都已在 RunApproval 上）指認具體項目。
+ */
+function approvalLabel(approval: RunApproval, target: string): string {
+  const runShort = (approval.runId ?? target).slice(0, 8)
+  const approvalShort = approval.id.slice(0, 8)
+  return `Run ${runShort}・核准項 ${approvalShort}・需要核准的角色：${approval.requiredRole ?? '—'}`
+}
+
+/** 到期時間附在確認文案尾端；沒有值就整句省略，不顯示「—」。 */
+function expirySentence(approval: RunApproval): string {
+  return approval.expiresAt ? `到期時間:${fmtDate(approval.expiresAt)}。` : ''
 }
 
 const SCOPE_LABEL: Record<ApprovalQueueScope, string> = {
@@ -68,6 +87,7 @@ function approvalErrorMessage(error: unknown): string {
 /** A USER-safe approval surface. Backend is the authorization and redaction authority. */
 export default function ApprovalInbox() {
   const toast = useToast()
+  const confirm = useConfirm()
   const [runId, setRunId] = useState('')
   const [approvals, setApprovals] = useState<RunApproval[]>([])
   const [reason, setReason] = useState('')
@@ -134,6 +154,17 @@ export default function ApprovalInbox() {
   async function decide(approval: RunApproval, decision: 'approve' | 'reject') {
     const target = runId.trim()
     if (!target || loading || approval.status !== 'pending') return
+    // D7 決策是 once-only、不可重放的最終寫入授權，比照站內其餘不可逆動作先二次確認。
+    const confirmed = await confirm(
+      decision === 'approve'
+        ? `已確認要核准「${approvalLabel(approval, target)}」?核准後立即生效且無法撤銷。${expirySentence(approval)}`
+        : `已確認要駁回「${approvalLabel(approval, target)}」?駁回後此 Run 不會執行該動作,且無法撤銷。${expirySentence(approval)}`,
+      decision === 'approve'
+        ? { confirmLabel: '核准' }
+        : { danger: true, confirmLabel: '駁回' },
+    )
+    if (!confirmed) return
+    // keyFor 必須在確認通過後才呼叫：取消不該消耗一個 logical attempt。
     const identity = [target, approval.id, decision, reason.trim()] as const
     const key = attempts.keyFor(identity)
     setLoading(true)

@@ -45,7 +45,7 @@ interface Props {
 
 /** 文件視圖：新增表單 + 清單，含 202→processing→輪詢至就緒的完整流程（見 useDocuments）。 */
 export default function DocumentsView({ documents, onAskDocument }: Props) {
-  const { docs, loading, error, timedOut, create, remove } = documents
+  const { docs, loading, error, timedOut, create, remove, reload } = documents
   const toast = useToast()
   const confirm = useConfirm()
   const [title, setTitle] = useState('')
@@ -255,10 +255,16 @@ export default function DocumentsView({ documents, onAskDocument }: Props) {
         <p className="muted">仍在處理中，稍後重新整理頁面即可看到最新狀態。</p>
       )}
 
+      {/* 三態:載入中 / 載入失敗 / 真的沒有文件。載入失敗不得偽裝成「尚無文件」邀請文案
+          （錯誤訊息本身由上方既有的 ErrorText 呈現，這裡只補一條重試動線,不重複顯示）。 */}
       {loading && docs.length === 0 ? (
         <div className="table-wrap">
           <Skeleton rows={4} />
         </div>
+      ) : error && docs.length === 0 ? (
+        <button className="btn" type="button" onClick={() => void reload()} disabled={loading}>
+          重新載入
+        </button>
       ) : docs.length === 0 ? (
         <p className="muted">尚無文件,新增一份讓 AI 檢索。</p>
       ) : (

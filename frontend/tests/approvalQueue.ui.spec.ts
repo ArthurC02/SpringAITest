@@ -132,11 +132,86 @@ test('approval queue renders, switches scope, paginates, shows actionable/expire
   await page.getByRole('button', { name: '寫入執行證據' }).first().click()
   await expect(page.getByRole('button', { name: '核准', exact: true })).toBeVisible()
   await page.getByRole('button', { name: '核准', exact: true }).click()
+  // 決策是不可逆的最終寫入授權，先過二次確認（見下方專測）。
+  await page.getByRole('button', { name: '核准', exact: true }).last().click()
   await expect(page.getByText('已核准。')).toBeVisible()
 
   // 決策完成後，對應佇列項從畫面上移除。
   await expect(page.getByText('寫入執行證據')).toHaveCount(0)
   expect(decisions).toEqual([{ approvalId: 'approval-1', key: expect.any(String) }])
+})
+
+// D7 決策是 once-only、不可重放的最終寫入授權，站內其餘不可逆動作都先過 useConfirm。
+test('approve and reject both require a second confirmation, and cancelling neither sends the decision nor burns a logical attempt', async ({
+  page,
+}) => {
+  const decisions: Array<{ decision: string; key: string | undefined }> = []
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'confirm-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo' })
+    }
+    if (path === '/api/features') return json(route, { agentWriteToolsEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+
+    if (path === '/api/runs/approvals') {
+      return json(route, {
+        items: [{
+          approval_id: 'approval-1', run_id: runActionable, agent_id: agentId, agent_revision: 3,
+          status: 'pending', required_role: 'USER', action_summary: 'runtime.write_evidence',
+          created_at: '2026-01-01T00:00:00Z', expires_at: '2099-01-01T00:00:00Z', actionable: true,
+        }],
+        has_more: false, next_cursor: null,
+      })
+    }
+    if (path === `/api/runs/${runActionable}/approvals` && request.method() === 'GET') {
+      const decided = decisions.length > 0
+      return json(route, [{
+        id: 'approval-1', run_id: runActionable, status: decided ? 'rejected' : 'pending',
+        required_role: 'USER', expires_at: '2099-01-01T00:00:00Z',
+        decision: decided ? 'rejected' : null,
+      }])
+    }
+    if (path.startsWith(`/api/runs/${runActionable}/approvals/approval-1/`) && request.method() === 'POST') {
+      decisions.push({
+        decision: path.endsWith('/approve') ? 'approve' : 'reject',
+        key: request.headers()['idempotency-key'],
+      })
+      return json(route, { id: 'approval-1', status: 'rejected', decision: 'rejected', decided_by: 'admin' })
+    }
+    return json(route, [])
+  })
+
+  await login(page)
+  await page.getByRole('button', { name: '寫入執行證據' }).first().click()
+  await expect(page.getByRole('button', { name: '核准', exact: true })).toBeVisible()
+
+  // 核准：確認文案要說清楚在核准什麼、生效後不可撤銷，並帶上到期時間。
+  await page.getByRole('button', { name: '核准', exact: true }).click()
+  await expect(
+    page.getByText('已確認要核准「Run 11111111・核准項 approval・需要核准的角色：USER」?核准後立即生效且無法撤銷。到期時間:'),
+  ).toBeVisible()
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  expect(decisions).toEqual([])
+  // 取消不得消耗一個 logical attempt（keyFor 必須在確認之後才呼叫，否則 key 已寫進 sessionStorage）。
+  expect(await page.evaluate(() => sessionStorage.getItem('springai-run-approvals:idempotency'))).toBeNull()
+  await expect(page.getByRole('button', { name: '核准', exact: true })).toBeVisible()
+
+  // 駁回：走 danger 樣式且確認鈕字樣為「駁回」。
+  await page.getByRole('button', { name: '駁回', exact: true }).click()
+  await expect(
+    page.getByText('已確認要駁回「Run 11111111・核准項 approval・需要核准的角色：USER」?駁回後此 Run 不會執行該動作,且無法撤銷。'),
+  ).toBeVisible()
+  await expect(page.locator('.confirm-dialog__confirm--danger')).toHaveText('駁回')
+  await page.locator('.confirm-dialog__confirm--danger').click()
+
+  await expect(page.getByText('已駁回。')).toBeVisible()
+  expect(decisions).toHaveLength(1)
+  expect(decisions[0].decision).toBe('reject')
+  expect(decisions[0].key).toBeTruthy()
 })
 
 test('a non-404 queue failure shows an inline error but keeps the manual Run ID lookup usable, and an empty queue shows the empty-state notice', async ({

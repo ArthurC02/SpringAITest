@@ -51,39 +51,39 @@
 
 ### P0
 
-- [ ] **W1-01** Run 核准/駁回加二次確認（`frontend/src/components/ApprovalInbox.tsx:222-225`）：`decide()` 內用既有 `useConfirm()`，文案帶入動作摘要與到期時間，`keyFor` 移到確認之後以免取消也消耗 logical attempt。D7 核准是 once-only、不可重放的最終寫入授權，卻是站內唯一沒有二次確認的高風險操作，而這個畫面設計上正是給非技術的業務核准者用的。
+- [x] **W1-01** Run 核准/駁回加二次確認（`frontend/src/components/ApprovalInbox.tsx:222-225`）：`decide()` 內用既有 `useConfirm()`，文案帶入動作摘要與到期時間，`keyFor` 移到確認之後以免取消也消耗 logical attempt。D7 核准是 once-only、不可重放的最終寫入授權，卻是站內唯一沒有二次確認的高風險操作，而這個畫面設計上正是給非技術的業務核准者用的。
 
 ### P1 — 使用者可見缺陷
 
-- [ ] **W1-02** 5xx 錯誤訊息接上追蹤編號（`frontend/src/api/http.ts:62-65`）：`parseErrorMessage` 在 `status >= 500` 時把 `data.correlationId` 或 `X-Correlation-Id` header 附成「（追蹤編號：…）」。單改一個函式即同時覆蓋 `apiFetch` 與 SSE 兩條路徑。workflow 的固定訊息字面上就是「請提供追蹤編號給管理員」，但前端從未讀取它。
+- [x] **W1-02** 5xx 錯誤訊息接上追蹤編號（`frontend/src/api/http.ts:62-65`）：`parseErrorMessage` 在 `status >= 500` 時把 `data.correlationId` 或 `X-Correlation-Id` header 附成「（追蹤編號：…）」。單改一個函式即同時覆蓋 `apiFetch` 與 SSE 兩條路徑。workflow 的固定訊息字面上就是「請提供追蹤編號給管理員」，但前端從未讀取它。
 - [ ] **W1-18** 文件失敗原因全鏈路（`backend/src/Backend.Api/Files/RagRepository.cs:162-171` → DTO → `frontend/src/components/DocumentsView.tsx`）：`MarkFailedAsync` 加 nullable `failureReason`，`rag_documents` 加欄位，DocumentProcessor 從**封閉集合**取已消毒分類文字，前端在失敗 chip 旁顯示。**先跑 `contract-change` skill**；不含重試（見 W2-08）。
 - [ ] **W1-03** 管理面中文化補完（`AppShell.tsx:55-56`、`OrchestratorsView.tsx:95-148,274-294,314,328,348,358,773,780,836,856-863,882,898`、`ConfigView.tsx:20,89-90`）：詞彙一律沿用 `AgentTestConsole.tsx` 既有對照，不新建。同輪 grep `frontend/tests` + `frontend/e2e` 更新受影響的文字選擇器。
 - [ ] **W1-07** 執行總覽解析 Agent/Orchestrator 名稱（`frontend/src/components/RunsView.tsx`、`runDiscoveryDisplay.ts:47-53`）：比照 `TriggersView.tsx:230-234` 的 client-side 反查。兩支目錄 API 各有獨立 flag/權限，必須**完全 fail-open**（404/403 靜默，退回短 GUID）。
-- [ ] **W1-04** 文件旅程兩處誠實回饋（`DocumentsView.tsx:253-263`、`AppShell.tsx:239-246,275-282`）：(a) 載入失敗時顯示「重新載入」而非「尚無文件」邀請文案（比照 `AnalysisView.tsx:27-35`）；(b) 副駕加「目前聚焦：《…》×」指示與清除鈕。
-- [ ] **W1-06** TriggerDetails 補世代守衛（`TriggersView.tsx:169-182`）：照抄 `ApprovalInbox.tsx:92-111` / `RunsView.tsx:95-117` 的 `generationRef`，並補 `:209` 重新載入鈕的 `disabled`。**不抽共用 hook**（只有 3 個呼叫點）。
+- [x] **W1-04** 文件旅程兩處誠實回饋（`DocumentsView.tsx:253-263`、`AppShell.tsx:239-246,275-282`）：(a) 載入失敗時顯示「重新載入」而非「尚無文件」邀請文案（比照 `AnalysisView.tsx:27-35`）；(b) 副駕加「目前聚焦：《…》×」指示與清除鈕。
+- [x] **W1-06** TriggerDetails 補世代守衛（`TriggersView.tsx:169-182`）：照抄 `ApprovalInbox.tsx:92-111` / `RunsView.tsx:95-117` 的 `generationRef`，並補 `:209` 重新載入鈕的 `disabled`。**不抽共用 hook**（只有 3 個呼叫點）。
 - [ ] **W1-05** 聊天來源徽章不外洩 slug（`frontend/src/skillSentinel.ts:24-26`）：白名單外一律回「來源：自訂技能」，不印 kebab-case 技術識別碼。
 - [ ] **W1-08** SPA 容器基線安全標頭（`frontend/nginx.conf`）：必做三個零風險標頭（nosniff / Referrer-Policy / X-Frame-Options），盡力加 CSP。**若 CSP 擋住 pdf.js worker 或 CopilotKit，拿掉 CSP 並回報，絕不得加 `unsafe-eval`。** 不得動 `location /api/` 的 `proxy_buffering off` 與 `.mjs` MIME 映射。
 
 ### P1 — 資料層／併發／可靠性
 
-- [ ] **W1-09** DbBootstrap 兩個遷移收斂（`DbBootstrap.cs:1093-1097,1247-1261,1264-1269`）：(a) 用已算好的 `nameChanged/definitionNeedsRewrite/packageNeedsRewrite` 包住兩個 UPDATE；(b) 用 `information_schema.columns` guard 包住 `ALTER … SET NOT NULL`（比照同檔 `:798-819` 的 DO 區塊）。外層 `SELECT … FOR UPDATE` 維持不變，加 `ponytail:` 註解記錄剩餘天花板。
+- [x] **W1-09** DbBootstrap 兩個遷移收斂（`DbBootstrap.cs:1093-1097,1247-1261,1264-1269`）：(a) 用已算好的 `nameChanged/definitionNeedsRewrite/packageNeedsRewrite` 包住兩個 UPDATE；(b) 用 `information_schema.columns` guard 包住 `ALTER … SET NOT NULL`（比照同檔 `:798-819` 的 DO 區塊）。外層 `SELECT … FOR UPDATE` 維持不變，加 `ponytail:` 註解記錄剩餘天花板。
 - [ ] **W1-12** O5 due/misfire 改用 DB 時鐘（`TriggerDispatcher.cs:31-33,63,145`、`TriggerRepository.cs:174-213`、`Data/InMemory/InMemoryTriggerRepository.cs`）：`ClaimDueAsync` 去掉傳入的 `now`，SQL 改用 `now()`（同述句內穩定，且與既有 `updated_at=now()` 同值）並回傳權威時間；misfire 用回傳值判斷。**先跑 `parity-check` skill。** 一次性觸發永不重試，時鐘飄移＝使用者排定的 run 靜默不發生。
-- [ ] **W1-10** InMemoryCheckpointRetentionRepository 實作 + 測試（`CheckpointRetentionRepository.cs:115-142`）：目前 `ListAsync` 永遠回空陣列，且該類別在全 repo 唯一出現處是 DI 註冊本身。改由兩個 InMemory run repository 各自在**自己的鎖內**回傳候選快照，retention repo 在鎖外合併。**紅線：絕不得持有自己的 `_gate` 時呼叫另外兩個 repository**（CLAUDE.md 記載的 ABBA 實例）。
-- [ ] **W1-11** `X-User-Capabilities` 有界驗證（`Common/IdentityHeaders.cs:29-35`）：比照同檔 `UserGroups()`（:56-83）做值數量／wire byte／entry 長度／控制字元檢查，單一壞值拒絕整個 header。**紅線：不得加名稱文法正則**（`RequireCapability` 已是 Ordinal 精確比對，未知字串本來就無法命中；加文法只會製造未來破壞面）。
+- [x] **W1-10** InMemoryCheckpointRetentionRepository 實作 + 測試（`CheckpointRetentionRepository.cs:115-142`）：目前 `ListAsync` 永遠回空陣列，且該類別在全 repo 唯一出現處是 DI 註冊本身。改由兩個 InMemory run repository 各自在**自己的鎖內**回傳候選快照，retention repo 在鎖外合併。**紅線：絕不得持有自己的 `_gate` 時呼叫另外兩個 repository**（CLAUDE.md 記載的 ABBA 實例）。
+- [x] **W1-11** `X-User-Capabilities` 有界驗證（`Common/IdentityHeaders.cs:29-35`）：比照同檔 `UserGroups()`（:56-83）做值數量／wire byte／entry 長度／控制字元檢查，單一壞值拒絕整個 header。**紅線：不得加名稱文法正則**（`RequireCapability` 已是 Ordinal 精確比對，未知字串本來就無法命中；加文法只會製造未來破壞面）。
 - [ ] **W1-13** 文件處理鏈路傳遞 correlationId（`Files/DocumentDtos.cs:20-21`、`platform/src/Platform.Service/RabbitDocumentQueue.cs:38`、`Files/DocumentConsumerService.cs`）：body 欄位 + AMQP `BasicProperties.CorrelationId` 雙寫，consumer 驗證後開 logging scope。**紅線：缺欄位的舊訊息必須照常處理完成**（滾動部署相容）。
 - [ ] **W1-14** Backend readiness 揭露 consumer 連線狀態（`Common/BackendHealth.cs:101-107`、`Files/DocumentConsumerService.cs`）：加 `document_consumer` 元件，**`Required: false`**（看得見但不翻轉 200/503，避免 broker 抖動造成重啟迴圈）；consumer 未啟動的部署不得出現該元件。
 - [ ] **W1-15** AgentChatRuntime 輪詢 100ms → 500ms（`platform/src/Platform.Service/AgentChatRuntime.cs:32`）：一個常數，backend 請求量降一個數量級，使用者無感（LLM 本身是秒級）。**不加退避狀態機**（YAGNI），加 `ponytail:` 註解記錄升級路徑。
 
 ### P1 — CI 覆蓋
 
-- [ ] **W1-16** workflow CI job 加 postgres service container（`.github/workflows/ci.yml:75-88`）：鏡射 backend job（:29-41）的 pgvector service，設 `CHECKPOINT_DATABASE_URL` + HMAC key（**實作前先讀 `workflow/app/settings.py` 確認變數名**），加「must be reachable」防呆步驟，改寫 :76-77 的過期註解。對應 `plans/agent-architecture-improvements/02-evaluation-observability-plan.md` §3（E0 item 3）。
-- [ ] **W1-17** Route snapshot 納入授權 metadata（`backend/tests/…/ApiRouteSnapshotTests.cs:17-28`、`platform/tests/…/ApiRouteSnapshotTests.cs:17-28` + 兩份 `RouteSnapshots/*.txt`）：每行附 `[authz:policy=…]` / `[authz:anonymous]` / `[authz:authenticated]` / `[authz:none]`。**紅線：不得改任何路由或授權屬性**；重新產生的快照 diff 必須完整呈現在 PR 中，讓 reviewer 一次性簽核所有路由的授權狀態。
+- [x] **W1-16** workflow CI job 加 postgres service container（`.github/workflows/ci.yml:75-88`）：鏡射 backend job（:29-41）的 pgvector service，設 `CHECKPOINT_DATABASE_URL` + HMAC key（**實作前先讀 `workflow/app/settings.py` 確認變數名**），加「must be reachable」防呆步驟，改寫 :76-77 的過期註解。對應 `plans/agent-architecture-improvements/02-evaluation-observability-plan.md` §3（E0 item 3）。
+- [x] **W1-17** Route snapshot 納入授權 metadata（`backend/tests/…/ApiRouteSnapshotTests.cs:17-28`、`platform/tests/…/ApiRouteSnapshotTests.cs:17-28` + 兩份 `RouteSnapshots/*.txt`）：每行附 `[authz:policy=…]` / `[authz:anonymous]` / `[authz:authenticated]` / `[authz:none]`。**紅線：不得改任何路由或授權屬性**；重新產生的快照 diff 必須完整呈現在 PR 中，讓 reviewer 一次性簽核所有路由的授權狀態。
 
 ### P2 — 文件與建置
 
 - [ ] **W1-19** 三份旗標清單／健康檢查／腳本 OS 慣例同步（`README.md:36,75-83`、`infra/.env.example`、`platform/AGENTS.md`）：README 補 6 個缺漏旗標、.env.example 補 `RUN_DISCOVERY_ENABLED`/`AGENT_TRIGGERS_ENABLED`、platform/AGENTS.md 補 `/actuator/health/ready` 及其六項依賴檢查、README 補一句 verify-* 腳本僅 pwsh 版。**以程式碼與 compose 檔為準逐一核對，不照抄本計畫的清單。**
-- [ ] **W1-21** backend/platform Dockerfile restore 層分離（`backend/Dockerfile:3-7`、`platform/Dockerfile:3-7`）：`COPY *.csproj` + `dotnet restore` 獨立成層，再 `COPY . .` + `publish --no-restore`。與 `workflow/Dockerfile:9-14` 已有的做法一致。**紅線：不得抽共用 csproj**（已否決提案）。
-- [ ] **W1-20** start-infra 提示需手動 build（`scripts/start-infra.ps1:9`、`scripts/start-infra.sh:11`）：加 `-Build`/`--build` opt-in 開關；未帶時印提示。不預設 build（多數模式 A 使用者只改主機上的 platform/frontend）。`*.sh` 維持 LF。
+- [x] **W1-21** backend/platform Dockerfile restore 層分離（`backend/Dockerfile:3-7`、`platform/Dockerfile:3-7`）：`COPY *.csproj` + `dotnet restore` 獨立成層，再 `COPY . .` + `publish --no-restore`。與 `workflow/Dockerfile:9-14` 已有的做法一致。**紅線：不得抽共用 csproj**（已否決提案）。
+- [x] **W1-20** start-infra 提示需手動 build（`scripts/start-infra.ps1:9`、`scripts/start-infra.sh:11`）：加 `-Build`/`--build` opt-in 開關；未帶時印提示。不預設 build（多數模式 A 使用者只改主機上的 platform/frontend）。`*.sh` 維持 LF。
 
 ---
 

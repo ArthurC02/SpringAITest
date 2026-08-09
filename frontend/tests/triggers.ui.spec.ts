@@ -266,6 +266,67 @@ test('the fire history loads on expand, renders the bounded status in Chinese an
   expect(occurrenceCalls).toBe(1)
 })
 
+// 「重新載入」的 onClick 沒有任何進行中判斷（按下的當下錯誤區塊才被 setError(null) 收掉），
+// 所以同一個 tick 內連點兩次真的會送出兩個並行請求。沒有世代守衛時，先送出的那個晚到就會
+// 覆寫較新的畫面狀態——這裡讓第一個回應「舊資料且慢」、第二個「新資料且快」來釘住這件事。
+function occurrence(id: string, rootRunId: string) {
+  return {
+    id, trigger_id: 'trigger-1', scheduled_for: '2026-08-10T02:30:00Z',
+    status: 'fired', root_run_id: rootRunId,
+    created_at: '2026-08-10T02:30:01Z', updated_at: '2026-08-10T02:30:02Z',
+  }
+}
+
+test('a slow earlier fire-history response cannot overwrite the newer one', async ({ page }) => {
+  let occurrenceCalls = 0
+  let releaseStale!: () => void
+  const staleGate = new Promise<void>((resolve) => { releaseStale = resolve })
+
+  await openTriggers(page, {
+    handler: async (route, url) => {
+      if (url.pathname === '/api/admin/triggers') {
+        await json(route, { items: [SCHEDULED] })
+        return true
+      }
+      if (url.pathname === '/api/admin/triggers/trigger-1/occurrences') {
+        occurrenceCalls += 1
+        // 展開時的第一次載入失敗，讓「重新載入」按鈕出現。
+        if (occurrenceCalls === 1) {
+          await json(route, { timestamp: '2026-08-09T00:00:00Z', status: 500, message: '伺服器暫時無法回應', fieldErrors: {} }, 500)
+          return true
+        }
+        if (occurrenceCalls === 2) {
+          await staleGate
+          await json(route, { items: [occurrence('occ-stale', 'aaaaaaaa-3333-4444-8555-666666666666')], has_more: false, next_cursor: null })
+          return true
+        }
+        await json(route, { items: [occurrence('occ-fresh', 'bbbbbbbb-3333-4444-8555-666666666666')], has_more: false, next_cursor: null })
+        return true
+      }
+      return false
+    },
+  })
+
+  await page.getByText('展開 input mapping 與 fire 歷史').click()
+  await expect(page.getByRole('button', { name: '重新載入' })).toBeEnabled()
+
+  // 同一個 tick 內按兩次：React 尚未重繪，兩次 onClick 都會真的送出請求。
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find((b) => b.textContent === '重新載入')
+    button?.click()
+    button?.click()
+  })
+  await expect.poll(() => occurrenceCalls).toBe(3)
+
+  // 較新的那個先回來並上畫面。
+  await expect(page.getByText('bbbbbbbb(請至「執行總覽」查看)')).toBeVisible()
+
+  // 較舊的那個晚到，必須被世代守衛丟掉。
+  releaseStale()
+  await expect(page.getByText('aaaaaaaa(請至「執行總覽」查看)')).toHaveCount(0)
+  await expect(page.getByText('bbbbbbbb(請至「執行總覽」查看)')).toBeVisible()
+})
+
 test('an unavailable orchestrator catalog degrades to manual id entry instead of blocking the form', async ({ page }) => {
   await openTriggers(page, {
     handler: async (route, url) => {

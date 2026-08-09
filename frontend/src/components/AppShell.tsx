@@ -481,6 +481,21 @@ export default function AppShell({
             }}
           >
             <CopilotOpenController onReady={registerCopilotSetOpen} />
+            {/* 「問這份文件」的可見回饋(WS1-a):副駕多數時候本來就開著,只 setState
+                的話畫面完全沒變化。指示條由同一份 focusedDocument 驅動,並提供清除入口。 */}
+            {focusedDocument && (
+              <div className="copilot-focus">
+                <span className="chip chip--ready">目前聚焦:《{focusedDocument.title}》</span>
+                <button
+                  type="button"
+                  className="copilot-focus__clear"
+                  aria-label="清除聚焦文件"
+                  onClick={() => setFocusedDocument(null)}
+                >
+                  ×
+                </button>
+              </div>
+            )}
           </CopilotSidebar>
         </div>
       </div>

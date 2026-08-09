@@ -131,6 +131,10 @@ export function useDocuments(onSettled?: (doc: DocumentInfo) => void) {
     }
   }, [])
 
+  // 首次載入失敗後的手動重試（見 DocumentsView 的三態空狀態）：沿用同一支 load，
+  // 只是把目前的 lifecycle generation 補上，不另建第二條載入路徑。
+  const reload = useCallback(() => load(lifecycleGenerationRef.current), [load])
+
   useEffect(() => {
     const lifecycleGeneration = ++lifecycleGenerationRef.current
     load(lifecycleGeneration)
@@ -142,5 +146,5 @@ export function useDocuments(onSettled?: (doc: DocumentInfo) => void) {
     }
   }, [load, stopPolling])
 
-  return { docs, loading, error, timedOut, create, remove }
+  return { docs, loading, error, timedOut, create, remove, reload }
 }
