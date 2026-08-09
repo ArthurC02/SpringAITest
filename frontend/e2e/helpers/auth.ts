@@ -43,7 +43,7 @@ export async function openCopilot(page: Page): Promise<void> {
   const input = sidebar.getByTestId('copilot-chat-textarea')
   const window = sidebar.locator('.copilotKitWindow')
   if (!(await window.evaluate((element) => element.classList.contains('open')))) {
-    await sidebar.locator('.copilotKitButton').click()
+    await sidebar.locator('.copilot-launcher').click()
     await expect(window).toHaveClass(/\bopen\b/)
   }
   await expect(input).toBeVisible()
@@ -74,12 +74,16 @@ export async function logoutFromTopBar(page: Page): Promise<void> {
 }
 
 /**
- * AppShell fetches documents immediately after a reload. Abort only that unrelated request so
- * a malformed session is exercised by the real AG-UI middleware rather than racing a generic
- * apiFetch 401. The target `/api/copilot/agui` request is never intercepted or fulfilled.
+ * AppShell fetches documents, and the default chat view eagerly loads chat history,
+ * immediately after a reload. Both are ordinary authenticated apiFetch calls, so with an
+ * invalid session they would 401 and trigger the global logout before the test's own
+ * intentional AG-UI call does. Abort only these unrelated requests so a malformed session is
+ * exercised by the real AG-UI middleware rather than racing a generic apiFetch 401. The target
+ * `/api/copilot/agui` request is never intercepted or fulfilled.
  */
 export async function preventCompetingDocument401(page: Page): Promise<void> {
   await page.route('**/api/documents', (route) => route.abort('failed'))
+  await page.route('**/api/chat/history/page**', (route) => route.abort('failed'))
 }
 
 /**

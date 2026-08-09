@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { evidenceUsers, signIn } from './helpers/auth'
+import { evidenceUsers, openCopilot, signIn } from './helpers/auth'
 
 const toolPrompt = process.env.EVIDENCE_TOOL_PROMPT
 
@@ -39,10 +39,10 @@ test.describe('E-03 browser client-tool evidence', () => {
     })
 
     await signIn(page, evidenceUsers.a)
+    // WS3: first login auto-opens the sidebar once, so this must tolerate either
+    // starting state instead of unconditionally clicking the launcher.
+    await openCopilot(page)
     const sidebar = page.getByTestId('copilot-sidebar')
-    const window = sidebar.locator('.copilotKitWindow')
-    await sidebar.locator('.copilotKitButton').click()
-    await expect(window).toHaveClass(/\bopen\b/)
     const input = sidebar.getByTestId('copilot-chat-textarea')
     const finalRunResponse = page.waitForResponse((response) => {
       if (!response.url().includes('/api/copilot/agui') || response.request().method() !== 'POST') return false

@@ -42,7 +42,12 @@ services:
       LLM_MODEL: ${EVIDENCE_REAL_WORKFLOW_MODEL:-evidence-model}
       AGENT_TEST_RUN_ENABLED: ${EVIDENCE_AGENT_TEST_RUN_ENABLED:-true}
       CHECKPOINT_DATABASE_URL: ${EVIDENCE_CHECKPOINT_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@appdb:5432/springaitest}
-      CHECKPOINT_HMAC_KEY: ${EVIDENCE_CHECKPOINT_HMAC_KEY:?set a per-run D3 checkpoint HMAC key via the verifier}
+      # Empty-default, not `:?required`: Compose interpolates every service in
+      # the merged file even when its profile is not selected, so a required
+      # var here would break a bare `docker compose ... config`/`up` for
+      # profiles that never touch this service. The verifier scripts always
+      # populate this before starting a profile that actually needs it.
+      CHECKPOINT_HMAC_KEY: ${EVIDENCE_CHECKPOINT_HMAC_KEY:-}
 
   # RealModel-only dependency chain. It has no published host ports and uses a
   # generated appdb database plus its own RabbitMQ broker, so normal platform,
@@ -75,7 +80,10 @@ services:
         condition: service_started
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
-      DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres};Database=${EVIDENCE_DB_NAME:?set a generated evidence database}
+      # Empty-default: see the CHECKPOINT_HMAC_KEY comment on the workflow
+      # service above. Start-RealProfile in verify-copilot-shared-core-evidence.ps1
+      # fails loud before this profile starts if EVIDENCE_DB_NAME is blank.
+      DB_CONNECTION_STRING: Host=appdb;Port=5432;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres};Database=${EVIDENCE_DB_NAME:-}
       RABBITMQ_URL: amqp://app:${RABBITMQ_PASSWORD:-app-dev-password}@rabbitmq-evidence:5672
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-internal-dev-token}
       JWT_ISSUER:
@@ -138,8 +146,10 @@ services:
       PROMPT_ARTIFACTS_SHADOW: ${PROMPT_ARTIFACTS_SHADOW:-false}
       RUN_EVAL_ENABLED: ${RUN_EVAL_ENABLED:-false}
       ISOLATED_SKILL_SCRIPTS_ENABLED: ${ISOLATED_SKILL_SCRIPTS_ENABLED:-false}
-      CHECKPOINT_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@appdb:5432/${EVIDENCE_DB_NAME:?set a generated evidence database}
-      CHECKPOINT_HMAC_KEY: ${EVIDENCE_CHECKPOINT_HMAC_KEY:?set a per-run checkpoint HMAC key}
+      # Empty-default: see the CHECKPOINT_HMAC_KEY comment on the workflow
+      # service above (same interpolation-scope reasoning applies to both vars).
+      CHECKPOINT_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@appdb:5432/${EVIDENCE_DB_NAME:-}
+      CHECKPOINT_HMAC_KEY: ${EVIDENCE_CHECKPOINT_HMAC_KEY:-}
     user: appuser
     networks:
       - default
@@ -159,7 +169,9 @@ services:
     ports:
       - "127.0.0.1:4010:8080"
     environment:
-      EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:?set a per-run HMAC key via the evidence wrapper}
+      # Empty-default: see the CHECKPOINT_HMAC_KEY comment on the workflow
+      # service above (same interpolation-scope reasoning applies here).
+      EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:-}
       EVIDENCE_FRAME_DELAY_SECONDS: ${EVIDENCE_FRAME_DELAY_SECONDS:-0.5}
     user: evidence
     networks: [evidence_internal]
@@ -178,7 +190,9 @@ services:
     ports:
       - "127.0.0.1:8011:8081"
     environment:
-      EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:?set a per-run HMAC key via the evidence wrapper}
+      # Empty-default: see the CHECKPOINT_HMAC_KEY comment on the workflow
+      # service above (same interpolation-scope reasoning applies here).
+      EVIDENCE_HMAC_KEY: ${EVIDENCE_HMAC_KEY:-}
       WORKFLOW_UPSTREAM_URL: ${EVIDENCE_WORKFLOW_UPSTREAM_URL:-http://workflow:8000}
     user: evidence
     networks:

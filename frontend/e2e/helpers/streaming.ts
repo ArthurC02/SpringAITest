@@ -9,14 +9,18 @@ export interface BrowserStreamRead {
 export interface BrowserSseEvent {
   offsetMs: number
   event: string | null
-  data: string
   /**
-   * The literal text preceding the first `data` line's content — `data:` (no space) or
-   * `data: ` (with space). Root AGENTS.md: the two SSE endpoints deliberately differ here
-   * (`/api/chat/stream` vs AG-UI); this is what lets E-06 assert the byte-level framing
-   * survived the browser fetch/ReadableStream path, not just curl's network-layer trace.
+   * The literal text immediately following `data:` for this line, joined with `\n` across
+   * multi-line frames — never stripped of a leading space. SSE permits an optional single space
+   * after `data:`, so a `data:` (no space) frame and a `data: ` (with space) frame are only
+   * distinguishable by that leading byte; but a legitimate token can *itself* start with a space
+   * (real tokenizer output, e.g. `infra/evidence/evidence_model.py`'s `" model"`), which makes
+   * `data: model` genuinely ambiguous in isolation — `data:` + `" model"` and `data: ` + `"model"`
+   * are byte-identical. This field therefore reports the raw text as-is and leaves resolving the
+   * ambiguity to a caller that knows, from its own request, which literal prefix the endpoint it
+   * called is contractually required to use (see `concatFramedContent` below).
    */
-  rawPrefix: string | null
+  data: string
 }
 
 export interface BrowserStreamEvidence {
@@ -41,7 +45,6 @@ export interface BrowserStreamRequest {
 export interface ParsedSseEvent {
   event: string | null
   data: string
-  rawPrefix: string | null
 }
 
 /**
@@ -64,20 +67,47 @@ export function parseSseBuffer(buffer: string): { events: ParsedSseEvent[]; rema
     pending = pending.slice(separator.index + separator[0].length)
     const data: string[] = []
     let event: string | null = null
-    let rawPrefix: string | null = null
     for (const line of rawEvent.split(/\r?\n/)) {
       if (line.startsWith('data:')) {
-        const afterColon = line.slice(5)
-        const content = afterColon.replace(/^ /, '')
-        if (rawPrefix === null) rawPrefix = afterColon.length === content.length ? 'data:' : 'data: '
-        data.push(content)
+        data.push(line.slice(5))
       } else if (line.startsWith('event:')) {
         event = line.slice(6).replace(/^ /, '')
       }
     }
-    if (data.length > 0) events.push({ event, data: data.join('\n'), rawPrefix })
+    if (data.length > 0) events.push({ event, data: data.join('\n') })
   }
   return { events, remaining: pending }
+}
+
+/**
+ * Concatenates each frame's literal `data:`-suffix content, in order, under the exact framing
+ * the caller declares for its own endpoint — never inferred from a frame's own bytes (see
+ * {@link BrowserSseEvent.data}). `chat` strips nothing (`/api/chat/stream` writes
+ * `data:<content>`, no separator space). `agui` strips exactly one leading character
+ * unconditionally (AG-UI writes `data: <json>`); if the server omitted that space, this
+ * corrupts the JSON on purpose so `JSON.parse` fails loudly instead of silently tolerating the
+ * wrong framing. Callers pass only already-selected controlled-content frames (root
+ * AGENTS.md's two SSE formats) — lifecycle/error/`[DONE]` frames must be filtered out first.
+ */
+export function concatFramedContent(
+  frames: { data: string }[],
+  streamKind: 'chat' | 'agui',
+): string | null {
+  const parts: string[] = []
+  for (const frame of frames) {
+    if (streamKind === 'chat') {
+      parts.push(frame.data)
+      continue
+    }
+    try {
+      const payload = JSON.parse(frame.data.slice(1)) as { delta?: unknown }
+      if (typeof payload.delta !== 'string') return null
+      parts.push(payload.delta)
+    } catch {
+      return null
+    }
+  }
+  return parts.join('')
 }
 
 /**
@@ -132,20 +162,16 @@ export async function readBrowserStream(
         pending = pending.slice(separator.index + separator[0].length)
         const data: string[] = []
         let event: string | null = null
-        let rawPrefix: string | null = null
         for (const line of rawEvent.split(/\r?\n/)) {
           if (line.startsWith('data:')) {
-            // SSE permits one optional space after the colon; retain all content after it,
-            // but remember which exact prefix this line actually used.
-            const afterColon = line.slice(5)
-            const content = afterColon.replace(/^ /, '')
-            if (rawPrefix === null) rawPrefix = afterColon.length === content.length ? 'data:' : 'data: '
-            data.push(content)
+            // SSE permits one optional space after the colon; retain all content after it as-is
+            // (never strip a leading space here — see BrowserSseEvent.data doc comment).
+            data.push(line.slice(5))
           } else if (line.startsWith('event:')) {
             event = line.slice(6).replace(/^ /, '')
           }
         }
-        if (data.length > 0) events.push({ offsetMs: receivedAtMs, event, data: data.join('\n'), rawPrefix })
+        if (data.length > 0) events.push({ offsetMs: receivedAtMs, event, data: data.join('\n') })
       }
     }
 

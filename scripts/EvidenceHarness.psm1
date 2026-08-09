@@ -34,9 +34,12 @@ function Resolve-EvidenceDirectory {
         $rootItem = Get-Item -LiteralPath $approvedRoot -Force
         $attributes = $rootItem.Attributes
         # OneDrive marks ordinary cloud-backed directories as reparse points
-        # without a link target. Continue to reject actual junctions/symlinks.
+        # without a link target: Get-Item -Force reports .Target as $null, and
+        # wrapping $null in @() still yields a one-element array, so a bare
+        # .Count check misreads "no target" as "has a target". Count only
+        # non-blank target entries. Continue to reject actual junctions/symlinks.
         $hasLinkTarget = -not [string]::IsNullOrWhiteSpace([string]$rootItem.LinkType) -or
-            @($rootItem.Target).Count -gt 0
+            @($rootItem.Target | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
         if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and $hasLinkTarget) {
             throw "Evidence root must not be a reparse point: $approvedRoot"
         }

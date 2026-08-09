@@ -151,23 +151,43 @@ $tokenAdmin = Login 'admin-a'
 $marker = "shared-core-$([guid]::NewGuid().ToString('N'))"
 $threadId = "shared-core-$([guid]::NewGuid().ToString('N'))"
 
-Invoke-Case 'C-00 default-disabled Agent Builder returns 404 before auth' {
-    $anonymous = Invoke-JsonRequest GET "$BaseUrl/api/agents"
-    Assert-True ($anonymous.StatusCode -eq 404) "anonymous /api/agents returned $($anonymous.StatusCode), expected fail-closed 404"
-    $error = $anonymous.Content | ConvertFrom-Json
-    Assert-True ($error.status -eq 404 -and -not [string]::IsNullOrWhiteSpace($error.code)) 'anonymous 404 is not ApiError-shaped'
+Invoke-Case 'C-00 Agent Builder fail-closed gate matches live AGENT_BUILDER_ENABLED' {
+    # /api/features is AllowAnonymous and is the authority for the flag's live
+    # value; do not guess it from an environment variable the harness itself
+    # may not share with the running platform container.
+    $features = Invoke-JsonRequest GET "$BaseUrl/api/features"
+    Assert-True ($features.StatusCode -eq 200) "GET /api/features returned $($features.StatusCode)"
+    $agentBuilderEnabled = ($features.Content | ConvertFrom-Json).agentBuilderEnabled
 
-    # admin-a is the seeded ADMIN identity with workflow.manage. It must still
-    # see 404 while AGENT_BUILDER_ENABLED is at its default false value.
-    $admin = Invoke-JsonRequest GET "$BaseUrl/api/agents" $null $tokenAdmin
-    Assert-True ($admin.StatusCode -eq 404) "authorized admin /api/agents returned $($admin.StatusCode), expected fail-closed 404"
+    $anonymous = Invoke-JsonRequest GET "$BaseUrl/api/agents"
+    if ($agentBuilderEnabled) {
+        # Flag on: the 404 fail-closed gate no longer applies, so anonymous now
+        # hits the controller's own [Authorize] and is rejected with 401 —
+        # still fail-closed, just a different (correct) status for this state.
+        Assert-True ($anonymous.StatusCode -eq 401) "anonymous /api/agents returned $($anonymous.StatusCode) with AGENT_BUILDER_ENABLED=true, expected 401"
+    }
+    else {
+        # Flag off (default): the pre-auth gate returns the same 404 as a
+        # nonexistent route, before any authentication check runs.
+        Assert-True ($anonymous.StatusCode -eq 404) "anonymous /api/agents returned $($anonymous.StatusCode) with AGENT_BUILDER_ENABLED=false, expected fail-closed 404"
+
+        # admin-a is the seeded ADMIN identity. This assertion only makes sense
+        # while the flag is off: it proves even a legitimately privileged,
+        # authenticated caller cannot learn the route exists before the gate is
+        # opened. Once the flag is on, admin-a is expected to reach the
+        # controller (not fail-closed), so there is nothing equivalent to assert here.
+        $admin = Invoke-JsonRequest GET "$BaseUrl/api/agents" $null $tokenAdmin
+        Assert-True ($admin.StatusCode -eq 404) "authorized admin /api/agents returned $($admin.StatusCode) with AGENT_BUILDER_ENABLED=false, expected fail-closed 404"
+    }
+    $error = $anonymous.Content | ConvertFrom-Json
+    Assert-True ($error.status -eq $anonymous.StatusCode -and -not [string]::IsNullOrWhiteSpace($error.code)) 'anonymous response is not ApiError-shaped'
 }
 
 Invoke-Case 'C-01A authenticated blocking chat + appdb history' {
     $historyBefore = @(((Invoke-JsonRequest GET "$BaseUrl/api/chat/history" $null $tokenA).Content | ConvertFrom-Json)).Count
     $chat = Invoke-JsonRequest POST "$BaseUrl/api/chat" @{
         message = "blocking-$marker"
-        conversationId = "$threadId-blocking"
+        conversationId = [guid]::NewGuid().ToString()
     } $tokenA
     Assert-True ($chat.StatusCode -eq 200) "blocking chat returned $($chat.StatusCode)"
 
@@ -175,8 +195,26 @@ Invoke-Case 'C-01A authenticated blocking chat + appdb history' {
     $responseId = 0L
     Assert-True ([long]::TryParse([string]$body.id, [ref]$responseId) -and $responseId -gt 0) 'blocking chat response id is missing or invalid'
     Assert-True (-not [string]::IsNullOrWhiteSpace($body.reply)) 'blocking chat response reply is empty'
+    # ConvertFrom-Json auto-converts an ISO-8601 "Z" string into a [DateTime]
+    # (Kind=Utc). Re-stringifying that value with [string] renders it in the
+    # local culture and drops the UTC marker, so a plain TryParse on the
+    # re-stringified value would misread it as local time. Branch on the
+    # actual runtime type instead, and for the string fallback assume UTC
+    # when no offset is present rather than guessing the local zone.
+    $createdAtRaw = $body.createdAt
     $createdAt = [DateTimeOffset]::MinValue
-    Assert-True ([DateTimeOffset]::TryParse([string]$body.createdAt, [ref]$createdAt)) 'blocking chat response createdAt is invalid'
+    if ($createdAtRaw -is [DateTime]) {
+        $createdAtValid = $true
+        $createdAt = [DateTimeOffset]::new($createdAtRaw.ToUniversalTime())
+    }
+    else {
+        $createdAtValid = [DateTimeOffset]::TryParse(
+            [string]$createdAtRaw,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal,
+            [ref]$createdAt)
+    }
+    Assert-True $createdAtValid 'blocking chat response createdAt is invalid'
     $createdAge = [DateTimeOffset]::UtcNow - $createdAt.ToUniversalTime()
     Assert-True ($createdAge.TotalMinutes -ge -1 -and $createdAge.TotalMinutes -le 10) 'blocking chat response createdAt is outside the expected time window'
 
@@ -192,7 +230,7 @@ Invoke-Case 'C-01B chat SSE + appdb history' {
     $historyBefore = @(((Invoke-JsonRequest GET "$BaseUrl/api/chat/history" $null $tokenA).Content | ConvertFrom-Json)).Count
     $stream = Invoke-JsonRequest POST "$BaseUrl/api/chat/stream" @{
         message = $marker
-        conversationId = $threadId
+        conversationId = [guid]::NewGuid().ToString()
     } $tokenA
     Assert-True ($stream.StatusCode -eq 200) "chat stream returned $($stream.StatusCode)"
     Assert-True ($stream.Content -match '(?m)^data:[^ ]') 'chat SSE must use data: without a space'
@@ -314,7 +352,7 @@ Invoke-Case 'C-07 workflow/backend shape smoke (real-model shared routing still 
 Invoke-Case 'C-08 frontend proxy framing (browser timing still required)' {
     $chat = Invoke-JsonRequest POST "$ProxyBaseUrl/api/chat/stream" @{
         message = 'proxy chat stream'
-        conversationId = "$threadId-proxy"
+        conversationId = [guid]::NewGuid().ToString()
     } $tokenA
     Assert-True ($chat.StatusCode -eq 200 -and $chat.Content -match '(?m)^data:[^ ]') 'proxy changed chat SSE framing'
     $agui = Invoke-Agui $tokenA "$threadId-proxy" @(New-WireMessage user 'proxy AG-UI') $ProxyBaseUrl

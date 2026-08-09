@@ -13,7 +13,14 @@ param(
     [string]$Mem0Model = 'evidence-gpt-4o-mini-2024-07-18',
     [string]$EmbeddingModel = 'text-embedding-3-small',
     [switch]$StartEvidenceProfile,
-    [switch]$BuildEvidenceProfile
+    # ponytail: default flipped to always rebuild the evidence images (a stale
+    # springaitest-*-evidence image previously caused false JWT failures and
+    # unhealthy containers, forcing an easy-to-forget -BuildEvidenceProfile
+    # rerun). Pass -SkipEvidenceBuild once you know the images are fresh, for
+    # fast local iteration. Ceiling: this rebuilds every run even with no
+    # source changes; a build-time-vs-source-mtime check would avoid that but
+    # is more moving parts than this harness needs today.
+    [switch]$SkipEvidenceBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,7 +108,7 @@ function Start-DeterministicProfile {
     Push-Location $infraDir
     try {
         $composeArgs = @('-f', 'docker-compose.yml', '-f', 'docker-compose.evidence.yml', '--profile', 'evidence', 'up', '-d')
-        if ($BuildEvidenceProfile) { $composeArgs += '--build' }
+        if (-not $SkipEvidenceBuild) { $composeArgs += '--build' }
         # Deterministic evidence intentionally names its normal dependencies.
         # They are not compose depends_on edges because the RealModel lane
         # redirects the same proxy/gateway to an isolated dependency chain.
@@ -344,11 +351,20 @@ function Invoke-Deterministic {
         $junitPath=Join-Path $run.FullPath 'junit/playwright.xml'
         $safeJUnit=ConvertTo-SafePlaywrightJUnit $junitPath 'junit/e01-browser.xml' 'EvidenceGate.E-01.browser'; $browserTests=$safeJUnit.Tests; $browserSkipped=$safeJUnit.Skipped
         if($code -ne 0){if($playwrightOutput -match 'Executable doesn.t exist|browserType.launch'){throw 'BROWSER_UNAVAILABLE'};throw 'Playwright browser authentication assertion failed'}; if($browserTests -ne 2 -or $browserSkipped -ne 0){throw 'BROWSER_SKIPPED'}
-        $index=0; if(Test-Path -LiteralPath $playwrightArtifactDir){Get-ChildItem -LiteralPath $playwrightArtifactDir -Recurse -Filter '*.png' | ForEach-Object { $index++; Move-Item -LiteralPath $_.FullName -Destination (Join-Path $run.FullPath "screenshots/e01-$index.png") -Force }; Remove-Item -LiteralPath $playwrightArtifactDir -Recurse -Force}
+        $index=0; if(Test-Path -LiteralPath $playwrightArtifactDir){Get-ChildItem -LiteralPath $playwrightArtifactDir -Recurse -Filter '*.png' | ForEach-Object { $index++; Move-Item -LiteralPath $_.FullName -Destination (Join-Path $run.FullPath "screenshots/e01-$index.png") -Force }}
         Write-EvidenceArtifact -Run $run -RelativePath 'requests/e01-browser-summary.json' -Value @{ tests=$browserTests; skipped=$browserSkipped; screenshots=$index; target='frontend-evidence to platform-evidence' }
         Set-EvidenceGate -Run $run -Gate E-01 -Status PASS -Detail 'Two real browser account-switch and AG-UI 401 logout flows passed against the evidence frontend/platform.'
     } catch { if($_.Exception.Message -match '^BROWSER_(UNAVAILABLE|SKIPPED)'){Set-EvidenceGate -Run $run -Gate E-01 -Status BLOCKED -Detail $_.Exception.Message}else{Set-EvidenceGate -Run $run -Gate E-01 -Status FAIL -Detail $_.Exception.Message} }
-    finally { Restore-ProcessEnvironment $e01Environment }
+    finally {
+        Restore-ProcessEnvironment $e01Environment
+        # A throw between the Playwright run and the screenshot move (a failed
+        # assertion, a missing JUnit file) previously skipped this cleanup,
+        # leaving playwright/.last-run.json in the bundle and tripping
+        # Complete-EvidenceRun's fail-closed secret-scan removal of the whole
+        # run. Removing it unconditionally here does not weaken that scan —
+        # it only keeps the leak from ever reaching it.
+        if (Test-Path -LiteralPath $playwrightArtifactDir) { Remove-Item -LiteralPath $playwrightArtifactDir -Recurse -Force }
+    }
     try {
         Reset-Captures $capture
         $tokenA=New-DevelopmentEvidenceJwt $users[0] 'demo-a'; $tokenB=New-DevelopmentEvidenceJwt $users[1] 'demo-b'; $thread="e02-$([guid]::NewGuid().ToString('N'))"; $markerA="e02a_$([guid]::NewGuid().ToString('N'))"; $markerB="e02b_$([guid]::NewGuid().ToString('N'))"
@@ -420,17 +436,24 @@ function Invoke-Deterministic {
     # written; only safe counts and relative timing projections are retained.
     $e06Environment = Set-ProcessEnvironment @{ EVIDENCE_USER_A=$browserUsers.a.Username; EVIDENCE_PASSWORD_A=$browserUsers.a.Password; EVIDENCE_TENANT_A=$browserUsers.a.TenantCode }
     try {
-        $chatBody = @{message="e06_$([guid]::NewGuid().ToString('N'))";conversationId="e06-$([guid]::NewGuid().ToString('N'))"} | ConvertTo-Json -Compress
-        $aguiToken = New-DevelopmentEvidenceJwt $users[0] 'demo-a'
+        # ChatController.GetConversationId Guid.Parse()s any non-blank value: it
+        # must be a bare UUID, never a prefixed/decorated string.
+        $chatBody = @{message="e06_$([guid]::NewGuid().ToString('N'))";conversationId=[guid]::NewGuid().ToString()} | ConvertTo-Json -Compress
+        # /api/chat/stream and /api/copilot/agui both require an authenticated
+        # caller; the same generated demo-a identity is valid on both routes.
+        $e06Token = New-DevelopmentEvidenceJwt $users[0] 'demo-a'
         $aguiBody = @{threadId="e06-$([guid]::NewGuid().ToString('N'))";runId=[guid]::NewGuid().ToString('N');state=@{};messages=@(@{id=[guid]::NewGuid().ToString('N');role='user';content="e06_$([guid]::NewGuid().ToString('N'))"});tools=@();context=@();forwardedProps=@{}} | ConvertTo-Json -Depth 12 -Compress
         $controlledContent = @('evidence', 'model', 'reply')
+        # Both routes require an authenticated caller (ChatController has had a class-level
+        # [Authorize] since de2d9a8; anonymous chat is not a supported contract) — chat must use
+        # the same authenticated browser session as AG-UI, not an anonymous fetch.
         $browserCases = @(
-            @{name='chat';path='/api/chat/stream';expectedFramePrefix='data:';streamKind='chat';controlledContent=$controlledContent;method='POST';body=$chatBody;useBrowserSession=$false},
+            @{name='chat';path='/api/chat/stream';expectedFramePrefix='data:';streamKind='chat';controlledContent=$controlledContent;method='POST';body=$chatBody;useBrowserSession=$true},
             @{name='agui';path='/api/copilot/agui';expectedFramePrefix='data: ';streamKind='agui';controlledContent=$controlledContent;method='POST';body=$aguiBody;useBrowserSession=$true}
         )
         $nginx = @{
-            chat = Invoke-CurlStreamEvidence 'nginx-chat' 'http://127.0.0.1:8181/api/chat/stream' $chatBody '(?m)^data:evidence\r?$' -Kind Chat -ControlledContent $controlledContent
-            agui = Invoke-CurlStreamEvidence 'nginx-agui' 'http://127.0.0.1:8181/api/copilot/agui' $aguiBody '(?m)^data: \{' -Kind Agui -ControlledContent $controlledContent -Token $aguiToken
+            chat = Invoke-CurlStreamEvidence 'nginx-chat' 'http://127.0.0.1:8181/api/chat/stream' $chatBody '(?m)^data:evidence\r?$' -Kind Chat -ControlledContent $controlledContent -Token $e06Token
+            agui = Invoke-CurlStreamEvidence 'nginx-agui' 'http://127.0.0.1:8181/api/copilot/agui' $aguiBody '(?m)^data: \{' -Kind Agui -ControlledContent $controlledContent -Token $e06Token
             browser = Invoke-BrowserStreamEvidence 'nginx' 'http://127.0.0.1:5180' $browserCases
         }
         $oldViteTarget = $env:VITE_API_PROXY_TARGET; $hadViteTarget = Test-Path Env:VITE_API_PROXY_TARGET
@@ -438,8 +461,8 @@ function Invoke-Deterministic {
             $env:VITE_API_PROXY_TARGET = 'http://127.0.0.1:8180'
             Start-EvidenceViteProxy
             $vite = @{
-                chat = Invoke-CurlStreamEvidence 'vite-chat' 'http://127.0.0.1:5181/api/chat/stream' $chatBody '(?m)^data:evidence\r?$' -Kind Chat -ControlledContent $controlledContent
-                agui = Invoke-CurlStreamEvidence 'vite-agui' 'http://127.0.0.1:5181/api/copilot/agui' $aguiBody '(?m)^data: \{' -Kind Agui -ControlledContent $controlledContent -Token $aguiToken
+                chat = Invoke-CurlStreamEvidence 'vite-chat' 'http://127.0.0.1:5181/api/chat/stream' $chatBody '(?m)^data:evidence\r?$' -Kind Chat -ControlledContent $controlledContent -Token $e06Token
+                agui = Invoke-CurlStreamEvidence 'vite-agui' 'http://127.0.0.1:5181/api/copilot/agui' $aguiBody '(?m)^data: \{' -Kind Agui -ControlledContent $controlledContent -Token $e06Token
                 browser = Invoke-BrowserStreamEvidence 'vite' 'http://127.0.0.1:5181' $browserCases
             }
         } finally {
@@ -575,6 +598,13 @@ function Invoke-LiteLlmPreflight([string]$Path, [object]$Body, [string]$Kind) {
 function Start-RealProfile([string]$Tenant) {
     Set-RealEvidenceEnvironment $Tenant
     New-RealEvidenceDatabase
+    # docker-compose.evidence.yml intentionally defaults EVIDENCE_DB_NAME to
+    # empty rather than a required `:?` interpolation (that would break a bare
+    # `docker compose ... config`/`up` for any profile, since Compose
+    # interpolates every service in the merged file regardless of the
+    # selected profile). Enforce the fail-loud requirement here instead,
+    # exactly where the isolated evidence-real database is actually needed.
+    if ([string]::IsNullOrWhiteSpace($env:EVIDENCE_DB_NAME)) { throw 'EVIDENCE_DB_NAME must be set before starting the evidence-real profile' }
     $script:realServicesChanged = $true
     Push-Location $infraDir
     try {
@@ -583,7 +613,7 @@ function Start-RealProfile([string]$Tenant) {
         # that the dated evidence alias used below is actually loaded.
         docker compose -f docker-compose.yml up -d --force-recreate litellm | Out-Null
         if ($LASTEXITCODE -ne 0) { Throw-RealBlocked 'LiteLLM could not be recreated with the pinned model map' }
-        if ($BuildEvidenceProfile) {
+        if (-not $SkipEvidenceBuild) {
             # mem0 is intentionally image-only in the base compose file, so a
             # fresh evidence run must rebuild its local compatibility wrapper
             # explicitly before compose recreates the real dependency set.
@@ -591,7 +621,7 @@ function Start-RealProfile([string]$Tenant) {
             if ($LASTEXITCODE -ne 0) { throw 'unable to build the local mem0 evidence image' }
         }
         $composeArgs = @('-f', 'docker-compose.yml', '-f', 'docker-compose.evidence.yml', '--profile', 'evidence', '--profile', 'evidence-real', 'up', '-d')
-        if ($BuildEvidenceProfile) { $composeArgs += '--build' }
+        if (-not $SkipEvidenceBuild) { $composeArgs += '--build' }
         $composeArgs += @('rabbitmq-evidence', 'backend-evidence', 'workflow-evidence', 'mem0', 'evidence-model', 'workflow-capture-proxy', 'platform-evidence')
         docker compose @composeArgs | Out-Null
         if ($LASTEXITCODE -ne 0) { Throw-RealBlocked 'real evidence services could not be started' }
@@ -860,7 +890,11 @@ function Get-RealD6RunDebugStatus([string]$Tenant, [string]$User, [string]$Conve
     $sql = "WITH r AS (SELECT * FROM orchestrator_run WHERE tenant_id=convert_from(decode('$tenant64','base64'),'UTF8') AND user_id=convert_from(decode('$user64','base64'),'UTF8') AND conversation_id=convert_from(decode('$conversation64','base64'),'UTF8') ORDER BY created_at DESC LIMIT 1) SELECT COALESCE(r.status,'none')||'/'||COALESCE(r.error_code,'none')||'|'||COALESCE((SELECT e.payload->>'reason' FROM orchestrator_run_event e WHERE e.run_id=r.id AND e.event_type='run_cancelled' ORDER BY e.sequence DESC LIMIT 1),'none') FROM r;"
     Push-Location $infraDir
     try {
-        $value = (docker compose exec -T appdb psql -At -U postgres -d $script:realDatabaseName -c $sql).Trim()
+        # docker compose exec can return $null (no output captured) rather than an
+        # empty string when the command fails outright; -join coerces either shape
+        # to a string before .Trim() so this diagnostic helper cannot itself throw
+        # and mask the caller's real failure.
+        $value = ((docker compose exec -T appdb psql -At -U postgres -d $script:realDatabaseName -c $sql) -join '').Trim()
         if ($LASTEXITCODE -ne 0 -or $value -notmatch '^([a-z_]+)/([a-z_]+)\|(.*)$') { return 'unknown/unknown/unknown' }
         $reason = switch ($Matches[3]) {
             'Invalid immutable Root execution contract' { 'invalid_contract' }
@@ -877,7 +911,9 @@ function Invoke-RealD6RootEvidence([string]$Base, [string]$Tenant, [string]$User
     catch { throw 'real evidence D6 fixture provisioning failed' }
     $token = New-DevelopmentEvidenceJwt $User $Tenant
     $chatPrompt = "D6 chat correlation $([guid]::NewGuid().ToString('N'))"
-    $chatWireConversation = "d6-chat-$([guid]::NewGuid().ToString('N'))"
+    # ChatController.GetConversationId Guid.Parse()s any non-blank value: it
+    # must be a bare UUID, never a prefixed/decorated string.
+    $chatWireConversation = [guid]::NewGuid().ToString()
     try { $chat = Invoke-Json POST "$Base/api/chat" @{ message=$chatPrompt; conversationId=$chatWireConversation } $token }
     catch {
         $status = Get-RealD6RunDebugStatus $Tenant $User "$Tenant`:$User`:$chatWireConversation"
@@ -1003,7 +1039,9 @@ function Invoke-RealModel {
                 # containing the fixture number must prove document retrieval.
                 $question = "Find the uploaded document for tracking code $e05Marker and return its unique acceptance number."
                 Reset-Captures $capture
-                $chat = Invoke-Json POST "$base/api/chat" @{ message=$question; conversationId="e05chat-$round-$([guid]::NewGuid().ToString('N'))" } $e05Token
+                # ChatController.GetConversationId Guid.Parse()s any non-blank
+                # value: it must be a bare UUID, never a prefixed/decorated string.
+                $chat = Invoke-Json POST "$base/api/chat" @{ message=$question; conversationId=[guid]::NewGuid().ToString() } $e05Token
                 if ($chat.StatusCode -ne 200) { throw "chat routing round $round returned HTTP $($chat.StatusCode)" }
                 $chatReply = [string](($chat.Content | ConvertFrom-Json).reply); Assert-RealReplyContainsNumber $chatReply $number 'chat'
                 $chatCapture = Get-SingleWorkflowCapture $capture 'chat'

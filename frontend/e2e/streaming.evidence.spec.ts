@@ -1,11 +1,10 @@
 import { expect, test } from '@playwright/test'
 import { evidenceUsers, signIn } from './helpers/auth'
-import { readBrowserStream } from './helpers/streaming'
+import { concatFramedContent, readBrowserStream } from './helpers/streaming'
 
 interface StreamCase {
   name: string
   path: string
-  expectedFramePrefix: string
   streamKind: 'chat' | 'agui'
   controlledContent: string[]
   method: string
@@ -29,7 +28,6 @@ function streamCases(): StreamCase[] {
   return [{
     name: 'legacy stream case',
     path: streamPath,
-    expectedFramePrefix: process.env.EVIDENCE_STREAM_PREFIX ?? 'data:',
     streamKind: 'chat',
     controlledContent: ['evidence', 'model', 'reply'],
     method: process.env.EVIDENCE_STREAM_METHOD ?? 'POST',
@@ -38,12 +36,17 @@ function streamCases(): StreamCase[] {
   }]
 }
 
+/**
+ * Selects the controlled-content frames for a case and keeps both a trimmed `content` (for
+ * ordering/membership checks, where a token's own incidental whitespace never matters) and the
+ * raw, un-stripped `data:`-suffix text (for the byte-level framing check below, where it does).
+ */
 function controlledContentFrames(evidence: Awaited<ReturnType<typeof readBrowserStream>>, streamCase: StreamCase) {
   if (streamCase.streamKind === 'chat') {
     return evidence.events
-      .filter((frame) => frame.event !== 'error' && frame.data !== '[DONE]')
+      .filter((frame) => frame.event !== 'error' && frame.data.trim() !== '[DONE]')
       .filter((frame) => streamCase.controlledContent.includes(frame.data.trim()))
-      .map((frame) => ({ content: frame.data.trim(), offsetMs: frame.offsetMs, rawPrefix: frame.rawPrefix }))
+      .map((frame) => ({ content: frame.data.trim(), raw: frame.data, offsetMs: frame.offsetMs }))
   }
 
   return evidence.events.flatMap((frame) => {
@@ -52,7 +55,7 @@ function controlledContentFrames(evidence: Awaited<ReturnType<typeof readBrowser
       if (agui.type !== 'TEXT_MESSAGE_CONTENT' || typeof agui.delta !== 'string') return []
       const content = agui.delta.trim()
       return streamCase.controlledContent.includes(content)
-        ? [{ content, offsetMs: frame.offsetMs, rawPrefix: frame.rawPrefix }]
+        ? [{ content, raw: frame.data, offsetMs: frame.offsetMs }]
         : []
     } catch {
       return []
@@ -81,10 +84,14 @@ test.describe('E-06 browser ReadableStream evidence', () => {
     // surfaced as SKIP so the outer release gate reports BLOCKED rather than fabricating timing.
     test.skip(cases.length === 0, 'EVIDENCE_STREAM_CASES_JSON is required; outer evidence gate must mark BLOCKED')
 
-    for (const streamCase of cases) {
-      if (streamCase.useBrowserSession) await signIn(page, evidenceUsers.a)
-      else await page.goto('/')
+    // Sign in once, outside the loop: signIn() asserts the login page is visible before
+    // submitting credentials, which only holds pre-login. A per-case signIn broke as soon as a
+    // second case also needed useBrowserSession=true, because the first case's login already
+    // left an authenticated session in localStorage for the rest of this page's lifetime.
+    if (cases.some((streamCase) => streamCase.useBrowserSession)) await signIn(page, evidenceUsers.a)
+    else await page.goto('/')
 
+    for (const streamCase of cases) {
       const evidence = await readBrowserStream(page, {
         path: streamCase.path,
         method: streamCase.method,
@@ -100,13 +107,18 @@ test.describe('E-06 browser ReadableStream evidence', () => {
       expect(frames.length, streamCase.name).toBeGreaterThanOrEqual(3)
       expect(frames.map((frame) => frame.content), streamCase.name).toEqual(streamCase.controlledContent)
       // Byte-level framing check: root AGENTS.md requires `/api/chat/stream` to write `data:`
-      // (no space) and AG-UI to write `data: ` (with space). readBrowserStream normalizes both
-      // to the same `data` field for convenience, so without this the two formats would be
-      // indistinguishable here even if a regression collapsed them to one. `expectedFramePrefix`
-      // makes that distinction an actual assertion instead of a declared-but-unread field.
-      expect(frames.map((frame) => frame.rawPrefix), streamCase.name).toEqual(
-        frames.map(() => streamCase.expectedFramePrefix),
+      // (no space) and AG-UI to write `data: ` (with space). A per-frame guess at which prefix was
+      // used is unsound the moment a controlled-model token itself starts with a space (real
+      // tokenizer output — infra/evidence/evidence_model.py), because `data:` + `" model"` and
+      // `data: ` + `"model"` are byte-identical. So the framing to strip is declared by
+      // `streamCase.streamKind` (this test's own request, not the content), and the proof is that
+      // stripping it and re-joining the controlled model's own reply reproduces it verbatim — any
+      // framing mismatch surfaces as extra/missing/garbled bytes here, never a guess.
+      const reconstructed = concatFramedContent(
+        frames.map((frame) => ({ data: frame.raw })),
+        streamCase.streamKind,
       )
+      expect(reconstructed, streamCase.name).toBe(streamCase.controlledContent.join(' '))
       expect(frames.at(-1)!.offsetMs, streamCase.name).toBeLessThan(evidence.completedMs)
 
       const firstToLastMs = frames.at(-1)!.offsetMs - frames[0].offsetMs
