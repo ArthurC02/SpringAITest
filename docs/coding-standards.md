@@ -1,6 +1,6 @@
 # Coding Standards(開發代理憲法)
 
-適用對象:`dotnet-implementer`、`frontend-implementer`、`python-implementer`、`code-reviewer`、`code-simplifier`。開工先讀本檔;實作代理同時載入 Skill `ponytail:ponytail`。
+適用對象:`dotnet-implementer`、`frontend-implementer`、`python-implementer`、`code-reviewer`、`code-simplifier`。開工先讀本檔;實作代理已透過 agent 定義的 `skills:` frontmatter 預載 Skill `ponytail:ponytail`,無需自行載入。
 
 ## Karpathy 四原則(嚴格遵守)
 

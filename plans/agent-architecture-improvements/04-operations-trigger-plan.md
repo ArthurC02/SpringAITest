@@ -1,7 +1,7 @@
 # Operations、Recovery 與 Durable Trigger 計畫
 
 > 優先級：P0–P2。  
-> 交付狀態：Phase O1 已實作（2026-07-30）；Phase O2–O5 未實作。  
+> 交付狀態：Phase O1（2026-07-30）、O2（2026-08-09）、O3（2026-08-09，由 admin-experience-downshift 計畫 W1 交付）、O5（2026-08-09，one-shot schedule only；recurring/webhook 未做）已實作；Phase O4 未實作。  
 > 目標：把已存在的 durable runtime 變成可操作產品，再以同一 command path 增加有限 trigger 能力。
 
 ## 1. 問題
@@ -53,6 +53,8 @@ document consumer bounded retry + terminal DLQ 已實作（見 [02-evaluation-ob
 任何 operator retry 都不能繞過 snapshot/hash、lease generation、deadline、approval 或 effect identity。
 
 ## 6. Phase O5：Durable triggers
+
+**交付狀態（2026-08-09）**：one-shot schedule 已透過 dev-cycle 全管線交付（實作 → 三輪審查 → 簡化 → e2e 22/22 → 文件）。範圍為 §6.2 one-shot schedule only；recurring cron、signed webhook、§7 通知收件匣仍未做。Backend `Triggers/` feature folder 落地 occurrence ledger、claim/lease、immutable principal grant snapshot；fire 走既有 D5 root creation/command path。Platform 代理 + `AGENT_TRIGGERS_ENABLED` 404 fail-closed gate + features flag；Frontend「排程觸發」視圖（gate = 旗標 + 精確 `workflow.manage`）；compose 佈線齊。名稱唯一性 scoped 到 `status='scheduled'`（取消後同名重建可行）。
 
 ### 6.1 Authority
 
