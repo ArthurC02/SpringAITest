@@ -265,8 +265,8 @@ test('published Agent test console polls, resumes waiting_input, redacts trace, 
   await page.getByRole('button', { name: '啟動測試 Run' }).click()
   await expect(page.getByText('等待補充資訊', { exact: true })).toBeVisible()
   await expect(page.getByText('請提供案號')).toBeVisible()
-  await expect(page.getByText('Pinned Agent').locator('..')).toContainText('r3')
-  await expect(page.getByText('Pinned Workflow').locator('..')).toContainText('r2')
+  await expect(page.getByText('已鎖定 Agent 版本').locator('..')).toContainText('r3')
+  await expect(page.getByText('已鎖定 Workflow 版本').locator('..')).toContainText('r2')
   await expect(page.getByText('safe trace')).toBeVisible()
   await expect(page.getByText('Bearer must-not-render')).toHaveCount(0)
   await expect(page.getByText('[已遮罩]')).toBeVisible()
@@ -899,9 +899,9 @@ test('waiting_approval shows the no-approval notice and a failed refresh renders
   await page.getByRole('button', { name: '測試 Run' }).click()
   await page.getByLabel('測試訊息').fill('needs approval')
   await page.getByRole('button', { name: '啟動測試 Run' }).click()
-  await expect(page.getByText('等待核准（D3 不提供核准操作）', { exact: true })).toBeVisible()
+  await expect(page.getByText('等待核准（此測試主控台不提供核准操作）', { exact: true })).toBeVisible()
   await expect(
-    page.getByText('此 Run 正在等待核准。D3 測試主控台不提供 approval 或寫入操作；可取消 Run。'),
+    page.getByText('此 Run 正在等待核准。這個測試主控台不提供核准或寫入操作；可取消 Run。'),
   ).toBeVisible()
   await expect(page.getByLabel('補充資訊')).toHaveCount(0)
   await expect(page.getByRole('button', { name: '取消 Run', exact: true })).toBeEnabled()
@@ -911,7 +911,7 @@ test('waiting_approval shows the no-approval notice and a failed refresh renders
   await expect(page.getByText('失敗', { exact: true })).toBeVisible()
   await expect(page.getByRole('alert')).toContainText('工具預算已用盡')
   await expect(
-    page.getByText('此 Run 正在等待核准。D3 測試主控台不提供 approval 或寫入操作；可取消 Run。'),
+    page.getByText('此 Run 正在等待核准。這個測試主控台不提供核准或寫入操作；可取消 Run。'),
   ).toHaveCount(0)
   await expect(page.getByRole('button', { name: '取消 Run', exact: true })).toBeDisabled()
 })
@@ -987,13 +987,13 @@ test('pinned skill and budget sections render when populated and vanish when the
   await page.getByRole('button', { name: '測試 Run' }).click()
   await page.getByLabel('測試訊息').fill('pinned run')
   await page.getByRole('button', { name: '啟動測試 Run' }).click()
-  await expect(page.getByText('Pinned Skills')).toBeVisible()
+  await expect(page.getByText('已鎖定 Skills')).toBeVisible()
   await expect(page.getByText('review · r6')).toBeVisible()
   await expect(page.getByText('Budget 使用量')).toBeVisible()
 
   stripped = true
   await page.getByRole('button', { name: '立即重新整理' }).click()
-  await expect(page.getByText('Pinned Skills')).toHaveCount(0)
+  await expect(page.getByText('已鎖定 Skills')).toHaveCount(0)
   await expect(page.getByText('Budget 使用量')).toHaveCount(0)
   await expect(page.getByText(runOne, { exact: true })).toBeVisible()
 })

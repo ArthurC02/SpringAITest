@@ -198,7 +198,8 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
         return await client.SendAsync(request);
     }
 
-    private async Task<JsonNode> PublishedUserAgentAsync(HttpClient admin)
+    /// <summary>internal static so AgentRunApprovalQueueApiTests (O3 queue) can reuse the same setup without re-deriving it.</summary>
+    internal static async Task<JsonNode> PublishedUserAgentAsync(HttpClient admin)
     {
         var create = await admin.PostAsJsonAsync("/api/agents", new
         {
@@ -219,9 +220,9 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
         return agent;
     }
 
-    private sealed record RunningRun(JsonNode Run, string LeaseToken, long LeaseGeneration);
+    internal sealed record RunningRun(JsonNode Run, string LeaseToken, long LeaseGeneration);
 
-    private static async Task<RunningRun> StartRunningAsync(HttpClient owner, JsonNode agent)
+    internal static async Task<RunningRun> StartRunningAsync(HttpClient owner, JsonNode agent)
     {
         var agentId = agent["id"]!.GetValue<string>();
         using var start = new HttpRequestMessage(HttpMethod.Post, $"/api/agents/{agentId}/runs") { Content = JsonContent.Create(new { message = "write evidence" }) };
@@ -243,7 +244,7 @@ public sealed class AgentRunApprovalApiTests : IClassFixture<TestWebAppFactory>
         return new RunningRun(await transition.ReadJsonAsync(), leaseBody["lease_token"]!.GetValue<string>(), leaseBody["lease_generation"]!.GetValue<long>());
     }
 
-    private static async Task<JsonNode> CreateApprovalAsync(HttpClient owner, RunningRun running, string fingerprint, string role)
+    internal static async Task<JsonNode> CreateApprovalAsync(HttpClient owner, RunningRun running, string fingerprint, string role)
     {
         var run = running.Run;
         var runId = run["id"]!.GetValue<string>();

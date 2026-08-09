@@ -89,3 +89,37 @@ public sealed record AgentRunApprovalWriteResult(
     AgentRunApprovalResponse? Approval = null,
     AgentRunResponse? Run = null,
     string? Message = null);
+
+/// <summary>
+/// O3 "discoverable approval queue" projection. Cross-run, so unlike
+/// <see cref="AgentRunApprovalPublicResponse"/> it also carries run/Agent identity — still
+/// never action_fingerprint, checkpoint, effect identity, or lease.
+/// </summary>
+public sealed record AgentRunApprovalQueueItem(
+    [property: JsonPropertyName("approval_id")] Guid ApprovalId,
+    [property: JsonPropertyName("run_id")] Guid RunId,
+    [property: JsonPropertyName("agent_id")] Guid AgentId,
+    [property: JsonPropertyName("agent_revision")] int AgentRevision,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("required_role")] string RequiredRole,
+    [property: JsonPropertyName("action_summary")] string ActionSummary,
+    [property: JsonPropertyName("created_at")] DateTime CreatedAt,
+    [property: JsonPropertyName("expires_at")] DateTime ExpiresAt,
+    [property: JsonPropertyName("actionable")] bool Actionable);
+
+public sealed record AgentRunApprovalQueuePage(
+    [property: JsonPropertyName("items")] IReadOnlyList<AgentRunApprovalQueueItem> Items,
+    [property: JsonPropertyName("next_cursor")] string? NextCursor,
+    [property: JsonPropertyName("has_more")] bool HasMore);
+
+/// <summary>Repository-only keyset position; not serialized directly (see the controller's opaque cursor).</summary>
+public sealed record AgentRunApprovalQueuePosition(DateTime CreatedAt, Guid Id);
+
+/// <summary>
+/// D7 ships exactly one write tool. The queue's "server-authored safe action summary" (O3 §4)
+/// is this fixed constant, never derived from action_fingerprint or any caller-supplied text.
+/// </summary>
+public static class AgentRunApprovalActionCatalog
+{
+    public const string WriteEvidence = "runtime.write_evidence";
+}

@@ -13,6 +13,8 @@ public sealed class D7FeatureGateTests : IClassFixture<D7FeatureGateTests.Disabl
     public static TheoryData<HttpMethod, string> HiddenRoutes => new()
     {
         { HttpMethod.Get, $"/api/runs/{Guid.NewGuid():D}/approvals" },
+        // O3 discoverable approval queue: same gate posture as every other D7 route.
+        { HttpMethod.Get, "/api/runs/approvals" },
         // The two state-mutating decision routes: the gate must win over the mandatory
         // Idempotency-Key 400 inside Decide(), which never runs because the middleware
         // short-circuits before MVC — these requests carry no Idempotency-Key header.

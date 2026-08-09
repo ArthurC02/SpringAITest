@@ -149,6 +149,58 @@ public sealed class AgentRunApprovalInMemoryTests
         Assert.Equal(AgentRunStatuses.Failed, (await runs.GetAsync("demo-a", "admin-a", running.Run.Id, default))!.Status);
     }
 
+    // O3 §4: "actionable" requires the exact pending waiting state and non-expiry, and this is
+    // the one predicate the HTTP-level AgentRunApprovalQueueApiTests cannot exercise (it has no
+    // clock control). Also proves queue/decide policy parity for the expired case specifically.
+    [Fact]
+    public async Task ListQueue_ExpiredApproval_IsVisibleButNeverActionable_AndDecideAgrees()
+    {
+        var fixture = await FixtureAsync("d7-queue-expired");
+        var runId = fixture.Running.Run.Id;
+        var approval = (await CreateApprovalAsync(fixture)).Approval!;
+
+        var beforeExpiry = await fixture.Approvals.ListQueueAsync(
+            "demo-a", "approver-a", "USER", actionableOnly: true, null, 20, default);
+        Assert.Contains(beforeExpiry, item => item.ApprovalId == approval.Id && item.Actionable);
+
+        fixture.Clock.Advance(TimeSpan.FromMinutes(6));
+
+        var afterExpiry = await fixture.Approvals.ListQueueAsync(
+            "demo-a", "approver-a", "USER", actionableOnly: true, null, 20, default);
+        Assert.DoesNotContain(afterExpiry, item => item.ApprovalId == approval.Id);
+
+        var visibleAfterExpiry = await fixture.Approvals.ListQueueAsync(
+            "demo-a", "admin-a", "USER", actionableOnly: false, null, 20, default);
+        var visible = Assert.Single(visibleAfterExpiry, item => item.ApprovalId == approval.Id);
+        Assert.False(visible.Actionable);
+
+        // Parity: what the queue excluded for expiry, DecideAsync independently rejects the same way.
+        Assert.Equal(AgentRunApprovalWriteStatus.Expired,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval.Id, true, "expired-parity", null, default)).Status);
+    }
+
+    // O3 §4 "exact waiting state": once a pending approval is decided, it is no longer
+    // actionable to anyone even though it has not expired and the role still matches.
+    [Fact]
+    public async Task ListQueue_OnlyExactPendingStatus_IsActionable()
+    {
+        var fixture = await FixtureAsync("d7-queue-waiting-state");
+        var runId = fixture.Running.Run.Id;
+        var approval = (await CreateApprovalAsync(fixture)).Approval!;
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await fixture.Approvals.DecideAsync("demo-a", "approver-a", "USER", runId, approval.Id, true, "approve", null, default)).Status);
+
+        var actionable = await fixture.Approvals.ListQueueAsync(
+            "demo-a", "approver-a", "USER", actionableOnly: true, null, 20, default);
+        Assert.DoesNotContain(actionable, item => item.ApprovalId == approval.Id);
+
+        var visible = await fixture.Approvals.ListQueueAsync(
+            "demo-a", "admin-a", "USER", actionableOnly: false, null, 20, default);
+        var listed = Assert.Single(visible);
+        Assert.Equal("approved", listed.Status);
+        Assert.False(listed.Actionable);
+    }
+
     // 決策表的另一半:整份測試只走過 approve=true。拒絕必須把 run 終局化成 failed,而且
     // **不得**留下任何 execute row(被拒絕的寫入永遠不該發生),執行身分也不得外流給 Workflow。
     [Fact]

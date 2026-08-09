@@ -42,6 +42,28 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
         Assert.Equal(before, FakeAgentRunService.Calls.Count);
     }
 
+    // O3 discoverable approval queue shares the exact same 404 fail-closed gate as the existing
+    // per-run list route — same flag, same pre-auth posture.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FeatureOff_HidesQueueRouteBeforeAuthentication(bool agentTestRunEnabled)
+    {
+        var testRun = agentTestRunEnabled ? "true" : "false";
+        using var factory = new TestWebAppFactory(new()
+        {
+            ["AGENT_BUILDER_ENABLED"] = testRun,
+            ["AGENT_TEST_RUN_ENABLED"] = testRun,
+            ["AGENT_WRITE_TOOLS_ENABLED"] = "false",
+        });
+        var before = FakeAgentRunService.Calls.Count;
+
+        var response = await factory.CreateClient().GetAsync("/api/runs/approvals");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(before, FakeAgentRunService.Calls.Count);
+    }
+
     // 下面共用 EnabledApprovalFixture 的測試都只斷言「自己這次呼叫」(Contains 特定字串,或緊接在
     // 自己請求後讀 LastContext/delta count),不依賴 FakeAgentRunService.Calls 只含自己那筆或固定順序,
     // 故共用同一份 host 是安全的(旗標組合的風險注記見 EnabledApprovalFixture)。
@@ -66,6 +88,75 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
             Assert.Equal("business-approver", FakeAgentRunService.LastContext!.UserId);
             Assert.Equal("tenant-x", FakeAgentRunService.LastContext.TenantCode);
         }
+    }
+
+    [Theory]
+    [InlineData(null, HttpStatusCode.Unauthorized)]
+    [InlineData("USER", HttpStatusCode.OK)]
+    [InlineData("ADMIN", HttpStatusCode.OK)]
+    public async Task EnabledQueue_RequiresAuthenticationButNotAdmin(string? role, HttpStatusCode expected)
+    {
+        var client = _factory.CreateClient();
+        if (role is not null)
+        {
+            client = client.WithToken(_factory.IssueToken("business-approver", role, "tenant-x"));
+        }
+
+        var response = await client.GetAsync("/api/runs/approvals");
+
+        Assert.Equal(expected, response.StatusCode);
+        if (expected == HttpStatusCode.OK)
+        {
+            Assert.Equal("business-approver", FakeAgentRunService.LastContext!.UserId);
+            Assert.Equal("tenant-x", FakeAgentRunService.LastContext.TenantCode);
+        }
+    }
+
+    // O3 §4 defines two predicates (scope=visible/actionable) plus a keyset cursor; Platform's
+    // whole job here is to forward the query string and identity verbatim — Backend owns both
+    // predicates and the cursor codec, so this only proves nothing is dropped or defaulted away.
+    [Fact]
+    public async Task Queue_ForwardsScopeCursorAndLimitVerbatim()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken("approver", "USER", "tenant-x"));
+
+        var response = await client.GetAsync("/api/runs/approvals?scope=actionable&cursor=abc123&limit=7");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("queue:actionable:abc123:7:approver", FakeAgentRunService.Calls);
+    }
+
+    // Off-point for the cursor parameter specifically: omitted entirely (not an empty string),
+    // and the controller's own default scope/limit apply — Platform must not invent a cursor.
+    [Fact]
+    public async Task Queue_WithoutCursorOrExplicitScopeAndLimit_ForwardsControllerDefaults()
+    {
+        var client = _factory.CreateClient().WithToken(_factory.IssueToken("approver", "USER", "tenant-x"));
+
+        var response = await client.GetAsync("/api/runs/approvals");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("queue:visible::20:approver", FakeAgentRunService.Calls);
+    }
+
+    // 決策權在 Backend,查詢佇列同理:SoD/expiry/角色都是 Backend 算好放進 DTO 的,平台只透傳。
+    [Theory]
+    [InlineData(403)]
+    [InlineData(404)]
+    [InlineData(409)]
+    public async Task Queue_DownstreamRejection_PassesThroughVerbatim(int status)
+    {
+        using var factory = new RejectingFactory(status);
+        var client = factory.CreateClient().WithToken(factory.IssueToken("approver", "USER", "tenant-x"));
+
+        var response = await client.GetAsync("/api/runs/approvals");
+
+        Assert.Equal(status, (int)response.StatusCode);
+        var body = await response.ReadJsonAsync();
+        Assert.Equal(status, body["status"]!.GetValue<int>());
+        Assert.Equal("下游決策訊息", body["message"]!.GetValue<string>());
+        Assert.Equal("backend_decision_code", body["code"]!.GetValue<string>());
+        Assert.Equal("backend-trace-2", body["correlationId"]!.GetValue<string>());
     }
 
     // List 的三格(匿名/USER/ADMIN)已覆蓋,決策路由卻只被 USER 打過:approve/reject 共用同一支
@@ -191,6 +282,9 @@ public sealed class RunApprovalApiTests : IClassFixture<RunApprovalApiTests.Enab
             => Task.FromResult(Rejection());
 
         public Task<AgentProxyResponse> ApprovalsAsync(Guid runId, UserContext ctx, CancellationToken ct = default)
+            => Task.FromResult(Rejection());
+
+        public Task<AgentProxyResponse> QueueAsync(string scope, string? cursor, int limit, UserContext ctx, CancellationToken ct = default)
             => Task.FromResult(Rejection());
 
         public Task<AgentProxyResponse> StartAsync(

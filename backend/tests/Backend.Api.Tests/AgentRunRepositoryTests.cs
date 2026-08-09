@@ -200,6 +200,75 @@ public sealed class AgentRunRepositoryTests : IAsyncLifetime
             "SELECT count(*) FROM agent_run_write_outbox WHERE run_id=@runId", new { runId = reservedRun.Run.Id }));
     }
 
+    /// <summary>
+    /// O3 discoverable approval queue against real Postgres: proves the SQL (JOIN, boolean
+    /// predicate, tenant filter, keyset ordering) actually behaves like the acceptance-level
+    /// InMemory coverage in <c>AgentRunApprovalQueueApiTests</c>, and that the queue's
+    /// "actionable" flag has policy parity with <c>DecideAsync</c>'s own authorization check.
+    /// </summary>
+    [SkippableFact]
+    public async Task D7_ApprovalQueue_AppliesVisibleAndActionablePredicates_TenantScopedThroughDapper()
+    {
+        _fixture.SkipIfUnavailable();
+        var tenant = "agentrunrepo-d7-queue-" + Guid.NewGuid().ToString("N");
+        var otherTenant = "agentrunrepo-d7-queue-other-" + Guid.NewGuid().ToString("N");
+        var agent = await PublishedAgentAsync(tenant, "d7-queue");
+        var approvals = new AgentRunApprovalRepository(_fixture.DataSource!);
+
+        // Run #1: required_role USER matches approver-a -> visible and actionable.
+        var (run1, token1, gen1) = await RunningRunAsync(tenant, agent.Id, "d7-queue-run1");
+        var approval1 = await approvals.CreateAsync(tenant, "admin-a", run1.Id,
+            new AgentRunApprovalCreateRequest(run1.StateVersion, token1, gen1, V2CheckpointRef(gen1), 1,
+                "USER", new string('a', 64), DateTime.UtcNow.AddMinutes(10)), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, approval1.Status);
+
+        // Run #2: required_role ADMIN mismatches approver-a's USER role -> visible to the owner,
+        // never actionable to approver-a.
+        var (run2, token2, gen2) = await RunningRunAsync(tenant, agent.Id, "d7-queue-run2");
+        var approval2 = await approvals.CreateAsync(tenant, "admin-a", run2.Id,
+            new AgentRunApprovalCreateRequest(run2.StateVersion, token2, gen2, V2CheckpointRef(gen2), 1,
+                "ADMIN", new string('b', 64), DateTime.UtcNow.AddMinutes(10)), default);
+        Assert.Equal(AgentRunApprovalWriteStatus.Success, approval2.Status);
+
+        // Cross-tenant approval must never surface in either predicate.
+        var otherAgent = await PublishedAgentAsync(otherTenant, "d7-queue-other");
+        var (crossRun, crossToken, crossGen) = await RunningRunAsync(otherTenant, otherAgent.Id, "d7-queue-cross");
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await approvals.CreateAsync(otherTenant, "admin-a", crossRun.Id,
+                new AgentRunApprovalCreateRequest(crossRun.StateVersion, crossToken, crossGen, V2CheckpointRef(crossGen), 1,
+                    "USER", new string('c', 64), DateTime.UtcNow.AddMinutes(10)), default)).Status);
+
+        var visibleToOwner = await approvals.ListQueueAsync(tenant, "admin-a", "USER", actionableOnly: false, null, 20, default);
+        Assert.Equal(2, visibleToOwner.Count);
+        Assert.All(visibleToOwner, item => Assert.Equal(agent.Id, item.AgentId));
+        Assert.DoesNotContain(visibleToOwner, item => item.RunId == crossRun.Id);
+
+        var actionableToApprover = await approvals.ListQueueAsync(tenant, "approver-a", "USER", actionableOnly: true, null, 20, default);
+        var onlyActionable = Assert.Single(actionableToApprover);
+        Assert.Equal(approval1.Approval!.Id, onlyActionable.ApprovalId);
+        Assert.True(onlyActionable.Actionable);
+        Assert.Equal(AgentRunApprovalActionCatalog.WriteEvidence, onlyActionable.ActionSummary);
+
+        // Policy parity: the queue's actionable item is accepted by the decision endpoint...
+        Assert.Equal(AgentRunApprovalWriteStatus.Success,
+            (await approvals.DecideAsync(tenant, "approver-a", "USER", run1.Id, approval1.Approval.Id, true, "queue-parity-accept", null, default)).Status);
+        // ...and the item the queue excluded for role mismatch is rejected the same way DecideAsync rejects it directly.
+        Assert.Equal(AgentRunApprovalWriteStatus.Forbidden,
+            (await approvals.DecideAsync(tenant, "approver-a", "USER", run2.Id, approval2.Approval!.Id, true, "queue-parity-reject", null, default)).Status);
+    }
+
+    private async Task<(AgentRunResponse Run, string Token, long Generation)> RunningRunAsync(string tenant, Guid agentId, string key)
+    {
+        var created = await Runs.CreateDirectAsync(tenant, "admin-a", "ADMIN", agentId, "queue test", key + "-" + Guid.NewGuid().ToString("N"), default);
+        var lease = await Runs.ClaimLeaseAsync(tenant, "admin-a", created.Run!.Id,
+            new AgentRunLeaseRequest(created.Run.StateVersion, "workflow", 300), default);
+        var running = await Runs.TransitionAsync(tenant, "admin-a", created.Run.Id,
+            new AgentRunTransitionRequest(lease.Lease!.Run.StateVersion, AgentRunStatuses.Running, lease.Lease.LeaseToken,
+                lease.Lease.LeaseGeneration, lease.Lease.EventAckCursor), default);
+        Assert.Equal(AgentRunWriteStatus.Success, running.Status);
+        return (running.Run!, lease.Lease.LeaseToken, lease.Lease.LeaseGeneration);
+    }
+
     [SkippableFact]
     public async Task Create_GetArtifact_LeaseAndTransition_RoundTripThroughDapper()
     {

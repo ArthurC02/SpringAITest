@@ -20,6 +20,19 @@ public sealed class RunApprovalController(IAgentRunService runs) : ProxyControll
     public async Task<IActionResult> List(Guid runId, CancellationToken ct)
         => Write(await runs.ApprovalsAsync(runId, User.ToUserContext(), ct));
 
+    /// <summary>
+    /// O3 discoverable approval queue. A transparent proxy like <see cref="List"/> — Backend owns
+    /// both the "visible"/"actionable" predicates and the keyset cursor; Platform only forwards
+    /// identity and the query string verbatim.
+    /// </summary>
+    [HttpGet("~/api/runs/approvals")]
+    public async Task<IActionResult> Queue(
+        [FromQuery] string scope = "visible",
+        [FromQuery] string? cursor = null,
+        [FromQuery] int limit = 20,
+        CancellationToken ct = default)
+        => Write(await runs.QueueAsync(scope, cursor, limit, User.ToUserContext(), ct));
+
     [HttpPost("{approvalId:guid}/approve")]
     public async Task<IActionResult> Approve(
         Guid runId,

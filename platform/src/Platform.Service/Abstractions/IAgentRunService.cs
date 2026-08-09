@@ -51,6 +51,18 @@ public interface IAgentRunService
         UserContext ctx,
         CancellationToken ct = default);
 
+    /// <summary>
+    /// O3 discoverable approval queue, spanning every run in the tenant (scope is "visible" or
+    /// "actionable" — see 04-operations-trigger-plan.md §4). A transparent proxy like
+    /// <see cref="ApprovalsAsync"/>: Backend owns both predicates and the keyset cursor.
+    /// </summary>
+    Task<AgentProxyResponse> QueueAsync(
+        string scope,
+        string? cursor,
+        int limit,
+        UserContext ctx,
+        CancellationToken ct = default);
+
     Task<AgentProxyResponse> DecideApprovalAsync(
         Guid runId,
         Guid approvalId,

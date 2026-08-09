@@ -48,6 +48,38 @@ public sealed partial class AgentRunApprovalRepository(NpgsqlDataSource dataSour
         return rows.Where(x => owner || (x.RequiredRole == role && (!x.SelfApprovalForbidden || x.RequestedBy != userId))).Select(ToResponse).ToArray();
     }
 
+    public async Task<IReadOnlyList<AgentRunApprovalQueueItem>> ListQueueAsync(
+        string tenantId, string userId, string role, bool actionableOnly,
+        AgentRunApprovalQueuePosition? position, int limit, CancellationToken ct)
+    {
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        var rows = await conn.QueryAsync<AgentRunApprovalQueueItem>(new CommandDefinition(
+            QueueSelect + @"
+FROM agent_run_approval a
+JOIN agent_run r ON r.id = a.run_id
+WHERE a.tenant_id=@tenantId
+  AND (
+    (@actionableOnly = FALSE AND (a.requested_by=@userId OR (a.required_role=@role AND (NOT a.self_approval_forbidden OR a.requested_by<>@userId))))
+    OR (@actionableOnly = TRUE AND a.status='pending' AND a.expires_at > now() AND a.required_role=@role AND (NOT a.self_approval_forbidden OR a.requested_by<>@userId))
+  )
+  AND (@hasPosition = FALSE OR (a.created_at, a.id) < (@posCreatedAt, @posId))
+ORDER BY a.created_at DESC, a.id DESC
+LIMIT @limit",
+            new
+            {
+                tenantId,
+                userId,
+                role,
+                actionableOnly,
+                summary = AgentRunApprovalActionCatalog.WriteEvidence,
+                hasPosition = position is not null,
+                posCreatedAt = position?.CreatedAt ?? DateTime.MinValue,
+                posId = position?.Id ?? Guid.Empty,
+                limit,
+            }, cancellationToken: ct));
+        return rows.ToArray();
+    }
+
     public async Task<AgentRunApprovalWriteResult> DecideAsync(string tenantId, string approverId, string approverRole, Guid runId, Guid approvalId, bool approve, string idempotencyKey, string? reason, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 128 || reason?.Length > 500)
@@ -253,6 +285,13 @@ public sealed partial class AgentRunApprovalRepository(NpgsqlDataSource dataSour
 
     private static AgentRunApprovalResponse ToResponse(ApprovalRow row) => new(row.Id,row.RunId,row.Status,row.RequiredRole,row.ActionFingerprint,row.ExpiresAt,row.SelfApprovalForbidden,row.RequestedBy,row.Decision,row.DecidedBy,row.DecidedAt,row.Reason,row.CheckpointRef,row.CheckpointVersion);
     private const string ApprovalSelect = "SELECT id AS Id,run_id AS RunId,status AS Status,required_role AS RequiredRole,action_fingerprint AS ActionFingerprint,expires_at AS ExpiresAt,self_approval_forbidden AS SelfApprovalForbidden,requested_by AS RequestedBy,decision AS Decision,decided_by AS DecidedBy,decided_at AS DecidedAt,reason AS Reason,checkpoint_ref AS CheckpointRef,checkpoint_version AS CheckpointVersion FROM agent_run_approval";
+    // Never selects action_fingerprint/checkpoint_ref/requested_by/reason (O3 §4 DTO boundary).
+    // Actionable is computed inline so it always matches DecideAsync's authorization predicate.
+    private const string QueueSelect = @"SELECT a.id AS ApprovalId, a.run_id AS RunId, r.agent_id AS AgentId, r.agent_revision AS AgentRevision,
+       a.status AS Status, a.required_role AS RequiredRole, @summary AS ActionSummary,
+       a.created_at AS CreatedAt, a.expires_at AS ExpiresAt,
+       (a.status='pending' AND a.expires_at > now() AND a.required_role=@role AND (NOT a.self_approval_forbidden OR a.requested_by<>@userId)) AS Actionable
+";
     private static async Task<AgentRunApprovalResponse?> FindAsync(NpgsqlConnection conn,string tenantId,Guid runId,Guid id,CancellationToken ct) => (await conn.QuerySingleAsync<ApprovalRow>(new CommandDefinition(ApprovalSelect + " WHERE id=@id AND run_id=@runId AND tenant_id=@tenantId",new { id,runId,tenantId },cancellationToken:ct))) is { } row ? ToResponse(row) : null;
     [GeneratedRegex("^[A-Z][A-Z0-9_]{0,63}$")] private static partial Regex Role();
     [GeneratedRegex("^[0-9a-f]{64}$")] private static partial Regex Fingerprint();

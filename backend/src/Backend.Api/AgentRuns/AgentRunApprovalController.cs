@@ -7,9 +7,49 @@ namespace Backend.Api.AgentRuns;
 [Route("api/runs/{runId:guid}/approvals")]
 public sealed class AgentRunApprovalController(IAgentRunApprovalRepository approvals, AgentWriteToolsState writeTools) : ControllerBase
 {
+    private const int DefaultQueuePageSize = 20;
+    private const int MaxQueuePageSize = 100;
+
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<AgentRunApprovalPublicResponse>>> List(Guid runId, CancellationToken ct)
     { RequireEnabled(); return Ok((await approvals.ListAsync(Request.RequireTenant(), Request.RequireUserId(), Request.UserRole() ?? "", runId, ct) ?? throw new ApiException(404, "run not found")).Select(Public)); }
+
+    /// <summary>
+    /// O3 discoverable approval queue: "visible to me" (scope=visible, the default) and
+    /// "actionable to me" (scope=actionable) are separate predicates, both reused word for word
+    /// from <see cref="IAgentRunApprovalRepository.ListQueueAsync"/> / <c>DecideAsync</c>. This is
+    /// a discovery layer only — the decision still goes through the existing
+    /// approve/reject endpoints and their once-only semantics; nothing here decides anything.
+    /// </summary>
+    [HttpGet("~/api/runs/approvals")]
+    public async Task<ActionResult<AgentRunApprovalQueuePage>> Queue(
+        [FromQuery] string scope = "visible",
+        [FromQuery] string? cursor = null,
+        [FromQuery] int limit = DefaultQueuePageSize,
+        CancellationToken ct = default)
+    {
+        RequireEnabled();
+        if (limit is < 1 or > MaxQueuePageSize)
+        {
+            throw new ApiException(400, "limit 必須介於 1 到 100");
+        }
+        var actionableOnly = scope switch
+        {
+            "visible" => false,
+            "actionable" => true,
+            _ => throw new ApiException(400, "scope 必須是 visible 或 actionable"),
+        };
+        var position = cursor is null
+            ? null
+            : KeysetCursor.Decode(cursor, (createdAt, id) => new AgentRunApprovalQueuePosition(createdAt, id));
+        var rows = await approvals.ListQueueAsync(
+            Request.RequireTenant(), Request.RequireUserId(), Request.UserRole() ?? "",
+            actionableOnly, position, limit + 1, ct);
+        var hasMore = rows.Count > limit;
+        var items = hasMore ? rows.Take(limit).ToArray() : rows;
+        var nextCursor = hasMore ? KeysetCursor.Encode(items[^1].CreatedAt, items[^1].ApprovalId) : null;
+        return Ok(new AgentRunApprovalQueuePage(items, nextCursor, hasMore));
+    }
 
     [HttpPost("{approvalId:guid}/approve")]
     public Task<ActionResult<AgentRunApprovalResponse>> Approve(Guid runId, Guid approvalId, [FromBody] AgentRunApprovalDecisionRequest? request, CancellationToken ct) => Decide(runId, approvalId, true, request, ct);

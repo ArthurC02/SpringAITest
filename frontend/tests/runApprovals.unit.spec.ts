@@ -1,5 +1,12 @@
 import { expect, test } from 'vitest'
-import { decideRunApproval, listRunApprovals, normalizeRunApproval, normalizeRunApprovals } from '../src/api/runApprovals'
+import {
+  decideRunApproval,
+  listApprovalQueue,
+  listRunApprovals,
+  normalizeApprovalQueuePage,
+  normalizeRunApproval,
+  normalizeRunApprovals,
+} from '../src/api/runApprovals'
 
 test.describe('D7 approval public projection', () => {
   test('allowlists redacted fields and drops prompt, tool and anti-replay data', () => {
@@ -82,5 +89,64 @@ test.describe('D7 approval public projection', () => {
     } finally { globalThis.fetch = originalFetch }
     // Reject is a distinct route segment, and a blank reason is omitted rather than sent as ''.
     expect(seen).toEqual({ url: '/api/runs/run-1/approvals/approval-1/reject', key: 'logical-attempt-2', body: {} })
+  })
+})
+
+test.describe('O3 discoverable approval queue projection', () => {
+  test('allowlists cross-run identity fields and drops unidentifiable rows', () => {
+    const page = normalizeApprovalQueuePage({
+      items: [
+        {
+          approval_id: 'approval-1', run_id: 'run-1', agent_id: 'agent-1', agent_revision: 3,
+          status: 'pending', required_role: 'USER', action_summary: 'runtime.write_evidence',
+          created_at: '2026-01-01T00:00:00Z', expires_at: '2026-01-02T00:00:00Z', actionable: true,
+          action_fingerprint: 'secret', checkpoint_ref: 'secret', lease_token: 'secret',
+        },
+        { status: 'pending' },
+      ],
+      next_cursor: 'opaque-cursor', has_more: true,
+    })
+    expect(page).toEqual({
+      items: [{
+        approvalId: 'approval-1', runId: 'run-1', agentId: 'agent-1', agentRevision: 3,
+        status: 'pending', requiredRole: 'USER', actionSummary: 'runtime.write_evidence',
+        createdAt: '2026-01-01T00:00:00Z', expiresAt: '2026-01-02T00:00:00Z', actionable: true,
+      }],
+      hasMore: true, cursor: 'opaque-cursor',
+    })
+    expect(JSON.stringify(page)).not.toContain('secret')
+  })
+
+  test('accepts a bare array payload and a missing payload', () => {
+    expect(normalizeApprovalQueuePage([{ approval_id: 'approval-2', status: 'pending', actionable: false }])).toEqual({
+      items: [{
+        approvalId: 'approval-2', runId: null, agentId: null, agentRevision: null,
+        status: 'pending', requiredRole: null, actionSummary: null,
+        createdAt: null, expiresAt: null, actionable: false,
+      }],
+      hasMore: false, cursor: null,
+    })
+    expect(normalizeApprovalQueuePage(null)).toEqual({ items: [], hasMore: false, cursor: null })
+    expect(normalizeApprovalQueuePage(undefined)).toEqual({ items: [], hasMore: false, cursor: null })
+  })
+
+  test('lists a scoped page and forwards limit/cursor as query params', async () => {
+    const originalFetch = globalThis.fetch
+    let seen: { url: string; method: string } | null = null
+    globalThis.fetch = async (input, init) => {
+      seen = { url: String(input), method: init?.method ?? 'GET' }
+      return new Response(
+        '{"items":[{"approval_id":"approval-3","status":"pending","actionable":true}],"has_more":false,"next_cursor":null}',
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    try {
+      const page = await listApprovalQueue('actionable', { limit: 10, cursor: 'next-page' })
+      expect(page.items.map((entry) => entry.approvalId)).toEqual(['approval-3'])
+    } finally { globalThis.fetch = originalFetch }
+    expect(seen).toEqual({
+      url: '/api/runs/approvals?scope=actionable&limit=10&cursor=next-page',
+      method: 'GET',
+    })
   })
 })

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Backend.Api.AgentRuns;
+using Backend.Api.Common;
 using Backend.Api.Skills;
 
 namespace Backend.Api.Data.InMemory;
@@ -25,6 +26,14 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
     internal Lock ReferenceSyncRoot => _gate;
 
     private readonly Dictionary<Guid, AgentRunApprovalResponse> _items = new();
+    // ponytail: AgentRunApprovalResponse (the shared decision-endpoint DTO) has no CreatedAt
+    // field, and adding one would ripple through every ToResponse/positional-constructor call
+    // site across both engines. The O3 queue is the only consumer of creation order, so it gets
+    // its own narrow side table instead.
+    private readonly Dictionary<Guid, DateTime> _createdAt = new();
+    // Tracks each run's agent identity for the O3 queue projection; agent_run itself already
+    // carries AgentId/AgentRevision, this just avoids a per-row round trip through IAgentRunRepository.
+    private readonly Dictionary<Guid, (Guid AgentId, int AgentRevision)> _runAgents = new();
     private readonly HashSet<(Guid Approval, string Key)> _decisions = new();
     private readonly Dictionary<Guid, (string Tenant, string Owner, string Status)> _runs = new();
     private readonly Dictionary<(Guid Run, string Fingerprint), Effect> _effects = new();
@@ -69,7 +78,46 @@ public sealed partial class InMemoryAgentRunApprovalRepository : IAgentRunApprov
             var value = new AgentRunApprovalResponse(Guid.NewGuid(), runId, "pending", request.RequiredRole!, request.ActionFingerprint!, expiry,
                 true, userId, null, null, null, null, request.CheckpointRef!, request.CheckpointVersion);
             _items[value.Id] = value;
+            _createdAt[value.Id] = UtcNow();
+            _runAgents[runId] = (existing.AgentId, existing.AgentRevision);
             return new(AgentRunApprovalWriteStatus.Success, value);
+        }
+    }
+
+    /// <summary>
+    /// O3 discoverable approval queue. Mirrors <see cref="AgentRunApprovalRepository.ListQueueAsync"/>
+    /// row for row: visible = requester-owned OR role-eligible regardless of status/expiry;
+    /// actionable literally repeats <see cref="DecideAsync"/>'s authorization predicate (pending,
+    /// not expired, required role, separation of duties) so the two cannot drift apart.
+    /// </summary>
+    public Task<IReadOnlyList<AgentRunApprovalQueueItem>> ListQueueAsync(
+        string tenantId, string userId, string role, bool actionableOnly,
+        AgentRunApprovalQueuePosition? position, int limit, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            var now = UtcNow();
+            bool RoleEligible(AgentRunApprovalResponse x)
+                => x.RequiredRole == role && (!x.SelfApprovalForbidden || x.RequestedBy != userId);
+            bool Actionable(AgentRunApprovalResponse x)
+                => x.Status == "pending" && x.ExpiresAt > now && RoleEligible(x);
+
+            var rows = _items.Values
+                .Where(x => _runs.TryGetValue(x.RunId, out var run) && run.Tenant == tenantId)
+                .Where(x => actionableOnly ? Actionable(x) : x.RequestedBy == userId || RoleEligible(x))
+                .Select(x => (Item: x, CreatedAt: _createdAt.GetValueOrDefault(x.Id, x.ExpiresAt)))
+                .Where(x => position is null || KeysetCursor.FollowsPosition(x.CreatedAt, x.Item.Id, position.CreatedAt, position.Id))
+                .OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Item.Id)
+                .Take(limit)
+                .Select(x =>
+                {
+                    var (agentId, agentRevision) = _runAgents.GetValueOrDefault(x.Item.RunId);
+                    return new AgentRunApprovalQueueItem(
+                        x.Item.Id, x.Item.RunId, agentId, agentRevision, x.Item.Status, x.Item.RequiredRole,
+                        AgentRunApprovalActionCatalog.WriteEvidence, x.CreatedAt, x.Item.ExpiresAt, Actionable(x.Item));
+                })
+                .ToArray();
+            return Task.FromResult<IReadOnlyList<AgentRunApprovalQueueItem>>(rows);
         }
     }
 

@@ -421,6 +421,34 @@ public sealed class AgentRunServiceTests
     }
 
     /// <summary>
+    /// O3 discoverable approval queue: Backend owns both predicates and the keyset cursor codec,
+    /// so this service layer's only job is to build the query string exactly (scope/limit always
+    /// present; cursor only when non-blank — never invented when the caller omitted it).
+    /// </summary>
+    [Theory]
+    [InlineData("visible", null, 20, "scope=visible&limit=20")]
+    [InlineData("actionable", "abc123", 5, "scope=actionable&limit=5&cursor=abc123")]
+    [InlineData("visible", "", 20, "scope=visible&limit=20")]
+    public async Task Queue_ForwardsScopeLimitAndOptionalCursorPathVerbatim(
+        string scope, string? cursor, int limit, string expectedQuery)
+    {
+        var backend = new StubHttpMessageHandler(_ => Json(
+            HttpStatusCode.OK, """{"items":[],"next_cursor":null,"has_more":false}"""));
+        var workflow = new StubHttpMessageHandler(_ =>
+            throw new InvalidOperationException("讀取核准佇列不得觸發 Workflow"));
+
+        var result = await Build(backend, workflow).QueueAsync(scope, cursor, limit, Admin);
+
+        Assert.Equal(
+            $"http://backend/api/runs/approvals?{expectedQuery}",
+            backend.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Get, backend.LastRequest.Method);
+        Assert.Equal("demo-a", backend.Header("X-Tenant-Id"));
+        Assert.Equal("admin-a", backend.Header("X-User-Id"));
+        Assert.Equal(200, result.Status);
+    }
+
+    /// <summary>
     /// approve 走 /approve 後綴、reason 去頭尾空白、Idempotency-Key 原樣轉發,成功後 best-effort kick
     /// Workflow 的一次性寫入執行;reject 走 /reject 後綴且**絕不**觸發該 kick(拒絕不得產生任何效果)。
     /// </summary>

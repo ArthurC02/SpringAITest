@@ -154,6 +154,22 @@ public sealed class AgentRunService : IAgentRunService
         CancellationToken ct = default)
         => BackendAsync(HttpMethod.Get, $"/api/runs/{runId:D}/approvals", ctx, null, null, ct);
 
+    public Task<AgentProxyResponse> QueueAsync(
+        string scope,
+        string? cursor,
+        int limit,
+        UserContext ctx,
+        CancellationToken ct = default)
+    {
+        var path = "/api/runs/approvals?scope=" + Uri.EscapeDataString(scope)
+            + "&limit=" + limit.ToString(CultureInfo.InvariantCulture);
+        if (!string.IsNullOrWhiteSpace(cursor))
+        {
+            path += "&cursor=" + Uri.EscapeDataString(cursor);
+        }
+        return BackendAsync(HttpMethod.Get, path, ctx, null, null, ct);
+    }
+
     public async Task<AgentProxyResponse> DecideApprovalAsync(
         Guid runId,
         Guid approvalId,

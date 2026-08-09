@@ -42,7 +42,7 @@ function statusLabel(status: string): string {
     resuming: '恢復中',
     cancelling: '取消中',
     waiting_input: '等待補充資訊',
-    waiting_approval: '等待核准（D3 不提供核准操作）',
+    waiting_approval: '等待核准（此測試主控台不提供核准操作）',
     completed: '已完成',
     failed: '失敗',
     cancelled: '已取消',
@@ -162,17 +162,17 @@ function RunOverview({ run }: { run: AgentRun }) {
 
       <dl className="agent-test-console__summary">
         <div>
-          <dt>Pinned Agent</dt>
+          <dt>已鎖定 Agent 版本</dt>
           <dd>{run.pinnedAgentRevision === null ? '未回傳' : `r${run.pinnedAgentRevision}`}</dd>
         </div>
         <div>
-          <dt>Pinned Workflow</dt>
+          <dt>已鎖定 Workflow 版本</dt>
           <dd>
             {run.pinnedWorkflowRevision === null ? '未回傳' : `r${run.pinnedWorkflowRevision}`}
           </dd>
         </div>
         <div>
-          <dt>State / checkpoint</dt>
+          <dt>狀態 / Checkpoint</dt>
           <dd>
             {run.stateVersion ?? '—'} / {run.checkpointVersion ?? '—'}
           </dd>
@@ -185,7 +185,7 @@ function RunOverview({ run }: { run: AgentRun }) {
 
       {run.pinnedSkills.length > 0 && (
         <>
-          <h5>Pinned Skills</h5>
+          <h5>已鎖定 Skills</h5>
           <ul className="agent-test-console__pins">
             {run.pinnedSkills.map((skill) => (
               <li key={`${skill.name}:${skill.revision}`}>
@@ -279,7 +279,7 @@ function RunResumePanel({
 function RunTraceEvents({ events }: { events: AgentRunEvent[] }) {
   return (
     <section aria-labelledby="agent-test-events-title">
-      <h5 id="agent-test-events-title">Sanitized trace events</h5>
+      <h5 id="agent-test-events-title">已淨化的追蹤事件</h5>
       {events.length === 0 ? (
         <p className="muted">尚無事件。</p>
       ) : (
@@ -678,7 +678,7 @@ export default function AgentTestConsole({ agentId, publishedRevision, enabled }
 
           {run.status === 'waiting_approval' && (
             <p className="field-error" role="alert">
-              此 Run 正在等待核准。D3 測試主控台不提供 approval 或寫入操作；可取消 Run。
+              此 Run 正在等待核准。這個測試主控台不提供核准或寫入操作；可取消 Run。
             </p>
           )}
           {run.error && <ErrorText msg={run.error} />}
