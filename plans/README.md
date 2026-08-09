@@ -7,6 +7,10 @@ This directory records the evolution of the Skill and Agent platform. Source cod
 - [Architecture Hard Reset](architecture-hard-reset/00-analysis.md): status — P1, the P2 migration-runner mechanics, P3-R1 baseline validation, and P3-R2 instrumentation/export tooling are delivered; P3 destructive execution remains blocked pending production observation, retention, consumer, rollback, and approval evidence. One decision set across [delivery plan](architecture-hard-reset/01-plan.md), [target specification](architecture-hard-reset/02-spec.md), [design](architecture-hard-reset/03-design.md), [acceptance tests](architecture-hard-reset/04-acceptance-tests.md), [deletion/migration ledger](architecture-hard-reset/05-deletion-and-migration-ledger.md), [todo list](architecture-hard-reset/06-todo.md), [current inventory](architecture-hard-reset/07-p3-inventory.md), [P3 reconciliation](architecture-hard-reset/08-p3-reconciliation-44f9de4.md), and [P3-R2 evidence contract](architecture-hard-reset/09-p3-r2-runtime-evidence-contract.md). Current source and tests remain authoritative until each phase lands.
 - [Architecture Improvements Continuation](architecture-improvements-continuation/00-status.md): coordination record tracking the same wave-based hardening that feeds into Architecture Hard Reset's P3; not a release declaration. Current state — Wave5-B ACTIVE/PENDING (B0b runtime-calibration bundle not yet collected/reviewed, so no ceiling is approved) and Wave6/P3 EVIDENCE_PENDING/BLOCKED_BY_C8_GATE (production observation, retention, consumer, rollback, and named C8 approval remain pending); final integration closure BLOCKED. See the file for the full work-item table.
 
+## System Reinforcement (2026-08-10)
+
+- [系統重估補強計畫](system-reinforcement-2026-08-10.md)：九維度全系統重估（產品旅程×2、安全、測試、可靠性、效能、資料層、前端、DX）合併出的分波補強清單——Wave 1 可執行 21 項（checkbox 續跑格式）、Wave 2 需使用者拍板 8 項、Wave 3 大型工程 5 項（引用既有計畫）。不取代任何既有計畫。
+
 ## Architecture Research and Improvements
 
 - [Agent Architecture 改善總覽](agent-architecture-improvements/00-analysis.md)：比較 `awesome-agent-architecture` 00–21 與目前 D1–D7/E1–E3 架構，記錄採用與不採用決策。
