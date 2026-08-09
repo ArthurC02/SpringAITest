@@ -7,6 +7,7 @@ import {
   listEvalRuns,
   listEvalSuites,
 } from '../api/operations'
+import { listSkillCatalog } from '../api/skills'
 import { isNotFound } from '../api/http'
 import { newIdempotencyKey } from '../api/agentRuns'
 import { getSessionStorage, LogicalAttemptKey, OPERATIONS_ATTEMPT_STORAGE_PREFIX } from '../logicalAttemptKey'
@@ -18,6 +19,7 @@ import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { fmtDate } from '../format'
 import { Observed } from './Observed'
+import CatalogPicker from './CatalogPicker'
 
 const EVAL_RUN_ATTEMPT_KEY = `${OPERATIONS_ATTEMPT_STORAGE_PREFIX}eval-run-idempotency`
 // backend EvalController.MaxBudgetMs — model binding for `budget_ms:int?` rejects a
@@ -47,12 +49,12 @@ function VerdictBadge({ verdict }: { verdict: string }) {
 }
 
 const DELTA_LABEL: Record<EvalCaseDeltaStatus, { cls: string; label: string }> = {
-  regressed: { cls: 'chip--failed', label: 'Regressed (PASS→FAIL)' },
-  improved: { cls: 'chip--ready', label: 'Improved (FAIL→PASS)' },
-  changed: { cls: 'chip--warn', label: 'Changed' },
-  unchanged: { cls: 'chip--skip', label: 'Unchanged' },
-  added: { cls: 'chip--warn', label: 'New case' },
-  removed: { cls: 'chip--warn', label: 'Removed case' },
+  regressed: { cls: 'chip--failed', label: '退步(通過→失敗)' },
+  improved: { cls: 'chip--ready', label: '進步(失敗→通過)' },
+  changed: { cls: 'chip--warn', label: '有變化' },
+  unchanged: { cls: 'chip--skip', label: '無變化' },
+  added: { cls: 'chip--warn', label: '新案例' },
+  removed: { cls: 'chip--warn', label: '已移除案例' },
 }
 
 function DeltaBadge({ status }: { status: EvalCaseDeltaStatus }) {
@@ -127,7 +129,7 @@ function EvalSuiteRow({ suite }: { suite: EvalSuite }) {
                   </dd>
                 </div>
                 <div>
-                  <dt>Cases</dt>
+                  <dt>案例數</dt>
                   <dd>{current ? current.caseCount : <Observed value={null} />}</dd>
                 </div>
               </dl>
@@ -140,14 +142,14 @@ function EvalSuiteRow({ suite }: { suite: EvalSuite }) {
 }
 
 function EvalSuiteTable({ suites }: { suites: EvalSuite[] }) {
-  if (suites.length === 0) return <p className="muted">No eval suites recorded yet.</p>
+  if (suites.length === 0) return <p className="muted">尚無評測組合紀錄。</p>
   return (
     <div className="table-wrap">
       <table className="table">
         <thead>
           <tr>
-            <th>Suite</th>
-            <th>Current revision</th>
+            <th>組合</th>
+            <th>目前版本</th>
           </tr>
         </thead>
         <tbody>
@@ -189,9 +191,9 @@ function EvalRunRow({
         <td>{run.startedAt ? fmtDate(run.startedAt) : <Observed value={null} />}</td>
         <td>{run.completedAt ? fmtDate(run.completedAt) : <Observed value={null} />}</td>
         <td>
-          <span className="chip chip--ready">{run.passCount} PASS</span>{' '}
-          <span className="chip chip--failed">{run.failCount} FAIL</span>{' '}
-          <span className="chip chip--warn">{run.errorCount} ERROR</span>
+          <span className="chip chip--ready">{run.passCount} 通過</span>{' '}
+          <span className="chip chip--failed">{run.failCount} 失敗</span>{' '}
+          <span className="chip chip--warn">{run.errorCount} 錯誤</span>
         </td>
         <td>{run.runnerVersion ?? <Observed value={null} />}</td>
       </tr>
@@ -207,17 +209,17 @@ function EvalRunRow({
                   type="button"
                   onClick={() => onUseForRegressionGate(run.id)}
                 >
-                  Use for regression gate
+                  套用到品質迴歸關卡
                 </button>
                 <div className="table-wrap">
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>Case</th>
-                        <th>Verdict</th>
-                        <th>Latency</th>
-                        <th>Failure reason</th>
-                        <th>Canonical identity</th>
+                        <th>案例</th>
+                        <th>判定</th>
+                        <th>延遲</th>
+                        <th>失敗原因</th>
+                        <th>正規化身分</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -255,18 +257,18 @@ function EvalRunTable({
   runs: EvalRun[]
   onUseForRegressionGate: (runId: string) => void
 }) {
-  if (runs.length === 0) return <p className="muted">No eval runs recorded yet.</p>
+  if (runs.length === 0) return <p className="muted">尚無評測執行紀錄。</p>
   return (
     <div className="table-wrap">
       <table className="table">
         <thead>
           <tr>
-            <th>Run</th>
-            <th>Suite / revision</th>
-            <th>Started</th>
-            <th>Completed</th>
-            <th>Cases</th>
-            <th>Runner version</th>
+            <th>執行</th>
+            <th>組合 / 版本</th>
+            <th>開始時間</th>
+            <th>完成時間</th>
+            <th>案例</th>
+            <th>執行器版本</th>
           </tr>
         </thead>
         <tbody>
@@ -292,6 +294,9 @@ function EvalTriggerForm({
   const [candidateName, setCandidateName] = useState('')
   const [budgetMs, setBudgetMs] = useState('')
   const [busy, setBusy] = useState(false)
+  // W5(規格 §5.1):candidate skill name 手輸改下拉,資料源沿用 AgentEditor 已用過的
+  // listSkillCatalog();目錄載入失敗或為空,CatalogPicker 自動優雅退回手動輸入。
+  const skillsRes = useResource(listSkillCatalog)
   // 懶初始化:useRef(new X()) 每次 render 都會建構(並讀 sessionStorage),只有第一顆會被留下。
   const attemptRef = useRef<LogicalAttemptKey | null>(null)
   const attempts = (attemptRef.current ??= new LogicalAttemptKey(
@@ -313,8 +318,8 @@ function EvalTriggerForm({
     const revision = selectedSuite?.currentRevision ?? null
     if (busy || !selectedSuite || !revision || !name || budgetInvalid) return
     if (
-      !(await confirm(`Run suite "${suiteId}" r${revision} against skill "${name}"?`, {
-        confirmLabel: 'Run',
+      !(await confirm(`對 Skill「${name}」執行組合「${suiteId}」r${revision}?`, {
+        confirmLabel: '執行',
       }))
     )
       return
@@ -325,7 +330,7 @@ function EvalTriggerForm({
       toast,
       () => createEvalRun(suiteId, revision, { kind: 'skill', ref: { name } }, key, parsedBudget),
       {
-        success: 'Eval run completed.',
+        success: '評測執行已完成。',
         onSuccess: () => {
           attempts.consume(identity, key)
           setCandidateName('')
@@ -339,16 +344,16 @@ function EvalTriggerForm({
 
   return (
     <section className="agent-block" aria-busy={busy}>
-      <h4>Trigger eval run</h4>
+      <h4>觸發評測執行</h4>
       <div className="field">
-        <label htmlFor="eval-suite">Suite</label>
+        <label htmlFor="eval-suite">組合</label>
         <select
           id="eval-suite"
           value={suiteId}
           onChange={(e) => setSuiteId(e.target.value)}
           disabled={busy}
         >
-          <option value="">Select a suite…</option>
+          <option value="">請選擇組合…</option>
           {suites.map((s) => (
             <option key={s.suiteId} value={s.suiteId}>
               {s.suiteId} (r{s.currentRevision})
@@ -356,17 +361,20 @@ function EvalTriggerForm({
           ))}
         </select>
       </div>
+      <CatalogPicker
+        id="eval-candidate-name"
+        label="候選 Skill 名稱"
+        value={candidateName}
+        onChange={setCandidateName}
+        disabled={busy}
+        items={skillsRes.data}
+        itemsError={skillsRes.error}
+        itemsLoading={skillsRes.loading}
+        optionValue={(s) => s.name}
+        optionLabel={(s) => `${s.name}${s.revision != null ? ` (r${s.revision})` : ''}`}
+      />
       <div className="field">
-        <label htmlFor="eval-candidate-name">Candidate skill name</label>
-        <input
-          id="eval-candidate-name"
-          value={candidateName}
-          onChange={(e) => setCandidateName(e.target.value)}
-          disabled={busy}
-        />
-      </div>
-      <div className="field">
-        <label htmlFor="eval-budget">Budget (ms, optional)</label>
+        <label htmlFor="eval-budget">預算(毫秒,選填)</label>
         <input
           id="eval-budget"
           type="number"
@@ -380,7 +388,7 @@ function EvalTriggerForm({
         />
         {budgetInvalid && (
           <span className="field-error" id="eval-budget-err" role="alert">
-            Budget (ms) must be a whole number between 1 and {MAX_BUDGET_MS}.
+            預算(毫秒)必須是 1 到 {MAX_BUDGET_MS} 之間的整數。
           </span>
         )}
       </div>
@@ -390,7 +398,7 @@ function EvalTriggerForm({
         disabled={busy || !suiteId || !candidateName.trim() || budgetInvalid}
         onClick={() => void submit()}
       >
-        Run eval
+        執行評測
       </button>
     </section>
   )
@@ -439,12 +447,12 @@ function EvalDeltaCompare({ runs }: { runs: EvalRun[] }) {
 
   return (
     <section className="agent-block">
-      <h4>Baseline / candidate delta</h4>
-      <p className="muted">Client-side per-case verdict comparison only — no server-side gate is affected.</p>
+      <h4>基準 / 候選差異比較</h4>
+      <p className="muted">僅前端逐案例判定比對,不影響任何伺服器端關卡。</p>
       <div className="field">
-        <label htmlFor="eval-baseline-run">Baseline run</label>
+        <label htmlFor="eval-baseline-run">基準執行</label>
         <select id="eval-baseline-run" value={baselineId} onChange={(e) => setBaselineId(e.target.value)}>
-          <option value="">Select…</option>
+          <option value="">請選擇…</option>
           {runs.map((r) => (
             <option key={r.id} value={r.id}>
               {r.id.slice(0, 8)} · {r.suiteId} r{r.suiteRevision}
@@ -453,9 +461,9 @@ function EvalDeltaCompare({ runs }: { runs: EvalRun[] }) {
         </select>
       </div>
       <div className="field">
-        <label htmlFor="eval-candidate-run">Candidate run</label>
+        <label htmlFor="eval-candidate-run">候選執行</label>
         <select id="eval-candidate-run" value={candidateId} onChange={(e) => setCandidateId(e.target.value)}>
-          <option value="">Select…</option>
+          <option value="">請選擇…</option>
           {runs.map((r) => (
             <option key={r.id} value={r.id}>
               {r.id.slice(0, 8)} · {r.suiteId} r{r.suiteRevision}
@@ -467,8 +475,7 @@ function EvalDeltaCompare({ runs }: { runs: EvalRun[] }) {
       <ErrorText msg={error} />
       {baseline && candidate && baseline.suiteId !== candidate.suiteId && (
         <p className="muted">
-          Selected runs are from different suites ({baseline.suiteId} vs {candidate.suiteId}); case IDs
-          may not correspond.
+          所選執行來自不同組合({baseline.suiteId} 對 {candidate.suiteId}),案例 ID 可能無法對應。
         </p>
       )}
       {delta && (
@@ -476,10 +483,10 @@ function EvalDeltaCompare({ runs }: { runs: EvalRun[] }) {
           <table className="table">
             <thead>
               <tr>
-                <th>Case</th>
-                <th>Baseline</th>
-                <th>Candidate</th>
-                <th>Change</th>
+                <th>案例</th>
+                <th>基準</th>
+                <th>候選</th>
+                <th>變化</th>
               </tr>
             </thead>
             <tbody>
@@ -513,17 +520,17 @@ export default function EvaluationPanel({
 
   return (
     <section className="agent-block">
-      <h3>Evaluation</h3>
+      <h3>評測</h3>
       <ErrorText msg={error} />
       {loading && !data ? (
         <Skeleton rows={4} />
       ) : !data ? null : !data.enabled ? (
-        <p className="muted">Evaluation is not enabled for this tenant (RUN_EVAL_ENABLED off).</p>
+        <p className="muted">此系統目前未開放評測功能。</p>
       ) : (
         <>
           <EvalSuiteTable suites={data.suites} />
           <EvalTriggerForm suites={data.suites} onCreated={() => void reload()} />
-          <h4>Runs</h4>
+          <h4>執行紀錄</h4>
           <EvalRunTable runs={data.runs} onUseForRegressionGate={onUseForRegressionGate} />
           <EvalDeltaCompare runs={data.runs} />
         </>

@@ -17,7 +17,7 @@ const agent = {
     system_prompt: 'Review invoices carefully.',
     execution_roles: ['worker'],
     capabilities: ['analysis'],
-    output_contract: { type: 'object' },
+    output_contract: { type: 'object', maxItems: 5, strict: true },
     audience: ['USER', 'ADMIN'],
     allowed_tools: [],
     skill_bindings: [],
@@ -75,6 +75,7 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   let draftSaveStatus = 200
   let validateIfMatch: string | null = null
   let savedAudience: string[] | null = null
+  let savedOutputContract: unknown = null
   let agentEtag = '"1"'
 
   await page.route('**/api/**', async (route) => {
@@ -134,7 +135,9 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
       return json(route, { valid: true, errors: [] })
     }
     if (path === `/api/agents/${agentId}/draft` && request.method() === 'PUT') {
-      savedAudience = (request.postDataJSON() as { audience: string[] }).audience
+      const body = request.postDataJSON() as { audience: string[]; output_contract: unknown }
+      savedAudience = body.audience
+      savedOutputContract = body.output_contract
       if (draftSaveStatus === 409) {
         return route.fulfill({
           status: 409,
@@ -177,9 +180,25 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   const tool = page.locator('.agent-skills__row').filter({ hasText: 'retrieve' })
   await expect(tool).toContainText('Search authorized tenant knowledge')
   await expect(tool).toContainText('風險：read')
-  await expect(page.getByLabel('Output contract（JSON object）')).toHaveValue(
-    '{\n  "type": "object"\n}',
+  // W5:Output contract 預設是結構化鍵值編輯器（非裸 JSON textarea）。
+  const outputContractRow = page.locator('.agent-kv__row').filter({ hasText: 'type' })
+  await expect(outputContractRow.locator('input')).toHaveValue('object')
+  // Bug fix regression: number/boolean fields must render as typed inputs, not text, so editing
+  // them never silently coerces the value to a string.
+  const outputContractMaxItems = page.locator('.agent-kv__row').filter({ hasText: 'maxItems' })
+  const outputContractStrict = page.locator('.agent-kv__row').filter({ hasText: 'strict' })
+  await expect(outputContractMaxItems.locator('input[type="number"]')).toHaveValue('5')
+  await expect(outputContractStrict.locator('input[type="checkbox"]')).toBeChecked()
+  // P3 output contract advisory: `maxItems`/`strict` are outside the D3 runtime whitelist
+  // (workflow/app/runtime/output_contract.py `_KEYS`) and warn; `type` is whitelisted and must not.
+  await expect(page.locator('.agent-kv__warn')).toHaveCount(2)
+  await expect(page.locator('.agent-kv__warn').filter({ hasText: 'maxItems' })).toContainText(
+    '不在支援的關鍵字清單內,驗證/發布時會被拒絕',
   )
+  await expect(page.locator('.agent-kv__warn').filter({ hasText: 'strict' })).toContainText(
+    '不在支援的關鍵字清單內,驗證/發布時會被拒絕',
+  )
+  await expect(page.locator('.agent-kv__warn').filter({ hasText: 'type' })).toHaveCount(0)
   await expect(page.getByRole('checkbox', { name: 'role:USER' })).toBeChecked()
   await expect(page.getByRole('checkbox', { name: 'role:ADMIN' })).toBeChecked()
 
@@ -212,8 +231,17 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   await page.getByRole('button', { name: '移除 group:*' }).click()
   await groupInput.fill('finance-reviewers')
   await page.getByRole('button', { name: '加入 group' }).click()
+  // Edit the typed output_contract fields before saving: number must stay a number, boolean must
+  // stay a boolean, not the string coercion the structured editor used to write. The fields live
+  // in the collapsed advanced group, so it must be expanded before interacting with them.
+  await advancedSummary(page).click()
+  await outputContractMaxItems.locator('input[type="number"]').fill('7')
+  await outputContractStrict.locator('input[type="checkbox"]').uncheck()
+  // maxItems/strict are still present (and still advisory-warned) at save time — the advisory
+  // never blocks the save; only the server is authoritative.
   await page.getByRole('button', { name: '儲存草稿' }).click()
   expect(savedAudience).toEqual(['role:USER', 'role:ADMIN', 'group:finance-reviewers'])
+  expect(savedOutputContract).toEqual({ type: 'object', maxItems: 7, strict: false })
   await expect(page.getByRole('alert')).toContainText('已被其他人更新')
   // 衝突鎖定的同時絕不能出現成功 toast(共通層 runWithToast 的 conflict 分支保證)。
   await expect(page.locator('.toast--success')).toHaveCount(0)
@@ -233,6 +261,73 @@ test('Agent Builder honors governed catalogs, ETag, conflict lock, and dialog ke
   await expect(validateButton).toBeEnabled()
   await validateButton.click()
   await expect.poll(() => validateIfMatch).toBe('"3"')
+})
+
+// D3 runtime (workflow/app/runtime/output_contract.py `_KEYS`) silently accepts non-whitelisted
+// top-level output_contract keys through create/validate/publish and only rejects them at test
+// Run time with a generic "Execution preflight was rejected." The advisory warns in both editor
+// modes but must never block the draft save — the server stays the sole authority.
+test('output contract advisory warns on non-whitelisted top-level keys in raw JSON mode too, and never blocks save', async ({
+  page,
+}) => {
+  let savedOutputContract: unknown = null
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'contract-advisory-token',
+        username: 'admin',
+        role: 'ADMIN',
+        tenantCode: 'demo',
+      })
+    }
+    if (path === '/api/features') return json(route, { agentBuilderEnabled: true })
+    if (path === '/api/documents' || path === '/api/chat/history') return json(route, [])
+    if (path === '/api/agents' && request.method() === 'GET') return json(route, [agent])
+    if (path === `/api/agents/${agentId}` && request.method() === 'GET') {
+      return json(route, agent, { ETag: '"1"' })
+    }
+    if (path === `/api/agents/${agentId}/revisions`) return json(route, [])
+    if (path === '/api/skills/catalog' || path === '/api/tools') return json(route, [])
+    if (path === `/api/agents/${agentId}/draft` && request.method() === 'PUT') {
+      savedOutputContract = (request.postDataJSON() as { output_contract: unknown }).output_contract
+      return json(route, agent, { ETag: '"2"' })
+    }
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByRole('button', { name: '編輯' }).click()
+  await advancedSummary(page).click()
+
+  // Fixture ships whitelisted `type` plus non-whitelisted `maxItems`/`strict`: exactly those two warn.
+  await expect(page.locator('.agent-kv__warn')).toHaveCount(2)
+
+  // Removing both non-whitelisted keys — leaving only the whitelisted `type` — clears every warning.
+  await page.getByRole('button', { name: '移除 maxItems' }).click()
+  await page.getByRole('button', { name: '移除 strict' }).click()
+  await expect(page.locator('.agent-kv__warn')).toHaveCount(0)
+
+  // Switching to advanced JSON mode and typing a non-whitelisted top-level key warns there too.
+  await page.getByRole('button', { name: '切換為進階 JSON 模式' }).click()
+  const textarea = page.getByLabel('Output contract（進階 JSON 模式）')
+  await textarea.fill(JSON.stringify({ type: 'string', pattern: '^[a-z]+$' }))
+  await expect(page.locator('.agent-kv__warn')).toHaveCount(1)
+  await expect(page.locator('.agent-kv__warn')).toHaveText(
+    '「pattern」不在支援的關鍵字清單內,驗證/發布時會被拒絕',
+  )
+
+  // The advisory is non-blocking: the draft still saves with the non-whitelisted key intact.
+  await page.getByRole('button', { name: '儲存草稿' }).click()
+  await expect.poll(() => savedOutputContract).toEqual({ type: 'string', pattern: '^[a-z]+$' })
+  await expect(page.locator('.toast--success')).toHaveCount(1)
 })
 
 // The advanced group is collapsed by default, so every error whose field lives inside it would be

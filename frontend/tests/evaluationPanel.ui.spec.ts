@@ -50,7 +50,7 @@ test('Evaluation panel shows a disabled empty state on 404, with no error toast 
   await login(page)
 
   await expect(
-    page.getByText('Evaluation is not enabled for this tenant (RUN_EVAL_ENABLED off).'),
+    page.getByText('此系統目前未開放評測功能。'),
   ).toBeVisible()
   await expect(page.locator('.toast')).toHaveCount(0)
   // A 404 is not a 401 — the session must survive, not bounce back to the login form.
@@ -89,7 +89,7 @@ test('a non-404 eval load failure renders the error line, never the "not enabled
   // must surface as a real error line, or a broken eval store would read as "flag is off".
   await expect(page.locator('.error-text')).toHaveText('eval store unavailable')
   await expect(
-    page.getByText('Evaluation is not enabled for this tenant (RUN_EVAL_ENABLED off).'),
+    page.getByText('此系統目前未開放評測功能。'),
   ).toHaveCount(0)
   // Read failures never toast — only write actions go through runWithToast.
   await expect(page.locator('.toast')).toHaveCount(0)
@@ -116,11 +116,11 @@ test('an enabled tenant with zero suites and zero runs shows both empty-list mes
 
   await login(page)
 
-  await expect(page.getByText('No eval suites recorded yet.')).toBeVisible()
-  await expect(page.getByText('No eval runs recorded yet.')).toBeVisible()
+  await expect(page.getByText('尚無評測組合紀錄。')).toBeVisible()
+  await expect(page.getByText('尚無評測執行紀錄。')).toBeVisible()
   // Empty (200 []) is the enabled-but-idle class, not the 404-disabled class.
   await expect(
-    page.getByText('Evaluation is not enabled for this tenant (RUN_EVAL_ENABLED off).'),
+    page.getByText('此系統目前未開放評測功能。'),
   ).toHaveCount(0)
 })
 
@@ -194,7 +194,7 @@ test('expanding a suite row and a run row fetches detail; "Use for regression ga
   await page.getByRole('button', { name: /CSR-EVAL-001/ }).click()
   await expect(page.getByText('abc123def456', { exact: true })).toBeVisible()
   await expect(
-    page.locator('.agent-test-console__summary div', { hasText: 'Cases' }).locator('dd'),
+    page.locator('.agent-test-console__summary div', { hasText: '案例數' }).locator('dd'),
   ).toHaveText('6')
 
   await page.getByRole('button', { name: /3fa85f64/ }).click()
@@ -206,7 +206,7 @@ test('expanding a suite row and a run row fetches detail; "Use for regression ga
   await expect(failedCase).toContainText('mismatch')
 
   // The drill-down hands the run id to RegressionPanel's E3 trusted-path field.
-  await page.getByRole('button', { name: 'Use for regression gate' }).click()
+  await page.getByRole('button', { name: '套用到品質迴歸關卡' }).click()
   await expect(page.locator('#ops-eval-run-id')).toHaveValue(runId)
 })
 
@@ -242,7 +242,7 @@ test('the optional budget field accepts only whole numbers in 1..300000 and bloc
 
   const budget = page.locator('#eval-budget')
   const budgetError = page.locator('#eval-budget-err')
-  const runEval = page.getByRole('button', { name: 'Run eval' })
+  const runEval = page.getByRole('button', { name: '執行評測' })
 
   // Blank (omitted from the request) plus both inclusive bounds of MAX_BUDGET_MS = 300_000.
   for (const valid of ['', '1', '300000']) {
@@ -253,7 +253,7 @@ test('the optional budget field accepts only whole numbers in 1..300000 and bloc
   // Just outside each bound, plus a non-integer that Number.isFinite would have let through.
   for (const invalid of ['0', '300001', '1.5']) {
     await budget.fill(invalid)
-    await expect(budgetError).toHaveText('Budget (ms) must be a whole number between 1 and 300000.')
+    await expect(budgetError).toHaveText('預算(毫秒)必須是 1 到 300000 之間的整數。')
     await expect(runEval).toBeDisabled()
   }
 })
@@ -313,11 +313,11 @@ test('selecting a baseline and candidate run renders the per-case delta and the 
 
   // Comparison is client-side only and still runs across suites — it warns instead of refusing.
   await expect(
-    page.getByText('Selected runs are from different suites (CSR-EVAL-001 vs CSR-EVAL-002)'),
+    page.getByText('所選執行來自不同組合(CSR-EVAL-001 對 CSR-EVAL-002)'),
   ).toBeVisible()
-  await expect(page.locator('tr', { hasText: 'case-1' })).toContainText('Regressed (PASS→FAIL)')
-  await expect(page.locator('tr', { hasText: 'case-2' })).toContainText('Removed case')
-  await expect(page.locator('tr', { hasText: 'case-3' })).toContainText('New case')
+  await expect(page.locator('tr', { hasText: 'case-1' })).toContainText('退步(通過→失敗)')
+  await expect(page.locator('tr', { hasText: 'case-2' })).toContainText('已移除案例')
+  await expect(page.locator('tr', { hasText: 'case-3' })).toContainText('新案例')
 })
 
 test('a failed eval run trigger keeps the same Idempotency-Key on retry; success consumes it', async ({ page }) => {
@@ -379,14 +379,14 @@ test('a failed eval run trigger keeps the same Idempotency-Key on retry; success
   await page.locator('#eval-suite').selectOption('CSR-EVAL-001')
   await page.locator('#eval-candidate-name').fill('kb-query')
 
-  await page.getByRole('button', { name: 'Run eval' }).click()
-  await page.getByRole('dialog', { name: '確認操作' }).getByRole('button', { name: 'Run' }).click()
+  await page.getByRole('button', { name: '執行評測' }).click()
+  await page.getByRole('dialog', { name: '確認操作' }).getByRole('button', { name: '執行' }).click()
   await expect(page.getByRole('alert')).toContainText('downstream outcome unknown')
   expect(requestKeys).toHaveLength(1)
   expect(requestKeys[0]).toBeTruthy()
 
-  await page.getByRole('button', { name: 'Run eval' }).click()
-  await page.getByRole('dialog', { name: '確認操作' }).getByRole('button', { name: 'Run' }).click()
+  await page.getByRole('button', { name: '執行評測' }).click()
+  await page.getByRole('dialog', { name: '確認操作' }).getByRole('button', { name: '執行' }).click()
   await expect.poll(() => requestKeys.length).toBe(2)
   expect(requestKeys[1]).toBe(requestKeys[0])
 

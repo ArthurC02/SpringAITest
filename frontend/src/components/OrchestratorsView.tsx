@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   createOrchestrator, getOrchestrator, listOrchestratorRevisions, listOrchestrators,
   publishOrchestrator, putOrchestratorDraft, restoreOrchestratorRevision, validateOrchestrator,
 } from '../api/orchestrators'
+import { listAgents, listAgentToolCatalog } from '../api/agents'
 import type {
-  AgentRun, AgentRunEvent, Orchestrator, OrchestratorDraft, WorkflowDefinition, WorkflowNodeType,
-  WorkflowRevision, WorkflowTraceEntry, WorkflowUiMetadata,
+  AgentRun, AgentRunEvent, AgentSummary, AgentToolCatalogEntry, Orchestrator, OrchestratorDraft,
+  WorkflowDefinition, WorkflowNodeType, WorkflowRevision, WorkflowTraceEntry, WorkflowUiMetadata,
 } from '../types'
 import { useResource } from '../hooks/useResource'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { requireLoaded, runWithToast, useToast } from './Toast'
 import RevisionList from './RevisionList'
+import CatalogPicker from './CatalogPicker'
 import { cancelOrchestratorRun, getOrchestratorRun, getOrchestratorRunEvents, newIdempotencyKey, startOrchestratorRun } from '../api/orchestratorRuns'
 import { getSession } from '../api/auth'
 import {
@@ -390,16 +392,342 @@ function jsonTexts(draft: OrchestratorDraft): Record<JsonKey, string> {
   }
 }
 
+/**
+ * W5(規格 §5):structured/raw 雙模開關——結構化表單是預設,裸 JSON 只作為進階逃生口
+ * 保留(defense in depth,見規格 §5.3)。fieldName 讓四個欄位各自的切換按鈕有獨立可辨識文字。
+ */
+function StructuredOrRaw({
+  fieldName,
+  advanced,
+  onToggleAdvanced,
+  structured,
+  raw,
+}: {
+  fieldName: string
+  advanced: boolean
+  onToggleAdvanced: () => void
+  structured: ReactNode
+  raw: ReactNode
+}) {
+  return (
+    <>
+      <button type="button" className="btn" onClick={onToggleAdvanced}>
+        {fieldName} — {advanced ? '切換為結構化編輯' : '切換為進階 JSON 模式'}
+      </button>
+      {advanced ? raw : structured}
+    </>
+  )
+}
+
+/**
+ * §5.5:Verifier/Worker 候選過濾——「已發布」是硬性前提;`published_execution_roles`
+ * 若有值,進一步要求包含該角色(避免選到 Worker harness 當 Verifier 之類的錯配)。
+ * fail-open:欄位缺席或 legacy null(舊後端未回傳)一律視為「不過濾角色」,絕不能讓下拉
+ * 因為缺欄位而整組變空——伺服器 validate/publish 才是最終權威,這裡只是減少誤觸。
+ */
+function agentPublishedForRole(agent: AgentSummary, role: 'worker' | 'verifier'): boolean {
+  if (agent.published_revision == null) return false
+  const roles = agent.published_execution_roles
+  return roles == null || roles.includes(role)
+}
+
+/** 已發布 Agent 的 id + revision 選取列;workerPool/verifier 共用(§5.1:資料源 listAgents)。
+ * agentsError/agentsLoading 傳入 CatalogPicker 由它自行決定 fail-open 為手動輸入。 */
+function AgentRefRow({
+  idPrefix,
+  agentLabel,
+  revisionLabel,
+  value,
+  agents,
+  agentsError,
+  agentsLoading,
+  role,
+  disabled,
+  onChange,
+  onRemove,
+}: {
+  idPrefix: string
+  agentLabel: string
+  revisionLabel: string
+  value: { agentId: string; revision: number }
+  agents: AgentSummary[] | null
+  agentsError: string | null
+  agentsLoading: boolean
+  role: 'worker' | 'verifier'
+  disabled?: boolean
+  onChange: (next: { agentId: string; revision: number }) => void
+  onRemove?: () => void
+}) {
+  return (
+    <div className="agent-runtime-grid">
+      <CatalogPicker
+        id={`${idPrefix}-agent`}
+        label={agentLabel}
+        value={value.agentId}
+        disabled={disabled}
+        items={agents ? agents.filter((a) => agentPublishedForRole(a, role)) : null}
+        itemsError={agentsError}
+        itemsLoading={agentsLoading}
+        optionValue={(a) => a.id}
+        optionLabel={(a) => `${a.name}${a.published_revision != null ? ` (r${a.published_revision})` : ''}`}
+        placeholder="Agent id"
+        onChange={(agentId) => {
+          const picked = agents?.find((a) => a.id === agentId)
+          onChange({ agentId, revision: picked?.published_revision ?? value.revision })
+        }}
+      />
+      <div className="field">
+        <label htmlFor={`${idPrefix}-revision`}>
+          {revisionLabel}
+          <input
+            id={`${idPrefix}-revision`}
+            className="input"
+            type="number"
+            min={1}
+            disabled={disabled}
+            value={value.revision}
+            onChange={(e) => onChange({ ...value, revision: Number(e.target.value) })}
+          />
+        </label>
+      </div>
+      {onRemove && !disabled && (
+        <button type="button" className="btn btn--danger" onClick={onRemove}>
+          移除
+        </button>
+      )}
+    </div>
+  )
+}
+
+function WorkerPoolEditor({
+  idPrefix,
+  items,
+  agents,
+  agentsError,
+  agentsLoading,
+  disabled,
+  onChange,
+}: {
+  idPrefix: string
+  items: OrchestratorDraft['workerPool']
+  agents: AgentSummary[] | null
+  agentsError: string | null
+  agentsLoading: boolean
+  disabled?: boolean
+  onChange: (next: OrchestratorDraft['workerPool']) => void
+}) {
+  return (
+    <div className="field">
+      <label>Worker pool(已發布 Agent,明確指定 revision)</label>
+      {items.length === 0 && (
+        <p className="agent-set__empty" role="note">
+          尚未加入任何 Worker——沒有 Worker 無法建立/發布。
+        </p>
+      )}
+      {items.map((it, index) => (
+        <AgentRefRow
+          key={index}
+          idPrefix={`${idPrefix}-${index}`}
+          agentLabel="Worker Agent id"
+          revisionLabel="Worker revision"
+          value={it}
+          agents={agents}
+          agentsError={agentsError}
+          agentsLoading={agentsLoading}
+          role="worker"
+          disabled={disabled}
+          onChange={(next) => onChange(items.map((x, i) => (i === index ? next : x)))}
+          onRemove={() => onChange(items.filter((_, i) => i !== index))}
+        />
+      ))}
+      {!disabled && (
+        <button
+          type="button"
+          className="btn"
+          onClick={() => onChange([...items, { agentId: '', revision: 0 }])}
+        >
+          ＋ 加入 Worker
+        </button>
+      )}
+    </div>
+  )
+}
+
+function VerifierRefEditor({
+  idPrefix,
+  value,
+  agents,
+  agentsError,
+  agentsLoading,
+  disabled,
+  onChange,
+}: {
+  idPrefix: string
+  value: { agentId: string; revision: number }
+  agents: AgentSummary[] | null
+  agentsError: string | null
+  agentsLoading: boolean
+  disabled?: boolean
+  onChange: (next: { agentId: string; revision: number }) => void
+}) {
+  return (
+    <div className="field">
+      <label>Verifier(唯讀查核者,已發布 Agent)</label>
+      <p className="muted agent-set__hint">
+        Verifier 一律固定為唯讀查核 harness,一般 Worker 不會被伺服器接受為 Verifier;此清單僅供選取,實際校驗仍以伺服器 validate/publish 為準。
+      </p>
+      <AgentRefRow
+        idPrefix={idPrefix}
+        agentLabel="Verifier Agent id"
+        revisionLabel="Verifier revision"
+        value={value}
+        agents={agents}
+        agentsError={agentsError}
+        agentsLoading={agentsLoading}
+        role="verifier"
+        disabled={disabled}
+        onChange={onChange}
+      />
+    </div>
+  )
+}
+
+const BUDGET_FIELDS: [keyof OrchestratorDraft['budgets'], string][] = [
+  ['maxContextRounds', 'Context 輪數上限'],
+  ['maxTasks', '任務數上限'],
+  ['maxChildRuns', 'Child run 數上限'],
+  ['maxConcurrency', '併發數上限'],
+  ['maxRepairRounds', '修復輪數上限'],
+  ['tokenBudget', 'Token 預算'],
+  ['timeoutSeconds', '逾時秒數'],
+]
+
+/** 數字輸入格 grid;比照 AgentEditor.tsx 的 AgentRuntimeLimitsSection 既有模式(規格 §5.2 分類 2)。 */
+function BudgetsEditor({
+  idPrefix,
+  value,
+  disabled,
+  onChange,
+}: {
+  idPrefix: string
+  value: OrchestratorDraft['budgets']
+  disabled?: boolean
+  onChange: (next: OrchestratorDraft['budgets']) => void
+}) {
+  return (
+    <div className="field">
+      <label>Budgets(上線資源上限)</label>
+      <div className="agent-runtime-grid">
+        {BUDGET_FIELDS.map(([key, label]) => (
+          <div className="field" key={key}>
+            <label htmlFor={`${idPrefix}-${key}`}>
+              {label}
+              <input
+                id={`${idPrefix}-${key}`}
+                className="input"
+                type="number"
+                min={0}
+                disabled={disabled}
+                value={value[key]}
+                onChange={(e) => {
+                  const n = Number(e.target.value)
+                  onChange({ ...value, [key]: Number.isFinite(n) && n >= 0 ? n : 0 })
+                }}
+              />
+            </label>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Context 一律唯讀(readOnly:true 是型別上的字面量,無法也不需要編輯);allowedTools 從
+ * Tool Catalog 勾選(規格 §5.2 分類 1),knowledgeSources 沿用本檔既有的「每行一項」慣例。 */
+function ContextEditor({
+  value,
+  toolCatalog,
+  toolCatalogError,
+  disabled,
+  onChange,
+}: {
+  value: OrchestratorDraft['context']
+  toolCatalog: AgentToolCatalogEntry[]
+  toolCatalogError: string | null
+  disabled?: boolean
+  onChange: (next: OrchestratorDraft['context']) => void
+}) {
+  function toggleTool(name: string) {
+    onChange({
+      ...value,
+      allowedTools: value.allowedTools.includes(name)
+        ? value.allowedTools.filter((t) => t !== name)
+        : [...value.allowedTools, name],
+    })
+  }
+  return (
+    <div className="field">
+      <label>Context(root run 可用的工具與知識來源,一律唯讀)</label>
+      {toolCatalogError && (
+        <p className="muted">工具目錄載入失敗,已保留目前設定,可用進階 JSON 模式調整。</p>
+      )}
+      {toolCatalog.length === 0 && !toolCatalogError ? (
+        <p className="muted">目前工具目錄為空。</p>
+      ) : (
+        <div className="agent-roles">
+          {toolCatalog.map((tool) => (
+            <label key={tool.name} className="agent-check">
+              <input
+                type="checkbox"
+                checked={value.allowedTools.includes(tool.name)}
+                disabled={disabled}
+                onChange={() => toggleTool(tool.name)}
+              />
+              {tool.name}
+            </label>
+          ))}
+        </div>
+      )}
+      {value.allowedTools
+        .filter((name) => !toolCatalog.some((tool) => tool.name === name))
+        .map((name) => (
+          <p key={name} className="muted">
+            {name}(不在目前工具目錄中)
+          </p>
+        ))}
+      <div className="field">
+        <label htmlFor="orchestrator-context-knowledge">知識來源(每行一項)</label>
+        <textarea
+          id="orchestrator-context-knowledge"
+          className="input"
+          disabled={disabled}
+          value={value.knowledgeSources.join('\n')}
+          onChange={(e) =>
+            onChange({
+              ...value,
+              knowledgeSources: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean),
+            })
+          }
+        />
+      </div>
+    </div>
+  )
+}
+
 function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClose: () => void; multiAgentDispatchEnabled: boolean }) {
   const toast = useToast(); const [item, setItem] = useState<Orchestrator | null>(null); const [draft, setDraft] = useState<OrchestratorDraft | null>(null)
   const [etag, setEtag] = useState<string | null>(null); const [blocked, setBlocked] = useState(false); const [errors, setErrors] = useState<string[]>([])
   const [texts, setTexts] = useState<Partial<Record<JsonKey, string>>>({}); const [jsonErrors, setJsonErrors] = useState<Partial<Record<JsonKey, string>>>({})
+  // W5:四個結構化欄位各自的 structured/raw 顯示模式;預設全部結構化(false)。
+  const [advancedFields, setAdvancedFields] = useState<Partial<Record<JsonKey, boolean>>>({})
+  const agentsRes = useResource(listAgents)
+  const toolsRes = useResource(listAgentToolCatalog)
   const revisions = useResource(useCallback(() => listOrchestratorRevisions(id), [id]))
   // 失敗在 load 本體收斂成可見錯誤：衝突鎖定後「重新載入」是唯一出口，它靜默失敗等於死路。
   const load = useCallback(async () => {
     try {
       const result = await getOrchestrator(id)
-      setItem(result.data); setDraft(result.data.draft); setEtag(result.etag); setBlocked(false); setErrors([]); setTexts(jsonTexts(result.data.draft)); setJsonErrors({})
+      setItem(result.data); setDraft(result.data.draft); setEtag(result.etag); setBlocked(false); setErrors([]); setTexts(jsonTexts(result.data.draft)); setJsonErrors({}); setAdvancedFields({})
     } catch (e) { setErrors([(e as Error).message]) }
   }, [id])
   useEffect(() => { void load() }, [load])
@@ -408,6 +736,7 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
   const disabled = blocked || !etag
   const onConflict = () => setBlocked(true)
   const update = (patch: Partial<OrchestratorDraft>) => { setDraft({ ...draft, ...patch }); setErrors([]) }
+  const toggleAdvanced = (key: JsonKey) => setAdvancedFields((prev) => ({ ...prev, [key]: !prev[key] }))
   // 文字永遠寫回顯示;只有解析成功才更新 draft(parsedValue),失敗留下欄位錯誤把寫入動作鎖住。
   const editJson = (key: JsonKey, text: string) => {
     setTexts((prev) => ({ ...prev, [key]: text }))
@@ -415,6 +744,13 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
     try { parsed = JSON.parse(text) } catch { setJsonErrors((prev) => ({ ...prev, [key]: JSON_FIELD_ERROR })); return }
     setJsonErrors((prev) => ({ ...prev, [key]: undefined }))
     update({ [key]: parsed } as Partial<OrchestratorDraft>)
+  }
+  // 結構化控制項的寫入路徑:直接更新 draft(typed),同時把 texts 重新序列化,讓「切換為
+  // 進階 JSON 模式」看到的永遠是目前結構化值,而不是切換前殘留的舊字串。
+  function setStructured<K extends JsonKey>(key: K, value: OrchestratorDraft[K]) {
+    update({ [key]: value } as Partial<OrchestratorDraft>)
+    setTexts((prev) => ({ ...prev, [key]: JSON.stringify(value, null, 2) }))
+    setJsonErrors((prev) => ({ ...prev, [key]: undefined }))
   }
   // 衝突不在這裡吞（吞掉 = runWithToast 看不到失敗 → 假成功 toast），一律往外拋，
   // 由 runWithToast 的 onConflict 統一鎖定編輯器。
@@ -483,18 +819,85 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
           onChange={(e) => update({ capabilities: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })}
         />
       </div>
-      <JsonField id="orchestrator-context" label="Context (JSON)" disabled={disabled} text={texts.context ?? ''} error={jsonErrors.context} onChange={(text) => editJson('context', text)} />
-      <JsonField
-        id="orchestrator-worker-pool"
-        label="Worker pool (JSON)"
-        disabled={disabled}
-        text={texts.workerPool ?? ''}
-        error={jsonErrors.workerPool}
-        onChange={(text) => editJson('workerPool', text)}
+      <StructuredOrRaw
+        fieldName="Context"
+        advanced={!!advancedFields.context}
+        onToggleAdvanced={() => toggleAdvanced('context')}
+        structured={
+          <ContextEditor
+            value={draft.context}
+            toolCatalog={toolsRes.data ?? []}
+            toolCatalogError={toolsRes.error}
+            disabled={disabled}
+            onChange={(context) => setStructured('context', context)}
+          />
+        }
+        raw={
+          <JsonField id="orchestrator-context" label="Context (JSON)" disabled={disabled} text={texts.context ?? ''} error={jsonErrors.context} onChange={(text) => editJson('context', text)} />
+        }
+      />
+      <StructuredOrRaw
+        fieldName="Worker pool"
+        advanced={!!advancedFields.workerPool}
+        onToggleAdvanced={() => toggleAdvanced('workerPool')}
+        structured={
+          <WorkerPoolEditor
+            idPrefix="orchestrator-worker-pool"
+            items={draft.workerPool}
+            agents={agentsRes.data}
+            agentsError={agentsRes.error}
+            agentsLoading={agentsRes.loading}
+            disabled={disabled}
+            onChange={(workerPool) => setStructured('workerPool', workerPool)}
+          />
+        }
+        raw={
+          <JsonField
+            id="orchestrator-worker-pool"
+            label="Worker pool (JSON)"
+            disabled={disabled}
+            text={texts.workerPool ?? ''}
+            error={jsonErrors.workerPool}
+            onChange={(text) => editJson('workerPool', text)}
+          />
+        }
       />
       <WorkerPolicyEditor value={draft.workerPolicy} disabled={disabled} onChange={(workerPolicy) => update({ workerPolicy })} />
-      <JsonField id="orchestrator-verifier" label="Verifier (JSON)" disabled={disabled} text={texts.verifier ?? ''} error={jsonErrors.verifier} onChange={(text) => editJson('verifier', text)} />
-      <JsonField id="orchestrator-budgets" label="Budgets (JSON)" disabled={disabled} text={texts.budgets ?? ''} error={jsonErrors.budgets} onChange={(text) => editJson('budgets', text)} />
+      <StructuredOrRaw
+        fieldName="Verifier"
+        advanced={!!advancedFields.verifier}
+        onToggleAdvanced={() => toggleAdvanced('verifier')}
+        structured={
+          <VerifierRefEditor
+            idPrefix="orchestrator-verifier"
+            value={{ agentId: draft.verifier.agentId, revision: draft.verifier.revision }}
+            agents={agentsRes.data}
+            agentsError={agentsRes.error}
+            agentsLoading={agentsRes.loading}
+            disabled={disabled}
+            onChange={(ref) => setStructured('verifier', { ...draft.verifier, ...ref })}
+          />
+        }
+        raw={
+          <JsonField id="orchestrator-verifier" label="Verifier (JSON)" disabled={disabled} text={texts.verifier ?? ''} error={jsonErrors.verifier} onChange={(text) => editJson('verifier', text)} />
+        }
+      />
+      <StructuredOrRaw
+        fieldName="Budgets"
+        advanced={!!advancedFields.budgets}
+        onToggleAdvanced={() => toggleAdvanced('budgets')}
+        structured={
+          <BudgetsEditor
+            idPrefix="orchestrator-budget"
+            value={draft.budgets}
+            disabled={disabled}
+            onChange={(budgets) => setStructured('budgets', budgets)}
+          />
+        }
+        raw={
+          <JsonField id="orchestrator-budgets" label="Budgets (JSON)" disabled={disabled} text={texts.budgets ?? ''} error={jsonErrors.budgets} onChange={(text) => editJson('budgets', text)} />
+        }
+      />
     </section>
     <div className="agent-actions">
       <button
@@ -537,6 +940,8 @@ export default function OrchestratorsView({ multiAgentDispatchEnabled = false }:
   const [create, setCreate] = useState(false); const [draft, setDraft] = useState(emptyDraft)
   const [workerPoolText, setWorkerPoolText] = useState(() => JSON.stringify(emptyDraft().workerPool, null, 2))
   const [workerPoolError, setWorkerPoolError] = useState<string | undefined>(undefined)
+  const [workerPoolAdvanced, setWorkerPoolAdvanced] = useState(false)
+  const agentsRes = useResource(listAgents)
   if (editing) return <Editor id={editing} multiAgentDispatchEnabled={multiAgentDispatchEnabled} onClose={() => { setEditing(null); void resource.reload() }} />
   const editWorkerPool = (text: string) => {
     setWorkerPoolText(text)
@@ -544,6 +949,11 @@ export default function OrchestratorsView({ multiAgentDispatchEnabled = false }:
     try { parsed = JSON.parse(text) } catch { setWorkerPoolError(JSON_FIELD_ERROR); return }
     setWorkerPoolError(undefined)
     setDraft({ ...draft, workerPool: parsed as OrchestratorDraft['workerPool'] })
+  }
+  const setCreateWorkerPool = (next: OrchestratorDraft['workerPool']) => {
+    setDraft({ ...draft, workerPool: next })
+    setWorkerPoolText(JSON.stringify(next, null, 2))
+    setWorkerPoolError(undefined)
   }
   const refsReady = !!draft.workflow.id && draft.workflow.revision > 0 && !!draft.verifier.agentId && draft.verifier.revision > 0 && draft.workerPool.length > 0
   return <>
@@ -577,28 +987,33 @@ export default function OrchestratorsView({ multiAgentDispatchEnabled = false }:
               />
             </label>
           </div>
-          <div className="field">
-            <label>Verifier Agent id
-              <input
-                className="input"
-                value={draft.verifier.agentId}
-                onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, agentId: e.target.value } })}
-              />
-            </label>
-          </div>
-          <div className="field">
-            <label>Verifier revision
-              <input
-                className="input"
-                type="number"
-                min={1}
-                value={draft.verifier.revision}
-                onChange={(e) => setDraft({ ...draft, verifier: { ...draft.verifier, revision: Number(e.target.value) } })}
-              />
-            </label>
-          </div>
         </div>
-        <JsonField id="orchestrator-create-worker-pool" label="Worker pool (JSON)" text={workerPoolText} error={workerPoolError} onChange={editWorkerPool} />
+        <StructuredOrRaw
+          fieldName="Worker pool"
+          advanced={workerPoolAdvanced}
+          onToggleAdvanced={() => setWorkerPoolAdvanced((a) => !a)}
+          structured={
+            <WorkerPoolEditor
+              idPrefix="orchestrator-create-worker-pool"
+              items={draft.workerPool}
+              agents={agentsRes.data}
+              agentsError={agentsRes.error}
+              agentsLoading={agentsRes.loading}
+              onChange={setCreateWorkerPool}
+            />
+          }
+          raw={
+            <JsonField id="orchestrator-create-worker-pool" label="Worker pool (JSON)" text={workerPoolText} error={workerPoolError} onChange={editWorkerPool} />
+          }
+        />
+        <VerifierRefEditor
+          idPrefix="orchestrator-create-verifier"
+          value={{ agentId: draft.verifier.agentId, revision: draft.verifier.revision }}
+          agents={agentsRes.data}
+          agentsError={agentsRes.error}
+          agentsLoading={agentsRes.loading}
+          onChange={(ref) => setDraft({ ...draft, verifier: { ...draft.verifier, ...ref } })}
+        />
         <PolicyEditor value={draft.policy} onChange={(policy) => setDraft({ ...draft, policy })} />
         <WorkerPolicyEditor value={draft.workerPolicy} onChange={(workerPolicy) => setDraft({ ...draft, workerPolicy })} />
         <div className="field">

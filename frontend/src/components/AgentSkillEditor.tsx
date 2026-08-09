@@ -95,7 +95,7 @@ export default function AgentSkillEditor({ name, onSaved, onClose }: Props) {
 
   async function onSave() {
     if (extractName(frontmatter) !== name) {
-      const msg = `Existing Agent Skill names are immutable. Keep the name as "${name}"; import a new package to create a different skill.`
+      const msg = `已存在的 Agent Skill 名稱不可變更，請保持名稱為「${name}」；如需建立不同名稱的技能，請改用匯入套件建立新技能。`
       setSaveError(msg)
       toast(msg, 'error')
       return
@@ -181,7 +181,7 @@ export default function AgentSkillEditor({ name, onSaved, onClose }: Props) {
               onChange={(e) => setFrontmatter(e.target.value)}
             />
             <p className="muted" role="note">
-              Existing Agent Skill name is immutable and must remain <strong>{name}</strong>. Use package import to create a skill with a different name.
+              已存在的 Agent Skill 名稱不可變更，必須維持為 <strong>{name}</strong>。如需使用不同名稱，請改用匯入套件建立新技能。
             </p>
             <p className="muted">
               標準欄位在頂層（name、description、allowed-tools、license/compatibility），引擎專屬欄位收在
@@ -232,7 +232,7 @@ export default function AgentSkillEditor({ name, onSaved, onClose }: Props) {
                       <span className="agent-pkg__path">{r.path}</span>
                       <span className="muted">{fmtBytes(r.bytes.length)}</span>
                       {readOnly ? (
-                        <span className="badge badge--user">唯讀（P1 不執行）</span>
+                        <span className="badge badge--user">唯讀（附件不會被執行）</span>
                       ) : (
                         <button
                           className="btn btn--danger"

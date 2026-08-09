@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
 import { canConnect } from '../src/workflowDesigner/connection'
+import { parseConfigSchema } from '../src/workflowDesigner/configSchema'
 import { patchPositions, semanticFingerprint } from '../src/workflowDesigner/graphAdapter'
 import { semanticDiff } from '../src/workflowDesigner/diff'
 import { canDeleteNode, catalogForKind } from '../src/workflowDesigner/catalog'
@@ -187,5 +188,54 @@ test.describe('Workflow Designer graph boundary', () => {
     // Variant-scoped nodes stay locked when no variant is supplied; orchestrators ignore the argument.
     expect(canDeleteNode(catalog, 'agent-runtime', 'model_step', '1.0')).toBe(false)
     expect(canDeleteNode(catalog, 'orchestrator', 'optional', '1.0', 'verifier')).toBe(true)
+  })
+})
+
+// P1 Phase A': configSchema → 泛型表單欄位解析。三個既有 catalog 形狀(見
+// `workflow/app/orchestration/catalog.py` `_node()`)必須成功解析；任何超出
+// string/integer/number/boolean 頂層屬性子集的形狀一律 fail-open 回 null。
+test.describe('Node Config schema parsing (P1 Phase A\')', () => {
+  test('empty object schema (the common case) yields zero fields, not null', () => {
+    expect(parseConfigSchema({ type: 'object', additionalProperties: false })).toEqual([])
+    expect(parseConfigSchema({})).toEqual([])
+  })
+
+  test('the real bounded_agent_loop/bounded_repair catalog shape resolves one required integer field', () => {
+    const schema = {
+      type: 'object', additionalProperties: false,
+      required: ['maxIterations'],
+      properties: { maxIterations: { type: 'integer', minimum: 1 } },
+    }
+    expect(parseConfigSchema(schema)).toEqual([{ key: 'maxIterations', type: 'integer', required: true, minimum: 1, maximum: undefined }])
+  })
+
+  test('the real bounded_repair_or_controlled_failure catalog shape resolves maxRepairRounds', () => {
+    const schema = {
+      type: 'object', additionalProperties: false,
+      required: ['maxRepairRounds'],
+      properties: { maxRepairRounds: { type: 'integer', minimum: 1 } },
+    }
+    expect(parseConfigSchema(schema)).toEqual([{ key: 'maxRepairRounds', type: 'integer', required: true, minimum: 1, maximum: undefined }])
+  })
+
+  test('an optional field without minimum/maximum omits those keys as undefined', () => {
+    expect(parseConfigSchema({ type: 'object', properties: { label: { type: 'string' } } })).toEqual([
+      { key: 'label', type: 'string', required: false, minimum: undefined, maximum: undefined },
+    ])
+  })
+
+  test('falls back to null (raw JSON escape hatch) for shapes outside the supported subset', () => {
+    const unsupported: Array<Record<string, unknown> | null | undefined | string> = [
+      undefined,
+      null,
+      'not-an-object',
+      { type: 'array' },
+      { type: 'object', properties: 'nope' },
+      { type: 'object', properties: { child: { type: 'object', properties: {} } } },
+      { type: 'object', properties: { items: { type: 'array' } } },
+      { type: 'object', properties: { mode: { type: 'string', enum: ['a', 'b'] } } },
+      { type: 'object', properties: { mode: { oneOf: [{ type: 'string' }] } } },
+    ]
+    for (const schema of unsupported) expect(parseConfigSchema(schema as Record<string, unknown>)).toBeNull()
   })
 })

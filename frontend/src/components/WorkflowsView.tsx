@@ -14,6 +14,10 @@ import { useResource } from '../hooks/useResource'
 import { requireLoaded, runWithToast, useToast } from './Toast'
 import RevisionList from './RevisionList'
 
+/** WorkflowKind 顯示字（W2/W3 詞彙表：Orchestrator→協作流程，Agent Runtime→Agent 執行骨架）。
+ * 未知值原樣顯示，不假裝已知（比照 WorkflowNode.tsx 的 TRACE_STATUS_LABEL 慣例）。 */
+const KIND_LABEL: Record<string, string> = { orchestrator: '協作流程', 'agent-runtime': 'Agent 執行骨架' }
+
 function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   const toast = useToast()
   const catalog = useResource(listWorkflowNodeCatalog)
@@ -43,11 +47,11 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   // 由 runWithToast 的 onConflict 統一鎖定編輯器。
   // 守衛不成立 = UI 狀態與寫入前提脫節（disabled 失守），一律拋錯而非靜默返回。
   async function save() {
-    await putWorkflowDraft(id, requireLoaded(workflow, 'Workflow'), requireLoaded(draft, '草稿'), requireLoaded(etag, '草稿版本')); await load()
+    await putWorkflowDraft(id, requireLoaded(workflow, '執行骨架'), requireLoaded(draft, '草稿'), requireLoaded(etag, '草稿版本')); await load()
   }
   async function validate() { setValidation(await validateWorkflow(id, requireLoaded(etag, '草稿版本'))) }
   async function simulate() { setSimulation(await simulateWorkflow(id, requireLoaded(etag, '草稿版本'))) }
-  async function publish() { await publishWorkflow(id, requireLoaded(workflow, 'Workflow').draft_version, requireLoaded(etag, '草稿版本')); await load() }
+  async function publish() { await publishWorkflow(id, requireLoaded(workflow, '執行骨架').draft_version, requireLoaded(etag, '草稿版本')); await load() }
   if (!workflow || !draft) return <><button className="btn" onClick={onClose}>返回清單</button><ErrorText msg={error} /><Skeleton rows={4} /></>
   return <>
     <div className="view__head"><h2 className="view__title">{workflow.name}</h2><button className="btn" onClick={onClose}>返回清單</button></div>
@@ -92,7 +96,7 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
     </div>
     {validation && (
       <section className="agent-block">
-        <h4>Validation</h4>
+        <h4>驗證結果</h4>
         {validation.valid ? <p className="notice-text">驗證通過。</p> : (
           <ul className="agent-errors">
             {validation.errors.map((issue, index) => <li key={`${issue.id ?? 'graph'}-${index}`}>{issue.id ? `[${issue.id}] ` : ''}{issue.message}</li>)}
@@ -102,19 +106,19 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
     )}
     {simulation?.trace && (
       <section className="agent-block">
-        <h4>Simulation trace（敏感資料已由 server 遮罩）</h4>
+        <h4>模擬追蹤（敏感資料已由 server 遮罩）</h4>
         <ul>
           {simulation.trace.map((entry) => <li key={entry.node_id}>{entry.node_id}: {entry.status}{entry.summary ? ` — ${entry.summary}` : ''}</li>)}
         </ul>
       </section>
     )}
     <section className="agent-block">
-      <h4>Revisions / Semantic Diff</h4>
+      <h4>版本歷史 / 語意差異</h4>
       <RevisionList
         loading={revisions.loading}
         revisions={revisions.data ?? []}
-        restoreLabel="還原為新 revision"
-        successMessage="已從歷史 revision 建立新 revision"
+        restoreLabel="還原為新版本"
+        successMessage="已從歷史版本建立新版本"
         onRestore={(revision) => restoreWorkflowRevision(id, revision)}
         onRestored={() => { void load(); void revisions.reload() }}
         renderExtra={(revision) => {
@@ -135,19 +139,19 @@ export default function WorkflowsView() {
   const rows = resource.data ?? []
   if (editing) return <WorkflowEditor id={editing} onClose={() => { setEditing(null); void resource.reload() }} />
   return <><ErrorText msg={resource.error} />
-    {kind === 'agent-runtime' && <label className="field">Runtime variant
-      <select className="input" aria-label="Runtime variant" value={runtimeVariant} onChange={(event) => setRuntimeVariant(event.target.value as WorkflowRuntimeVariant)}>
-        <option value="worker">Worker Harness</option>
-        <option value="verifier">Read-only Verifier Harness</option>
+    {kind === 'agent-runtime' && <label className="field">執行骨架變體
+      <select className="input" aria-label="執行骨架變體" value={runtimeVariant} onChange={(event) => setRuntimeVariant(event.target.value as WorkflowRuntimeVariant)}>
+        <option value="worker">執行者執行骨架</option>
+        <option value="verifier">唯讀查核者執行骨架</option>
       </select>
     </label>}
     <section className="agent-block">
-      <h4>建立 Execution Harness</h4>
+      <h4>建立執行骨架</h4>
       <div className="agent-runtime-grid">
         <input className="input" placeholder="名稱" value={name} onChange={(e) => setName(e.target.value)} />
         <select className="input" value={kind} onChange={(e) => setKind(e.target.value as WorkflowKind)}>
-          <option value="orchestrator">Orchestrator</option>
-          <option value="agent-runtime">Agent Runtime</option>
+          <option value="orchestrator">協作流程</option>
+          <option value="agent-runtime">Agent 執行骨架</option>
         </select>
         <button
           className="btn btn--primary"
@@ -159,7 +163,7 @@ export default function WorkflowsView() {
           )}
         >建立</button>
       </div>
-      <p className="muted">只可編輯 Harness graph；Prompt、Rule、Skill instruction 與 Agent binding 一律不在 Graph IR。</p>
+      <p className="muted">只可編輯執行骨架圖；Prompt、Rule、Skill instruction 與 Agent binding 一律不在 Graph IR。</p>
     </section>
     {resource.loading && rows.length === 0 ? <Skeleton rows={3} /> : (
       <div className="table-wrap">
@@ -169,7 +173,7 @@ export default function WorkflowsView() {
             {rows.map((row) => (
               <tr key={row.id}>
                 <td>{row.name}</td>
-                <td>{row.kind}</td>
+                <td>{KIND_LABEL[row.kind] ?? row.kind}</td>
                 <td>{row.published_revision == null ? '草稿' : `r${row.published_revision}`}</td>
                 <td><button className="btn" onClick={() => setEditing(row.id)}>編輯</button></td>
               </tr>

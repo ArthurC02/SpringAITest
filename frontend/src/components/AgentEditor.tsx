@@ -17,6 +17,7 @@ import { listConfig } from '../api/config'
 import type {
   AgentDraft,
   AgentExecutionRole,
+  AgentOutputContract,
   AgentRevision,
   AgentRuntimeLimits,
   AgentToolCatalogEntry,
@@ -698,7 +699,33 @@ function AgentExecutionRolesSection({
   )
 }
 
-/** Discovery capabilities + output contract(JSON 解析錯誤優先於伺服器欄位錯誤)。 */
+type OutputContractMode = 'structured' | 'raw'
+
+/**
+ * D3 執行期(workflow/app/runtime/output_contract.py `_KEYS`)只接受這組頂層 JSON-Schema
+ * 子集關鍵字;backend 的 Agent validate/publish(AgentCanonicalizer.ValidOutputContractKeys)
+ * 現已鏡射同一份白名單並於驗證/發布期以 422 擋下。三處清單需同步維護。
+ */
+const OUTPUT_CONTRACT_RUNTIME_KEYS = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'enum',
+])
+
+/** 白名單外的頂層鍵——僅供前端非阻斷提示；伺服器驗證/發布/儲存仍是唯一權威來源。 */
+function unsupportedOutputContractKeys(value: AgentOutputContract): string[] {
+  return Object.keys(value).filter((key) => !OUTPUT_CONTRACT_RUNTIME_KEYS.has(key))
+}
+
+/**
+ * Discovery capabilities + output contract(JSON 解析錯誤優先於伺服器欄位錯誤)。
+ * W5(規格 §5.2 分類 3):Output contract 鍵值皆可自訂,不假造下拉選單,改用鍵值對編輯器
+ * (比照 StringSetEditor/AudienceEditor 的「新增鍵 + 值 + 移除」互動模式)。
+ * 巢狀/陣列值無法在結構化模式逐值編輯,仍可整鍵移除;需要編輯這類值時切到進階 JSON 模式。
+ */
 function AgentCapabilityOutputSection({
   capabilities,
   contractText,
@@ -716,6 +743,30 @@ function AgentCapabilityOutputSection({
   onCapabilities: (next: string[]) => void
   onContractText: (text: string) => void
 }) {
+  const [mode, setMode] = useState<OutputContractMode>('structured')
+  const [newKey, setNewKey] = useState('')
+  const [newValue, setNewValue] = useState('')
+  const parsed = parseOutputContract(contractText)
+  const value = parsed.value ?? {}
+  const entries = Object.entries(value)
+  const unsupportedKeys = unsupportedOutputContractKeys(value)
+
+  function setEntry(key: string, val: unknown) {
+    onContractText(JSON.stringify({ ...value, [key]: val }, null, 2))
+  }
+  function removeEntry(key: string) {
+    const next = { ...value }
+    delete next[key]
+    onContractText(JSON.stringify(next, null, 2))
+  }
+  function addEntry() {
+    const key = newKey.trim()
+    if (!key || Object.prototype.hasOwnProperty.call(value, key)) return
+    setEntry(key, newValue)
+    setNewKey('')
+    setNewValue('')
+  }
+
   return (
     <section className="agent-block">
       <h4 className="agent-block__title">能力與輸出</h4>
@@ -729,17 +780,128 @@ function AgentCapabilityOutputSection({
         onChange={onCapabilities}
       />
       <div className="field">
-        <label htmlFor="agent-output-contract">Output contract（JSON object）</label>
-        <textarea
-          id="agent-output-contract"
-          className="textarea code-textarea"
-          value={contractText}
-          disabled={locked}
-          aria-invalid={!!contractParseError}
-          aria-describedby={contractParseError ? 'agent-output-contract-error' : undefined}
-          onChange={(event) => onContractText(event.target.value)}
-        />
-        {contractParseError && (
+        <p className="muted agent-set__hint">
+          Output contract（這個 Agent 回覆時應遵循的欄位結構；執行期僅接受受限的 JSON-Schema
+          子集，允許的頂層關鍵字為 type、properties、required、additionalProperties、items、enum，
+          其餘頂層鍵在驗證/發布時就會被拒絕）
+        </p>
+        {mode === 'structured' ? (
+          <>
+            {contractParseError && (
+              <p className="field-error" role="alert">
+                目前的內容不是合法 JSON，暫時無法以結構化模式顯示；請切到進階 JSON 模式修正。
+              </p>
+            )}
+            {entries.length === 0 ? (
+              <p className="agent-set__empty" role="note">
+                尚未設定任何欄位。
+              </p>
+            ) : (
+              <ul className="agent-kv">
+                {entries.map(([key, val]) => {
+                  return (
+                    <li key={key} className="agent-kv__row">
+                      <span className="agent-kv__key">{key}</span>
+                      {typeof val === 'boolean' ? (
+                        <input
+                          type="checkbox"
+                          checked={val}
+                          disabled={locked}
+                          onChange={(e) => setEntry(key, e.target.checked)}
+                        />
+                      ) : typeof val === 'number' ? (
+                        <input
+                          className="input"
+                          type="number"
+                          value={val}
+                          disabled={locked}
+                          onChange={(e) => {
+                            const raw = e.target.value
+                            // ponytail: 空字串/非數字時保持原值不寫回，不落地 NaN；沒有額外行內錯誤提示。
+                            if (raw.trim() === '') return
+                            const num = Number(raw)
+                            if (Number.isNaN(num)) return
+                            setEntry(key, num)
+                          }}
+                        />
+                      ) : typeof val === 'string' ? (
+                        <input
+                          className="input"
+                          value={val}
+                          disabled={locked}
+                          onChange={(e) => setEntry(key, e.target.value)}
+                        />
+                      ) : (
+                        <span className="muted">複合值，請切到進階 JSON 模式編輯</span>
+                      )}
+                      {!locked && (
+                        <button
+                          type="button"
+                          className="agent-set__chip-x"
+                          aria-label={`移除 ${key}`}
+                          onClick={() => removeEntry(key)}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+            {!locked && (
+              <div className="agent-set__add">
+                <input
+                  className="input"
+                  placeholder="鍵"
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                />
+                <input
+                  className="input"
+                  placeholder="值"
+                  value={newValue}
+                  onChange={(e) => setNewValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      addEntry()
+                    }
+                  }}
+                />
+                <button type="button" className="btn" onClick={addEntry} disabled={!newKey.trim()}>
+                  加入
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <label htmlFor="agent-output-contract">Output contract（進階 JSON 模式）</label>
+            <textarea
+              id="agent-output-contract"
+              className="textarea code-textarea"
+              value={contractText}
+              disabled={locked}
+              aria-invalid={!!contractParseError}
+              aria-describedby={contractParseError ? 'agent-output-contract-error' : undefined}
+              onChange={(event) => onContractText(event.target.value)}
+            />
+          </>
+        )}
+        {unsupportedKeys.length > 0 && (
+          <ul className="agent-kv__warnings" role="status">
+            {unsupportedKeys.map((key) => (
+              <li key={key} className="agent-kv__warn">
+                {`「${key}」不在支援的關鍵字清單內,驗證/發布時會被拒絕`}
+              </li>
+            ))}
+          </ul>
+        )}
+        <button type="button" className="btn" onClick={() => setMode(mode === 'structured' ? 'raw' : 'structured')}>
+          {mode === 'structured' ? '切換為進階 JSON 模式' : '切換為結構化編輯'}
+        </button>
+        {contractParseError && mode === 'raw' && (
           <span id="agent-output-contract-error" className="field-error" role="alert">
             {contractParseError}
           </span>

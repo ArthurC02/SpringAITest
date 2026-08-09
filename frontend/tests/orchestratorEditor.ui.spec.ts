@@ -103,7 +103,8 @@ test('a 409 draft save locks the editor, exposes reload, and emits no success to
   await page.getByRole('button', { name: '重新載入' }).click()
   await expect(page.getByRole('alert')).toHaveCount(0)
   await expect(name).toBeEnabled()
-  await expect(page.getByLabel('Budgets (JSON)')).toContainText('"maxTasks": 12')
+  // W5:Budgets 預設為結構化數字 grid（非裸 JSON），見 orchestrator-budget-maxTasks。
+  await expect(page.locator('#orchestrator-budget-maxTasks')).toHaveValue('12')
 
   await save.click()
   await expect(page.locator('.toast--success')).toContainText('草稿已儲存')
@@ -111,6 +112,8 @@ test('a 409 draft save locks the editor, exposes reload, and emits no success to
 
 test('invalid JSON blocks save/validate/publish and a correction restores them without stale payload', async ({ page }) => {
   const harness = await openEditor(page)
+  // W5:Budgets 預設是結構化 grid，裸 JSON 驗證路徑只在「進階 JSON 模式」逃生口才可達。
+  await page.getByRole('button', { name: 'Budgets — 切換為進階 JSON 模式' }).click()
   const budgets = page.getByLabel('Budgets (JSON)')
   const save = page.getByRole('button', { name: '儲存', exact: true })
   const validate = page.getByRole('button', { name: '驗證' })
@@ -131,6 +134,67 @@ test('invalid JSON blocks save/validate/publish and a correction restores them w
   await save.click()
   await expect(page.locator('.toast--success')).toContainText('草稿已儲存')
   expect(harness.saved?.definition.budgets.maxTasks).toBe(42)
+})
+
+// 規格 §5.5:Worker/Verifier 下拉只能選到已發布、且（若後端有回傳角色資料）角色相符的
+// Agent；欄位缺席/legacy null 時 fail-open,不過濾、維持「僅已發布」現行行為。
+test('create form Worker/Verifier pickers filter by published_execution_roles, fail-open when the field is absent', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, {
+        token: 'orch-role-filter-token', username: 'admin', role: 'ADMIN', tenantCode: 'demo',
+        capabilities: ['workflow.manage'],
+      })
+    }
+    if (path === '/api/features') return json(route, { workflowDesignerEnabled: true })
+    if (path === '/api/agents') {
+      return json(route, [
+        { id: 'worker-only', name: 'Worker Only', slug: 'worker-only', description: '', enabled: true, published_revision: 1, published_execution_roles: ['worker'], updated_at: '2026-08-09T00:00:00Z' },
+        { id: 'verifier-only', name: 'Verifier Only', slug: 'verifier-only', description: '', enabled: true, published_revision: 1, published_execution_roles: ['verifier'], updated_at: '2026-08-09T00:00:00Z' },
+        { id: 'both-roles', name: 'Both Roles', slug: 'both-roles', description: '', enabled: true, published_revision: 1, published_execution_roles: ['worker', 'verifier'], updated_at: '2026-08-09T00:00:00Z' },
+        { id: 'legacy-no-roles', name: 'Legacy No Roles', slug: 'legacy-no-roles', description: '', enabled: true, published_revision: 1, published_execution_roles: null, updated_at: '2026-08-09T00:00:00Z' },
+        { id: 'unpublished', name: 'Unpublished', slug: 'unpublished', description: '', enabled: true, published_revision: null, published_execution_roles: ['worker', 'verifier'], updated_at: '2026-08-09T00:00:00Z' },
+      ])
+    }
+    if (path === '/api/admin/orchestrators' && request.method() === 'GET') return json(route, [])
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('admin')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  await page.getByTestId('nav-agentPlatform').click()
+  await page.getByTestId('agent-platform-tab-orchestrators').click()
+  await page.getByRole('button', { name: '＋ 建立' }).click()
+  await page.getByRole('button', { name: '＋ 加入 Worker' }).click()
+
+  const workerPicker = page.locator('#orchestrator-create-worker-pool-0-agent')
+  const verifierPicker = page.locator('#orchestrator-create-verifier-agent')
+  await expect(workerPicker).toHaveJSProperty('tagName', 'SELECT')
+  await expect(verifierPicker).toHaveJSProperty('tagName', 'SELECT')
+
+  const workerLabels = await workerPicker.locator('option').allTextContents()
+  const verifierLabels = await verifierPicker.locator('option').allTextContents()
+
+  // Worker pool: worker-only、both-roles、legacy-no-roles(fail-open)在列；verifier-only 與
+  // unpublished 不在列。
+  expect(workerLabels.some((t) => t.includes('Worker Only'))).toBe(true)
+  expect(workerLabels.some((t) => t.includes('Both Roles'))).toBe(true)
+  expect(workerLabels.some((t) => t.includes('Legacy No Roles'))).toBe(true)
+  expect(workerLabels.some((t) => t.includes('Verifier Only'))).toBe(false)
+  expect(workerLabels.some((t) => t.includes('Unpublished'))).toBe(false)
+
+  // Verifier: verifier-only、both-roles、legacy-no-roles(fail-open)在列;worker-only 與
+  // unpublished 不在列。
+  expect(verifierLabels.some((t) => t.includes('Verifier Only'))).toBe(true)
+  expect(verifierLabels.some((t) => t.includes('Both Roles'))).toBe(true)
+  expect(verifierLabels.some((t) => t.includes('Legacy No Roles'))).toBe(true)
+  expect(verifierLabels.some((t) => t.includes('Worker Only'))).toBe(false)
+  expect(verifierLabels.some((t) => t.includes('Unpublished'))).toBe(false)
 })
 
 test('invalid JSON in the create form blocks 建立', async ({ page }) => {
@@ -161,6 +225,9 @@ test('invalid JSON in the create form blocks 建立', async ({ page }) => {
   await page.getByLabel('Workflow revision').fill('1')
   await page.getByLabel('Verifier Agent id').fill('v1')
   await page.getByLabel('Verifier revision').fill('1')
+  // W5:Worker pool 預設是結構化清單（無已發布 Agent 目錄時自動退回逐列手動輸入），
+  // 裸 JSON 驗證路徑只在「進階 JSON 模式」逃生口才可達。
+  await page.getByRole('button', { name: 'Worker pool — 切換為進階 JSON 模式' }).click()
   const workerPool = page.getByLabel('Worker pool (JSON)')
   await workerPool.fill('[{"agentId": "a1", "revision": 2}]')
   const create = page.getByRole('button', { name: '建立', exact: true })

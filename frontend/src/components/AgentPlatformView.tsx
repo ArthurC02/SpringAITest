@@ -4,10 +4,11 @@ import WorkflowsView from './WorkflowsView'
 import OrchestratorsView from './OrchestratorsView'
 import { agentPlatformTabs, type AgentPlatformTab as Tab } from '../agentPlatformTabs'
 
+// 任務導向命名(非系統分層命名),讓分頁標籤反映使用者要做的事而非內部架構層。
 const LABEL: Record<Tab, string> = {
-  agents: 'Agents',
-  workflows: 'Workflow Designer',
-  orchestrators: 'Orchestrators',
+  agents: 'Agent 管理',
+  workflows: '流程設計',
+  orchestrators: '協作流程',
 }
 
 interface Gates {

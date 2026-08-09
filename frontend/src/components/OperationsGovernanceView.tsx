@@ -4,10 +4,12 @@ import {
   getLegacyInventory,
   getOperationsMetrics,
   getVersionComparison,
+  listEvalRuns,
   overrideRegression,
   recordRegression,
   sumOrUnknown,
 } from '../api/operations'
+import { listOrchestrators } from '../api/orchestrators'
 import { newIdempotencyKey } from '../api/agentRuns'
 import { getSessionStorage, LogicalAttemptKey, OPERATIONS_ATTEMPT_STORAGE_PREFIX } from '../logicalAttemptKey'
 import type {
@@ -27,6 +29,7 @@ import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
 import { Observed } from './Observed'
 import EvaluationPanel from './EvaluationPanel'
+import CatalogPicker from './CatalogPicker'
 
 const OVERRIDE_ATTEMPT_KEY = `${OPERATIONS_ATTEMPT_STORAGE_PREFIX}override-idempotency`
 
@@ -59,32 +62,31 @@ function SummaryCards({ metrics }: { metrics: OperationsMetrics }) {
       <div className="card">
         <div className="card__num">{metrics.rootRuns}</div>
         <div className="card__label">
-          Root runs · {metrics.childRuns} child ({metrics.childSuccess} succeeded)
+          根執行 · {metrics.childRuns} 個子執行({metrics.childSuccess} 成功)
         </div>
       </div>
       <div className="card">
         <div className="card__num">
           {metrics.aggregation.completed} / {metrics.aggregation.partialOrFailed}
         </div>
-        <div className="card__label">Completed / partial-or-failed roots</div>
+        <div className="card__label">已完成 / 部分失敗或失敗的根執行</div>
       </div>
       <div className="card">
         <div className="card__num">{metrics.aggregation.averageLatencyMs} ms</div>
-        <div className="card__label">Average root latency</div>
+        <div className="card__label">根執行平均延遲</div>
       </div>
       <div className="card">
         <div className="card__num">{totalUsage === null ? <Observed value={null} /> : totalUsage}</div>
-        <div className="card__label">Observed usage units (agents)</div>
+        <div className="card__label">已量測用量單位(Agent)</div>
       </div>
       <div className="card">
         <div className="card__num">{totalCost === null ? <Observed value={null} /> : totalCost}</div>
-        <div className="card__label">Observed cost units (agents)</div>
+        <div className="card__label">已量測成本單位(Agent)</div>
       </div>
       <div className="card">
-        <div className="card__num">{gate.regressionPassed ? 'PASS' : 'FAIL'}</div>
+        <div className="card__num">{gate.regressionPassed ? '通過' : '未通過'}</div>
         <div className="card__label">
-          Regression gate{gate.overrideActive ? ' · override active' : ''} · {gate.auditEntries} audit
-          entries
+          品質迴歸關卡{gate.overrideActive ? ' · 已啟用覆蓋' : ''} · {gate.auditEntries} 筆稽核紀錄
         </div>
       </div>
     </div>
@@ -132,19 +134,19 @@ function AgentTable({ rows }: { rows: OperationsAgentMetric[] }) {
   return (
     <MetricsTable
       rows={rows}
-      empty="No Agent runs recorded yet."
+      empty="尚無 Agent 執行紀錄。"
       rowKey={(a) => `${a.agentId}:${a.revision}`}
       columns={[
         ['Agent', (a) => a.agentId],
-        ['Rev', (a) => `r${a.revision}`],
-        ['Runs', (a) => a.runs],
-        ['Completed', (a) => a.completed],
-        ['Failed', (a) => a.failed],
-        ['Avg latency', (a) => `${a.averageLatencyMs} ms`],
-        ['Reserved budget', (a) => a.reservedBudgetUnits],
-        ['Observed usage', (a) => <Observed value={a.observedUsageUnits} />],
-        ['Observed cost', (a) => <Observed value={a.observedCostUnits} />],
-        ['Observed latency', (a) => <Observed value={a.observedLatencyMs} unit=" ms" />],
+        ['版本', (a) => `r${a.revision}`],
+        ['執行次數', (a) => a.runs],
+        ['已完成', (a) => a.completed],
+        ['失敗', (a) => a.failed],
+        ['平均延遲', (a) => `${a.averageLatencyMs} ms`],
+        ['預留預算', (a) => a.reservedBudgetUnits],
+        ['已量測用量', (a) => <Observed value={a.observedUsageUnits} />],
+        ['已量測成本', (a) => <Observed value={a.observedCostUnits} />],
+        ['已量測延遲', (a) => <Observed value={a.observedLatencyMs} unit=" ms" />],
       ]}
     />
   )
@@ -154,16 +156,16 @@ function SkillTable({ rows }: { rows: OperationsSkillMetric[] }) {
   return (
     <MetricsTable
       rows={rows}
-      empty="No Skill telemetry recorded yet."
+      empty="尚無 Skill 用量紀錄。"
       rowKey={(s) => `${s.name}:${s.revision}`}
       columns={[
         ['Skill', (s) => s.name],
-        ['Rev', (s) => `r${s.revision}`],
-        ['Runs', (s) => s.runs],
-        ['Observed latency', (s) => <Observed value={s.observedLatencyMs} unit=" ms" />],
-        ['Observed usage', (s) => <Observed value={s.observedUsageUnits} />],
-        ['Observed cost', (s) => <Observed value={s.observedCostUnits} />],
-        ['Reserved budget', (s) => s.reservedBudgetUnits],
+        ['版本', (s) => `r${s.revision}`],
+        ['執行次數', (s) => s.runs],
+        ['已量測延遲', (s) => <Observed value={s.observedLatencyMs} unit=" ms" />],
+        ['已量測用量', (s) => <Observed value={s.observedUsageUnits} />],
+        ['已量測成本', (s) => <Observed value={s.observedCostUnits} />],
+        ['預留預算', (s) => s.reservedBudgetUnits],
       ]}
     />
   )
@@ -173,15 +175,15 @@ function ToolTable({ rows }: { rows: OperationsToolMetric[] }) {
   return (
     <MetricsTable
       rows={rows}
-      empty="No tool telemetry recorded yet."
+      empty="尚無工具用量紀錄。"
       rowKey={(t) => t.kind}
       columns={[
-        ['Tool', (t) => t.kind],
-        ['Count', (t) => t.count],
-        ['Observed latency', (t) => <Observed value={t.observedLatencyMs} unit=" ms" />],
-        ['Observed usage', (t) => <Observed value={t.observedUsageUnits} />],
-        ['Observed cost', (t) => <Observed value={t.observedCostUnits} />],
-        ['Reserved budget', (t) => t.reservedBudgetUnits],
+        ['工具', (t) => t.kind],
+        ['次數', (t) => t.count],
+        ['已量測延遲', (t) => <Observed value={t.observedLatencyMs} unit=" ms" />],
+        ['已量測用量', (t) => <Observed value={t.observedUsageUnits} />],
+        ['已量測成本', (t) => <Observed value={t.observedCostUnits} />],
+        ['預留預算', (t) => t.reservedBudgetUnits],
       ]}
     />
   )
@@ -191,13 +193,13 @@ function NodeTable({ rows }: { rows: OperationsNodeMetric[] }) {
   return (
     <MetricsTable
       rows={rows}
-      empty="No node telemetry recorded yet."
+      empty="尚無節點執行紀錄。"
       rowKey={(n) => n.nodeId}
       columns={[
-        ['Node', (n) => n.nodeId],
-        ['Executions', (n) => n.executions],
-        ['Avg latency', (n) => `${n.averageLatencyMs} ms`],
-        ['Max latency', (n) => `${n.maxLatencyMs} ms`],
+        ['節點', (n) => n.nodeId],
+        ['執行次數', (n) => n.executions],
+        ['平均延遲', (n) => `${n.averageLatencyMs} ms`],
+        ['最大延遲', (n) => `${n.maxLatencyMs} ms`],
       ]}
     />
   )
@@ -207,26 +209,25 @@ function RevisionComparison({ comparison }: { comparison: OperationsVersionCompa
   const delta = comparison.selectedVsPrevious
   return (
     <section className="agent-block">
-      <h3>Revision comparison</h3>
+      <h3>版本比較</h3>
       <p className="muted">
-        Active runs keep their pinned immutable execution snapshot — a rollout only changes which
-        revision <strong>future</strong> roots select; it never edits, migrates, or cancels work already
-        in flight.
+        執行中的 run 一律保留自己 pinned 的不可變執行快照——上線只改變<strong>未來</strong>
+        根執行要選哪個版本,絕不會編輯、遷移或取消已經在跑的工作。
       </p>
       {comparison.revisions.length === 0 ? (
-        <p className="muted">No Orchestrator revisions recorded yet.</p>
+        <p className="muted">尚無協作流程版本紀錄。</p>
       ) : (
         <div className="table-wrap">
           <table className="table">
             <thead>
               <tr>
-                <th>Revision</th>
-                <th>Runs</th>
-                <th>Completed</th>
-                <th>Failed</th>
-                <th>Avg latency</th>
-                <th>Reserved budget</th>
-                <th>Active runs</th>
+                <th>版本</th>
+                <th>執行次數</th>
+                <th>已完成</th>
+                <th>失敗</th>
+                <th>平均延遲</th>
+                <th>預留預算</th>
+                <th>執行中</th>
               </tr>
             </thead>
             <tbody>
@@ -234,7 +235,7 @@ function RevisionComparison({ comparison }: { comparison: OperationsVersionCompa
                 <tr key={r.revision}>
                   <td>
                     {r.revision === comparison.selectedRevision ? (
-                      <strong>r{r.revision} (selected)</strong>
+                      <strong>r{r.revision}(目前選用)</strong>
                     ) : (
                       `r${r.revision}`
                     )}
@@ -253,20 +254,20 @@ function RevisionComparison({ comparison }: { comparison: OperationsVersionCompa
       )}
       {delta && (
         <dl className="agent-test-console__summary">
-          <div><dt>Revisions</dt><dd>r{delta.fromRevision} → r{delta.toRevision}</dd></div>
-          <div><dt>Run delta</dt><dd>{delta.runDelta}</dd></div>
-          <div><dt>Completed delta</dt><dd>{delta.completedDelta}</dd></div>
-          <div><dt>Avg latency delta</dt><dd>{delta.averageLatencyDeltaMs} ms</dd></div>
-          <div><dt>Reserved budget delta</dt><dd>{delta.reservedBudgetDeltaUnits}</dd></div>
+          <div><dt>版本</dt><dd>r{delta.fromRevision} → r{delta.toRevision}</dd></div>
+          <div><dt>執行次數變化</dt><dd>{delta.runDelta}</dd></div>
+          <div><dt>已完成變化</dt><dd>{delta.completedDelta}</dd></div>
+          <div><dt>平均延遲變化</dt><dd>{delta.averageLatencyDeltaMs} ms</dd></div>
+          <div><dt>預留預算變化</dt><dd>{delta.reservedBudgetDeltaUnits}</dd></div>
         </dl>
       )}
       <p className="muted">
         {comparison.newRootsOnly
-          ? 'A rollout is applied — the tenant is pinned to the selected revision for future roots only.'
-          : 'No rollout is applied yet — the tenant is on legacy/default routing.'}{' '}
+          ? '已套用上線設定——租戶已釘選此版本,僅套用於未來的根執行。'
+          : '尚未套用任何上線設定——租戶目前走舊有/預設路由。'}{' '}
         {comparison.activeRunsKeepImmutableSnapshot
-          ? 'All active runs still hold an intact immutable execution snapshot.'
-          : 'At least one active run is missing its immutable execution snapshot.'}
+          ? '所有執行中的 run 仍持有完整的不可變執行快照。'
+          : '至少有一個執行中的 run 缺少不可變執行快照。'}
       </p>
     </section>
   )
@@ -290,6 +291,9 @@ function RegressionPanel({
   const [evidenceRef, setEvidenceRef] = useState('')
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
+  // W5(規格 §5.1 補充項):Eval run ID 手輸 GUID → 下拉,資料源沿用 EvaluationPanel 已用過的
+  // listEvalRuns();目錄載入失敗或為空,CatalogPicker 自動優雅退回手動輸入(GUID_PATTERN 驗證仍保留)。
+  const evalRunsRes = useResource(listEvalRuns)
   // 懶初始化:useRef(new X()) 每次 render 都會建構(並讀 sessionStorage),只有第一顆會被留下。
   const attemptRef = useRef<LogicalAttemptKey | null>(null)
   const attempts = (attemptRef.current ??= new LogicalAttemptKey(
@@ -314,7 +318,7 @@ function RegressionPanel({
           evalRunIdTrusted ? trimmedEvalRunId : undefined,
         ),
       {
-        success: 'Regression result recorded.',
+        success: '已記錄品質迴歸結果。',
         onSuccess: () => {
           setSuite('')
           setEvidenceRef('')
@@ -331,8 +335,8 @@ function RegressionPanel({
     if (busy || trimmed.length < 8) return
     if (
       !(await confirm(
-        'Override the failed regression gate? This is a break-glass action and is permanently audited.',
-        { danger: true, confirmLabel: 'Override' },
+        '確定要覆蓋這個失敗的品質迴歸關卡嗎?這是緊急覆蓋動作,全程留痕稽核。',
+        { danger: true, confirmLabel: '覆蓋' },
       ))
     )
       return
@@ -340,7 +344,7 @@ function RegressionPanel({
     const key = attempts.keyFor(identity)
     setBusy(true)
     await runWithToast(toast, () => overrideRegression(trimmed, key), {
-      success: 'Override recorded.',
+      success: '已記錄覆蓋。',
       onSuccess: () => {
         attempts.consume(identity, key)
         setReason('')
@@ -352,18 +356,18 @@ function RegressionPanel({
 
   return (
     <section className="agent-block" aria-busy={busy}>
-      <h3>Regression evidence &amp; override</h3>
+      <h3>品質迴歸證據與覆蓋</h3>
       <p>
-        Current gate: <strong>{gate.regressionPassed ? 'PASS' : 'FAIL'}</strong>
-        {gate.overrideActive && <span className="chip chip--warn"> override active</span>}
-        {' '}· {gate.auditEntries} audit entries
+        目前關卡狀態:<strong>{gate.regressionPassed ? '通過' : '未通過'}</strong>
+        {gate.overrideActive && <span className="chip chip--warn"> 已啟用覆蓋</span>}
+        {' '}· {gate.auditEntries} 筆稽核紀錄
       </p>
       <div className="field">
-        <label htmlFor="ops-suite">Suite</label>
+        <label htmlFor="ops-suite">測試組合</label>
         <input id="ops-suite" value={suite} onChange={(e) => setSuite(e.target.value)} disabled={busy} />
       </div>
       <div className="field">
-        <label htmlFor="ops-evidence">Evidence ref</label>
+        <label htmlFor="ops-evidence">證據參照</label>
         <input
           id="ops-evidence"
           value={evidenceRef}
@@ -371,27 +375,21 @@ function RegressionPanel({
           disabled={busy}
         />
       </div>
-      <div className="field">
-        <label htmlFor="ops-eval-run-id">Eval run ID (optional)</label>
-        <input
-          id="ops-eval-run-id"
-          value={evalRunId}
-          onChange={(e) => onEvalRunIdChange(e.target.value)}
-          disabled={busy}
-          aria-invalid={evalRunIdInvalid}
-          aria-describedby={evalRunIdInvalid ? 'ops-eval-run-id-err' : 'ops-eval-run-id-hint'}
-        />
-        {evalRunIdInvalid ? (
-          <span className="field-error" id="ops-eval-run-id-err" role="alert">
-            Eval run ID must be a valid GUID (e.g. 3fa85f64-5717-4562-b3fc-2c963f66afa6).
-          </span>
-        ) : (
-          <span className="muted" id="ops-eval-run-id-hint">
-            Leave blank to record a caller-supplied result, or pin a completed eval run so the
-            server recomputes pass/fail from stored case results (trusted path).
-          </span>
-        )}
-      </div>
+      <CatalogPicker
+        id="ops-eval-run-id"
+        label="評測執行 ID(選填)"
+        value={evalRunId}
+        onChange={onEvalRunIdChange}
+        disabled={busy}
+        items={evalRunsRes.data}
+        itemsError={evalRunsRes.error}
+        itemsLoading={evalRunsRes.loading}
+        optionValue={(r) => r.id}
+        optionLabel={(r) => `${r.suiteId} r${r.suiteRevision} · ${r.id.slice(0, 8)}`}
+        invalid={evalRunIdInvalid}
+        invalidHint="評測執行 ID 必須是合法的 GUID(例如 3fa85f64-5717-4562-b3fc-2c963f66afa6)。"
+        hint="留白代表記錄呼叫端自行提供的結果;選定一個已完成的評測執行,則由伺服器依儲存的案例結果重新計算通過/未通過(可信路徑)。"
+      />
       <label>
         <input
           type="checkbox"
@@ -399,7 +397,7 @@ function RegressionPanel({
           onChange={(e) => setPassed(e.target.checked)}
           disabled={busy || evalRunIdTrusted}
         />{' '}
-        Passed{evalRunIdTrusted ? ' (computed by server from eval results)' : ''}
+        通過{evalRunIdTrusted ? '(由伺服器依評測結果計算)' : ''}
       </label>
       <div>
         <button
@@ -408,14 +406,14 @@ function RegressionPanel({
           disabled={busy || !suite.trim() || !evidenceRef.trim() || evalRunIdInvalid}
           onClick={() => void submitRegression()}
         >
-          Record regression result
+          記錄品質迴歸結果
         </button>
       </div>
 
       {!gate.regressionPassed && (
         <>
           <div className="field">
-            <label htmlFor="ops-override-reason">Override reason (min. 8 characters)</label>
+            <label htmlFor="ops-override-reason">覆蓋原因(至少 8 個字元)</label>
             <input
               id="ops-override-reason"
               value={reason}
@@ -429,7 +427,7 @@ function RegressionPanel({
             disabled={busy || reason.trim().length < 8 || gate.overrideActive}
             onClick={() => void submitOverride()}
           >
-            {gate.overrideActive ? 'Override already recorded' : 'Override failed gate'}
+            {gate.overrideActive ? '已記錄覆蓋' : '覆蓋失敗的關卡'}
           </button>
         </>
       )}
@@ -445,6 +443,10 @@ function RolloutPanel({ onChanged }: { onChanged: () => void }) {
   const [revision, setRevision] = useState('')
   const [canaryUserIds, setCanaryUserIds] = useState('')
   const [busy, setBusy] = useState(false)
+  // W5(規格 §5.1):Rollout 的 Orchestrator ID 手輸 GUID → 下拉,資料源 listOrchestrators();
+  // 目錄載入失敗(例如 WORKFLOW_DESIGNER_ENABLED 關閉時 404)或為空,CatalogPicker 自動優雅
+  // 退回手動輸入,不壞頁(GUID_PATTERN 驗證仍保留)。
+  const orchestratorsRes = useResource(listOrchestrators)
   const trimmedOrchestratorId = orchestratorId.trim()
   const orchestratorIdInvalid =
     trimmedOrchestratorId.length > 0 && !GUID_PATTERN.test(trimmedOrchestratorId)
@@ -453,15 +455,15 @@ function RolloutPanel({ onChanged }: { onChanged: () => void }) {
     if (busy || orchestratorIdInvalid) return
     const parsedRevision = revision.trim() ? Number(revision.trim()) : null
     if (enabled && (!orchestratorId.trim() || !parsedRevision)) {
-      toast('Enabling a rollout requires an Orchestrator ID and a pinned revision.', 'error')
+      toast('啟用上線設定需要提供 Orchestrator ID 與明確指定的版本。', 'error')
       return
     }
     if (
       !(await confirm(
         enabled
-          ? `Roll out Orchestrator ${orchestratorId.trim()} r${parsedRevision} to future roots?`
-          : 'Roll back to legacy/default routing for future roots? Active runs are unaffected.',
-        { confirmLabel: enabled ? 'Roll out' : 'Roll back' },
+          ? `將協作流程 ${orchestratorId.trim()} r${parsedRevision} 上線到未來的根執行?`
+          : '回退到舊有/預設路由,套用於未來的根執行?執行中的 run 不受影響。',
+        { confirmLabel: enabled ? '上線' : '回退' },
       ))
     )
       return
@@ -479,7 +481,7 @@ function RolloutPanel({ onChanged }: { onChanged: () => void }) {
             .filter(Boolean),
         }),
       {
-        success: enabled ? 'Rollout applied — future roots only.' : 'Rolled back — future roots only.',
+        success: enabled ? '已上線——僅套用於未來的根執行。' : '已回退——僅套用於未來的根執行。',
         onSuccess: onChanged,
       },
     )
@@ -488,33 +490,36 @@ function RolloutPanel({ onChanged }: { onChanged: () => void }) {
 
   return (
     <section className="agent-block" aria-busy={busy}>
-      <h3>Rollout / rollback</h3>
+      <h3>上線 / 回退</h3>
       <p className="muted">
-        Changes the tenant default Orchestrator binding for future roots only. Active runs keep their
-        pinned immutable snapshot and are never edited or cancelled by this action.
+        僅改變租戶未來根執行的預設協作流程綁定。執行中的 run 保留自己 pinned 的不可變快照,不會被這個動作編輯或取消。
       </p>
       <label>
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} disabled={busy} />{' '}
-        Enabled (uncheck to roll back to legacy/default routing)
+        已啟用(取消勾選以回退到舊有/預設路由)
       </label>
+      <CatalogPicker
+        id="ops-orch-id"
+        label="Orchestrator ID"
+        value={orchestratorId}
+        onChange={(id) => {
+          setOrchestratorId(id)
+          const picked = orchestratorsRes.data?.find((o) => o.id === id)
+          if (picked?.published_revision != null && !revision.trim()) {
+            setRevision(String(picked.published_revision))
+          }
+        }}
+        disabled={busy}
+        items={orchestratorsRes.data}
+        itemsError={orchestratorsRes.error}
+        itemsLoading={orchestratorsRes.loading}
+        optionValue={(o) => o.id}
+        optionLabel={(o) => `${o.name}${o.published_revision != null ? ` (r${o.published_revision})` : ''}`}
+        invalid={orchestratorIdInvalid}
+        invalidHint="Orchestrator ID 必須是合法的 GUID(例如 3fa85f64-5717-4562-b3fc-2c963f66afa6)。"
+      />
       <div className="field">
-        <label htmlFor="ops-orch-id">Orchestrator ID</label>
-        <input
-          id="ops-orch-id"
-          value={orchestratorId}
-          onChange={(e) => setOrchestratorId(e.target.value)}
-          disabled={busy}
-          aria-invalid={orchestratorIdInvalid}
-          aria-describedby={orchestratorIdInvalid ? 'ops-orch-id-err' : undefined}
-        />
-        {orchestratorIdInvalid && (
-          <span className="field-error" id="ops-orch-id-err" role="alert">
-            Orchestrator ID must be a valid GUID (e.g. 3fa85f64-5717-4562-b3fc-2c963f66afa6).
-          </span>
-        )}
-      </div>
-      <div className="field">
-        <label htmlFor="ops-orch-rev">Revision</label>
+        <label htmlFor="ops-orch-rev">版本</label>
         <input
           id="ops-orch-rev"
           type="number"
@@ -525,7 +530,7 @@ function RolloutPanel({ onChanged }: { onChanged: () => void }) {
         />
       </div>
       <div className="field">
-        <label htmlFor="ops-canary">Canary user IDs (comma-separated)</label>
+        <label htmlFor="ops-canary">Canary 使用者 ID(以逗號分隔)</label>
         <input
           id="ops-canary"
           value={canaryUserIds}
@@ -539,7 +544,7 @@ function RolloutPanel({ onChanged }: { onChanged: () => void }) {
         disabled={busy || orchestratorIdInvalid}
         onClick={() => void submit()}
       >
-        {enabled ? 'Apply rollout' : 'Apply rollback'}
+        {enabled ? '套用上線' : '套用回退'}
       </button>
     </section>
   )
@@ -556,10 +561,9 @@ export default function OperationsGovernanceView() {
 
   return (
     <section className="agent-block">
-      <h2>Operations governance</h2>
+      <h2>營運治理</h2>
       <p className="muted">
-        Aggregate, redacted release data only. Server authorization (workflow.manage), feature flags,
-        and idempotency are unchanged by this view.
+        僅呈現彙總、已去識別化的上線資料。伺服器端授權(workflow.manage)、功能旗標與冪等性判斷不受此畫面影響。
       </p>
       <ErrorText msg={error} />
 
@@ -569,13 +573,13 @@ export default function OperationsGovernanceView() {
         <>
           <SummaryCards metrics={data.metrics} />
 
-          <h3>Agent usage</h3>
+          <h3>Agent 用量</h3>
           <AgentTable rows={data.metrics.agents} />
-          <h3>Skill usage</h3>
+          <h3>Skill 用量</h3>
           <SkillTable rows={data.metrics.skills} />
-          <h3>Tool usage</h3>
+          <h3>工具用量</h3>
           <ToolTable rows={data.metrics.tools} />
-          <h3>Node usage</h3>
+          <h3>節點用量</h3>
           <NodeTable rows={data.metrics.nodes} />
 
           <RevisionComparison comparison={data.comparison} />
@@ -589,17 +593,17 @@ export default function OperationsGovernanceView() {
           <RolloutPanel onChanged={reload} />
 
           <section className="agent-block">
-            <h3>Legacy inventory</h3>
+            <h3>舊制清單</h3>
             {data.inventory.length === 0 ? (
-              <p className="muted">No legacy items recorded.</p>
+              <p className="muted">尚無舊制項目紀錄。</p>
             ) : (
               <div className="table-wrap">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Item</th>
-                      <th>Disposition</th>
-                      <th>Trigger</th>
+                      <th>項目</th>
+                      <th>處置方式</th>
+                      <th>觸發條件</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -616,8 +620,12 @@ export default function OperationsGovernanceView() {
             )}
           </section>
 
+          {/* ponytail: W5 結構化表單覆蓋了上方所有欄位,這份原始 JSON 除錯區塊語意上與
+              04-operations-trigger-plan §10「Structured cockpit 上線後移除 raw JSON
+              production view」的既定清理項一致；保留作為除錯逃生口,列為後續清理輪的候選,
+              不在本輪一併移除(見 01-plan §6 舊碼盤點)。 */}
           <details>
-            <summary>Raw JSON (debug)</summary>
+            <summary>原始 JSON(除錯用)</summary>
             <pre>{JSON.stringify(data, null, 2)}</pre>
           </details>
         </>
