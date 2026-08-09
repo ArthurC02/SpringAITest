@@ -52,8 +52,8 @@ const NAV: { id: View; icon: string; label: string; adminOnly?: boolean }[] = [
 // Agent 平台入口:Agents(D1)/Workflow Designer(D4)/Orchestrators(D4)三個分頁的共用入口,
 // 只要其中一個分頁的 flag + 權限成立就出現;個別分頁仍在 AgentPlatformView 各自 fail-closed。
 const AGENT_PLATFORM_NAV = { id: 'agentPlatform' as const, icon: '🧑‍💼', label: 'Agent 平台' }
-const APPROVALS_NAV = { id: 'approvals' as const, icon: '✅', label: 'Approvals' }
-const OPERATIONS_NAV = { id: 'operations' as const, icon: '📈', label: 'Operations' }
+const APPROVALS_NAV = { id: 'approvals' as const, icon: '✅', label: 'Run 核准' }
+const OPERATIONS_NAV = { id: 'operations' as const, icon: '📈', label: '營運治理' }
 // O2(04-operations-trigger-plan.md §3):獨立側欄入口,gate 比照 Operations
 // (runDiscoveryEnabled && workflow.manage),與 agentWriteToolsEnabled 無關。
 const RUNS_NAV = { id: 'runs' as const, icon: '🗂️', label: '執行總覽' }

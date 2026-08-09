@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listRuns } from '../api/runs'
+import { listAgents } from '../api/agents'
+import { listOrchestrators } from '../api/orchestrators'
 import type { RunSummaryItem } from '../types'
 import { fmtDate } from '../format'
+import { useResource } from '../hooks/useResource'
 import {
   childProgressSummary,
   fmtElapsed,
@@ -33,21 +36,37 @@ function flattenEntries(value: unknown): [string, string][] {
   ])
 }
 
-function RunRow({ run }: { run: RunSummaryItem }) {
+/** id → 顯示名稱的兩張反查表(目錄 API 取不到時為空 Map,不影響任何渲染)。 */
+type NameMaps = { agents: Map<string, string>; orchestrators: Map<string, string> }
+
+/**
+ * 名稱是純裝飾:查得到就在既有的短 GUID 前面補人類可讀名稱,查不到原樣退回 runIdentity()。
+ * 比照 TriggersView 的 targetLabel(),client-side 反查已在畫面上的目錄清單,零後端契約變更。
+ */
+function displayIdentity(run: RunSummaryItem, names: NameMaps): string {
+  const identity = runIdentity(run)
+  const id = run.kind === 'orchestrator' ? run.orchestratorId : run.agentId
+  if (!id) return identity
+  const name = (run.kind === 'orchestrator' ? names.orchestrators : names.agents).get(id)
+  return name ? `${name} · ${identity}` : identity
+}
+
+function RunRow({ run, names }: { run: RunSummaryItem; names: NameMaps }) {
   const childSummary = childProgressSummary(run)
   const budgetEntries = flattenEntries(run.budgetSummary)
+  const identity = displayIdentity(run, names)
   return (
     <article className="agent-block">
       <div className="agent-test-console__actions">
         <span className="badge badge--user">{kindLabel(run.kind)}</span>
         <span className={`chip ${statusChipClass(run.status)}`}>{statusLabel(run.status)}</span>
         {run.pendingApproval && (
-          <span className="chip chip--warn">待核准 · 請至 Approvals 處理</span>
+          <span className="chip chip--warn">待核准 · 請至「Run 核准」處理</span>
         )}
         {run.needsRecovery && <span className="chip chip--failed">需要復原</span>}
       </div>
       <dl className="agent-test-console__summary">
-        <div><dt>身分</dt><dd>{runIdentity(run)}</dd></div>
+        <div><dt>身分</dt><dd>{identity}</dd></div>
         <div><dt>建立時間</dt><dd>{fmtDate(run.createdAt)}</dd></div>
         <div><dt>完成時間</dt><dd>{run.completedAt ? fmtDate(run.completedAt) : '—'}</dd></div>
         <div><dt>耗時</dt><dd>{fmtElapsed(run.elapsedSeconds)}</dd></div>
@@ -94,6 +113,15 @@ export default function RunsView() {
   const [error, setError] = useState<string | null>(null)
   // 世代守衛:避免快速切換過濾條件或連續「載入更多」時,較舊的回應晚到覆寫較新的畫面狀態。
   const generationRef = useRef(0)
+  // 名稱反查用的目錄:兩支 API 各自有獨立的 flag + 權限(listAgents 需 agentBuilderEnabled &&
+  // ADMIN,listOrchestrators 需 workflowDesignerEnabled && workflow.manage),對本畫面的合法
+  // 使用者很可能回 404/403。因此完全 fail-open:error/loading 一律忽略,不顯示訊息、不擋主清單。
+  const agentsRes = useResource(listAgents)
+  const orchestratorsRes = useResource(listOrchestrators)
+  const names = useMemo<NameMaps>(() => ({
+    agents: new Map((agentsRes.data ?? []).map((a) => [a.id, a.name])),
+    orchestrators: new Map((orchestratorsRes.data ?? []).map((o) => [o.id, o.name])),
+  }), [agentsRes.data, orchestratorsRes.data])
 
   const load = useCallback(async (cursorArg: string | null) => {
     const generation = ++generationRef.current
@@ -123,7 +151,7 @@ export default function RunsView() {
       <h2>執行總覽</h2>
       <p className="muted">
         你自己可查看的 Direct/Worker/Verifier 與協作 root 執行紀錄;不提供任意狀態編輯,
-        取消/恢復/核准請至各自主控台或 Approvals 進行。
+        取消/恢復/核准請至各自主控台或「Run 核准」進行。
       </p>
 
       <div className="field-row">
@@ -152,7 +180,7 @@ export default function RunsView() {
 
       {!loading && !error && items.length === 0 && <p className="muted">目前沒有可顯示的執行紀錄。</p>}
 
-      {items.map((run) => <RunRow key={run.id} run={run} />)}
+      {items.map((run) => <RunRow key={run.id} run={run} names={names} />)}
 
       {hasMore && <button className="btn" type="button" disabled={loading} onClick={() => void load(cursor)}>載入更多</button>}
     </section>

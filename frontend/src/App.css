@@ -436,6 +436,10 @@
   background: var(--danger-bg);
   color: var(--danger);
 }
+/* 失敗 chip 旁的原因短文字（W1-18）。完整內容同時掛在 chip 的 title 上。 */
+.doc-failure-reason {
+  margin-left: 8px;
+}
 
 .table {
   width: 100%;

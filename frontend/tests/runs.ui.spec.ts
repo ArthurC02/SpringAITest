@@ -78,7 +78,11 @@ const workerRun = {
   updated_at: '2026-01-01T00:02:00Z', completed_at: '2026-01-01T00:02:00Z', elapsed_seconds: 45,
 }
 
-async function mountRunsView(page: Page, onList: (route: Route, url: URL) => Promise<boolean>) {
+async function mountRunsView(
+  page: Page,
+  onList: (route: Route, url: URL) => Promise<boolean>,
+  onDirectory?: (route: Route, path: string) => Promise<boolean>,
+) {
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -93,6 +97,10 @@ async function mountRunsView(page: Page, onList: (route: Route, url: URL) => Pro
     if (path === '/api/features') return json(route, { runDiscoveryEnabled: true })
     if (path === '/api/runs') {
       const handled = await onList(route, url)
+      if (handled) return
+    }
+    if (onDirectory && (path === '/api/agents' || path === '/api/admin/orchestrators')) {
+      const handled = await onDirectory(route, path)
       if (handled) return
     }
     return json(route, [])
@@ -114,7 +122,7 @@ test('renders Chinese kind/status labels, elapsed time, child progress and the t
   })
 
   await expect(page.getByRole('heading', { name: '執行總覽' })).toBeVisible()
-  const rootRow = page.locator('article.agent-block', { hasText: '待核准 · 請至 Approvals 處理' })
+  const rootRow = page.locator('article.agent-block', { hasText: '待核准 · 請至「Run 核准」處理' })
   const workerRow = page.locator('article.agent-block', { hasText: '需要復原' })
 
   await expect(rootRow.locator('.badge--user')).toHaveText('協作 root')
@@ -178,6 +186,55 @@ test('載入更多 appends the next keyset page instead of replacing the first o
   await expect(page.locator('.badge--user')).toHaveText(['協作 root', 'Worker'])
   await expect(page.getByRole('button', { name: '載入更多' })).toHaveCount(0)
 })
+
+// 名稱反查用的兩支目錄 API 各自有獨立的 flag + 權限,對本畫面的合法使用者很可能回 404/403,
+// 所以名稱是純裝飾:查得到就顯示,查不到/整支失敗都必須靜默退回短 GUID。
+const agentDirectory = [{
+  id: workerRun.agent_id, name: '報表小幫手', slug: 'report-helper', description: '',
+  enabled: true, published_revision: 7, updated_at: '2026-01-01T00:00:00Z',
+}]
+const orchestratorDirectory = [{
+  id: rootRun.orchestrator_id, name: '客服協作', description: '',
+  enabled: true, published_revision: 2, updated_at: '2026-01-01T00:00:00Z',
+}]
+
+async function mountBothRuns(page: Page, onDirectory: (route: Route, path: string) => Promise<boolean>) {
+  await mountRunsView(page, async (route, url) => {
+    if (url.searchParams.toString()) return false
+    await json(route, { items: [rootRun, workerRun], has_more: false, next_cursor: null })
+    return true
+  }, onDirectory)
+}
+
+test('resolved directory names are prefixed onto the short run identity', async ({ page }) => {
+  await mountBothRuns(page, async (route, path) => {
+    await json(route, path === '/api/agents' ? agentDirectory : orchestratorDirectory)
+    return true
+  })
+
+  const rootRow = page.locator('article.agent-block', { hasText: '協作 root' })
+  const workerRow = page.locator('article.agent-block', { hasText: '需要復原' })
+  await expect(rootRow.getByText('客服協作 · 22222222 · r2', { exact: true })).toBeVisible()
+  await expect(workerRow.getByText('報表小幫手 · 55555555 · r7', { exact: true })).toBeVisible()
+})
+
+for (const status of [404, 500]) {
+  test(`a ${status} from the directory APIs fails open silently and keeps the short identity`, async ({ page }) => {
+    await mountBothRuns(page, async (route) => {
+      await json(route, { timestamp: '2026-01-01T00:00:00Z', status, message: '目錄不可用', fieldErrors: {} }, status)
+      return true
+    })
+
+    const rootRow = page.locator('article.agent-block', { hasText: '協作 root' })
+    const workerRow = page.locator('article.agent-block', { hasText: '需要復原' })
+    await expect(rootRow.getByText('22222222 · r2', { exact: true })).toBeVisible()
+    await expect(workerRow.getByText('55555555 · r7', { exact: true })).toBeVisible()
+    // 主清單照常渲染,且目錄失敗不得產生任何錯誤訊息或 toast。
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(page.locator('.toast')).toHaveCount(0)
+    await expect(page.getByText('目錄不可用')).toHaveCount(0)
+  })
+}
 
 test('an empty page shows the empty-state notice, and a failure shows an error with a working retry', async ({ page }) => {
   let mode: 'fail' | 'empty' = 'fail'

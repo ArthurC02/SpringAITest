@@ -218,6 +218,39 @@ test('an empty 200 list still shows the empty-state invitation', async ({ page }
   await expect(page.getByRole('button', { name: '重新載入' })).toHaveCount(0)
 })
 
+// W1-18:失敗原因是後端封閉集合中的固定文字,且是 nullable —— 舊列(沒有這欄)必須照常
+// 只顯示「失敗」,絕不能渲染成 "null"/"undefined"。
+test('a failed document shows its reason beside the chip, and a reasonless one shows only 失敗', async ({ page }) => {
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/documents' && request.method() === 'GET') {
+      return json(route, [
+        { id: DOC_ID, title: '壞掉的檔', status: 'failed', chunk_count: 0, created_at: '2026-07-25T00:00:00Z', failure_reason: '檔案內容無法解析' },
+        { id: 'legacy-1', title: '舊的失敗檔', status: 'failed', chunk_count: 0, created_at: '2026-07-25T00:00:00Z' },
+      ])
+    }
+    return json(route, [])
+  })
+
+  await openDocuments(page)
+  const withReason = page.locator('tbody tr').filter({ hasText: '壞掉的檔' })
+  await expect(withReason.locator('.chip')).toHaveText('失敗')
+  await expect(withReason.locator('.chip')).toHaveAttribute('title', '檔案內容無法解析')
+  await expect(withReason.getByText('檔案內容無法解析')).toBeVisible()
+
+  const withoutReason = page.locator('tbody tr').filter({ hasText: '舊的失敗檔' })
+  await expect(withoutReason.locator('.chip')).toHaveText('失敗')
+  await expect(withoutReason.locator('.chip')).not.toHaveAttribute('title', /.+/)
+  await expect(withoutReason).not.toContainText('null')
+  await expect(withoutReason).not.toContainText('undefined')
+})
+
 test('late success does not clear form content edited after submit', async ({ page }) => {
   let releasePost!: () => void
   const postGate = new Promise<void>((resolve) => { releasePost = resolve })

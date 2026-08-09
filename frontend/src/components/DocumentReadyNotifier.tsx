@@ -26,7 +26,9 @@ export default function DocumentReadyNotifier({ events }: Props) {
       if (seenRef.current.has(event.key)) continue
       seenRef.current.add(event.key)
       if (event.doc.status === 'failed') {
-        toast(`文件「${event.doc.title}」處理失敗`, 'error')
+        // 失敗原因（W1-18）是後端封閉集合中的固定文字；舊列/空值時維持原本的短文案。
+        const reason = event.doc.failure_reason?.trim()
+        toast(`文件「${event.doc.title}」處理失敗${reason ? `:${reason}` : ''}`, 'error')
       } else if (event.doc.status === 'ready') {
         toast(`文件「${event.doc.title}」已就緒，可以開始提問了`, 'success')
       }

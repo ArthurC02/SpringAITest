@@ -23,6 +23,13 @@ const ASK_DISABLED_REASON: Record<string, string> = {
   failed: '文件處理失敗,無法提問',
 }
 
+// 失敗原因（W1-18）只在 failed 狀態顯示；舊列沒有這欄，空字串也一律當作沒有原因，
+// 避免畫面出現空的說明文字或 "null"/"undefined"。
+function failureReason(doc: DocumentInfo): string | null {
+  if (doc.status !== 'failed') return null
+  return doc.failure_reason?.trim() || null
+}
+
 function filePickStatus(extracting: boolean, fileName: string, charCount: number): string {
   if (extracting) return '讀取檔案中…'
   if (!fileName) return '尚未選擇檔案'
@@ -280,13 +287,16 @@ export default function DocumentsView({ documents, onAskDocument }: Props) {
             </tr>
           </thead>
           <tbody>
-            {docs.map((d) => (
+            {docs.map((d) => {
+              const reason = failureReason(d)
+              return (
               <tr key={d.id}>
                 <td>{d.title}</td>
                 <td>
-                  <span className={`chip chip--${d.status}`}>
+                  <span className={`chip chip--${d.status}`} title={reason ?? undefined}>
                     {STATUS_LABEL[d.status] ?? d.status}
                   </span>
+                  {reason && <span className="muted doc-failure-reason">{reason}</span>}
                 </td>
                 <td>{d.chunk_count}</td>
                 <td className="muted">{fmtDate(d.created_at)}</td>
@@ -304,7 +314,8 @@ export default function DocumentsView({ documents, onAskDocument }: Props) {
                   </button>
                 </td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
         </div>

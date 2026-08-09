@@ -92,11 +92,11 @@ function TraceOverlay({ run, events, definition, metadata, catalog }: {
 }) {
   const budget = safeOrchestratorBudget(run)
   return <details className="agent-test-console__trace" open>
-    <summary>Redacted root / child trace</summary>
+    <summary>已淨化的 root／子任務追蹤</summary>
     <dl className="agent-test-console__summary">
-      <div><dt>Root run</dt><dd><code>{run.runId}</code></dd></div>
-      <div><dt>Status</dt><dd>{run.status}</dd></div>
-      <div><dt>Workflow revision</dt><dd>{run.pinnedWorkflowRevision ?? '?'}</dd></div>
+      <div><dt>Root 執行</dt><dd><code>{run.runId}</code></dd></div>
+      <div><dt>狀態</dt><dd>{run.status}</dd></div>
+      <div><dt>Workflow 版本</dt><dd>{run.pinnedWorkflowRevision ?? '?'}</dd></div>
     </dl>
     {budget.length > 0 && (
       <dl className="agent-test-console__summary">
@@ -113,14 +113,14 @@ function TraceOverlay({ run, events, definition, metadata, catalog }: {
         </div>
         {child && (
           <dl className="agent-test-console__summary">
-            <div><dt>Child run</dt><dd>{child.childId ?? '?'}</dd></div>
-            <div><dt>Task / attempt</dt><dd>{child.taskId ?? '?'} / {child.attempt ?? '?'}</dd></div>
-            <div><dt>Kind / status</dt><dd>{child.kind ?? '?'} / {child.status ?? '?'}</dd></div>
+            <div><dt>子任務執行</dt><dd>{child.childId ?? '?'}</dd></div>
+            <div><dt>任務／嘗試次數</dt><dd>{child.taskId ?? '?'} / {child.attempt ?? '?'}</dd></div>
+            <div><dt>種類／狀態</dt><dd>{child.kind ?? '?'} / {child.status ?? '?'}</dd></div>
             <div><dt>Agent</dt><dd>{child.agentId ?? '?'}{child.agentRevision === null ? '' : ` r${child.agentRevision}`}</dd></div>
-            {child.verdict && <div><dt>Verdict</dt><dd>{child.verdict}</dd></div>}
+            {child.verdict && <div><dt>判定</dt><dd>{child.verdict}</dd></div>}
             {child.citations.length > 0 && (
               <div>
-                <dt>Citations</dt>
+                <dt>引用來源</dt>
                 <dd>
                   {child.citations.map((citation) => <span key={citation.id}>{citation.id}{citation.title ? ` (${citation.title})` : ''} </span>)}
                 </dd>
@@ -132,7 +132,7 @@ function TraceOverlay({ run, events, definition, metadata, catalog }: {
     })}</ol>
     {definition && metadata && catalog.length > 0 && (
       <section aria-label="Pinned workflow runtime trace">
-        <h5>Pinned workflow trace</h5>
+        <h5>已鎖定 Workflow 追蹤</h5>
         <WorkflowDesigner
           definition={definition}
           uiMetadata={metadata}
@@ -271,26 +271,26 @@ function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator }) {
     } finally { setCancelling(false) }
   }
 
-  if (orchestrator.published_revision == null) return <p className="muted">Publish a revision before test-running.</p>
+  if (orchestrator.published_revision == null) return <p className="muted">請先發布一個版本才能測跑。</p>
   const active = !!run && !TERMINAL_RUN_STATUSES.has(run.status)
   return <section className="agent-block agent-test-console">
-    <h4>System-admin test run</h4>
+    <h4>系統管理者測試執行</h4>
     <textarea
       className="input"
       value={message}
       disabled={active || starting || cancelling}
       onChange={(event) => setMessage(event.target.value)}
-      placeholder="Test message"
+      placeholder="測試訊息"
     />
     <div className="agent-actions">
       <button
         className="btn btn--primary"
         disabled={!message.trim() || active || starting || cancelling}
         onClick={() => void start()}
-      >{starting ? 'Starting…' : 'Start'}</button>
+      >{starting ? '啟動中…' : '開始'}</button>
       {run && (
         <button className="btn btn--danger" disabled={!active || cancelling} onClick={() => void cancel()}>
-          {cancelling || run.status === 'cancelling' ? 'Cancelling…' : 'Cancel'}
+          {cancelling || run.status === 'cancelling' ? '取消中…' : '取消'}
         </button>
       )}
     </div>
@@ -311,7 +311,7 @@ function TestRunConsole({ orchestrator }: { orchestrator: Orchestrator }) {
 function PolicyEditor({ value, disabled = false, onChange }: { value: OrchestratorDraft['policy']; disabled?: boolean; onChange: (value: OrchestratorDraft['policy']) => void }) {
   return <div className="agent-runtime-grid">
     <div className="field">
-      <label>Join policy
+      <label>彙整策略
         <select
           className="input"
           disabled={disabled}
@@ -325,7 +325,7 @@ function PolicyEditor({ value, disabled = false, onChange }: { value: Orchestrat
       </label>
     </div>
     <div className="field">
-      <label>Repair policy
+      <label>修復策略
         <select
           className="input"
           disabled={disabled}
@@ -345,7 +345,7 @@ function WorkerPolicyEditor({ value, disabled = false, onChange }: { value: Orch
   const lines = (text: string) => text.split('\n').map((x) => x.trim()).filter(Boolean)
   return <div className="agent-runtime-grid">
     <div className="field">
-      <label>Worker required audience
+      <label>Worker 必要對象
         <textarea
           className="input"
           disabled={disabled}
@@ -355,7 +355,7 @@ function WorkerPolicyEditor({ value, disabled = false, onChange }: { value: Orch
       </label>
     </div>
     <div className="field">
-      <label>Worker required capabilities
+      <label>Worker 必要權限
         <textarea
           className="input"
           disabled={disabled}
@@ -770,14 +770,14 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
         <input id="orchestrator-description" className="input" disabled={disabled} value={draft.description} onChange={(e) => update({ description: e.target.value })} />
       </div>
       <div className="field">
-        <label htmlFor="orchestrator-instructions">Root instructions</label>
+        <label htmlFor="orchestrator-instructions">Root 指示</label>
         <textarea id="orchestrator-instructions" className="input" disabled={disabled} value={draft.instructions} onChange={(e) => update({ instructions: e.target.value })} />
       </div>
       <p className="muted">Read-only Context、pinned Worker pool、Verifier 與 Root Workflow revision 由 server 在 validate/publish 時做 tenant、published 與角色相容性檢查。</p>
       <PolicyEditor value={draft.policy} disabled={disabled} onChange={(policy) => update({ policy })} />
       <div className="agent-runtime-grid">
         <div className="field">
-          <label htmlFor="orchestrator-workflow-id">Pinned Workflow id</label>
+          <label htmlFor="orchestrator-workflow-id">已鎖定的 Workflow id</label>
           <input
             id="orchestrator-workflow-id"
             className="input"
@@ -833,7 +833,7 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
           />
         }
         raw={
-          <JsonField id="orchestrator-context" label="Context (JSON)" disabled={disabled} text={texts.context ?? ''} error={jsonErrors.context} onChange={(text) => editJson('context', text)} />
+          <JsonField id="orchestrator-context" label="Context(JSON 進階模式)" disabled={disabled} text={texts.context ?? ''} error={jsonErrors.context} onChange={(text) => editJson('context', text)} />
         }
       />
       <StructuredOrRaw
@@ -854,7 +854,7 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
         raw={
           <JsonField
             id="orchestrator-worker-pool"
-            label="Worker pool (JSON)"
+            label="Worker pool(JSON 進階模式)"
             disabled={disabled}
             text={texts.workerPool ?? ''}
             error={jsonErrors.workerPool}
@@ -879,7 +879,7 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
           />
         }
         raw={
-          <JsonField id="orchestrator-verifier" label="Verifier (JSON)" disabled={disabled} text={texts.verifier ?? ''} error={jsonErrors.verifier} onChange={(text) => editJson('verifier', text)} />
+          <JsonField id="orchestrator-verifier" label="Verifier(JSON 進階模式)" disabled={disabled} text={texts.verifier ?? ''} error={jsonErrors.verifier} onChange={(text) => editJson('verifier', text)} />
         }
       />
       <StructuredOrRaw
@@ -895,7 +895,7 @@ function Editor({ id, onClose, multiAgentDispatchEnabled }: { id: string; onClos
           />
         }
         raw={
-          <JsonField id="orchestrator-budgets" label="Budgets (JSON)" disabled={disabled} text={texts.budgets ?? ''} error={jsonErrors.budgets} onChange={(text) => editJson('budgets', text)} />
+          <JsonField id="orchestrator-budgets" label="Budgets(JSON 進階模式)" disabled={disabled} text={texts.budgets ?? ''} error={jsonErrors.budgets} onChange={(text) => editJson('budgets', text)} />
         }
       />
     </section>
@@ -1003,7 +1003,7 @@ export default function OrchestratorsView({ multiAgentDispatchEnabled = false }:
             />
           }
           raw={
-            <JsonField id="orchestrator-create-worker-pool" label="Worker pool (JSON)" text={workerPoolText} error={workerPoolError} onChange={editWorkerPool} />
+            <JsonField id="orchestrator-create-worker-pool" label="Worker pool(JSON 進階模式)" text={workerPoolText} error={workerPoolError} onChange={editWorkerPool} />
           }
         />
         <VerifierRefEditor

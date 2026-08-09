@@ -33,7 +33,11 @@ describe('skillSourceLabel', () => {
     expect(skillSourceLabel('kb-query')).toBe('來源:知識庫')
   })
 
-  it('falls back to the raw skill name otherwise', () => {
-    expect(skillSourceLabel('weather-lookup')).toBe('來源:weather-lookup')
+  it('uses a generic label for non-whitelisted skills instead of leaking the slug', () => {
+    expect(skillSourceLabel('weather-lookup')).toBe('來源:自訂技能')
+
+    const label = skillSourceLabel('invoice-summary-v2')
+    expect(label).toBe('來源:自訂技能')
+    expect(label).not.toContain('invoice-summary-v2')
   })
 })

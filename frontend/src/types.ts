@@ -215,6 +215,9 @@ export interface DocumentInfo {
   status: 'processing' | 'ready' | 'failed'
   chunk_count: number
   created_at: string
+  // 處理失敗的原因（W1-18）。後端只寫入固定的封閉分類文字，永遠不含例外訊息；
+  // 舊列與非 failed 狀態沒有這欄，所以全鏈路都是 optional/nullable。
+  failure_reason?: string | null
 }
 
 /**

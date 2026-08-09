@@ -19,8 +19,8 @@ const FEATURES = /功能開通狀態/
 // D1/D4 now share one sidebar entry; the per-tab flag+capability gating lives inside
 // `AgentPlatformView` and is asserted by the tab-level cases at the bottom of this file.
 const AGENT_PLATFORM = /Agent 平台/
-const APPROVALS = /Approvals/
-const OPERATIONS = /Operations/
+const APPROVALS = /Run 核准/
+const OPERATIONS = /營運治理/
 
 const ADMIN_BASE = [CHAT, DOCUMENTS, ANALYSIS, CONFIG, FEATURES]
 const USER_BASE = [CHAT, DOCUMENTS, ANALYSIS]
@@ -197,6 +197,21 @@ test('an ADMIN without workflow.manage gets only the Agents tab and no tab bar',
   await expect(page.locator('.seg')).toHaveCount(0)
   expect(requested.filter((path) => path.startsWith('/api/admin/workflows'))).toEqual([])
   expect(requested.filter((path) => path.startsWith('/api/admin/orchestrators'))).toEqual([])
+})
+
+// `ALL_NAV` in AppShell drives both the sidebar label and the document title, so a drifting
+// second mapping would show up as a sidebar entry that does not match the view heading it opens.
+test('the D7 sidebar entries carry the same Chinese label as the view heading they open', async ({ page }) => {
+  await mountShell(page, {
+    capabilities: ['workflow.manage'],
+    features: { agentWriteToolsEnabled: true },
+  })
+  for (const [testId, label] of [['nav-approvals', 'Run 核准'], ['nav-operations', '營運治理']]) {
+    const entry = page.getByTestId(testId)
+    await expect(entry).toHaveText(new RegExp(label))
+    await entry.click()
+    await expect(page.getByRole('heading', { name: label, level: 2 })).toBeVisible()
+  }
 })
 
 test('a disabled agentChatEnabled flag never requests the Orchestrator chat catalog', async ({ page }) => {

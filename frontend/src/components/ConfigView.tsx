@@ -17,7 +17,7 @@ type Tab = 'businessWorkflows' | 'agentSkills' | 'nodeParams' | 'general'
 const TABS: { id: Tab; label: string }[] = [
   { id: 'businessWorkflows', label: '業務流程' },
   { id: 'agentSkills', label: 'Agent Skills' },
-  { id: 'nodeParams', label: '執行參數／Harness 節點參數' },
+  { id: 'nodeParams', label: '執行參數' },
   { id: 'general', label: '一般設定' },
 ]
 
@@ -86,8 +86,8 @@ function GeneralConfigTab({ isAdmin }: { isAdmin: boolean }) {
           <table className="table">
             <thead>
               <tr>
-                <th>Key</th>
-                <th>Value</th>
+                <th>設定鍵</th>
+                <th>設定值</th>
                 <th>更新時間</th>
                 {isAdmin && <th></th>}
               </tr>

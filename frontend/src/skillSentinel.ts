@@ -20,7 +20,10 @@ export function stripSkillSentinel(content: string): StrippedSkillContent {
 
 const KNOWLEDGE_BASE_SKILLS = new Set(['rag-qa', 'kb-query'])
 
-/** 徽章顯示文字：知識庫類 skill 統一顯示「來源:知識庫」，其餘顯示 skill 原名。 */
+/**
+ * 徽章顯示文字：知識庫類 skill 統一顯示「來源:知識庫」；名單外一律用通用文案
+ * 「來源:自訂技能」，不外洩租戶自訂的技術 slug（管理者取的英文 kebab 名稱）。
+ */
 export function skillSourceLabel(skillName: string): string {
-  return KNOWLEDGE_BASE_SKILLS.has(skillName) ? '來源:知識庫' : `來源:${skillName}`
+  return KNOWLEDGE_BASE_SKILLS.has(skillName) ? '來源:知識庫' : '來源:自訂技能'
 }

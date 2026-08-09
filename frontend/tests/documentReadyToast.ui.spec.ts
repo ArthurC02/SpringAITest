@@ -41,6 +41,36 @@ function toastLog(page: Page): Promise<string[]> {
   return page.evaluate(() => (window as unknown as { __toastLog: string[] }).__toastLog)
 }
 
+// W1-18:失敗 toast 在後端有給原因時附上原因(封閉集合中的固定文字),沒有時維持原本短文案。
+test('processing→failed 的 toast 在有 failure_reason 時附上原因', async ({ page }) => {
+  let doc: Record<string, unknown> = {
+    id: DOC_ID, title: DOC_TITLE, status: 'processing', chunk_count: 0, created_at: '2026-07-25T00:00:00Z',
+  }
+
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
+    if (path === '/api/auth/login') {
+      return json(route, { token: 'token', username: 'user', role: 'USER', tenantCode: 'demo', capabilities: [] })
+    }
+    if (path === '/api/features') return json(route, {})
+    if (path === '/api/documents' && route.request().method() === 'GET') return json(route, [doc])
+    return json(route, [])
+  })
+
+  await page.goto('/')
+  await page.getByTestId('auth-username').fill('user')
+  await page.getByTestId('auth-password').fill('password123')
+  await page.getByTestId('auth-submit').click()
+  // 先確認 processing 這一列真的被讀進來(轉態偵測靠的是「上一次看到的是 processing」),
+  // 否則翻狀態可能早於初次載入,轉態就不存在。
+  await page.getByTestId('nav-documents').click()
+  await expect(page.locator('tbody tr').filter({ hasText: DOC_TITLE }).locator('.chip')).toHaveText('處理中')
+
+  doc = { ...doc, status: 'failed', failure_reason: '檔案格式不支援' }
+  await expect(page.locator('.toast--error')).toContainText(`文件「${DOC_TITLE}」處理失敗:檔案格式不支援`)
+})
+
 test('文件在非文件視圖 processing→ready 轉態時跳 toast 且不重複通知', async ({ page }) => {
   await recordToastLog(page)
   let docStatus: 'processing' | 'ready' = 'processing'

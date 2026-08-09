@@ -114,7 +114,7 @@ test('invalid JSON blocks save/validate/publish and a correction restores them w
   const harness = await openEditor(page)
   // W5:Budgets 預設是結構化 grid，裸 JSON 驗證路徑只在「進階 JSON 模式」逃生口才可達。
   await page.getByRole('button', { name: 'Budgets — 切換為進階 JSON 模式' }).click()
-  const budgets = page.getByLabel('Budgets (JSON)')
+  const budgets = page.getByLabel('Budgets(JSON 進階模式)')
   const save = page.getByRole('button', { name: '儲存', exact: true })
   const validate = page.getByRole('button', { name: '驗證' })
   const publish = page.getByRole('button', { name: '發布' })
@@ -228,7 +228,7 @@ test('invalid JSON in the create form blocks 建立', async ({ page }) => {
   // W5:Worker pool 預設是結構化清單（無已發布 Agent 目錄時自動退回逐列手動輸入），
   // 裸 JSON 驗證路徑只在「進階 JSON 模式」逃生口才可達。
   await page.getByRole('button', { name: 'Worker pool — 切換為進階 JSON 模式' }).click()
-  const workerPool = page.getByLabel('Worker pool (JSON)')
+  const workerPool = page.getByLabel('Worker pool(JSON 進階模式)')
   await workerPool.fill('[{"agentId": "a1", "revision": 2}]')
   const create = page.getByRole('button', { name: '建立', exact: true })
   await expect(create).toBeEnabled()
