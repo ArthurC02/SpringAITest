@@ -124,6 +124,8 @@ const MIXED_CASE_PAYLOAD = {
 }
 
 const EXPECTED = {
+  // W2-02(e):三份 payload 都沒帶 window_days(尚未部署新後端),正規化後為 null,由畫面退回預設文案。
+  windowDays: null,
   releaseGate: { regressionPassed: true, overrideActive: false, auditEntries: 3 },
   rolloutEvents: 2,
   rootRuns: 5,
@@ -172,6 +174,7 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
 
   test('defaults every scalar to 0 and every list to empty for an absent payload', () => {
     const zeroed = {
+      windowDays: null,
       releaseGate: { regressionPassed: false, overrideActive: false, auditEntries: 0 },
       rolloutEvents: 0,
       rootRuns: 0,
@@ -190,6 +193,16 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
     expect(normalizeMetrics(undefined)).toEqual(zeroed)
     // 空集合的和是 0(確定值),與「任一分量未知 → null」是不同語意。
     expect(sumOrUnknown([])).toBe(0)
+  })
+
+  // W2-02(e):統計區間必須跟著數字一起回來,兩種命名、兩種擺放位置都要讀得到;
+  // 欄位缺席(舊後端)不得壞掉,而是回 null 讓畫面顯示預設區間文案。
+  test('reads the W2-02 statistics window from either casing and either nesting level', () => {
+    expect(normalizeMetrics({ window_days: 30 }).windowDays).toBe(30)
+    expect(normalizeMetrics({ windowDays: 7 }).windowDays).toBe(7)
+    expect(normalizeMetrics({ multi_agent: { window_days: 14 } }).windowDays).toBe(14)
+    expect(normalizeMetrics({ window_days: 30, multi_agent: { window_days: 14 } }).windowDays).toBe(30)
+    expect(normalizeMetrics({ window_days: 'ninety' }).windowDays).toBeNull()
   })
 
   test('never substitutes a partial sum when any observed value is unknown', () => {
@@ -245,6 +258,7 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
       },
       {
         // 同樣的混用命名:外層鍵 snake_case,revisions/selected_vs_previous 是 C# record camelCase。
+        window_days: 90,
         selected_revision: 3,
         rollout_events: 4,
         new_roots_only: true,
@@ -266,6 +280,7 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
 
     try {
       expect(await getVersionComparison()).toEqual({
+        windowDays: null,
         selectedRevision: null,
         rolloutEvents: 0,
         newRootsOnly: false,
@@ -274,6 +289,7 @@ test.describe('O1 operations metrics: unknown never renders as 0', () => {
         selectedVsPrevious: null,
       })
       expect(await getVersionComparison()).toEqual({
+        windowDays: 90,
         selectedRevision: 3,
         rolloutEvents: 4,
         newRootsOnly: true,

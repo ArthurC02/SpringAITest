@@ -38,6 +38,14 @@ const OVERRIDE_ATTEMPT_KEY = `${OPERATIONS_ATTEMPT_STORAGE_PREFIX}override-idemp
  * error, so reject it client-side first. */
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/** W2-02(e):後端彙總查詢的預設時間窗。伺服器未帶出 `window_days` 時的顯示值。 */
+const DEFAULT_WINDOW_DAYS = 90
+
+/** 統計數字的區間必須明示——加窗但不顯示會把效能問題轉嫁成正確性問題(見 W2-02 決策)。 */
+function WindowNotice({ days }: { days: number | null }) {
+  return <p className="muted">統計區間:最近 {days ?? DEFAULT_WINDOW_DAYS} 天</p>
+}
+
 interface OperationsData {
   metrics: OperationsMetrics
   comparison: OperationsVersionComparison
@@ -210,6 +218,7 @@ function RevisionComparison({ comparison }: { comparison: OperationsVersionCompa
   return (
     <section className="agent-block">
       <h3>版本比較</h3>
+      <WindowNotice days={comparison.windowDays} />
       <p className="muted">
         執行中的 run 一律保留自己 pinned 的不可變執行快照——上線只改變<strong>未來</strong>
         根執行要選哪個版本,絕不會編輯、遷移或取消已經在跑的工作。
@@ -571,6 +580,7 @@ export default function OperationsGovernanceView() {
         <Skeleton rows={6} />
       ) : !data ? null : (
         <>
+          <WindowNotice days={data.metrics.windowDays} />
           <SummaryCards metrics={data.metrics} />
 
           <h3>Agent 用量</h3>

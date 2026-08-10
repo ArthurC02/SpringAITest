@@ -1,5 +1,5 @@
 import { apiFetch } from './http'
-import { integer, number, object, pick, text } from '../wire'
+import { integer, number, object, pick, text, type JsonObject } from '../wire'
 import type {
   EvalCaseDelta,
   EvalCaseResult,
@@ -133,10 +133,19 @@ function legacyInventoryItem(value: unknown): OperationsLegacyInventoryItem {
   }
 }
 
+/**
+ * W2-02(e):後端彙總查詢改為預設最近 90 天並帶出實際區間。欄位缺席(尚未部署的後端)回 null,
+ * 由畫面退回預設文案——絕不靜默換窗。外層/`multi_agent` 內層都試,兩種擺法都讀得到。
+ */
+function windowDays(source: JsonObject): number | null {
+  return integer(pick(source, 'window_days', 'windowDays'))
+}
+
 export function normalizeMetrics(value: unknown): OperationsMetrics {
   const source = object(value)
   const multi = object(pick(source, 'multi_agent', 'multiAgent'))
   return {
+    windowDays: windowDays(source) ?? windowDays(multi),
     releaseGate: releaseGate(pick(source, 'release_gate', 'releaseGate')),
     rolloutEvents: integer(pick(multi, 'rolloutEvents', 'rollout_events')) ?? 0,
     rootRuns: integer(pick(multi, 'rootRuns', 'root_runs')) ?? 0,
@@ -156,6 +165,7 @@ export function normalizeMetrics(value: unknown): OperationsMetrics {
 function normalizeVersionComparison(value: unknown): OperationsVersionComparison {
   const source = object(value)
   return {
+    windowDays: windowDays(source),
     selectedRevision: integer(pick(source, 'selectedRevision', 'selected_revision')),
     rolloutEvents: integer(pick(source, 'rolloutEvents', 'rollout_events')) ?? 0,
     newRootsOnly: pick(source, 'newRootsOnly', 'new_roots_only') === true,

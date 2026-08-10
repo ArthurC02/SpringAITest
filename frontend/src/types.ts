@@ -739,6 +739,8 @@ export interface OperationsAggregateMetric {
 
 /** GET /api/admin/operations/metrics(已正規化)。 */
 export interface OperationsMetrics {
+  /** W2-02(e):後端彙總查詢的實際統計區間(天)。伺服器未帶出時為 null,畫面退回預設文案。 */
+  windowDays: number | null
   releaseGate: OperationsReleaseGate
   rolloutEvents: number
   rootRuns: number
@@ -775,6 +777,8 @@ export interface OperationsRevisionDelta {
 
 /** GET /api/admin/operations/version-comparison(已正規化)。 */
 export interface OperationsVersionComparison {
+  /** W2-02(e):同 OperationsMetrics.windowDays——版本比較的數字也走同一個時間窗。 */
+  windowDays: number | null
   selectedRevision: number | null
   rolloutEvents: number
   newRootsOnly: boolean
