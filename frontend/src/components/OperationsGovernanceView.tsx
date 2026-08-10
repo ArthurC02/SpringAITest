@@ -61,8 +61,25 @@ async function loadOperations(): Promise<OperationsData> {
   return { metrics, comparison, inventory }
 }
 
+/**
+ * 發版判定卡片,刻意獨立於 `WindowNotice` 之外(渲染在它之前)。`regressionPassed`/`overrideActive`
+ * 來自 Backend `GateAsync` 的不加窗單列讀取(加窗會讓久未跑迴歸的租戶 fail-open,見該處註解),
+ * 把它擺進統計區間標示的涵蓋範圍裡,等於告訴操作者「這是最近 N 天的判定」——會讓一筆窗外的失敗
+ * 迴歸被誤讀成已排除。加窗的 `auditEntries` 則留在 `SummaryCards`,一張卡不混兩種語意。
+ */
+function ReleaseGateCard({ gate }: { gate: OperationsReleaseGate }) {
+  return (
+    <div className="cards">
+      <div className="card">
+        <div className="card__num">{gate.regressionPassed ? '通過' : '未通過'}</div>
+        <div className="card__label">品質迴歸關卡{gate.overrideActive ? ' · 已啟用覆蓋' : ''}</div>
+        <p className="muted">最新一次迴歸結果,不受統計區間影響。</p>
+      </div>
+    </div>
+  )
+}
+
 function SummaryCards({ metrics }: { metrics: OperationsMetrics }) {
-  const gate = metrics.releaseGate
   const totalUsage = sumOrUnknown(metrics.agents.map((a) => a.observedUsageUnits))
   const totalCost = sumOrUnknown(metrics.agents.map((a) => a.observedCostUnits))
   return (
@@ -92,10 +109,8 @@ function SummaryCards({ metrics }: { metrics: OperationsMetrics }) {
         <div className="card__label">已量測成本單位(Agent)</div>
       </div>
       <div className="card">
-        <div className="card__num">{gate.regressionPassed ? '通過' : '未通過'}</div>
-        <div className="card__label">
-          品質迴歸關卡{gate.overrideActive ? ' · 已啟用覆蓋' : ''} · {gate.auditEntries} 筆稽核紀錄
-        </div>
+        <div className="card__num">{metrics.releaseGate.auditEntries}</div>
+        <div className="card__label">發版稽核紀錄筆數</div>
       </div>
     </div>
   )
@@ -369,7 +384,7 @@ function RegressionPanel({
       <p>
         目前關卡狀態:<strong>{gate.regressionPassed ? '通過' : '未通過'}</strong>
         {gate.overrideActive && <span className="chip chip--warn"> 已啟用覆蓋</span>}
-        {' '}· {gate.auditEntries} 筆稽核紀錄
+        {' '}(最新一次迴歸結果,不受統計區間影響)· 統計區間內 {gate.auditEntries} 筆稽核紀錄
       </p>
       <div className="field">
         <label htmlFor="ops-suite">測試組合</label>
@@ -580,6 +595,7 @@ export default function OperationsGovernanceView() {
         <Skeleton rows={6} />
       ) : !data ? null : (
         <>
+          <ReleaseGateCard gate={data.metrics.releaseGate} />
           <WindowNotice days={data.metrics.windowDays} />
           <SummaryCards metrics={data.metrics} />
 

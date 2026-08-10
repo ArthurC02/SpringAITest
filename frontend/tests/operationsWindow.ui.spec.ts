@@ -41,7 +41,7 @@ async function mockOperations(
 }
 
 const METRICS_BODY = {
-  release_gate: { regression_passed: true, override_active: false, audit_entries: 1 },
+  release_gate: { regression_passed: false, override_active: false, audit_entries: 1 },
   multi_agent: {
     root_runs: 5,
     child_runs: 3,
@@ -63,6 +63,11 @@ const COMPARISON_BODY = {
   selected_vs_previous: null,
 }
 
+/** 「根執行 · N 個子執行」那張加窗卡片(不再是第一張卡——發版判定卡刻意排在統計區間標示之前)。 */
+function rootRunsCard(page: import('@playwright/test').Page) {
+  return page.locator('.card').filter({ hasText: '個子執行' }).locator('.card__num')
+}
+
 test('the dashboard states the server-reported statistics window next to the numbers', async ({ page }) => {
   await mockOperations(
     page,
@@ -74,12 +79,46 @@ test('the dashboard states the server-reported statistics window next to the num
   await expect(page.getByText('統計區間:最近 30 天')).toHaveCount(2)
   await expect(page.getByText('統計區間:最近 90 天')).toHaveCount(0)
   // 數字仍然照常呈現——明示區間是加上說明,不是替換內容。
-  await expect(page.locator('.card__num').first()).toHaveText('5')
+  await expect(rootRunsCard(page)).toHaveText('5')
 })
 
 test('falls back to the default 90-day wording when the server omits the window field', async ({ page }) => {
   await mockOperations(page, METRICS_BODY, COMPARISON_BODY)
 
   await expect(page.getByText('統計區間:最近 90 天')).toHaveCount(2)
-  await expect(page.locator('.card__num').first()).toHaveText('5')
+  await expect(rootRunsCard(page)).toHaveText('5')
+})
+
+// release gate 的判定(regression_passed / override_active)來自 Backend 不加窗的 LIMIT 1 讀取,
+// 加窗會 fail-open,所以刻意不加窗。畫面因此不得把它擺進「統計區間:最近 N 天」的涵蓋範圍——
+// 否則一筆窗外的失敗迴歸會被讀成已排除(選項 (g)「含義變了卻不說」的鏡像失敗:含義沒變卻說變了)。
+test('the release-gate verdict sits outside the statistics-window notice and is labelled as unwindowed', async ({
+  page,
+}) => {
+  await mockOperations(
+    page,
+    { ...METRICS_BODY, window_days: 30 },
+    { ...COMPARISON_BODY, window_days: 30 },
+  )
+
+  const gateCard = page.locator('.card').filter({ hasText: '品質迴歸關卡' })
+  await expect(gateCard).toHaveCount(1)
+  await expect(gateCard.locator('.card__num')).toHaveText('未通過')
+  await expect(gateCard).toContainText('最新一次迴歸結果,不受統計區間影響')
+  // 同卡混用已拆開:加窗的稽核筆數不再與全歷史判定同卡。
+  await expect(gateCard).not.toContainText('稽核紀錄')
+  await expect(page.locator('.card').filter({ hasText: '發版稽核紀錄筆數' }).locator('.card__num')).toHaveText('1')
+
+  // 判定卡片排在統計區間標示之前 → 不在其涵蓋範圍內。
+  const gateBeforeNotice = await page.evaluate(() => {
+    const card = [...document.querySelectorAll('.card')].find((c) =>
+      c.textContent?.includes('品質迴歸關卡'),
+    )
+    const notice = [...document.querySelectorAll('p')].find((p) =>
+      p.textContent?.startsWith('統計區間:'),
+    )
+    if (!card || !notice) return null
+    return (card.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+  })
+  expect(gateBeforeNotice).toBe(true)
 })
