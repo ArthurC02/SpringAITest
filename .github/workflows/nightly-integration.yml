@@ -1,0 +1,145 @@
+name: Nightly D-phase Integration
+
+# W2-01: D3/D5/D6/D7 are deterministic, loopback-only cross-service regression verifiers
+# (concurrency/durability/governance surfaces) — see plans/wave2-decisions-2026-08-10.md § W2-01.
+# They belong off the PR path: they detect regressions rather than new-commit defects, and a
+# day's delay in surfacing one is an acceptable trade for not lengthening every PR's feedback
+# loop. All four use only the loopback deterministic evidence model
+# (infra/evidence/evidence_model.py, a fixed-reply fake — never a real LLM provider), so this
+# workflow needs no repository secret and no real model API key.
+#
+# Jobs run sequentially via `needs:` (D3 -> D5 -> D6 -> D7), matching the W2-01 decision's
+# execution order, and each gets its own fresh runner/Docker daemon rather than sharing one:
+# scripts/verify-agent-chat-d6.ps1 explicitly refuses to start if any evidence-profile service
+# is already running (it never tears its own services down on success, by design, so a caller
+# can inspect them afterward — see infra/AGENTS.md's D3 verifier note), so packing D3/D5/D6/D7
+# into steps of one job would make D6 fail on leftover containers from D3/D5, not on an actual
+# regression. A failure in an earlier job blocks the later ones (default `needs:` behavior, no
+# `if: always()`): these are escalating in scope (D3 single-agent runtime -> D5 root dispatch ->
+# D6 chat canary -> D7 write-tool governance), so a D3 regression already means the later gates
+# are exercising a runtime known to be broken.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # 03:17 UTC: off-peak for both US and Asia-Pacific business hours; an off-the-hour minute
+    # avoids GitHub's documented top-of-hour `schedule` scheduling crowd.
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  # scripts/verify-agent-runtime-d3.ps1: pure HTTP against platform-evidence (agent CRUD/publish,
+  # durable waiting_input/resume, restart recovery, cancel, unbound-skill/rule-deny denial). No
+  # dotnet/pytest suites of its own, so this job only needs Docker.
+  d3-agent-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: D3 direct-Agent runtime verifier
+        shell: pwsh
+        run: ./scripts/verify-agent-runtime-d3.ps1 -Build
+
+  # scripts/verify-multi-agent-d5.ps1: platform-evidence HTTP gates plus backend/platform
+  # (`--no-restore`, hence the restore step below) and workflow deterministic suites.
+  d5-multi-agent:
+    needs: d3-agent-runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-backend-${{ hashFiles('backend/**/*.csproj', 'backend/Directory.Build.props') }}
+          restore-keys: nuget-backend-
+      - run: dotnet restore
+        working-directory: backend
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-platform-${{ hashFiles('platform/**/*.csproj', 'platform/Directory.Build.props') }}
+          restore-keys: nuget-platform-
+      - run: dotnet restore
+        working-directory: platform
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: workflow/uv.lock
+      - name: D5 Root Orchestrator runtime verifier
+        shell: pwsh
+        run: ./scripts/verify-multi-agent-d5.ps1 -Build
+
+  # scripts/verify-agent-chat-d6.ps1: isolated evidence-real chain (its own backend/workflow
+  # instances) plus backend/platform (`--no-restore`) and workflow deterministic suites.
+  d6-agent-chat:
+    needs: d5-multi-agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-backend-${{ hashFiles('backend/**/*.csproj', 'backend/Directory.Build.props') }}
+          restore-keys: nuget-backend-
+      - run: dotnet restore
+        working-directory: backend
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-platform-${{ hashFiles('platform/**/*.csproj', 'platform/Directory.Build.props') }}
+          restore-keys: nuget-platform-
+      - run: dotnet restore
+        working-directory: platform
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: workflow/uv.lock
+      - name: D6 Agent Chat canary verifier
+        shell: pwsh
+        run: ./scripts/verify-agent-chat-d6.ps1 -Build
+
+  # scripts/verify-agent-governance-d7.ps1: backend/platform HTTP + isolated PostgreSQL
+  # transaction/outbox suites (`--no-restore`) plus one workflow pytest keyword selection. No
+  # -Build switch (it starts only a plain `appdb` container, nothing with a `build:` section).
+  d7-agent-governance:
+    needs: d6-agent-chat
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-backend-${{ hashFiles('backend/**/*.csproj', 'backend/Directory.Build.props') }}
+          restore-keys: nuget-backend-
+      - run: dotnet restore
+        working-directory: backend
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-platform-${{ hashFiles('platform/**/*.csproj', 'platform/Directory.Build.props') }}
+          restore-keys: nuget-platform-
+      - run: dotnet restore
+        working-directory: platform
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: workflow/uv.lock
+      - name: D7 write-tool governance verifier
+        shell: pwsh
+        run: ./scripts/verify-agent-governance-d7.ps1

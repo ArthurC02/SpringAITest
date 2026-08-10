@@ -374,7 +374,10 @@ jobs:
 
   full-chain-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # W2-01: raised from 35 to cover the added evidence-profile image builds
+    # (platform-evidence/frontend-evidence/evidence-model/workflow-capture-proxy) and the three
+    # real-browser evidence specs below, on top of the pre-existing black-box smoke.
+    timeout-minutes: 55
     env:
       COMPOSE_PROJECT_NAME: springaitest-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -382,6 +385,28 @@ jobs:
       - name: Run deterministic full-chain smoke
         shell: pwsh
         run: ./scripts/verify-copilot-shared-core.ps1 -Rebuild -CiComposeSubset
+      # W2-01: frontend's three real-browser evidence specs (E-01 auth / E-03 session-tool /
+      # E-06 streaming) merged into this job — it already pays the container-start cost, so the
+      # marginal cost is the evidence-profile services below (reusing the backend/workflow
+      # containers just started above) plus Playwright's own browser. playwright.config.ts's
+      # evidenceSkipGuardReporter fails this step (not a silent pass) if any of the three specs
+      # is skipped rather than actually run — see scripts/verify-frontend-evidence-browsers.ps1.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('frontend/package-lock.json') }}
+      - run: npm run test:evidence:install
+        working-directory: frontend
+      - name: Frontend real-browser evidence specs (E-01/E-03/E-06)
+        shell: pwsh
+        run: ./scripts/verify-frontend-evidence-browsers.ps1
       - name: Clean up this job's Compose resources
         if: always()
         working-directory: infra

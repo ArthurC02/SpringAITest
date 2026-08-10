@@ -10,6 +10,7 @@ This directory records the evolution of the Skill and Agent platform. Source cod
 ## System Reinforcement (2026-08-10)
 
 - [系統重估補強計畫](system-reinforcement-2026-08-10.md)：九維度全系統重估（產品旅程×2、安全、測試、可靠性、效能、資料層、前端、DX）合併出的分波補強清單——Wave 1 可執行 21 項（checkbox 續跑格式）、Wave 2 需使用者拍板 8 項、Wave 3 大型工程 5 項（引用既有計畫）。不取代任何既有計畫。
+- [Wave 2 決策記錄](wave2-decisions-2026-08-10.md)：上述 Wave 2 八道待拍板決策的裁決與理由（選了什麼、放棄了什麼、重新檢視觸發條件）。
 
 ## Architecture Research and Improvements
 
