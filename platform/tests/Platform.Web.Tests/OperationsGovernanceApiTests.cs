@@ -93,6 +93,28 @@ public sealed class OperationsGovernanceApiTests
         Assert.Null(_proxy.Handler.Header("Idempotency-Key"));
     }
 
+    // W2-02(e):window_days 在 platform 是純透傳,值域與拒絕行為留給 Backend authority。決策表兩半:
+    // 帶了就必須出現在轉發的 query 上(否則 backend 永遠只看得到預設 90 天),沒帶就不得憑空補一個
+    // (那會讓 platform 悄悄變成第二個定義預設值的地方)。界外值也照樣透傳 —— platform 不搶著驗。
+    [Theory]
+    [InlineData("metrics")]
+    [InlineData("version-comparison")]
+    public async Task WindowDays_IsForwardedVerbatim_AndAbsentWhenOmitted(string suffix)
+    {
+        using var client = _proxy.CreateClient().WithToken(
+            _proxy.IssueToken(capabilities: ["workflow.manage"]));
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/admin/operations/{suffix}?window_days=30")).StatusCode);
+        Assert.Equal("/api/admin/operations/" + suffix, _proxy.Handler.Path);
+        Assert.Equal("?window_days=30", _proxy.Handler.Query);
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/admin/operations/{suffix}?window_days=9999")).StatusCode);
+        Assert.Equal("?window_days=9999", _proxy.Handler.Query);
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/admin/operations/{suffix}")).StatusCode);
+        Assert.Equal("", _proxy.Handler.Query);
+    }
+
     // Regression 端點的 body 是 [FromBody] object(無 typed DTO),原樣序列化轉發;eval_run_id 這個
     // E2/E3 才新增的欄位不需要 platform 端額外補型別就能穿透 —— 這裡釘住這個事實。
     [Fact]

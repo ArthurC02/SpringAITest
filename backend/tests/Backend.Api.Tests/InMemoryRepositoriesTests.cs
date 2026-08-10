@@ -83,6 +83,27 @@ public sealed class InMemoryRepositoriesTests
         Assert.Equal(new[] { second.Id, first.Id }, list.Select(i => i.Id).ToArray());
     }
 
+    // W2-06 parity:Dapper 側是 SQL LIMIT 500,lite 側必須同樣封頂在最新 500 筆(排序不變),
+    // 否則同一支 API 在兩種模式下回不同筆數。501 筆是 off-point,截掉的必須是最舊那筆。
+    [Fact]
+    public async Task Conversation_ListDesc_CapsAtMaxHistoryItems_KeepingTheNewestOnesInOrder()
+    {
+        var repo = new InMemoryConversationRepository();
+        var ids = new List<long>();
+        for (var i = 0; i < IConversationRepository.MaxHistoryItems + 1; i++)
+        {
+            ids.Add((await repo.AddAsync("demo-a", "user-a", $"p{i}", $"r{i}", default)).Id);
+        }
+
+        var list = await repo.ListDescAsync("demo-a", "user-a", default);
+
+        Assert.Equal(IConversationRepository.MaxHistoryItems, list.Count);
+        Assert.Equal(
+            ids.AsEnumerable().Reverse().Take(IConversationRepository.MaxHistoryItems),
+            list.Select(i => i.Id));
+        Assert.DoesNotContain(ids[0], list.Select(i => i.Id));
+    }
+
     [Fact]
     public async Task Conversation_Page_SameTimestamp_TieAndBoundaryUseIdDesc()
     {

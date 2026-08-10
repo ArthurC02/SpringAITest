@@ -24,7 +24,9 @@ public sealed class TriggerApiTests : IClassFixture<TriggerApiTests.Factory>
     internal static readonly Guid UnpublishedId = Guid.Parse("a0000000-0000-4000-8000-000000000003");
     internal const int PublishedRevision = 2;
 
-    private static readonly DateTime FireAt = new(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    // W2-03 之後 fire_at 有 90 天上限,所以這裡不能再用固定的遠期常數(它會隨時間走出窗外,
+    // 讓每個非 fire_at 主題的測試都變成在測那道上限)。取窗內的相對時刻。
+    private static readonly DateTime FireAt = DateTime.UtcNow.AddDays(30);
 
     private readonly Factory _factory;
 
@@ -199,6 +201,42 @@ public sealed class TriggerApiTests : IClassFixture<TriggerApiTests.Factory>
             "/api/admin/triggers", Body("on-point", mapping: Mapping(TriggerInputMapping.MaxEntries)))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(
             "/api/admin/triggers", Body("off-point", mapping: Mapping(TriggerInputMapping.MaxEntries + 1)))).StatusCode);
+    }
+
+    // W2-03:fire_at 距現在不得超過 90 天。上限的意義是安全(不可變 principal 快照 = 引信長度),
+    // 所以 on-point/off-point 兩側都要釘住:剛好在窗內必須建得起來,只超過一點點必須 400。
+    // 一小時的緩衝是為了吸收「測試組出請求」到「伺服器讀時鐘」之間的時間差,不是在測邊界寬容度。
+    [Fact]
+    public async Task Create_FireAtAtHorizon_IsAccepted_JustBeyondHorizon_IsRejected()
+    {
+        using var client = Client(UniqueTenant());
+
+        var onPoint = await client.PostAsJsonAsync(
+            "/api/admin/triggers", Body("horizon-on", fireAt: DateTime.UtcNow.AddDays(90).AddHours(-1)));
+        var offPoint = await client.PostAsJsonAsync(
+            "/api/admin/triggers", Body("horizon-off", fireAt: DateTime.UtcNow.AddDays(90).AddHours(1)));
+
+        Assert.Equal(HttpStatusCode.Created, onPoint.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, offPoint.StatusCode);
+        (await offPoint.ReadJsonAsync()).AssertApiError(400, "validation_failed");
+    }
+
+    // 決策表的另一半:被拒的那一筆不得留下任何持久化痕跡(驗證在 repository 之前發生),
+    // 且窗內的遠期值(89 天)不會因為「看起來很遠」就被擋掉。
+    [Fact]
+    public async Task Create_RejectedFireAt_WritesNothing_AndInWindowValueStillCreates()
+    {
+        var tenant = UniqueTenant();
+        using var client = Client(tenant);
+
+        Assert.Equal(
+            HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync("/api/admin/triggers", Body("too-far", fireAt: DateTime.UtcNow.AddDays(400)))).StatusCode);
+        Assert.Empty((await (await client.GetAsync("/api/admin/triggers")).ReadJsonAsync())["items"]!.AsArray());
+
+        Assert.Equal(
+            HttpStatusCode.Created,
+            (await client.PostAsJsonAsync("/api/admin/triggers", Body("in-window", fireAt: DateTime.UtcNow.AddDays(89)))).StatusCode);
     }
 
     [Theory]
@@ -411,14 +449,15 @@ public sealed class TriggerApiTests : IClassFixture<TriggerApiTests.Factory>
         Guid? orchestratorId = null,
         int revision = PublishedRevision,
         int? misfireWindowSeconds = null,
-        object? mapping = null)
+        object? mapping = null,
+        DateTime? fireAt = null)
         => new
         {
             name,
             description = "每日夜間報表",
             orchestrator_id = orchestratorId ?? PublishedId,
             orchestrator_revision = revision,
-            fire_at = FireAt,
+            fire_at = fireAt ?? FireAt,
             misfire_window_seconds = misfireWindowSeconds,
             input_mapping = mapping ?? new { message = "產生報表" },
         };

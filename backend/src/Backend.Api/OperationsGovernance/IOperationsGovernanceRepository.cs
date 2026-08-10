@@ -14,8 +14,18 @@ public interface IOperationsGovernanceRepository
     Task<OverrideWriteResult> CreateOverrideAsync(string tenantId, Guid regressionId, string idempotencyKeyHash, string reason, string actorId, CancellationToken ct);
     Task<RolloutWriteStatus> ApplyRolloutAsync(string tenantId, TenantRuntimeBinding binding, string actorId, CancellationToken ct);
     Task RecordTelemetryAsync(string tenantId, OperationsTelemetry telemetry, CancellationToken ct);
-    Task<OperationsMetrics> GetMetricsAsync(string tenantId, CancellationToken ct);
-    Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, CancellationToken ct);
+    /// <summary>
+    /// W2-02(e):彙總只涵蓋最近 <paramref name="windowDays"/> 天的資料(預設
+    /// <see cref="OperationsMetricsWindow.DefaultDays"/>,呼叫端可覆寫,值域由呼叫端夾在
+    /// <see cref="OperationsMetricsWindow.MinDays"/>–<see cref="OperationsMetricsWindow.MaxDays"/>)。
+    /// 全量 COUNT/AVG/SUM/GROUP BY 隨資料量單調變慢,加窗是為了把單次成本封頂;窗外資料不計入。
+    /// 這是刻意的語意變更,因此實際區間必須隨回應帶出(<c>window_days</c>),讓畫面能明示「統計區間:
+    /// 最近 N 天」。決策記錄:plans/wave2-decisions-2026-08-10.md(W2-02)。
+    /// </summary>
+    Task<OperationsMetrics> GetMetricsAsync(string tenantId, int windowDays, CancellationToken ct);
+
+    /// <inheritdoc cref="GetMetricsAsync"/>
+    Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, int windowDays, CancellationToken ct);
     Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct);
 
     /// <summary>
@@ -29,6 +39,18 @@ public interface IOperationsGovernanceRepository
     /// <summary>Per-tenant, per-event comparison between the legacy metric and the extended
     /// envelope so dual-write never lets usage/cost carry two authorities.</summary>
     Task<EvidenceReconcileSummary> GetEvidenceReconcileAsync(string tenantId, CancellationToken ct);
+}
+
+/// <summary>
+/// W2-02(e) 儀表板統計時間窗。有界(1–365)且超界一律拒絕(400)而非夾到邊界:一個打錯的
+/// <c>window_days=3650</c> 若被默默夾成 365,呼叫端會拿到一份標示為 365 天、自己以為是 3650 天的
+/// 數字——這正是本決策要避免的「數字含義改變卻不告訴使用者」。
+/// </summary>
+public static class OperationsMetricsWindow
+{
+    public const int DefaultDays = 90;
+    public const int MinDays = 1;
+    public const int MaxDays = 365;
 }
 
 public sealed record RegressionGate(Guid Id, bool Passed, string Suite, DateTime RecordedAt, bool OverrideActive, int AuditEntries);
@@ -75,7 +97,9 @@ public sealed record OperationsVersionComparison(
     [property: JsonPropertyName("new_roots_only")] bool NewRootsOnly,
     [property: JsonPropertyName("active_runs_keep_immutable_snapshot")] bool ActiveRunsKeepImmutableSnapshot,
     [property: JsonPropertyName("revisions")] IReadOnlyList<RevisionMetric> Revisions,
-    [property: JsonPropertyName("selected_vs_previous")] RevisionDelta? SelectedVsPrevious);
+    [property: JsonPropertyName("selected_vs_previous")] RevisionDelta? SelectedVsPrevious,
+    /// <summary>W2-02(e):這份比較實際涵蓋的統計區間(最近 N 天)。</summary>
+    [property: JsonPropertyName("window_days")] int WindowDays);
 public sealed record RevisionMetric(int Revision, int Runs, int Completed, int Failed, long AverageLatencyMs, long ReservedBudgetUnits, int ActiveRuns);
 public sealed record RevisionDelta(int FromRevision, int ToRevision, int RunDelta, int CompletedDelta, long AverageLatencyDeltaMs, long ReservedBudgetDeltaUnits);
 public sealed record LegacyInventoryItem(

@@ -25,6 +25,9 @@ public sealed class TriggerController(
     private const int MaxNameLength = 128;
     private const int MaxDescriptionLength = 512;
 
+    /// <summary>W2-03: how far ahead a one-shot <c>fire_at</c> may be scheduled. See <see cref="FireAt"/>.</summary>
+    private const int MaxFireAtHorizonDays = 90;
+
     [HttpPost]
     public async Task<IActionResult> Create(TriggerCreateRequest request, CancellationToken ct)
     {
@@ -181,11 +184,26 @@ public sealed class TriggerController(
     /// One-shot triggers are absolute UTC instants: an offset-less or local-offset literal is
     /// rejected rather than silently reinterpreted, so the stored instant always means what the
     /// caller sent. Timezone/DST handling stays a client input concern (§6, "明確不做").
+    /// <para>
+    /// W2-03 上限:<c>fire_at</c> 距現在不得超過 <see cref="MaxFireAtHorizonDays"/> 天。理由是安全
+    /// 而非效能——觸發器持有一份建立當下的**不可變 principal 快照**(§6.1),fire 時不會重讀建立者
+    /// 現況權限,所以一個排到無限遠的觸發器等於一個引信無限長的權限提升定時裝置。改期路徑本來就是
+    /// 「取消後重建」(O5 刻意的 YAGNI 決策),因此 90 天對真實排程需求不構成限制,卻把引信長度砍到
+    /// 有界。決策記錄:plans/wave2-decisions-2026-08-10.md(W2-03)。
+    /// </para>
     /// </summary>
     private static DateTime FireAt(DateTime? value)
-        => value is { Kind: DateTimeKind.Utc } fireAt
-            ? fireAt
-            : throw new ApiException(400, "fire_at must be an ISO-8601 UTC instant");
+    {
+        if (value is not { Kind: DateTimeKind.Utc } fireAt)
+        {
+            throw new ApiException(400, "fire_at must be an ISO-8601 UTC instant");
+        }
+        if (fireAt > DateTime.UtcNow.AddDays(MaxFireAtHorizonDays))
+        {
+            throw new ApiException(400, "fire_at 不得超過現在起算 90 天");
+        }
+        return fireAt;
+    }
 
     private static int MisfireWindow(int? value)
     {

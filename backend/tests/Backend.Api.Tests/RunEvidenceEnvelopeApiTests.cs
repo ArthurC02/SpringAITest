@@ -328,9 +328,9 @@ public sealed class RunEvidenceEnvelopeApiTests :
         public Task<RolloutWriteStatus> ApplyRolloutAsync(string tenantId, TenantRuntimeBinding binding, string actorId, CancellationToken ct)
             => _inner.ApplyRolloutAsync(tenantId, binding, actorId, ct);
         public Task RecordTelemetryAsync(string tenantId, OperationsTelemetry telemetry, CancellationToken ct) => _inner.RecordTelemetryAsync(tenantId, telemetry, ct);
-        public Task<OperationsMetrics> GetMetricsAsync(string tenantId, CancellationToken ct) => _inner.GetMetricsAsync(tenantId, ct);
-        public Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, CancellationToken ct)
-            => _inner.GetVersionComparisonAsync(tenantId, selectedRevision, ct);
+        public Task<OperationsMetrics> GetMetricsAsync(string tenantId, int windowDays, CancellationToken ct) => _inner.GetMetricsAsync(tenantId, windowDays, ct);
+        public Task<OperationsVersionComparison> GetVersionComparisonAsync(string tenantId, int? selectedRevision, int windowDays, CancellationToken ct)
+            => _inner.GetVersionComparisonAsync(tenantId, selectedRevision, windowDays, ct);
         public Task<IReadOnlyList<LegacyInventoryItem>> GetLegacyInventoryAsync(string tenantId, CancellationToken ct) => _inner.GetLegacyInventoryAsync(tenantId, ct);
         public Task RecordEvidenceAsync(string tenantId, RunEvidenceEnvelope envelope, CancellationToken ct) => throw new InvalidOperationException("simulated evidence sink outage");
         public Task<EvidenceReconcileSummary> GetEvidenceReconcileAsync(string tenantId, CancellationToken ct) => _inner.GetEvidenceReconcileAsync(tenantId, ct);

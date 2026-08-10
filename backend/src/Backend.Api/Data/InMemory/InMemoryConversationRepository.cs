@@ -32,8 +32,10 @@ public sealed class InMemoryConversationRepository : IConversationRepository
         lock (_lockObj)
         {
             return Task.FromResult<IReadOnlyList<ConversationItem>>(
+                // W2-06:與 Dapper 的 LIMIT 500 同一個常數,兩邊都封頂在最新 500 筆。
                 _items.Where(e => e.Tenant == tenantId && e.User == userId).Select(e => e.Item)
-                    .OrderByDescending(i => i.CreatedAt).ThenByDescending(i => i.Id).ToList());
+                    .OrderByDescending(i => i.CreatedAt).ThenByDescending(i => i.Id)
+                    .Take(IConversationRepository.MaxHistoryItems).ToList());
         }
     }
 

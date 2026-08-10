@@ -66,19 +66,27 @@ public sealed class OperationsGovernanceController(
     }
 
     [HttpGet("metrics")]
-    public async Task<IActionResult> Metrics(CancellationToken ct)
+    public async Task<IActionResult> Metrics([FromQuery(Name = "window_days")] int? windowDays, CancellationToken ct)
     {
-        RequireManage(); var value = await governance.GetMetricsAsync(Request.RequireTenant(), ct);
+        RequireManage(); var window = Window(windowDays);
+        var value = await governance.GetMetricsAsync(Request.RequireTenant(), window, ct);
         // DTO is aggregate-only: no prompts, tool values, tokens, context or idempotency keys.
-        return Ok(new { release_gate = new { regression_passed = value.RegressionPassed, override_active = value.OverrideActive, audit_entries = value.ReleaseAuditEntries }, multi_agent = new { rollout_events = value.RolloutEvents, root_runs = value.RootRuns, child_runs = value.ChildRuns, child_success = value.ChildSucceeded, verifier_reject = value.VerifierRejected, repair_rounds = value.RepairEvents, write_effects = value.WriteEffects, agents = value.Agents, skills = value.Skills, tools = value.Tools, nodes = value.Nodes, aggregation = value.Aggregation } });
+        // window_days 是刻意外露的:數字只涵蓋最近 N 天,不告訴呼叫方就是把效能問題轉嫁成正確性問題。
+        return Ok(new { window_days = window, release_gate = new { regression_passed = value.RegressionPassed, override_active = value.OverrideActive, audit_entries = value.ReleaseAuditEntries }, multi_agent = new { rollout_events = value.RolloutEvents, root_runs = value.RootRuns, child_runs = value.ChildRuns, child_success = value.ChildSucceeded, verifier_reject = value.VerifierRejected, repair_rounds = value.RepairEvents, write_effects = value.WriteEffects, agents = value.Agents, skills = value.Skills, tools = value.Tools, nodes = value.Nodes, aggregation = value.Aggregation } });
     }
 
     [HttpGet("version-comparison")]
-    public async Task<IActionResult> Compare(CancellationToken ct)
+    public async Task<IActionResult> Compare([FromQuery(Name = "window_days")] int? windowDays, CancellationToken ct)
     {
-        RequireManage(); var tenant = Request.RequireTenant(); var binding = await bindings.GetAsync(tenant, ct);
-        return Ok(await governance.GetVersionComparisonAsync(tenant, binding?.DefaultOrchestratorRevision, ct));
+        RequireManage(); var window = Window(windowDays); var tenant = Request.RequireTenant(); var binding = await bindings.GetAsync(tenant, ct);
+        return Ok(await governance.GetVersionComparisonAsync(tenant, binding?.DefaultOrchestratorRevision, window, ct));
     }
+
+    /// <summary>W2-02(e):有界統計時間窗;超界拒絕(不夾邊界)。<see cref="OperationsMetricsWindow"/> 說明理由。</summary>
+    private static int Window(int? windowDays)
+        => windowDays is null ? OperationsMetricsWindow.DefaultDays
+            : windowDays is >= OperationsMetricsWindow.MinDays and <= OperationsMetricsWindow.MaxDays ? windowDays.Value
+            : throw new ApiException(400, "window_days 必須介於 1 到 365");
 
     [HttpGet("legacy-inventory")]
     public async Task<IActionResult> LegacyInventory(CancellationToken ct)

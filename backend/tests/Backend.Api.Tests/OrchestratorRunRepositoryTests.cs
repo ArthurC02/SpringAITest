@@ -425,6 +425,56 @@ public sealed class OrchestratorRunRepositoryTests
         Assert.Equal("cancelled", (await fixture.Runs.GetChildAsync("t", "u", created.Run.Id, child.Id, default))!.Status);
     }
 
+    // W2-05 讀取路徑收斂(lite 側,對齊 Dapper 的 OrchestratorRunRepository.GetAsync):使用者看到
+    // 「永遠執行中而無錯誤提示」發生在讀取路徑上,所以 GetAsync 對「已過 deadline 且仍非終態」的 run
+    // 先收斂再回傳。四個等價類一次釘住:過期非終態要轉成 timed_out、未過期完全不受影響、已終態
+    // (completed)即使過了 deadline 也不得被改動、連續兩次 GetAsync 不得產生第二次轉換。
+    [Fact]
+    public async Task GetAsync_ConvergesExpiredNonTerminalRun_Idempotently_AndLeavesFreshAndTerminalRunsAlone()
+    {
+        var fixture = await FixtureAsync();
+        IOrchestratorRunRepository durable = fixture.Runs;
+
+        var expired = await fixture.Runs.CreateAsync(
+            "t", "u", "USER", [], [], fixture.OrchestratorId, "read-converge", "work", "read-converge-key", default);
+        var fresh = await fixture.Runs.CreateAsync(
+            "t", "u", "USER", [], [], fixture.OrchestratorId, "read-fresh", "work", "read-fresh-key", default);
+        var terminal = await fixture.Runs.CreateAsync(
+            "t", "u", "USER", [], [], fixture.OrchestratorId, "read-terminal", "work", "read-terminal-key", default);
+
+        // terminal 這一筆先真的完成,再把 deadline 撥到過去 —— 終態 + 過期是獨立於「過期非終態」的等價類。
+        var claim = await durable.ClaimCommandAsync("t", "u", terminal.Run!.Id, terminal.Dispatch!.CommandId, "worker", 30, default);
+        var terminalState = await fixture.Runs.GetAsync("t", "u", terminal.Run.Id, default);
+        Assert.Equal(
+            OrchestratorRunWriteStatus.Success,
+            (await durable.TransitionAsync("t", "u", terminal.Run.Id, new OrchestratorRootTransitionRequest(
+                terminalState!.StateVersion, claim!.ClaimToken, claim.LeaseGeneration, "completed",
+                Result: JsonDocument.Parse("{}").RootElement.Clone()), default)).Status);
+        SetDeadline(fixture.Runs, terminal.Run.Id, DateTime.UtcNow.AddSeconds(-1));
+        SetDeadline(fixture.Runs, expired.Run!.Id, DateTime.UtcNow.AddSeconds(-1));
+
+        // 沒有任何 scrubber / 背景服務跑過 —— 收斂完全由這次讀取觸發。
+        var converged = await fixture.Runs.GetAsync("t", "u", expired.Run.Id, default);
+        Assert.Equal("timed_out", converged!.Status);
+        Assert.Equal("deadline_exceeded", converged.ErrorCode);
+        Assert.Equal("timed_out", RawStatus(fixture.Runs, expired.Run.Id));
+
+        // 冪等:第二次讀取不得再轉一次(state_version 不動、只有一個 root_timed_out 事件)。
+        var again = await fixture.Runs.GetAsync("t", "u", expired.Run.Id, default);
+        Assert.Equal(converged.StateVersion, again!.StateVersion);
+        Assert.Equal(
+            1,
+            (await fixture.Runs.EventsAsync("t", "u", expired.Run.Id, 0, 50, default))!.Events.Count(x => x.EventType == "root_timed_out"));
+
+        Assert.Equal("queued", (await fixture.Runs.GetAsync("t", "u", fresh.Run!.Id, default))!.Status);
+        var stillCompleted = await fixture.Runs.GetAsync("t", "u", terminal.Run.Id, default);
+        Assert.Equal("completed", stillCompleted!.Status);
+        Assert.Null(stillCompleted.ErrorCode);
+        Assert.DoesNotContain(
+            (await fixture.Runs.EventsAsync("t", "u", terminal.Run.Id, 0, 50, default))!.Events,
+            x => x.EventType == "root_timed_out");
+    }
+
     // F3 回歸測試:私有 static Expire() 沒有 agentRuns 依賴,root 逾時只把本地 Child.Status 鏡射欄位
     // 撥成 cancelled,完全不呼叫 agentRuns.CancelAsync -- 底層 D3 agent_run 永遠不知道要取消。斷言必須
     // 讀 childRuns.CancelCalled/GetAsync(真正的 D3 run 狀態),Child.Status 鏡射欄位在修好之前就已經是
@@ -531,8 +581,8 @@ public sealed class OrchestratorRunRepositoryTests
         // Not terminal -- ClaimRecoveryAsync's claim phase (same call, after the failed scrub) is
         // free to reclaim the still-uncompleted command and move queued -> running; that is a
         // separate, expected concern from Expire's own all-or-nothing contract asserted below.
-        var afterFailedCascade = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
-        Assert.NotEqual("timed_out", afterFailedCascade!.Status);
+        // 讀權威欄位而非 GetAsync:GetAsync 現在會自己再收斂一次(W2-05),那會蓋掉待測的狀態。
+        Assert.NotEqual("timed_out", RawStatus(fixture.Runs, created.Run.Id));
         Assert.False(childRuns.CancelCalled);
         var events = await fixture.Runs.EventsAsync("t", "u", created.Run.Id, 0, 50, default);
         var incomplete = Assert.Single(events!.Events, x => x.EventType == "root_timeout_cascade_incomplete");
@@ -545,6 +595,42 @@ public sealed class OrchestratorRunRepositoryTests
         var afterRetry = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
         Assert.Equal("timed_out", afterRetry!.Status);
         Assert.True(childRuns.CancelCalled);
+    }
+
+    // Code review 追加迴歸測試:GetAsync 的 cascade-失敗分支原本不是冪等的 —— 每次讀取都會對已知
+    // 卡住的 child 重打一次 agentRuns.CancelAsync,並無上限地再追加一筆 root_timeout_cascade_incomplete
+    // 事件,和 Dapper 權威側「整段交易回滾、什麼都不寫」的語意分歧。這裡釘住:同一組失敗子執行連續
+    // 兩次 GetAsync,事件數不得變成 2、底層取消呼叫也不得變成 2(讀取路徑不是重試驅動者,那是
+    // ClaimRecoveryAsync 專責的工作 —— 見 Expire_WhenChildCancelFails_RootStaysNonTerminal_AndNextScrubRetries)。
+    [Fact]
+    public async Task GetAsync_WhenChildCancelFails_IsIdempotent_AcrossRepeatedReads()
+    {
+        var childRuns = new ScriptedChildAgentRuns();
+        var fixture = await FixtureAsync(maxChildRuns: 3, maxConcurrency: 3, agentRuns: childRuns);
+        var created = await fixture.Runs.CreateAsync(
+            "t", "u", "ADMIN", [], [], fixture.OrchestratorId, "expire-read-idempotent", "plan", "expire-read-idempotent-key", default);
+        var child = await ChildAsync(fixture, created.Run!.Id, "task-1");
+        Assert.NotNull(child);
+        childRuns.EnterWaitingInput();
+        Assert.Equal("waiting_input", (await fixture.Runs.GetChildAsync("t", "u", created.Run.Id, child!.Id, default))!.Status);
+        SetDeadline(fixture.Runs, created.Run.Id, DateTime.UtcNow.AddSeconds(-1));
+        childRuns.FailCancel = true;
+
+        var first = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        var second = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+
+        Assert.NotEqual("timed_out", first!.Status);
+        Assert.NotEqual("timed_out", second!.Status);
+        var events = await fixture.Runs.EventsAsync("t", "u", created.Run.Id, 0, 50, default);
+        Assert.Single(events!.Events, x => x.EventType == "root_timeout_cascade_incomplete");
+        Assert.Equal(1, childRuns.CancelAttempts);
+
+        // The dedicated scrub is still the retry driver: it must not be blocked by the read-path dedup.
+        childRuns.FailCancel = false;
+        IOrchestratorRunRepository durable = fixture.Runs;
+        await durable.ClaimRecoveryAsync("scrubber-1", 10, 30, default);
+        var afterScrub = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
+        Assert.Equal("timed_out", afterScrub!.Status);
     }
 
     // P1-06 回歸測試:cancel 的 child cascade 原本排在 root 已被寫成 cancelled 之後,而且整段沒有
@@ -615,8 +701,8 @@ public sealed class OrchestratorRunRepositoryTests
             () => durable.ClaimRecoveryAsync("scrubber-ct", 10, 30, cts.Token));
 
         childRuns.CancelDuringChildCancel = null;
-        var run = await fixture.Runs.GetAsync("t", "u", created.Run.Id, default);
-        Assert.Equal("queued", run!.Status);
+        // 同上:用權威欄位觀測,GetAsync 會自己收斂(W2-05),那正好會做掉這裡要證明「沒有發生」的事。
+        Assert.Equal("queued", RawStatus(fixture.Runs, created.Run.Id));
         var events = await fixture.Runs.EventsAsync("t", "u", created.Run.Id, 0, 50, default);
         Assert.DoesNotContain(events!.Events, x => x.EventType is "root_timed_out" or "root_timeout_cascade_incomplete");
         Assert.Equal("queued", (await childRuns.GetAsync("t", "u", first!.AgentRunId, default))!.Status);
@@ -918,6 +1004,10 @@ public sealed class OrchestratorRunRepositoryTests
         /// <summary>是否曾被要求取消(F1 迴歸斷言:waiting_input 子執行的取消是否真的傳到這裡)。</summary>
         public bool CancelCalled { get; private set; }
 
+        /// <summary>W2-05 cascade 去重回歸測試用:CancelAsync 被呼叫的總次數(含失敗的嘗試),
+        /// 用來斷言重複讀取不會讓底層取消呼叫隨讀取次數線性成長。</summary>
+        public int CancelAttempts { get; private set; }
+
         /// <summary>Expire all-or-nothing 回歸測試用:讓 CancelAsync 丟例外而不是成功,模擬單一
         /// child 取消失敗,藉此驗證 root 因此保持非終局(留給下次 scrub 重試),而不是被吞掉後
         /// 仍然標成 timed_out。</summary>
@@ -945,6 +1035,7 @@ public sealed class OrchestratorRunRepositoryTests
             lock (_gate)
             {
                 if (!_runs.TryGetValue(id, out var run)) throw new NotSupportedException();
+                CancelAttempts++;
                 CancelDuringChildCancel?.Cancel();
                 ct.ThrowIfCancellationRequested();
                 if (FailCancel || FailCancelAgentRunId == id) throw new InvalidOperationException("scripted cancel failure");
@@ -963,12 +1054,22 @@ public sealed class OrchestratorRunRepositoryTests
     }
 
     private static void SetDeadline(InMemoryOrchestratorRunRepository repository, Guid runId, DateTime deadline)
+        => Entry(repository, runId).GetType().GetField("Deadline")!.SetValue(Entry(repository, runId), deadline);
+
+    /// <summary>
+    /// W2-05 之後 <c>GetAsync</c> 是**會收斂的讀取**:對已過 deadline 的非終態 run 它會先跑逾時
+    /// cascade 再回傳。要斷言「某個寫入路徑自己有沒有把 run 標成終局」時就不能再用它當觀測手段
+    /// (那會把待測的那件事順手做掉),所以這裡直接讀權威的 <c>Entry.Status</c> 欄位。
+    /// </summary>
+    private static string RawStatus(InMemoryOrchestratorRunRepository repository, Guid runId)
+        => (string)Entry(repository, runId).GetType().GetField("Status")!.GetValue(Entry(repository, runId))!;
+
+    private static object Entry(InMemoryOrchestratorRunRepository repository, Guid runId)
     {
         var runs = (System.Collections.IDictionary)typeof(InMemoryOrchestratorRunRepository)
             .GetField("_runs", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .GetValue(repository)!;
-        var entry = runs[runId]!;
-        entry.GetType().GetField("Deadline")!.SetValue(entry, deadline);
+        return runs[runId]!;
     }
 
     private static async Task<Guid> CreateWorkflow(Data.InMemory.InMemoryWorkflowRepository workflows, string name, string kind)
@@ -1233,6 +1334,87 @@ public sealed class OrchestratorRunRepositoryPostgresTests(PostgresFixture fixtu
         await using var connection = await fixture.DataSource!.OpenConnectionAsync();
         Assert.Equal(1, await connection.ExecuteScalarAsync<int>("SELECT count(*) FROM orchestrator_run WHERE id=@runId", new { runId }));
         Assert.Equal(1, await connection.ExecuteScalarAsync<int>("SELECT count(*) FROM orchestrator_run_command WHERE run_id=@runId AND command_type='resume'", new { runId }));
+    }
+
+    // W2-05 讀取路徑收斂(Dapper 權威側)。四個等價類:過期非終態經 GetAsync 收斂成 timed_out、
+    // 未過期不受影響、已終態不被改動、連續兩次 GetAsync 不得產生第二次轉換。這裡沒有跑任何
+    // ClaimRecoveryAsync/ResumeAsync —— 收斂必須完全由讀取本身觸發。
+    [SkippableFact]
+    public async Task GetAsync_ConvergesExpiredNonTerminalRun_Idempotently_AndLeavesFreshAndTerminalRunsAlone()
+    {
+        fixture.SkipIfUnavailable();
+        var repo = new OrchestratorRunRepository(fixture.DataSource!);
+        var expired = Guid.NewGuid(); var fresh = Guid.NewGuid(); var terminal = Guid.NewGuid();
+        await InsertAsync(expired, "read-converge", Guid.NewGuid(), "running", expired: true);
+        await InsertAsync(fresh, "read-fresh", Guid.NewGuid(), "running");
+        await InsertAsync(terminal, "read-terminal", Guid.NewGuid(), "completed", expired: true);
+
+        var converged = await repo.GetAsync(Tenant, "user", expired, default);
+        Assert.Equal("timed_out", converged!.Status);
+        Assert.Equal("deadline_exceeded", converged.ErrorCode);
+
+        var again = await repo.GetAsync(Tenant, "user", expired, default);
+        Assert.Equal("timed_out", again!.Status);
+        Assert.Equal(converged.StateVersion, again.StateVersion);
+
+        Assert.Equal("running", (await repo.GetAsync(Tenant, "user", fresh, default))!.Status);
+        var stillCompleted = await repo.GetAsync(Tenant, "user", terminal, default);
+        Assert.Equal("completed", stillCompleted!.Status);
+        Assert.Null(stillCompleted.ErrorCode);
+
+        await using var connection = await fixture.DataSource!.OpenConnectionAsync();
+        Assert.Equal(1, await connection.ExecuteScalarAsync<int>("SELECT count(*)::int FROM orchestrator_run_event WHERE run_id=@id AND event_type='root_timed_out'", new { id = expired }));
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>("SELECT count(*)::int FROM orchestrator_run_event WHERE run_id=@id AND event_type='root_timed_out'", new { id = terminal }));
+        Assert.Equal(0, await connection.ExecuteScalarAsync<int>("SELECT count(*)::int FROM orchestrator_run_event WHERE run_id=@id AND event_type='root_timed_out'", new { id = fresh }));
+    }
+
+    // Code review finding (W2-05 follow-up): the convergence write inside GetAsync must be
+    // best-effort. Inject a real Postgres failure into exactly the expiry UPDATE (a trigger that
+    // raises only for this run's id, so it cannot affect any other test's rows) and assert the
+    // read path still returns the pre-expiry row instead of surfacing a 500, and that no partial
+    // mutation (event or status change) leaked out of the rolled-back transaction.
+    [SkippableFact]
+    public async Task GetAsync_ExpiryWriteFails_StaysBestEffort_AndReturnsPriorRowWithoutPartialMutation()
+    {
+        fixture.SkipIfUnavailable();
+        var repo = new OrchestratorRunRepository(fixture.DataSource!);
+        var expired = Guid.NewGuid();
+        await InsertAsync(expired, "read-converge-write-fails", Guid.NewGuid(), "running", expired: true);
+
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            await connection.ExecuteAsync($"""
+                CREATE OR REPLACE FUNCTION w2_05_get_async_deny_expiry() RETURNS trigger AS $trg$
+                BEGIN
+                    IF NEW.id = '{expired:D}' THEN
+                        RAISE EXCEPTION 'injected failure: W2-05 expiry write must stay best-effort';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $trg$ LANGUAGE plpgsql;
+                DROP TRIGGER IF EXISTS w2_05_get_async_deny_expiry_trg ON orchestrator_run;
+                CREATE TRIGGER w2_05_get_async_deny_expiry_trg
+                    BEFORE UPDATE ON orchestrator_run
+                    FOR EACH ROW EXECUTE FUNCTION w2_05_get_async_deny_expiry();
+                """);
+        }
+        try
+        {
+            var run = await repo.GetAsync(Tenant, "user", expired, default);
+
+            Assert.NotNull(run);
+            Assert.Equal("running", run!.Status);
+            Assert.Null(run.ErrorCode);
+        }
+        finally
+        {
+            await using var cleanup = await fixture.DataSource!.OpenConnectionAsync();
+            await cleanup.ExecuteAsync("DROP TRIGGER IF EXISTS w2_05_get_async_deny_expiry_trg ON orchestrator_run; DROP FUNCTION IF EXISTS w2_05_get_async_deny_expiry();");
+        }
+
+        await using var verify = await fixture.DataSource!.OpenConnectionAsync();
+        Assert.Equal("running", await verify.ExecuteScalarAsync<string>("SELECT status FROM orchestrator_run WHERE id=@id", new { id = expired }));
+        Assert.Equal(0, await verify.ExecuteScalarAsync<int>("SELECT count(*)::int FROM orchestrator_run_event WHERE run_id=@id AND event_type='root_timed_out'", new { id = expired }));
     }
 
     [SkippableFact]

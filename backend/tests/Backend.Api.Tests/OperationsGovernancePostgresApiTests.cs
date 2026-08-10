@@ -292,6 +292,73 @@ public sealed class OperationsGovernancePostgresApiTests(PostgresFixture fixture
             new { tenant }));
     }
 
+    /// <summary>
+    /// W2-02(e) 儀表板統計時間窗。四件事一次釘住:預設 90 天、呼叫端可覆寫、值域 1–365 的
+    /// on-point/off-point、以及**窗外資料真的不計入聚合**(這是整個決策的重點,也是只有真 DB 能證明的
+    /// 部分——lite 的紀錄全部發生在本行程執行期間,回填不了 200 天前的時間戳)。
+    /// 同時確認實際區間有隨回應帶出(window_days):數字含義改變卻不告訴使用者,就是把效能問題
+    /// 轉嫁成正確性問題。
+    /// </summary>
+    [SkippableFact]
+    public async Task D7_DapperHttp_MetricsWindow_DefaultsTo90Days_IsOverridable_AndExcludesOlderRows()
+    {
+        fixture.SkipIfUnavailable();
+
+        var tenant = TenantPrefix + Guid.NewGuid().ToString("N");
+        var recent = Guid.NewGuid();
+        var old = Guid.NewGuid();
+        await using (var connection = await fixture.DataSource!.OpenConnectionAsync())
+        {
+            await connection.ExecuteAsync(
+                """
+                INSERT INTO orchestrator_run
+                  (id,tenant_id,user_id,caller_role,orchestrator_id,orchestrator_revision,conversation_id,
+                   workflow_id,workflow_revision,execution_snapshot,execution_snapshot_canonical,snapshot_sha256,
+                   request_sha256,idempotency_key_sha256,status,deadline_at,created_at)
+                VALUES
+                  (@recent,@tenant,'owner','ADMIN',@orchestrator,1,'window-recent',@workflow,1,
+                   '{}'::jsonb,decode('7b7d','hex'),@hash,@hash,@key1,'running',now()+interval '1 hour',now()-interval '2 hours'),
+                  (@old,@tenant,'owner','ADMIN',@orchestrator,2,'window-old',@workflow,1,
+                   '{}'::jsonb,decode('7b7d','hex'),@hash,@hash,@key2,'running',now()+interval '1 hour',now()-interval '200 days');
+                INSERT INTO operations_release_audit(tenant_id,kind,outcome,actor_id,detail,occurred_at)
+                VALUES(@tenant,'rollout','updated','operator','revision:1',now()-interval '2 hours'),
+                      (@tenant,'rollout','updated','operator','revision:2',now()-interval '200 days');
+                """,
+                new
+                {
+                    recent,
+                    old,
+                    tenant,
+                    orchestrator = Guid.NewGuid(),
+                    workflow = Guid.Parse(AgentDefaults.RuntimeWorkflowId),
+                    hash = new string('a', 64),
+                    key1 = new string('b', 64),
+                    key2 = new string('c', 64),
+                });
+        }
+
+        using var factory = new DapperOperationsFactory(fixture.DataSource!);
+        using var admin = Client(factory, tenant, "operator", manage: true);
+
+        var byDefault = await (await admin.GetAsync("/api/admin/operations/metrics")).ReadJsonAsync();
+        Assert.Equal(OperationsMetricsWindow.DefaultDays, byDefault["window_days"]!.GetValue<int>());
+        Assert.Equal(1, byDefault["multi_agent"]!["root_runs"]!.GetValue<int>());
+        Assert.Equal(1, byDefault["multi_agent"]!["rollout_events"]!.GetValue<int>());
+        Assert.Equal(1, byDefault["release_gate"]!["audit_entries"]!.GetValue<int>());
+
+        var widened = await (await admin.GetAsync("/api/admin/operations/metrics?window_days=365")).ReadJsonAsync();
+        Assert.Equal(365, widened["window_days"]!.GetValue<int>());
+        Assert.Equal(2, widened["multi_agent"]!["root_runs"]!.GetValue<int>());
+        Assert.Equal(2, widened["multi_agent"]!["rollout_events"]!.GetValue<int>());
+
+        var comparisonDefault = await (await admin.GetAsync("/api/admin/operations/version-comparison")).ReadJsonAsync();
+        Assert.Equal(OperationsMetricsWindow.DefaultDays, comparisonDefault["window_days"]!.GetValue<int>());
+        Assert.Equal(1, comparisonDefault["revisions"]!.AsArray().Count);
+        var comparisonWide = await (await admin.GetAsync("/api/admin/operations/version-comparison?window_days=365")).ReadJsonAsync();
+        Assert.Equal(365, comparisonWide["window_days"]!.GetValue<int>());
+        Assert.Equal(2, comparisonWide["revisions"]!.AsArray().Count);
+    }
+
     /// <summary>租戶前綴清理:依外鍵相依由葉往根刪,讓共用的 springaitest 不留 D7 殘列。</summary>
     private async Task CleanupAsync()
     {

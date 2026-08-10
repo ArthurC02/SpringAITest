@@ -42,7 +42,45 @@ public sealed class OrchestratorRunRepository(NpgsqlDataSource dataSource, ICont
             return new(OrchestratorRunWriteStatus.Conflict, Message: "An active root run already exists for this conversation and Orchestrator");
         }
     }
-    public async Task<OrchestratorRunResponse?> GetAsync(string tenant, string user, Guid id, CancellationToken ct) { await using var c = await dataSource.OpenConnectionAsync(ct); return ToResponse(await Load(c, tenant, user, id, ct)); }
+    /// <summary>
+    /// W2-05 讀取路徑收斂:回傳前,若這筆 run 已過 <c>deadline_at</c> 卻仍停在非終態,就先跑既有的
+    /// <see cref="ExpireDeadlineAsync(NpgsqlConnection, NpgsqlTransaction, string, string, Guid, CancellationToken)"/>
+    /// 再回傳收斂後的狀態——回報的實際傷害(「使用者看到永遠執行中而無錯誤提示」)正是發生在讀取路徑上。
+    /// 這裡不引入第二個會改變 run 終態的行為者:沿用的是已被 resume / cancel / claim / recovery 四條
+    /// 路徑呼叫的同一個函式,它的 UPDATE 本身帶 <c>status IN (...) AND deadline_at&lt;=clock_timestamp()</c>
+    /// 守衛,所以連續兩次 GetAsync 的第二次一定 0 rows、不會寫出第二個 <c>root_timed_out</c> 事件或第二次
+    /// 狀態轉換。.NET 端的時間比較只是「要不要開交易」的前置過濾,是否真的逾時仍由資料庫時鐘裁決。
+    /// 已知殘留缺口(有意識接受):沒有人查詢的 run 仍會一直掛著非終態。
+    /// 決策記錄:plans/wave2-decisions-2026-08-10.md(W2-05)。
+    /// 收斂本身是 best-effort:這支 GET 的契約仍然是「讀」,不能因為收斂的 UPDATE 撞到暫時性錯誤
+    /// (deadlock 40P01、lock timeout、連線中斷……)就讓原本的純讀取跟著回 500。收斂失敗時退回收斂前
+    /// 讀到的那一列——這與 InMemory 那側「cascade 失敗只記一筆診斷事件、不讓例外冒出 GetAsync」的語意
+    /// 對齊。只有呼叫端自己的 CancellationToken 觸發的取消要原樣往外拋,其餘例外一律吞下退回舊列。
+    /// </summary>
+    public async Task<OrchestratorRunResponse?> GetAsync(string tenant, string user, Guid id, CancellationToken ct)
+    {
+        await using var c = await dataSource.OpenConnectionAsync(ct);
+        var row = await Load(c, tenant, user, id, ct);
+        if (row is null || row.Status is not ("queued" or "running" or "waiting_input") || row.Deadline > DateTime.UtcNow)
+            return ToResponse(row);
+        try
+        {
+            await using (var tx = await c.BeginTransactionAsync(ct))
+            {
+                if (!await ExpireDeadlineAsync(c, tx, tenant, user, id, ct))
+                {
+                    await tx.RollbackAsync(ct);
+                    return ToResponse(row);
+                }
+                await tx.CommitAsync(ct);
+            }
+        }
+        catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return ToResponse(row);
+        }
+        return ToResponse(await Load(c, tenant, user, id, ct));
+    }
     public async Task<OrchestratorRunActiveLookup> FindActiveAsync(string tenant, string user, string conversation, CancellationToken ct) { await using var c = await dataSource.OpenConnectionAsync(ct); var rows = (await c.QueryAsync<Row>(new CommandDefinition("SELECT " + Columns + " FROM orchestrator_run WHERE tenant_id=@tenant AND user_id=@user AND conversation_id=@conversation AND status IN ('queued','running','waiting_input') ORDER BY created_at DESC LIMIT 2", new { tenant, user, conversation }, cancellationToken: ct))).ToArray(); return rows.Length switch { 1 => new OrchestratorRunActiveLookup(ToResponse(rows[0])), > 1 => new OrchestratorRunActiveLookup(null, null, true), _ => new OrchestratorRunActiveLookup(null) }; }
     public async Task<OrchestratorRunActiveLookup> FindByIdempotencyKeyAsync(string tenant, string user, string key, OrchestratorRunReplayRequest replay, CancellationToken ct)
     {

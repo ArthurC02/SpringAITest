@@ -144,6 +144,36 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         Assert.Equal(HttpStatusCode.Conflict, (await OverrideAsync(admin, new string('r', 1000), "reason-at-limit")).StatusCode);
     }
 
+    // W2-02(e) window_days 的值域決策表:省略 → 預設 90 並帶回應;界內 → 照用並帶回應;
+    // 界外 → 400(刻意不夾到邊界,見 OperationsMetricsWindow 的註解)。on-point(1 / 365)與
+    // off-point(0 / 366)兩側都測,只用「安全內部值」試不出打錯的邊界數字。
+    // 窗外資料真的不計入聚合的部分由 Postgres 測試證明(lite 回填不了 200 天前的時間戳)。
+    [Theory]
+    [InlineData(null, OperationsMetricsWindow.DefaultDays, HttpStatusCode.OK)]
+    [InlineData(OperationsMetricsWindow.MinDays, OperationsMetricsWindow.MinDays, HttpStatusCode.OK)]
+    [InlineData(OperationsMetricsWindow.MaxDays, OperationsMetricsWindow.MaxDays, HttpStatusCode.OK)]
+    [InlineData(OperationsMetricsWindow.MinDays - 1, 0, HttpStatusCode.BadRequest)]
+    [InlineData(OperationsMetricsWindow.MaxDays + 1, 0, HttpStatusCode.BadRequest)]
+    [InlineData(-1, 0, HttpStatusCode.BadRequest)]
+    public async Task MetricsAndComparison_HonourWindowBounds_AndEchoTheAppliedWindow(
+        int? windowDays, int expectedWindow, HttpStatusCode expected)
+    {
+        using var admin = Client("ops-window-" + (windowDays?.ToString() ?? "default"), "operator", manage: true);
+        var query = windowDays is int days ? "?window_days=" + days : "";
+
+        foreach (var route in new[] { "metrics", "version-comparison" })
+        {
+            var response = await admin.GetAsync("/api/admin/operations/" + route + query);
+
+            Assert.Equal(expected, response.StatusCode);
+            var body = await response.ReadJsonAsync();
+            if (expected == HttpStatusCode.OK)
+                Assert.Equal(expectedWindow, body["window_days"]!.GetValue<int>());
+            else
+                body.AssertApiError(400, "validation_failed");
+        }
+    }
+
     private static async Task<HttpResponseMessage> OverrideAsync(HttpClient client, string reason, string key)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/operations/regression-overrides")
@@ -176,7 +206,7 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         await store.RecordTelemetryAsync("metric-a", new(run, Guid.NewGuid(), "tool", "invoke_tool", "local.calculator", "skill-a", 3, "agent-a", 7, null, null, 10), default);
         await store.RecordTelemetryAsync("metric-b", new(Guid.NewGuid(), Guid.NewGuid(), "model", "other", null, "other", 1, "other", 1, 99, 9m, 99), default);
 
-        var metrics = await store.GetMetricsAsync("metric-a", default);
+        var metrics = await store.GetMetricsAsync("metric-a", OperationsMetricsWindow.DefaultDays, default);
         var agent = Assert.Single(metrics.Agents);
         Assert.Equal(("agent-a", 7, 1), (agent.AgentId, agent.Revision, agent.Runs));
         Assert.Equal(12, agent.ObservedUsageUnits); Assert.Equal(1.25m, agent.ObservedCostUnits);
@@ -186,7 +216,7 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
         Assert.Equal("local.calculator", tool.Kind); Assert.Equal(10, tool.ObservedLatencyMs);
         Assert.Equal(2, metrics.Nodes.Count);
 
-        var comparison = await store.GetVersionComparisonAsync("metric-a", 7, default);
+        var comparison = await store.GetVersionComparisonAsync("metric-a", 7, OperationsMetricsWindow.DefaultDays, default);
         // Telemetry carries Agent revision, never Orchestrator revision.
         // Lite mode has no durable Root ledger, so it must not fabricate an
         // Orchestrator version series from these events.
@@ -211,7 +241,7 @@ public sealed class OperationsGovernanceApiTests : IClassFixture<TestWebAppFacto
                 await store.RecordTelemetryAsync(tenant, new(Guid.NewGuid(), Guid.NewGuid(), "model", "model_step", null, null, null, null, null, null, null, 1), default);
                 var gate = await store.RecordRegressionAsync(tenant, "suite", true, "evidence", "actor", default);
                 await store.GetCurrentGateAsync(tenant, default);
-                await store.GetMetricsAsync(tenant, default);
+                await store.GetMetricsAsync(tenant, OperationsMetricsWindow.DefaultDays, default);
                 await store.ApplyRolloutAsync(tenant, binding, "actor", default);
                 await store.CreateOverrideAsync(tenant, gate.Id, $"key-{i}-{round}", "reason", "actor", default);
             }

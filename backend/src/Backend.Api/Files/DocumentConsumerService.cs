@@ -81,6 +81,12 @@ public sealed class DocumentConsumerService : BackgroundService
                 await _channel.QueueDeclareAsync(
                     queue: DeadLetterQueueName, durable: true, exclusive: false, autoDelete: false, arguments: null,
                     cancellationToken: stoppingToken);
+                // ponytail: prefetch=1 是有意識的全域序列化天花板,不是疏漏 —— 整個進程一次只處理
+                // 一份文件,批次上傳會排隊。維持它是因為提高並行度要付出 embedding provider 速率
+                // 限制、pgvector 寫入競爭與更難除錯的代價,而目前沒有任何實際的延遲回饋。
+                // 升級路徑:先量測 202 -> ready 的等待時間(bounded telemetry,只帶固定 outcome
+                // 列舉,不得帶 tenant / document id),確認實際延遲後再決定提高 prefetchCount 或
+                // 開多個 channel。W2-07 決策記錄:plans/wave2-decisions-2026-08-10.md。
                 await _channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false, stoppingToken);
 
                 var consumer = new AsyncEventingBasicConsumer(_channel);

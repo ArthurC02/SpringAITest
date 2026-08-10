@@ -9,8 +9,11 @@ namespace Platform.Web.Controllers;
 [ApiController, Route("api/admin/operations"), Authorize(Policy = "workflow.manage")]
 public sealed class OperationsGovernanceController(BackendClient backend) : ProxyControllerBase
 {
-    [HttpGet("metrics")] public Task<IActionResult> Metrics(CancellationToken ct) => Send(HttpMethod.Get, "metrics", null, ct);
-    [HttpGet("version-comparison")] public Task<IActionResult> Compare(CancellationToken ct) => Send(HttpMethod.Get, "version-comparison", null, ct);
+    // W2-02(e):window_days 是純透傳,值域(1–365)與拒絕行為由 Backend authority 決定 —— 在這裡
+    // 再驗一次只會讓兩份規則慢慢漂移。省略時 Backend 用預設 90 天。
+    [HttpGet("metrics")] public Task<IActionResult> Metrics([FromQuery(Name = "window_days")] int? windowDays, CancellationToken ct) => Send(HttpMethod.Get, "metrics" + Window(windowDays), null, ct);
+    [HttpGet("version-comparison")] public Task<IActionResult> Compare([FromQuery(Name = "window_days")] int? windowDays, CancellationToken ct) => Send(HttpMethod.Get, "version-comparison" + Window(windowDays), null, ct);
+    private static string Window(int? windowDays) => windowDays is int days ? "?window_days=" + days.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
     [HttpGet("legacy-inventory")] public Task<IActionResult> Inventory(CancellationToken ct) => Send(HttpMethod.Get, "legacy-inventory", null, ct);
     [HttpGet("evidence-reconcile")] public Task<IActionResult> EvidenceReconcile(CancellationToken ct) => Send(HttpMethod.Get, "evidence-reconcile", null, ct);
     [HttpPost("regressions")] public Task<IActionResult> Regression([FromBody] object body, CancellationToken ct) => Send(HttpMethod.Post, "regressions", body, ct);

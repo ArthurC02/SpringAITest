@@ -87,10 +87,25 @@ public sealed class InMemoryOrchestratorRunRepository(
         finally { _gate.Release(); }
     }
 
+    /// <summary>
+    /// W2-05 讀取路徑收斂,對齊 Dapper 的 <c>OrchestratorRunRepository.GetAsync</c>:已過 deadline 且
+    /// 仍非終態的 run,在回傳前先跑同一支 <see cref="ExpireLockedAsync"/>(它自己的開頭守衛讓終態早退,
+    /// 因此重複 GetAsync 不會產生第二次轉換或第二個 root_timed_out 事件)。cascade 成功語意完全沿用,
+    /// 未改動;唯 cascade 失敗分支傳入 <c>retryKnownFailures:false</c> —— 讀取路徑是被動觀察者、可能
+    /// 被外部輪詢任意頻率呼叫,不是專責重試者,因此對「已知且未變化」的失敗子執行不重新呼叫
+    /// <c>agentRuns.CancelAsync</c>、也不重複追加 <c>root_timeout_cascade_incomplete</c> 事件
+    /// (見 <see cref="ExpireLockedAsync"/> 的 dedup 說明)。真正的重試由 <c>ClaimRecoveryAsync</c> 那支
+    /// scrub 專責驅動,那裡仍然每次都重試。決策記錄:plans/wave2-decisions-2026-08-10.md(W2-05)。
+    /// </summary>
     public async Task<OrchestratorRunResponse?> GetAsync(string tenant, string user, Guid id, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
-        try { return _runs.TryGetValue(id, out var x) && x.Tenant == tenant && x.User == user ? ToResponse(x) : null; }
+        try
+        {
+            if (!_runs.TryGetValue(id, out var x) || x.Tenant != tenant || x.User != user) return null;
+            if (x.Deadline <= DateTime.UtcNow) await ExpireLockedAsync(x, ct, retryKnownFailures: false);
+            return ToResponse(x);
+        }
         finally { _gate.Release(); }
     }
 
@@ -596,7 +611,7 @@ public sealed class InMemoryOrchestratorRunRepository(
         {
             if (_runs.TryGetValue(id, out var run) && run.Tenant == tenant && run.User == user && run.Deadline <= DateTime.UtcNow)
             {
-                await ExpireLockedAsync(run, ct);
+                await ExpireLockedAsync(run, ct, retryKnownFailures: false);
                 return new OrchestratorRunWriteResult(OrchestratorRunWriteStatus.InvalidState, ToResponse(run), "Root run deadline has expired");
             }
         }
@@ -613,7 +628,7 @@ public sealed class InMemoryOrchestratorRunRepository(
             _runs.TryGetValue(runId, out run);
             if (run is not null && run.Tenant == tenant && run.User == user && run.Deadline <= DateTime.UtcNow)
             {
-                await ExpireLockedAsync(run, ct);
+                await ExpireLockedAsync(run, ct, retryKnownFailures: false);
                 return null;
             }
         }
@@ -627,9 +642,12 @@ public sealed class InMemoryOrchestratorRunRepository(
         await _gate.WaitAsync(ct);
         try
         {
+            // This is the dedicated scrub: unlike the read-path call sites above, it always retries
+            // (retryKnownFailures: true) regardless of whether the failed-child set changed since
+            // last time -- it is the one call site whose whole job is retrying a stuck cascade.
             foreach (var run in _runs.Values.Where(x => !x.CommandCompleted && x.Deadline <= DateTime.UtcNow && (x.Status is "queued" or "running" or "waiting_input")))
             {
-                await ExpireLockedAsync(run, ct);
+                await ExpireLockedAsync(run, ct, retryKnownFailures: true);
             }
         }
         finally { _gate.Release(); }
@@ -648,16 +666,31 @@ public sealed class InMemoryOrchestratorRunRepository(
     // Accepted consequence (same one the Dapper transaction already has): a child that can never be
     // cancelled makes this root retry forever without becoming terminal.
     //
+    // <paramref name="retryKnownFailures"/> is the fix for a read-path-is-not-idempotent bug: when
+    // false (every call site above except the dedicated ClaimRecoveryAsync scrub), a cascade is not
+    // re-attempted at all -- and no duplicate event is written -- when the set of still-uncancelled
+    // children exactly matches the set recorded on the run's last cascade failure. Without this, a
+    // client polling GetAsync on a permanently-stuck run would re-invoke agentRuns.CancelAsync and
+    // append a fresh root_timeout_cascade_incomplete event on every single poll, growing both
+    // unboundedly. The dedicated scrub (retryKnownFailures: true) always retries regardless, since
+    // retrying a stuck cascade is its entire purpose.
+    //
     // Do not call another gate-acquiring member here: SemaphoreSlim is not reentrant.
-    private async Task ExpireLockedAsync(Entry run, CancellationToken ct)
+    private async Task ExpireLockedAsync(Entry run, CancellationToken ct, bool retryKnownFailures)
     {
         if (run.Status is "completed" or "failed" or "cancelled" or "timed_out") return;
+        var pending = run.Children.Where(x => x.Status is "queued" or "running" or "waiting_input").Select(x => x.Id).ToHashSet();
+        if (!retryKnownFailures && run.CascadeIncompleteChildren is { } known && known.SetEquals(pending)) return;
         var failures = await CascadeChildCancelLocked(run, "deadline", "orchestrator-deadline", ct);
         if (failures is { Count: > 0 })
         {
-            AppendCascadeIncomplete(run, "root_timeout_cascade_incomplete", failures);
+            var failedIds = failures.Select(f => f.ChildId).ToHashSet();
+            if (run.CascadeIncompleteChildren is null || !run.CascadeIncompleteChildren.SetEquals(failedIds))
+                AppendCascadeIncomplete(run, "root_timeout_cascade_incomplete", failures);
+            run.CascadeIncompleteChildren = failedIds;
             return;
         }
+        run.CascadeIncompleteChildren = null;
         run.Status = "timed_out";
         run.ErrorCode = "deadline_exceeded";
         run.ErrorMessage = "Root run deadline expired";
@@ -705,7 +738,7 @@ public sealed class InMemoryOrchestratorRunRepository(
         => run.Events.Add(new(run.Events.Count + 1, eventType, run.Hash,
             JsonSerializer.SerializeToElement(new { failed_children = failures.Select(f => new { child_id = f.ChildId, error = f.Error.Message }) }),
             DateTime.UtcNow));
-    private sealed class Entry(Guid id, Guid commandId, string tenant, string user, string role, Guid oid, int orev, string conversation, Guid wid, int wrev, string snapshot, string hash, DateTime deadline, DateTime now) { public Guid Id = id, CommandId = commandId; public string Tenant = tenant, User = user, Role = role, Conversation = conversation, Snapshot = snapshot, Hash = hash, Status = "queued"; public Guid OrchestratorId = oid, WorkflowId = wid; public int OrchestratorRevision = orev, WorkflowRevision = wrev; public long Version = 1, LeaseGeneration, CheckpointVersion; public bool CancelRequested, CommandCompleted, DispatchCompleted; public string? ClaimTokenHash, ResumeInput, CheckpointRef, ErrorCode, ErrorMessage; public DateTime ClaimExpiresAt = DateTime.MinValue; public DateTime Deadline = deadline, Created = now, Updated = now; public List<E> Events = []; public List<Child> Children = []; }
+    private sealed class Entry(Guid id, Guid commandId, string tenant, string user, string role, Guid oid, int orev, string conversation, Guid wid, int wrev, string snapshot, string hash, DateTime deadline, DateTime now) { public Guid Id = id, CommandId = commandId; public string Tenant = tenant, User = user, Role = role, Conversation = conversation, Snapshot = snapshot, Hash = hash, Status = "queued"; public Guid OrchestratorId = oid, WorkflowId = wid; public int OrchestratorRevision = orev, WorkflowRevision = wrev; public long Version = 1, LeaseGeneration, CheckpointVersion; public bool CancelRequested, CommandCompleted, DispatchCompleted; public string? ClaimTokenHash, ResumeInput, CheckpointRef, ErrorCode, ErrorMessage; public DateTime ClaimExpiresAt = DateTime.MinValue; public DateTime Deadline = deadline, Created = now, Updated = now; public List<E> Events = []; public List<Child> Children = []; /* Child ids that failed cancellation on the most recent deadline-cascade attempt (null once never attempted or once it last succeeded) -- lets ExpireLockedAsync dedup repeated read-path polls against an unresolved failure. See its own doc comment. */ public HashSet<Guid>? CascadeIncompleteChildren; }
     private sealed class Child(Guid id, string task, int attempt, string kind, Guid agentId, int agentRevision, Guid workflowId, int workflowRevision, string hash, Guid agentRunId, Guid commandId, JsonElement taskEnvelope, JsonElement dispatchArtifact) { public Guid Id = id, AgentId = agentId, WorkflowId = workflowId, AgentRunId = agentRunId, CommandId = commandId; public string Task = task, Kind = kind, Hash = hash, Status = "queued"; public int Attempt = attempt, AgentRevision = agentRevision, WorkflowRevision = workflowRevision; public JsonElement TaskEnvelope = taskEnvelope.Clone(), DispatchArtifact = dispatchArtifact.Clone(); public TaskContextRequest? ContextRequest; }
     private sealed class TaskContextRequest(Guid id, Guid contextId, string role, ContextRef? baseContext, DateTime now)
     {
