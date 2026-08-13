@@ -259,7 +259,10 @@ def test_child_process_sees_no_parent_environment(monkeypatch):
     )
     child = json.loads(result.stdout)
 
-    assert set(child) <= {"SYSTEMROOT"}  # 只留啟動不了就沒得談的那個
+    # Windows 留 SYSTEMROOT（啟動不了就沒得談）；POSIX 留 LC_ALL（擋 CPython 自己的
+    # legacy locale coercion，見 child_env() 註解）。兩者都不是 secret。
+    allowed = {"SYSTEMROOT"} if sys.platform == "win32" else {"LC_ALL"}
+    assert set(child) <= allowed
     for name, value in SECRET_ENVS.items():
         assert name not in child
         assert value not in json.dumps(child)

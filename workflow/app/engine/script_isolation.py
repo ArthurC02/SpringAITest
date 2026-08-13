@@ -108,6 +108,11 @@ def child_env() -> dict[str, str]:
         system_root = os.environ.get("SYSTEMROOT")
         if system_root:
             env["SYSTEMROOT"] = system_root
+    else:
+        # 完全空的環境會讓 CPython 偵測到 legacy C locale，自己觸發 PEP 538 coercion
+        # 並把 LC_CTYPE 寫回 os.environ（-I 也擋不住，這是 libc getenv 層級的行為）。
+        # 自己先設好 LC_ALL，讓這個過程不會被觸發，環境內容才是決定性的。
+        env["LC_ALL"] = "C.UTF-8"
     return env
 
 
