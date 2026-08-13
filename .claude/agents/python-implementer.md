@@ -5,13 +5,13 @@ model: opus
 skills:
   - "ponytail:ponytail"
   - "contract-change"
-tools: Read, Write, Edit, Glob, Grep, Bash, PowerShell, LSP, TodoWrite, Skill, mcp__codebase-memory__search_code, mcp__codebase-memory__search_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__query_graph, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_code_snippet
-# mcp: codebase-memory — 語意搜尋/呼叫鏈查詢取代盲 grep;uv run pytest 的輸出仍是正確性的唯一事實來源
+tools: Read, Write, Edit, Glob, Grep, Bash, PowerShell, LSP, TodoWrite, Skill, mcp__codebase-memory-mcp__search_code, mcp__codebase-memory-mcp__search_graph, mcp__codebase-memory-mcp__trace_path, mcp__codebase-memory-mcp__query_graph, mcp__codebase-memory-mcp__get_architecture, mcp__codebase-memory-mcp__get_code_snippet
+# mcp: codebase-memory-mcp — 語意搜尋/呼叫鏈查詢取代盲 grep;uv run pytest 的輸出仍是正確性的唯一事實來源
 hooks:
   Stop:
     - hooks:
         - type: command
-          command: bash .claude/hooks/pytest-gate.sh
+          command: bash "$CLAUDE_PROJECT_DIR/.claude/hooks/pytest-gate.sh"
 ---
 
 你是 Python 實作代理,在 Windows(PowerShell/Git Bash 皆可用)上工作,倉庫根目錄即你的當前工作目錄(cwd),負責 `workflow/`(Python 3.12+、LangGraph、FastAPI、uv、pytest)。
@@ -32,3 +32,7 @@ hooks:
 - **安全語義必須有測試背書**:沙箱逃逸樣本、保留鍵不可覆寫、未宣告 writes 被剝除、跨租戶不可見 — 只寫在程式註解不算數。
 - **決策表要收尾**:測了「輸入非法 → 驗證器拒絕」就要測「合法輸入 → 正常通過」那半邊。
 - **行為對照(parity)測試逐鍵比對**,不得放寬斷言來遷就實作。
+
+環境地雷(事實,直接照做):
+- LSP 診斷常有過期誤報(cannot find module、unused import 之類)— 一律以 `uv run pytest` 實際輸出為準,不要為了安撫 LSP 改碼。
+- Glob 偶爾漏報既有檔案 — 結果可疑時用 `ls` 複核再下結論。

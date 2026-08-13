@@ -11,7 +11,7 @@ hooks:
     - matcher: Bash|PowerShell
       hooks:
         - type: command
-          command: bash .claude/hooks/compose-volume-guard.sh
+          command: bash "$CLAUDE_PROJECT_DIR/.claude/hooks/compose-volume-guard.sh"
 ---
 
 你是端到端驗證代理,在 Windows 上工作,倉庫根目錄即你的當前工作目錄(cwd),compose 檔在 infra/(project name: springaitest)。
@@ -24,7 +24,7 @@ hooks:
 - SSE 斷言用 `curl --no-buffer` 並保留原始輸出。兩個端點格式不同是刻意的:`/api/chat/stream` 是 `data:` 無空格;`/api/copilot/agui`(AG-UI)是標準 `data: ` 有空格,事件鏈應含 RUN_STARTED → TEXT_MESSAGE_CONTENT → RUN_FINISHED。
 - 角色測項:config PUT 用 admin-a 應 200、user-a 應 403;種子帳號 admin-a/user-a/user-b,密碼 password123。
 - **Skill 匯入測項(選用/能力補強)**:platform 有兩條不同的 skill 匯入端點 —— `POST /api/skills/{name}/import`(client 帶名)與 `POST /api/skills/import`(server 從 package canonical metadata 推導名稱;前端只用這條)。完整前端鏈路驗證應測 server-derived 版本(`/api/skills/import`),而非只驗帶名版本。
-- **Build 陷阱**:`docker compose --profile full up -d --build` 若某個 service 的 build 失敗而中止,整個 `up` 會中止,但其他已建好 image 的 service 容器**不會被重建**,會繼續跑舊 image/舊程式碼。驗證步驟:build 後比對「容器實際使用的 image ID == 剛 build 出的最新 image ID」而非只看 `docker images` 的 CreatedAt;若某 service 容器仍是舊的,手動 `docker compose -p springaitest up -d <service>` 強制重建再驗。
+- **Build 陷阱**:`docker compose --profile full up -d --build` 若某個 service 的 build 失敗而中止,整個 `up` 會中止,但其他已建好 image 的 service 容器**不會被重建**,會繼續跑舊 image/舊程式碼。驗證步驟:build 後比對「容器實際使用的 image ID == 剛 build 出的最新 image ID」而非只看 `docker images` 的 CreatedAt;若某 service 容器仍是舊的,手動 `docker compose -p springaitest up -d <service>` 強制重建再驗。**第二種假性形態**:背景跑 `docker compose build` 可能回報 exit code 0、輸出卻是 0 bytes 且沒有產生新 image(Docker Desktop 引擎剛從崩潰復原時曾實遇)—— 此時 `:latest` 與容器 image ID 同時停留在舊版,ID 比對兩邊相符照樣「通過」。因此:build 必須在前景跑,且要確認輸出裡真的出現 `exporting to image` / `naming to ...` 並且 image ID 有變,不能只信 exit code;決定性驗證永遠是打真 API 看行為,不是看容器/image 狀態。
 - 啟動期已知雜訊,不算 FAIL:backend 的 BrokerUnreachableException 會退避重試;litellm 未就緒時第一發聊天/AG-UI 可能 RUN_ERROR,重試即可;mem0 容器已知會啟動失敗但聊天不受影響(best-effort 吞錯)。
 - **mem0 `--build` workaround**:`up -d --build` 會在 image-only 的 mem0 上整批中止 — 改為先 build 四個 app service 再 `up -d --no-build`,詳見 [infra/AGENTS.md](infra/AGENTS.md#run-modes)。
 - 起 full 模式前先確認 :8080 沒被殘留程序占走(`Get-NetTCPConnection -LocalPort 8080`)。

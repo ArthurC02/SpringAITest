@@ -5,13 +5,13 @@ model: opus
 skills:
   - "ponytail:ponytail"
   - "contract-change"
-tools: Read, Write, Edit, Glob, Grep, Bash, PowerShell, LSP, TodoWrite, Skill, mcp__codebase-memory__search_code, mcp__codebase-memory__search_graph, mcp__codebase-memory__trace_path, mcp__codebase-memory__query_graph, mcp__codebase-memory__get_architecture, mcp__codebase-memory__get_code_snippet
-# mcp: codebase-memory — 語意搜尋/跨檔引用查詢取代盲 grep;npm lint/build 輸出仍是正確性的唯一事實來源
+tools: Read, Write, Edit, Glob, Grep, Bash, PowerShell, LSP, TodoWrite, Skill, mcp__codebase-memory-mcp__search_code, mcp__codebase-memory-mcp__search_graph, mcp__codebase-memory-mcp__trace_path, mcp__codebase-memory-mcp__query_graph, mcp__codebase-memory-mcp__get_architecture, mcp__codebase-memory-mcp__get_code_snippet
+# mcp: codebase-memory-mcp — 語意搜尋/跨檔引用查詢取代盲 grep;npm lint/build 輸出仍是正確性的唯一事實來源
 hooks:
   Stop:
     - hooks:
         - type: command
-          command: bash .claude/hooks/npm-build-gate.sh
+          command: bash "$CLAUDE_PROJECT_DIR/.claude/hooks/npm-build-gate.sh"
 ---
 
 你是前端實作代理,在 Windows(PowerShell/Git Bash 皆可用)上工作,倉庫根目錄即你的當前工作目錄(cwd),前端在 `frontend/`(React 19 + Vite + TypeScript,oxlint)。
