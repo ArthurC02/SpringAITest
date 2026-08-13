@@ -102,19 +102,64 @@ code {
   background: var(--code-bg);
 }
 
-.workflow-designer__palette { border-right: 1px solid var(--border); }
+.workflow-designer__palette { border-right: 1px solid var(--border); overflow-y: auto; max-height: 34rem; }
 .workflow-designer__inspector { border-left: 1px solid var(--border); }
 .workflow-designer__palette .btn { display: block; width: 100%; margin: .5rem 0; text-align: left; }
-.workflow-designer__canvas { position: relative; min-height: 34rem; }
-.workflow-designer__layout { position: absolute; z-index: 4; right: .75rem; top: .75rem; }
+.workflow-designer__group > summary { cursor: pointer; margin-top: .75rem; font-size: .8rem; color: var(--text); }
+/* React Flow 需要確定高度才會量測畫布（min-height 在 grid 內不足以定高）。 */
+.workflow-designer__canvas { position: relative; height: 34rem; }
+.workflow-designer__toolbar { position: absolute; z-index: 4; right: .75rem; top: .75rem; display: flex; gap: .35rem; }
+.workflow-designer__viewbar { display: flex; align-items: center; gap: .4rem; margin-left: 2.6rem; }
+.workflow-designer__zoom { padding: .1rem .35rem; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text-h); font-size: .75rem; font-variant-numeric: tabular-nums; }
 .workflow-designer__config { min-height: 11rem; font-family: var(--mono); font-size: .82rem; }
-.workflow-node { min-width: 10rem; padding: .6rem .8rem; border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); color: var(--text-h); box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+.workflow-designer__delete { margin-top: 1rem; }
+/* 選取高亮一律用 design token，深淺色皆沿用 --accent。 */
+.react-flow__node.selected .workflow-node { outline: 2px solid var(--accent); outline-offset: 1px; }
+.react-flow__edge.selected .react-flow__edge-path, .react-flow__edge-path.workflow-edge--active { stroke: var(--accent); stroke-width: 2.5; }
+/* 埠點加大到好點擊的尺寸（原生 title 提供埠名 tooltip）。 */
+.workflow-designer__canvas .react-flow__handle { width: 10px; height: 10px; border: 1px solid var(--bg); background: var(--accent); }
+.workflow-node { min-width: 11rem; padding: .55rem .7rem; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg); color: var(--text-h); box-shadow: 0 1px 3px rgba(0,0,0,.15); }
 .workflow-node--invalid { border-color: var(--danger); background: var(--danger-bg); }
-.workflow-node__required, .workflow-node__trace { display: inline-block; margin-left: .35rem; padding: 0 .3rem; border-radius: 3px; font-size: .72rem; background: var(--warning-bg); color: var(--warning); }
+.workflow-node__head { display: flex; align-items: center; gap: .5rem; }
+.workflow-node__icon { flex: none; display: grid; place-items: center; width: 1.6rem; height: 1.6rem; border-radius: 6px; background: var(--code-bg); color: var(--text-h); font-size: .9rem; }
+.workflow-node__title { display: flex; flex-direction: column; line-height: 1.25; overflow: hidden; }
+.workflow-node__type { color: var(--text); font-size: .68rem; font-family: var(--mono); }
+.workflow-node__badges:not(:empty) { margin-top: .35rem; }
+.workflow-node__required, .workflow-node__trace, .workflow-node__invalid-badge { display: inline-block; margin-right: .35rem; padding: 0 .3rem; border-radius: 3px; font-size: .72rem; background: var(--warning-bg); color: var(--warning); }
 .workflow-node__trace { background: var(--success-bg); color: var(--success); }
+.workflow-node__invalid-badge { background: var(--danger-bg); color: var(--danger); }
+.workflow-node__tools { display: flex; gap: .25rem; }
+.workflow-node__tools .btn { padding: .15rem .45rem; font-size: .72rem; }
+
+/* 連線 hover 工具列：浮在線的上方，線的中點本身仍可點選。 */
+.workflow-edge__tools { position: absolute; z-index: 6; display: flex; align-items: center; gap: .25rem; padding: .1rem .25rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); pointer-events: all; }
+.workflow-edge__label { color: var(--text); font-size: .68rem; font-family: var(--mono); }
+.workflow-edge__btn { padding: 0 .35rem; font-size: .78rem; line-height: 1.4; }
+
+/* 節點選擇器 / 右鍵情境選單（自製，無 UI 套件）。 */
+.workflow-picker, .workflow-menu { z-index: 40; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: 0 6px 18px rgba(0,0,0,.22); }
+.workflow-picker { width: 19rem; padding: .6rem; }
+.workflow-picker__title { margin: 0 0 .4rem; font-weight: 600; }
+.workflow-picker__list { max-height: 16rem; margin-top: .5rem; overflow-y: auto; }
+.workflow-picker__group { margin: .4rem 0 .2rem; color: var(--text); font-size: .72rem; }
+.workflow-picker__option { display: flex; flex-direction: column; padding: .3rem .4rem; border-radius: 5px; cursor: pointer; }
+.workflow-picker__option .muted { font-size: .68rem; font-family: var(--mono); }
+.workflow-picker__option--active { background: var(--code-bg); outline: 2px solid var(--accent); }
+.workflow-menu { min-width: 10rem; padding: .25rem; }
+.workflow-menu__item { display: block; width: 100%; padding: .35rem .6rem; border: 0; border-radius: 5px; background: none; color: var(--text-h); text-align: left; font: inherit; font-size: .85rem; cursor: pointer; }
+.workflow-menu__item:hover:enabled { background: var(--code-bg); }
+.workflow-menu__item:disabled { color: var(--text); cursor: not-allowed; }
+
+.workflow-help { width: min(34rem, 100%); max-height: 80vh; padding: 1rem; overflow-y: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.workflow-help h4 { margin-top: 0; }
+
+/* MiniMap 節點著色依狀態，仍只用 design tokens。 */
+.react-flow__minimap-node.workflow-mini--normal { fill: var(--accent); }
+.react-flow__minimap-node.workflow-mini--required { fill: var(--warning); }
+.react-flow__minimap-node.workflow-mini--invalid { fill: var(--danger); }
 
 @media (max-width: 900px) {
   .workflow-designer { grid-template-columns: 1fr; }
   .workflow-designer__palette, .workflow-designer__inspector { border: 0; border-bottom: 1px solid var(--border); }
-  .workflow-designer__canvas { min-height: 28rem; }
+  .workflow-designer__canvas { height: 28rem; }
 }

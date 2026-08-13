@@ -1,7 +1,8 @@
 import { expect, test } from 'vitest'
+import type { Node } from '@xyflow/react'
 import { canConnect } from '../src/workflowDesigner/connection'
 import { parseConfigSchema } from '../src/workflowDesigner/configSchema'
-import { patchPositions, semanticFingerprint } from '../src/workflowDesigner/graphAdapter'
+import { patchPositions, semanticFingerprint, syncCanvasEdges, syncCanvasNodes } from '../src/workflowDesigner/graphAdapter'
 import { semanticDiff } from '../src/workflowDesigner/diff'
 import { canDeleteNode, catalogForKind } from '../src/workflowDesigner/catalog'
 import { reconnectSemanticEdge, removeSemanticEdges, removeSemanticNodes } from '../src/workflowDesigner/editing'
@@ -25,7 +26,7 @@ test.describe('Workflow Designer graph boundary', () => {
   test('UI movement changes only ui_metadata, not semantic graph fingerprint', () => {
     const ui: WorkflowUiMetadata = { positions: { a: { x: 1, y: 2 } } }
     const before = semanticFingerprint(graph)
-    const moved = patchPositions(ui, [{ id: 'a', position: { x: 600, y: 400 }, data: {} }])
+    const moved = patchPositions(ui, [{ id: 'a', position: { x: 600, y: 400 } }])
     expect(moved.positions.a).toEqual({ x: 600, y: 400 })
     expect(semanticFingerprint(graph)).toBe(before)
   })
@@ -188,6 +189,36 @@ test.describe('Workflow Designer graph boundary', () => {
     // Variant-scoped nodes stay locked when no variant is supplied; orchestrators ignore the argument.
     expect(canDeleteNode(catalog, 'agent-runtime', 'model_step', '1.0')).toBe(false)
     expect(canDeleteNode(catalog, 'orchestrator', 'optional', '1.0', 'verifier')).toBe(true)
+  })
+})
+
+// props → 本地 React Flow 投影的同步規則。UI-only 狀態(選取/量測)必須跨語意提交存活,
+// 否則拖曳一次就掉選取;反之語意欄位一律以新投影為準,本地不得回寫語意。
+test.describe('Canvas projection sync', () => {
+  const node = (id: string, extra: Record<string, unknown> = {}) =>
+    ({ id, type: 'workflow', position: { x: 0, y: 0 }, data: {}, ...extra }) as Node
+
+  test('keeps local selection and measurements for surviving nodes, drops them for new ones', () => {
+    const prev = [node('a', { selected: true, measured: { width: 100, height: 40 } }), node('b')]
+    const next = [node('a', { position: { x: 5, y: 6 } }), node('c')]
+    const merged = syncCanvasNodes(next, prev)
+    expect(merged.map((item) => [item.id, item.selected])).toEqual([['a', true], ['c', false]])
+    expect(merged[0].measured).toEqual({ width: 100, height: 40 })
+    expect(merged[0].position).toEqual({ x: 5, y: 6 })
+    expect(merged[1].measured).toBeUndefined()
+  })
+
+  test('selectId takes exclusive selection (newly added node) over the previous selection', () => {
+    const merged = syncCanvasNodes([node('a'), node('b')], [node('a', { selected: true })], 'b')
+    expect(merged.map((item) => item.selected)).toEqual([false, true])
+  })
+
+  test('edge selection survives a semantic commit; removed edges do not come back', () => {
+    const merged = syncCanvasEdges(
+      [{ id: 'e1', source: 'a', target: 'b', label: 'out → in' }],
+      [{ id: 'e1', source: 'a', target: 'b', selected: true }, { id: 'e2', source: 'a', target: 'c' }],
+    )
+    expect(merged).toEqual([{ id: 'e1', source: 'a', target: 'b', label: 'out → in', selected: true }])
   })
 })
 

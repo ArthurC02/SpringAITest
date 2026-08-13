@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   createWorkflow, getWorkflow, listWorkflowNodeCatalog, listWorkflowRevisions, listWorkflows,
   publishWorkflow, restoreWorkflowRevision, simulateWorkflow, putWorkflowDraft, validateWorkflow,
@@ -7,6 +7,7 @@ import type { Workflow, WorkflowDraft, WorkflowKind, WorkflowRuntimeVariant, Wor
 import { semanticFingerprint } from '../workflowDesigner/graphAdapter'
 import { semanticDiff } from '../workflowDesigner/diff'
 import { createBlankDraft } from '../workflowDesigner/draft'
+import { useDraftHistory } from '../workflowDesigner/history'
 import WorkflowDesigner from '../workflowDesigner/WorkflowDesigner'
 import ErrorText from './ErrorText'
 import Skeleton from './Skeleton'
@@ -23,7 +24,8 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
   const catalog = useResource(listWorkflowNodeCatalog)
   const [workflow, setWorkflow] = useState<Workflow | null>(null)
   const [etag, setEtag] = useState<string | null>(null)
-  const [draft, setDraft] = useState<WorkflowDraft | null>(null)
+  // 草稿真相 = 歷史的 present；undo/redo 只換指標，快照共用參考不深拷貝。
+  const { draft, canUndo, canRedo, commit: commitDraft, reset: resetDraft, undo, redo } = useDraftHistory()
   const [savedSemantic, setSavedSemantic] = useState('')
   const [validation, setValidation] = useState<WorkflowValidation | null>(null)
   const [simulation, setSimulation] = useState<WorkflowSimulation | null>(null)
@@ -35,13 +37,29 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
     setError(null)
     try {
       const result = await getWorkflow(id)
-      setWorkflow(result.data); setEtag(result.etag); setDraft(result.data.draft)
+      // 重新抓草稿 = 新基準線，歷史重設（undo 不得跨越一次重新載入）。
+      setWorkflow(result.data); setEtag(result.etag); resetDraft(result.data.draft)
       setSavedSemantic(semanticFingerprint(result.data.draft.definition)); setValidation(null); setSimulation(null); setBlocked(false)
     } catch (e) { setError((e as Error).message) }
-  }, [id])
+  }, [id, resetDraft])
   useEffect(() => { void load() }, [load])
-  const dirty = !!draft && semanticFingerprint(draft.definition) !== savedSemantic
+  // fingerprint 是整份定義的 JSON.stringify：每次 render 重算會讓拖曳期間明顯卡頓。
+  const dirty = useMemo(
+    () => !!draft && semanticFingerprint(draft.definition) !== savedSemantic,
+    [draft, savedSemantic],
+  )
   const writable = !!etag && !blocked && !!draft
+  // 每個 revision 各一次整份定義 diff：只在草稿或版本清單真的變動時重算。
+  const diffs = useMemo(() => new Map((revisions.data ?? []).map((revision) => [
+    revision.revision,
+    revision.definition && draft ? semanticDiff(draft.definition, revision.definition) : null,
+  ])), [draft, revisions.data])
+  const onDesignerChange = useCallback((
+    definition: WorkflowDraft['definition'], ui_metadata: WorkflowDraft['ui_metadata'], coalesce?: boolean,
+  ) => {
+    commitDraft({ definition, ui_metadata }, coalesce)
+    setValidation(null); setSimulation(null)
+  }, [commitDraft])
   const onConflict = () => setBlocked(true)
   // 衝突不在這裡吞（吞掉 = runWithToast 看不到失敗 → 假成功 toast），一律往外拋，
   // 由 runWithToast 的 onConflict 統一鎖定編輯器。
@@ -61,6 +79,12 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
         <button className="btn" onClick={() => void load()}>重新載入</button>
       </div>
     )}
+    {!etag && !blocked && (
+      <div className="agent-errors" role="alert">
+        無法取得草稿版本（ETag），編輯已鎖定；請重新載入。
+        <button className="btn" onClick={() => void load()}>重新載入</button>
+      </div>
+    )}
     <ErrorText msg={error} /><ErrorText msg={catalog.error} />
     <WorkflowDesigner
       definition={draft.definition}
@@ -69,7 +93,12 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
       validation={validation}
       simulation={simulation}
       disabled={!writable}
-      onChange={(definition, ui_metadata) => { setDraft({ definition, ui_metadata }); setValidation(null); setSimulation(null) }}
+      canUndo={canUndo}
+      canRedo={canRedo}
+      onUndo={() => { undo(); setValidation(null); setSimulation(null) }}
+      onRedo={() => { redo(); setValidation(null); setSimulation(null) }}
+      onSave={() => { if (writable) void runWithToast(toast, save, { success: '草稿已儲存', onConflict }) }}
+      onChange={onDesignerChange}
     />
     <div className="agent-actions">
       <button
@@ -122,7 +151,7 @@ function WorkflowEditor({ id, onClose }: { id: string; onClose: () => void }) {
         onRestore={(revision) => restoreWorkflowRevision(id, revision)}
         onRestored={() => { void load(); void revisions.reload() }}
         renderExtra={(revision) => {
-          const diff = revision.definition ? semanticDiff(draft.definition, revision.definition) : null
+          const diff = diffs.get(revision.revision)
           return diff ? ` · +${diff.added.length} −${diff.removed.length} ~${diff.changed.length}` : ''
         }}
       />
