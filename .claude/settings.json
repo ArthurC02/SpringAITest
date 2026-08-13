@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/turn-directive.py",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/turn-directive.py\"",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/subagent-directive.py",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/subagent-directive.py\"",
             "timeout": 15,
             "statusMessage": "附加 subagent 標準指示…"
           }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/guard-no-touch.py",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-no-touch.py\"",
             "timeout": 10,
             "statusMessage": "no-touch 護欄檢查…"
           }
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/guard-no-touch.py",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/guard-no-touch.py\"",
             "timeout": 10,
             "statusMessage": "no-touch 護欄檢查…"
           }
